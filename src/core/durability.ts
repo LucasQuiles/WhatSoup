@@ -4,6 +4,51 @@ import type { Database } from './database.ts';
 
 const log = createChildLogger('durability');
 
+// ── SQLite row interfaces ──
+
+/** Row returned by SELECT on inbound_events for pending/processing recovery. */
+export interface InboundEventRow {
+  seq: number;
+  message_id: string;
+  processing_status: string;
+  routed_to: string;
+}
+
+/** Row returned by SELECT on outbound_ops for status-based queries. */
+export interface OutboundOpRow {
+  id: number;
+  wa_message_id: string | null;
+  replay_policy: string;
+  submitted_at: string | null;
+  source_inbound_seq: number | null;
+  is_terminal: number;
+}
+
+/** Full row returned by SELECT * on session_checkpoints. */
+export interface SessionCheckpointRow {
+  id: number;
+  conversation_key: string;
+  session_id: string | null;
+  transcript_path: string | null;
+  active_turn_id: string | null;
+  last_inbound_seq: number | null;
+  last_flushed_outbound_id: number | null;
+  watchdog_state: string | null;
+  workspace_path: string | null;
+  claude_pid: number | null;
+  session_status: string;
+  checkpoint_version: number;
+  updated_at: string | null;
+}
+
+/** Minimal session_checkpoints row used for active-session enumeration. */
+export interface ActiveSessionCheckpointRow {
+  id: number;
+  conversation_key: string;
+  claude_pid: number | null;
+  session_status: string;
+}
+
 export interface RecoveryStats {
   inboundReplayed: number;
   outboundReconciled: number;
@@ -180,21 +225,16 @@ export class DurabilityEngine {
     );
   }
 
-  getSessionCheckpoint(conversationKey: string): {
-    id: number; conversation_key: string; session_id: string | null;
-    claude_pid: number | null; session_status: string; checkpoint_version: number;
-  } | undefined {
+  getSessionCheckpoint(conversationKey: string): SessionCheckpointRow | undefined {
     return this.db.raw.prepare(
       `SELECT * FROM session_checkpoints WHERE conversation_key = ?`,
-    ).get(conversationKey) as any;
+    ).get(conversationKey) as SessionCheckpointRow | undefined;
   }
 
-  getAllActiveCheckpoints(): Array<{
-    id: number; conversation_key: string; claude_pid: number | null; session_status: string;
-  }> {
+  getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {
     return this.db.raw.prepare(
       `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status = 'active'`,
-    ).all() as any[];
+    ).all() as unknown as ActiveSessionCheckpointRow[];
   }
 
   markSessionOrphaned(conversationKey: string): void {
@@ -204,16 +244,16 @@ export class DurabilityEngine {
   }
 
   // ── Getters for recovery ──
-  getPendingInbound(): Array<{ seq: number; message_id: string; processing_status: string; routed_to: string }> {
+  getPendingInbound(): InboundEventRow[] {
     return this.db.raw.prepare(
       `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
-    ).all() as any[];
+    ).all() as unknown as InboundEventRow[];
   }
 
-  getOutboundByStatus(status: string): Array<{ id: number; wa_message_id: string | null; replay_policy: string; submitted_at: string | null; source_inbound_seq: number | null; is_terminal: number }> {
+  getOutboundByStatus(status: string): OutboundOpRow[] {
     return this.db.raw.prepare(
       `SELECT id, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
-    ).all(status) as any[];
+    ).all(status) as unknown as OutboundOpRow[];
   }
 
   // ── Recovery engine ──
