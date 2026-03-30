@@ -51,6 +51,21 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
 
 // --- Write path ---
 
+function toInsertParams(msg: StoreMessageInput): Record<string, null | number | string> {
+  return {
+    chat_jid: msg.chatJid,
+    conversation_key: msg.conversationKey,
+    sender_jid: msg.senderJid,
+    sender_name: msg.senderName ?? null,
+    message_id: msg.messageId,
+    content: msg.content ?? null,
+    content_type: msg.contentType ?? 'text',
+    is_from_me: msg.isFromMe ? 1 : 0,
+    timestamp: msg.timestamp,
+    quoted_message_id: msg.quotedMessageId ?? null,
+  };
+}
+
 /**
  * Upsert a message. Uses ON CONFLICT(message_id) DO UPDATE so re-delivering
  * the same message_id is idempotent. Content fields are updated on conflict so
@@ -71,18 +86,7 @@ export function storeMessage(db: Database, msg: StoreMessageInput): void {
       is_from_me       = excluded.is_from_me,
       timestamp        = excluded.timestamp,
       quoted_message_id = COALESCE(excluded.quoted_message_id, quoted_message_id)
-  `).run({
-    chat_jid: msg.chatJid,
-    conversation_key: msg.conversationKey,
-    sender_jid: msg.senderJid,
-    sender_name: msg.senderName ?? null,
-    message_id: msg.messageId,
-    content: msg.content ?? null,
-    content_type: msg.contentType ?? 'text',
-    is_from_me: msg.isFromMe ? 1 : 0,
-    timestamp: msg.timestamp,
-    quoted_message_id: msg.quotedMessageId ?? null,
-  });
+  `).run(toInsertParams(msg));
 }
 
 /**
@@ -98,18 +102,7 @@ export function storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean
     VALUES
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
        @is_from_me, @timestamp, @quoted_message_id)
-  `).run({
-    chat_jid: msg.chatJid,
-    conversation_key: msg.conversationKey,
-    sender_jid: msg.senderJid,
-    sender_name: msg.senderName ?? null,
-    message_id: msg.messageId,
-    content: msg.content ?? null,
-    content_type: msg.contentType ?? 'text',
-    is_from_me: msg.isFromMe ? 1 : 0,
-    timestamp: msg.timestamp,
-    quoted_message_id: msg.quotedMessageId ?? null,
-  });
+  `).run(toInsertParams(msg));
   return (result.changes as number) > 0;
 }
 
@@ -197,11 +190,12 @@ export function markMessagesWithError(db: Database, pks: number[], error: string
  * Return all inbound messages (is_from_me = 0) from a given sender JID,
  * ordered chronologically ASC.
  */
-export function getMessagesBySender(db: Database, senderJid: string): StoredMessage[] {
+export function getMessagesBySender(db: Database, senderJid: string, limit = 50): StoredMessage[] {
   const rows = db.raw.prepare(
     `SELECT * FROM messages
      WHERE sender_jid = ? AND is_from_me = 0
-     ORDER BY timestamp ASC`
-  ).all(senderJid) as Record<string, unknown>[];
+     ORDER BY timestamp ASC
+     LIMIT ?`
+  ).all(senderJid, limit) as Record<string, unknown>[];
   return rows.map(rowToStoredMessage);
 }

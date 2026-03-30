@@ -1,7 +1,3 @@
-// src/config.ts
-// Minimal config stub — full implementation comes in Task 16.
-// Exported shape must satisfy all current consumers in src/core/.
-
 export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 
 export interface Config {
@@ -18,6 +14,39 @@ export interface Config {
     validation: string;
     fallback: string;
   };
+
+  // Conversation / LLM
+  systemPrompt: string;
+  maxTokens: number;
+  tokenBudget: number;
+  apiTimeoutMs: number;
+  apiRetryDelayMs: number;
+
+  // Conversation window
+  conversationWindow: number;
+  conversationWindowExtended: number;
+  windowExtensionThresholdMs: number;
+
+  // Rate limits
+  rateLimitPerHour: number;
+  rateLimitNoticeWindowMs: number;
+
+  // Enrichment
+  enrichmentIntervalMs: number;
+  enrichmentBatchSize: number;
+  enrichmentMinConfidence: number;
+  enrichmentDedupThreshold: number;
+  enrichmentMaxRetries: number;
+
+  // Pinecone
+  pineconeIndex: string;
+  pineconeContextTopK: number;
+  pineconeSenderTopK: number;
+  pineconeSelfFactTopK: number;
+  pineconeSearchMode: 'memory' | 'entity';
+  pineconeRerank: boolean;
+  pineconeTopK: number;
+  pineconeRerankTopN: number;
 }
 
 export const config: Config = {
@@ -36,4 +65,37 @@ export const config: Config = {
     validation: process.env.WHATSOUP_MODEL_VALIDATION ?? 'claude-haiku-4-5',
     fallback: process.env.WHATSOUP_MODEL_FALLBACK ?? 'claude-sonnet-4-5',
   },
+
+  // Conversation / LLM
+  systemPrompt: process.env.WHATSOUP_SYSTEM_PROMPT ?? 'You are WhatSoup, a helpful assistant.',
+  maxTokens: parseInt(process.env.WHATSOUP_MAX_TOKENS ?? '750', 10),
+  tokenBudget: parseInt(process.env.WHATSOUP_TOKEN_BUDGET ?? '100000', 10),
+  apiTimeoutMs: 30_000,
+  apiRetryDelayMs: 2_000,
+
+  // Conversation window
+  conversationWindow: 50,
+  conversationWindowExtended: 100,
+  windowExtensionThresholdMs: 10 * 60 * 1000,
+
+  // Rate limits
+  rateLimitPerHour: parseInt(process.env.WHATSOUP_RATE_LIMIT_PER_HOUR ?? '45', 10),
+  rateLimitNoticeWindowMs: 60 * 60 * 1000,
+
+  // Enrichment
+  enrichmentIntervalMs: 60 * 1000,
+  enrichmentBatchSize: 200,
+  enrichmentMinConfidence: 0.7,
+  enrichmentDedupThreshold: 0.95,
+  enrichmentMaxRetries: 3,
+
+  // Pinecone
+  pineconeIndex: process.env.PINECONE_INDEX ?? 'whatsoup',
+  pineconeContextTopK: 10,
+  pineconeSenderTopK: 5,
+  pineconeSelfFactTopK: 5,
+  pineconeSearchMode: (process.env.WHATSOUP_PINECONE_SEARCH_MODE ?? 'memory') as 'memory' | 'entity',
+  pineconeRerank: process.env.WHATSOUP_PINECONE_RERANK === 'true',
+  pineconeTopK: parseInt(process.env.WHATSOUP_PINECONE_TOP_K ?? '20', 10),
+  pineconeRerankTopN: parseInt(process.env.WHATSOUP_PINECONE_RERANK_TOP_N ?? '6', 10),
 };
