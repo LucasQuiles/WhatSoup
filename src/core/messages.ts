@@ -1,5 +1,41 @@
 import type { Database } from './database.ts';
 
+// ---------------------------------------------------------------------------
+// MCP row shape — used by tool files that query the messages table directly
+// ---------------------------------------------------------------------------
+
+export interface MessageRow {
+  pk: number;
+  message_id: string;
+  conversation_key: string;
+  chat_jid: string;
+  sender_jid: string;
+  sender_name: string | null;
+  content: string | null;
+  content_type: string;
+  is_from_me: number;
+  timestamp: number;
+  quoted_message_id: string | null;
+  created_at: string;
+}
+
+export function rowToMessage(row: MessageRow) {
+  return {
+    pk: row.pk,
+    messageId: row.message_id,
+    conversationKey: row.conversation_key,
+    chatJid: row.chat_jid,
+    senderJid: row.sender_jid,
+    senderName: row.sender_name ?? null,
+    content: row.content ?? null,
+    contentType: row.content_type,
+    isFromMe: Boolean(row.is_from_me),
+    timestamp: row.timestamp,
+    quotedMessageId: row.quoted_message_id ?? null,
+    createdAt: row.created_at,
+  };
+}
+
 export interface StoredMessage {
   pk: number;
   chatJid: string;

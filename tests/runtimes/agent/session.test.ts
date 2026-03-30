@@ -97,7 +97,6 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
-  updateLastMessage: vi.fn(),
   updateTranscriptPath: vi.fn(),
 }));
 

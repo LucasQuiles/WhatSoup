@@ -4,42 +4,7 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { Database } from '../../core/database.ts';
-
-// ---------------------------------------------------------------------------
-// Helper — map raw DB row to public-facing shape
-// ---------------------------------------------------------------------------
-
-interface MessageRow {
-  pk: number;
-  message_id: string;
-  conversation_key: string;
-  chat_jid: string;
-  sender_jid: string;
-  sender_name: string | null;
-  content: string | null;
-  content_type: string;
-  is_from_me: number;
-  timestamp: number;
-  quoted_message_id: string | null;
-  created_at: string;
-}
-
-function rowToMessage(row: MessageRow) {
-  return {
-    pk: row.pk,
-    messageId: row.message_id,
-    conversationKey: row.conversation_key,
-    chatJid: row.chat_jid,
-    senderJid: row.sender_jid,
-    senderName: row.sender_name ?? null,
-    content: row.content ?? null,
-    contentType: row.content_type,
-    isFromMe: Boolean(row.is_from_me),
-    timestamp: row.timestamp,
-    quotedMessageId: row.quoted_message_id ?? null,
-    createdAt: row.created_at,
-  };
-}
+import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 
 // ---------------------------------------------------------------------------
 // search_messages — global FTS5 across all conversations

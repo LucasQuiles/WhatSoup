@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Database } from '../../core/database.ts';
-import { canonicalChatKey } from '../../core/workspace.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('agent-session-db');
@@ -104,13 +104,6 @@ export function updateSessionId(db: Database, rowId: number, sessionId: string):
     .run(sessionId, rowId);
 }
 
-/** Stamp last_message_at to now on an existing session row. */
-export function updateLastMessage(db: Database, rowId: number): void {
-  db.raw
-    .prepare(`UPDATE agent_sessions SET last_message_at = datetime('now') WHERE id = ?`)
-    .run(rowId);
-}
-
 /** Increment message_count and stamp last_message_at on an existing session row. */
 export function incrementMessageCount(db: Database, rowId: number): void {
   db.raw
@@ -160,7 +153,12 @@ export function backfillWorkspaceKeys(db: Database, instanceCwd: string): void {
         .prepare(`UPDATE agent_sessions SET status = 'ended' WHERE id = ?`)
         .run(row.id);
     } else {
-      const key = canonicalChatKey(row.chat_jid);
+      let key: string;
+      try {
+        key = toConversationKey(row.chat_jid);
+      } catch {
+        key = row.chat_jid;
+      }
       db.raw
         .prepare(`UPDATE agent_sessions SET workspace_key = ? WHERE id = ?`)
         .run(key, row.id);

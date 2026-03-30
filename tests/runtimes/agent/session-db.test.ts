@@ -9,7 +9,6 @@ import {
   createSession,
   getActiveSession,
   updateSessionId,
-  updateLastMessage,
   updateSessionStatus,
   incrementMessageCount,
   backfillWorkspaceKeys,
@@ -127,22 +126,6 @@ describe('agent session-db', () => {
       .prepare('SELECT session_id FROM agent_sessions WHERE id = ?')
       .get(id) as { session_id: string } | undefined;
     expect(row?.session_id).toBe('ses_abc123');
-  });
-
-  it('updateLastMessage sets last_message_at', () => {
-    const id = createSession(db, 44444, '/tmp/lm');
-
-    const before = db.raw
-      .prepare('SELECT last_message_at FROM agent_sessions WHERE id = ?')
-      .get(id) as { last_message_at: string | null } | undefined;
-    expect(before?.last_message_at).toBeNull();
-
-    updateLastMessage(db, id);
-
-    const after = db.raw
-      .prepare('SELECT last_message_at FROM agent_sessions WHERE id = ?')
-      .get(id) as { last_message_at: string | null } | undefined;
-    expect(after?.last_message_at).toBeTruthy();
   });
 
   it('getActiveSession returns null after session is crashed', () => {

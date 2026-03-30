@@ -179,28 +179,25 @@ export class PineconeMemory {
     }
   }
 
+  private searchByField(
+    query: string,
+    field: string,
+    value: string,
+    topK: number,
+  ): Promise<SearchResult[]> {
+    return this.search(query, { [field]: { $eq: value } }, topK);
+  }
+
   async searchForChat(chatJid: string, query: string): Promise<SearchResult[]> {
-    return this.search(
-      query,
-      { chat_jid: { $eq: chatJid } },
-      config.pineconeContextTopK,
-    );
+    return this.searchByField(query, 'chat_jid', chatJid, config.pineconeContextTopK);
   }
 
   async searchForSender(senderJid: string, query: string): Promise<SearchResult[]> {
-    return this.search(
-      query,
-      { sender_jid: { $eq: senderJid } },
-      config.pineconeSenderTopK,
-    );
+    return this.searchByField(query, 'sender_jid', senderJid, config.pineconeSenderTopK);
   }
 
   async searchSelfFacts(query: string): Promise<SearchResult[]> {
-    return this.search(
-      query,
-      { memory_type: { $eq: 'self_fact' } },
-      config.pineconeSelfFactTopK,
-    );
+    return this.searchByField(query, 'memory_type', 'self_fact', config.pineconeSelfFactTopK);
   }
 
   async searchEntities(query: string): Promise<EntitySearchResult[]> {

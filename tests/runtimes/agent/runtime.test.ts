@@ -70,7 +70,6 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
-  updateLastMessage: vi.fn(),
   getActiveSession: mockGetActiveSession,
   backfillWorkspaceKeys: mockBackfillWorkspaceKeys,
   markOrphaned: vi.fn(),
@@ -131,9 +130,9 @@ const { mockChatJidToWorkspace, mockProvisionWorkspace } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../src/core/workspace.ts', () => ({
-  canonicalChatKey: vi.fn((chatJid: string) => chatJid.replace('@s.whatsapp.net', '').replace('@lid', '')),
   chatJidToWorkspace: mockChatJidToWorkspace,
   provisionWorkspace: mockProvisionWorkspace,
+  writeSandboxArtifacts: vi.fn(),
 }));
 
 // Mock WhatSoupSocketServer so tests don't bind real Unix sockets.
