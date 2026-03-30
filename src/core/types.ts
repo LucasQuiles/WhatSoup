@@ -7,11 +7,15 @@ export type OutboundMedia =
   | { type: 'audio'; buffer: Buffer; mimetype: string; ptt?: boolean }
   | { type: 'video'; buffer: Buffer; caption?: string; mimetype?: string };
 
+export interface SubmissionReceipt {
+  waMessageId: string | null;
+}
+
 export interface Messenger {
-  sendMessage(chatJid: string, text: string): Promise<void>;
+  sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt>;
   /** Send composing/paused presence update. Fire-and-forget; failures are silently ignored. */
   setTyping?(chatJid: string, typing: boolean): Promise<void>;
-  sendMedia(chatJid: string, media: OutboundMedia): Promise<void>;
+  sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;
 }
 
 export interface IncomingMessage {

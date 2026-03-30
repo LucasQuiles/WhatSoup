@@ -141,7 +141,7 @@ const mockProcessMedia = vi.mocked(processMedia);
 
 function makeMessenger(): Messenger & { sendMessage: ReturnType<typeof vi.fn> } {
   return {
-    sendMessage: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
   };
 }
 

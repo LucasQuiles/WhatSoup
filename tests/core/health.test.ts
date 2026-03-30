@@ -120,8 +120,8 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
     connectionManager: {
       botJid: '18455943112@s.whatsapp.net',
       botLid: null,
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-      sendMedia: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     },
@@ -167,8 +167,8 @@ describe('GET /health', () => {
       connectionManager: {
         botJid: null, // not connected
         botLid: null,
-        sendMessage: vi.fn().mockResolvedValue(undefined),
-        sendMedia: vi.fn().mockResolvedValue(undefined),
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
       },

@@ -46,8 +46,8 @@ function makeNullSock(): () => WhatsAppSocket | null {
 function makeMockConnection(): ConnectionManager {
   return {
     contactsDir: { contacts: new Map<string, string>() },
-    sendRaw: vi.fn().mockResolvedValue(undefined),
-    sendMedia: vi.fn().mockResolvedValue(undefined),
+    sendRaw: vi.fn().mockResolvedValue({ waMessageId: null }),
+    sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
     botJid: null,
     botLid: null,
   } as unknown as ConnectionManager;

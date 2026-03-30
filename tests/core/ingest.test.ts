@@ -101,8 +101,8 @@ afterEach(() => {
 
 function makeMessenger(): Messenger {
   return {
-    sendMessage: vi.fn().mockResolvedValue(undefined),
-    sendMedia: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+    sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
   };
 }
 

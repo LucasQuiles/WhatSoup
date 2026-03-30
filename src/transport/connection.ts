@@ -17,7 +17,7 @@ import {
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
-import type { Messenger, IncomingMessage, OutboundMedia } from '../core/types.ts';
+import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt } from '../core/types.ts';
 import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 
@@ -38,6 +38,7 @@ export interface TransportEvents {
   presenceUpdate: (jid: string, status: string, lastSeen?: number) => void;
   callReceived: (callId: string, callFrom: string) => void;
   jidAliasChanged: (conversationKey: string, newJid: string) => void;
+  historySyncComplete: () => void;
   exhausted: () => void;
 }
 
@@ -134,7 +135,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     return this.shutdown();
   }
 
-  async sendMessage(chatJid: string, text: string): Promise<void> {
+  async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
@@ -146,21 +147,24 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.contactsDir.contacts,
     );
 
+    let result;
     if (hasMentions) {
       this.log.info({ mentions }, 'Outbound message includes mentions');
-      await this.sock.sendMessage(chatJid, { text: formatted, mentions });
+      result = await this.sock.sendMessage(chatJid, { text: formatted, mentions });
     } else {
-      await this.sock.sendMessage(chatJid, { text: formatted });
+      result = await this.sock.sendMessage(chatJid, { text: formatted });
     }
+    return { waMessageId: result?.key?.id ?? null };
   }
 
   /**
    * Send a raw Baileys message payload. Used by MCP tools that need to send
    * message types not covered by the typed sendMessage/sendMedia helpers.
    */
-  async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<void> {
+  async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt> {
     if (!this.sock) throw new Error('WhatsApp is not connected');
-    await this.sock.sendMessage(chatJid, content as any);
+    const result = await this.sock.sendMessage(chatJid, content as any);
+    return { waMessageId: result?.key?.id ?? null };
   }
 
   async setTyping(chatJid: string, typing: boolean): Promise<void> {
@@ -172,22 +176,23 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
   }
 
-  async sendMedia(chatJid: string, media: OutboundMedia): Promise<void> {
+  async sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt> {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
     this.log.info({ chatJid, mediaType: media.type }, 'Sending media');
 
+    let result;
     switch (media.type) {
       case 'image':
-        await this.sock.sendMessage(chatJid, {
+        result = await this.sock.sendMessage(chatJid, {
           image: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
         });
         break;
       case 'document':
-        await this.sock.sendMessage(chatJid, {
+        result = await this.sock.sendMessage(chatJid, {
           document: media.buffer,
           fileName: media.filename,
           mimetype: media.mimetype,
@@ -195,20 +200,21 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         });
         break;
       case 'audio':
-        await this.sock.sendMessage(chatJid, {
+        result = await this.sock.sendMessage(chatJid, {
           audio: media.buffer,
           mimetype: media.mimetype,
           ptt: media.ptt,
         });
         break;
       case 'video':
-        await this.sock.sendMessage(chatJid, {
+        result = await this.sock.sendMessage(chatJid, {
           video: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
         });
         break;
     }
+    return { waMessageId: result?.key?.id ?? null };
   }
 
   async shutdown(): Promise<void> {
@@ -300,6 +306,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             this.log.info({ groupJid: update.id }, 'Bot removed from group');
           }
         }
+      }
+
+      if (events['messaging-history.set']) {
+        const data = events['messaging-history.set'] as { messages?: unknown[]; isLatest?: boolean };
+        this.log.info(
+          { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
+          'history sync received',
+        );
+        this.emit('historySyncComplete');
       }
     });
   }
