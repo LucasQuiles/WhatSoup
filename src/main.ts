@@ -16,6 +16,7 @@ import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
+import { DurabilityEngine } from './core/durability.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -103,6 +104,10 @@ process.on('exit', () => releaseLock());
 // 2. Database
 const db = new Database(config.dbPath);
 db.open();
+
+// 2b. Pre-connect recovery — runs synchronously before any connection attempt
+const durability = new DurabilityEngine(db);
+durability.preConnectRecovery();
 
 // 2a. Warm-start import: if DB is empty, import from legacy instance DB
 {
@@ -250,6 +255,16 @@ async function start(): Promise<void> {
   // runtime.start() starts enrichment poller internally
   await runtime.start();
   await connectionManager.connect();
+
+  // Wait for history sync or 15s timeout, then allow echo grace period before
+  // running post-connect recovery so echoes from inflight messages can arrive.
+  await Promise.race([
+    new Promise<void>((resolve) => connectionManager.once('historySyncComplete', resolve)),
+    new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
+  ]);
+  await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
+  durability.postConnectRecovery();
+
   log.info('WhatSoup bot started');
 
   // Agent instances notify the user on startup (resume or fresh start).

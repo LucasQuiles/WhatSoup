@@ -4,6 +4,17 @@ import type { Database } from './database.ts';
 
 const log = createChildLogger('durability');
 
+export interface RecoveryStats {
+  inboundReplayed: number;
+  outboundReconciled: number;
+  outboundReplayed: number;
+  outboundQuarantined: number;
+  toolCallsRecovered: number;
+  toolCallsReplayed: number;
+  toolCallsQuarantined: number;
+  sessionsRestored: number;
+}
+
 export interface OutboundOpParams {
   conversationKey: string;
   chatJid: string;
@@ -203,5 +214,288 @@ export class DurabilityEngine {
     return this.db.raw.prepare(
       `SELECT id, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
     ).all(status) as any[];
+  }
+
+  // ── Recovery engine ──
+
+  /**
+   * Phase 1: Run before reconnect. All synchronous SQLite operations.
+   *
+   * 1. Detect orphaned sessions via kill -0 on claude_pid.
+   * 2. Promote all `sending` outbound ops → `maybe_sent` (crash-in-flight).
+   * 3. Recover `executing` tool calls:
+   *    - With outbound_op_id: delegate to outbound reconciliation (no-op here, the
+   *      outbound op already handles it via maybe_sent promotion).
+   *    - Without outbound_op_id + replay_policy='safe': mark as 'replayed'.
+   *    - Without outbound_op_id + replay_policy='unsafe'/'read_only': quarantine.
+   * 4. For inbound events in `processing` with no terminal outbound ops: mark failed.
+   */
+  preConnectRecovery(): RecoveryStats {
+    const stats: RecoveryStats = {
+      inboundReplayed: 0,
+      outboundReconciled: 0,
+      outboundReplayed: 0,
+      outboundQuarantined: 0,
+      toolCallsRecovered: 0,
+      toolCallsReplayed: 0,
+      toolCallsQuarantined: 0,
+      sessionsRestored: 0,
+    };
+
+    log.info('preConnectRecovery: starting');
+
+    // Step 1: Detect orphaned sessions
+    try {
+      const active = this.getAllActiveCheckpoints();
+      for (const checkpoint of active) {
+        if (checkpoint.claude_pid == null) continue;
+        let alive = false;
+        try {
+          process.kill(checkpoint.claude_pid, 0);
+          alive = true;
+        } catch {
+          alive = false;
+        }
+        if (!alive) {
+          log.warn(
+            { conversationKey: checkpoint.conversation_key, pid: checkpoint.claude_pid },
+            'preConnectRecovery: orphaned session detected (pid dead)',
+          );
+          this.markSessionOrphaned(checkpoint.conversation_key);
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error during orphan detection');
+    }
+
+    // Step 2: Promote all `sending` ops → `maybe_sent`
+    try {
+      const sending = this.getOutboundByStatus('sending');
+      for (const op of sending) {
+        this.markMaybeSent(op.id, 'crash-in-flight');
+        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+        log.info({ opId: op.id }, 'preConnectRecovery: promoted sending → maybe_sent');
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error promoting sending ops');
+    }
+
+    // Step 3: Recover executing tool calls
+    try {
+      const executingCalls = this.db.raw.prepare(
+        `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
+         FROM tool_calls WHERE status = 'executing'`,
+      ).all() as Array<{
+        id: number;
+        conversation_key: string;
+        tool_name: string;
+        replay_policy: string;
+        outbound_op_id: number | null;
+      }>;
+
+      for (const tc of executingCalls) {
+        stats.toolCallsRecovered = (stats.toolCallsRecovered ?? 0) + 1;
+        if (tc.outbound_op_id != null) {
+          // Delegate to outbound reconciliation — the op was already promoted to
+          // maybe_sent above (or was already in a terminal state). No additional
+          // action needed; just log.
+          log.info(
+            { toolCallId: tc.id, outboundOpId: tc.outbound_op_id },
+            'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
+          );
+        } else if (tc.replay_policy === 'safe') {
+          // Mark as replayed — safe to re-execute on next run
+          this.db.raw.prepare(
+            `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
+          ).run(tc.id);
+          stats.toolCallsReplayed = (stats.toolCallsReplayed ?? 0) + 1;
+          log.info(
+            { toolCallId: tc.id, toolName: tc.tool_name },
+            'preConnectRecovery: safe tool call marked as replayed',
+          );
+        } else {
+          // unsafe or read_only without an outbound op: quarantine
+          this.db.raw.prepare(
+            `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
+          ).run(tc.id);
+          stats.toolCallsQuarantined = (stats.toolCallsQuarantined ?? 0) + 1;
+          log.warn(
+            { toolCallId: tc.id, toolName: tc.tool_name, replayPolicy: tc.replay_policy },
+            'preConnectRecovery: non-safe executing tool call quarantined',
+          );
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error recovering tool calls');
+    }
+
+    // Step 4: Mark inbound `processing` events with no terminal outbound ops as failed
+    try {
+      const processingEvents = this.db.raw.prepare(
+        `SELECT seq FROM inbound_events WHERE processing_status = 'processing'`,
+      ).all() as Array<{ seq: number }>;
+
+      for (const ev of processingEvents) {
+        // Check if there's any terminal outbound op linked to this inbound
+        const terminalOp = this.db.raw.prepare(
+          `SELECT id FROM outbound_ops
+           WHERE source_inbound_seq = ? AND is_terminal = 1
+             AND status NOT IN ('quarantined', 'failed_permanent')`,
+        ).get(ev.seq) as { id: number } | undefined;
+
+        if (!terminalOp) {
+          this.markInboundFailed(ev.seq);
+          log.info(
+            { inboundSeq: ev.seq },
+            'preConnectRecovery: inbound processing with no terminal op marked failed',
+          );
+        } else {
+          log.info(
+            { inboundSeq: ev.seq, terminalOpId: terminalOp.id },
+            'preConnectRecovery: inbound processing with terminal op — leaving for postConnect',
+          );
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, 'preConnectRecovery: error handling processing inbound events');
+    }
+
+    log.info(stats, 'preConnectRecovery: complete');
+    return stats;
+  }
+
+  /**
+   * Phase 2: Run after reconnect + echo grace period. All synchronous SQLite operations.
+   *
+   * 1. Reconcile `maybe_sent` ops: check messages table for wa_message_id match.
+   *    - Found: mark echoed.
+   *    - Not found + safe: mark for replay (outbound_replayed).
+   *    - Not found + unsafe/read_only: quarantine.
+   * 2. Reconcile stale `submitted` (no echo after grace): promote to `maybe_sent`.
+   * 3. Log recovery_run with aggregated stats.
+   */
+  postConnectRecovery(): RecoveryStats {
+    const stats: RecoveryStats = {
+      inboundReplayed: 0,
+      outboundReconciled: 0,
+      outboundReplayed: 0,
+      outboundQuarantined: 0,
+      toolCallsRecovered: 0,
+      toolCallsReplayed: 0,
+      toolCallsQuarantined: 0,
+      sessionsRestored: 0,
+    };
+
+    log.info('postConnectRecovery: starting');
+
+    // Step 1: Reconcile `maybe_sent` ops
+    try {
+      const maybeSent = this.getOutboundByStatus('maybe_sent');
+      for (const op of maybeSent) {
+        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+
+        if (op.wa_message_id) {
+          // Check if message was received via normal ingest (echo confirmation)
+          const found = this.db.raw.prepare(
+            `SELECT pk FROM messages WHERE message_id = ?`,
+          ).get(op.wa_message_id) as { pk: number } | undefined;
+
+          if (found) {
+            this.markEchoed(op.id);
+            log.info(
+              { opId: op.id, waMessageId: op.wa_message_id },
+              'postConnectRecovery: maybe_sent confirmed via messages table → echoed',
+            );
+          } else if (op.replay_policy === 'safe') {
+            // Re-enqueue for replay: reset to pending
+            this.db.raw.prepare(
+              `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
+            ).run(op.id);
+            stats.outboundReplayed = (stats.outboundReplayed ?? 0) + 1;
+            log.info(
+              { opId: op.id },
+              'postConnectRecovery: maybe_sent not confirmed, safe → reset to pending for replay',
+            );
+          } else {
+            this.markQuarantined(op.id);
+            stats.outboundQuarantined = (stats.outboundQuarantined ?? 0) + 1;
+            log.warn(
+              { opId: op.id, replayPolicy: op.replay_policy },
+              'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
+            );
+          }
+        } else {
+          // No wa_message_id: definitely not delivered; apply replay policy
+          if (op.replay_policy === 'safe') {
+            this.db.raw.prepare(
+              `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
+            ).run(op.id);
+            stats.outboundReplayed = (stats.outboundReplayed ?? 0) + 1;
+            log.info(
+              { opId: op.id },
+              'postConnectRecovery: maybe_sent (no wa_message_id), safe → reset to pending',
+            );
+          } else {
+            this.markQuarantined(op.id);
+            stats.outboundQuarantined = (stats.outboundQuarantined ?? 0) + 1;
+            log.warn(
+              { opId: op.id, replayPolicy: op.replay_policy },
+              'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
+            );
+          }
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, 'postConnectRecovery: error reconciling maybe_sent ops');
+    }
+
+    // Step 2: Promote stale `submitted` ops (no echo after grace period) → maybe_sent
+    try {
+      const staleSubmitted = this.getOutboundByStatus('submitted');
+      for (const op of staleSubmitted) {
+        this.markMaybeSent(op.id, 'stale-submitted-no-echo');
+        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+        log.info(
+          { opId: op.id },
+          'postConnectRecovery: stale submitted (no echo) promoted to maybe_sent',
+        );
+      }
+    } catch (err) {
+      log.warn({ err }, 'postConnectRecovery: error handling stale submitted ops');
+    }
+
+    // Step 3: Log recovery run
+    this.logRecoveryRun('post_connect', stats);
+
+    log.info(stats, 'postConnectRecovery: complete');
+    return stats;
+  }
+
+  /**
+   * Insert a recovery_run record with aggregated stats.
+   */
+  logRecoveryRun(trigger: string, stats: RecoveryStats): void {
+    try {
+      this.db.raw.prepare(`
+        INSERT INTO recovery_runs
+          (trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
+           outbound_quarantined, tool_calls_recovered, tool_calls_replayed,
+           tool_calls_quarantined, sessions_restored, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      `).run(
+        trigger,
+        stats.inboundReplayed,
+        stats.outboundReconciled,
+        stats.outboundReplayed,
+        stats.outboundQuarantined,
+        stats.toolCallsRecovered,
+        stats.toolCallsReplayed,
+        stats.toolCallsQuarantined,
+        stats.sessionsRestored,
+      );
+      log.info({ trigger, ...stats }, 'logRecoveryRun: inserted');
+    } catch (err) {
+      log.warn({ err, trigger }, 'logRecoveryRun: failed to insert recovery run');
+    }
   }
 }
