@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerProfileTools } from '../../../src/mcp/tools/profile.ts';
+import { Database } from '../../../src/core/database.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
+
+function makeDb(): Database {
+  const db = new Database(':memory:');
+  db.open();
+  return db;
+}
 
 function globalSession(): SessionContext {
   return { tier: 'global' };
@@ -43,11 +50,13 @@ function makeMockSock(): WhatsAppSocket {
 describe('profile tools', () => {
   let registry: ToolRegistry;
   let mockSock: WhatsAppSocket;
+  let db: Database;
 
   beforeEach(() => {
     mockSock = makeMockSock();
+    db = makeDb();
     registry = new ToolRegistry();
-    registerProfileTools(() => mockSock, (tool) => registry.register(tool));
+    registerProfileTools(() => mockSock, db, (tool) => registry.register(tool));
   });
 
   const globalTools = [
@@ -118,7 +127,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('get_profile_picture', { jid: '111@s.whatsapp.net' }, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -217,7 +226,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call(
         'update_profile_picture',
         { jid: '111@s.whatsapp.net', content: 'aGVsbG8=' },
@@ -245,7 +254,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('remove_profile_picture', { jid: '111@s.whatsapp.net' }, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -270,7 +279,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('update_profile_status', { status: 'hi' }, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -295,7 +304,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('update_profile_name', { name: 'X' }, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -362,7 +371,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call(
         'update_privacy_settings',
         { setting: 'last_seen', value: 'all' },
@@ -394,7 +403,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('get_privacy_settings', {}, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -403,28 +412,48 @@ describe('profile tools', () => {
   // --- get_blocklist ---
 
   describe('get_blocklist', () => {
-    it('calls sock.fetchBlocklist and returns list', async () => {
+    it('calls sock.fetchBlocklist and returns list with source=live', async () => {
       const result = await registry.call('get_blocklist', {}, globalSession());
       expect(result.isError).toBeUndefined();
       const sock = mockSock as any;
       expect(sock.fetchBlocklist).toHaveBeenCalled();
-      const data = JSON.parse(result.content[0].text) as { blocklist: string[] };
+      const data = JSON.parse(result.content[0].text) as { blocklist: string[]; source: string };
       expect(data.blocklist).toEqual(['111@s.whatsapp.net', '222@s.whatsapp.net']);
+      expect(data.source).toBe('live');
     });
 
     it('returns empty array when fetchBlocklist returns undefined', async () => {
       const sock = mockSock as any;
       sock.fetchBlocklist.mockResolvedValue(undefined);
       const result = await registry.call('get_blocklist', {}, globalSession());
-      const data = JSON.parse(result.content[0].text) as { blocklist: string[] };
+      const data = JSON.parse(result.content[0].text) as { blocklist: string[]; source: string };
       expect(data.blocklist).toEqual([]);
+      expect(data.source).toBe('live');
     });
 
-    it('errors when sock is null', async () => {
+    it('falls back to DB when sock is null and returns cached data', async () => {
+      // Seed blocklist table with known entries
+      db.raw.prepare(`INSERT INTO blocklist (jid) VALUES (?)`).run('cached1@s.whatsapp.net');
+      db.raw.prepare(`INSERT INTO blocklist (jid) VALUES (?)`).run('cached2@s.whatsapp.net');
+
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('get_blocklist', {}, globalSession());
-      expect(result.isError).toBe(true);
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { blocklist: string[]; source: string };
+      expect(data.source).toBe('cached');
+      expect(data.blocklist).toContain('cached1@s.whatsapp.net');
+      expect(data.blocklist).toContain('cached2@s.whatsapp.net');
+    });
+
+    it('falls back to DB (empty) when sock is null and blocklist table is empty', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('get_blocklist', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { blocklist: string[]; source: string };
+      expect(data.source).toBe('cached');
+      expect(data.blocklist).toEqual([]);
     });
   });
 
@@ -470,7 +499,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('add_or_edit_contact', { jid: '111@s.whatsapp.net' }, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -494,7 +523,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('remove_contact', { jid: '111@s.whatsapp.net' }, globalSession());
       expect(result.isError).toBe(true);
     });
@@ -542,7 +571,7 @@ describe('profile tools', () => {
 
     it('errors when sock is null', async () => {
       const nullRegistry = new ToolRegistry();
-      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      registerProfileTools(() => null, db, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call(
         'fetch_disappearing_duration',
         { jids: ['111@s.whatsapp.net'] },

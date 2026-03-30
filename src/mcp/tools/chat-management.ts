@@ -178,13 +178,31 @@ function makeListChats(db: Database): ToolDeclaration {
            LEFT JOIN chats c ON c.conversation_key = m.conversation_key
            WHERE m.deleted_at IS NULL
            GROUP BY m.conversation_key
-           ORDER BY last_timestamp DESC
+
+           UNION ALL
+
+           SELECT c2.conversation_key,
+                  c2.jid AS chat_jid,
+                  NULL AS last_timestamp,
+                  0 AS message_count,
+                  c2.name,
+                  c2.unread_count,
+                  c2.is_archived,
+                  c2.is_pinned,
+                  c2.mute_until,
+                  c2.ephemeral_duration
+           FROM chats c2
+           WHERE c2.conversation_key NOT IN (
+             SELECT DISTINCT conversation_key FROM messages WHERE deleted_at IS NULL
+           )
+
+           ORDER BY last_timestamp DESC NULLS LAST
            LIMIT ?`,
         )
         .all(limit) as Array<{
           conversation_key: string;
           chat_jid: string;
-          last_timestamp: number;
+          last_timestamp: number | null;
           message_count: number;
           name: string | null;
           unread_count: number | null;
@@ -198,7 +216,7 @@ function makeListChats(db: Database): ToolDeclaration {
         chats: rows.map((r) => ({
           conversationKey: r.conversation_key,
           chatJid: r.chat_jid,
-          lastTimestamp: r.last_timestamp,
+          lastTimestamp: r.last_timestamp ?? undefined,
           messageCount: r.message_count,
           name: r.name ?? undefined,
           unreadCount: r.unread_count ?? undefined,

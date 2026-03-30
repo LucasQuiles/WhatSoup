@@ -256,10 +256,8 @@ CREATE TABLE IF NOT EXISTS label_associations (
 `;
 
 // ─── Migration 5: raw_message column for forward_message support ─────────────
-
-const MIGRATION_5 = `
-ALTER TABLE messages ADD COLUMN raw_message TEXT;
-`;
+// SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so we guard
+// programmatically to make this migration idempotent (safe to re-run).
 
 // ─── Migration 6: blocklist and LID mapping persistence ──────────────────────
 
@@ -285,7 +283,14 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [2, (db: DatabaseSync) => { db.exec(MIGRATION_2); }],
   [3, (db: DatabaseSync) => { db.exec(MIGRATION_3); }],
   [4, (db: DatabaseSync) => { db.exec(MIGRATION_4); }],
-  [5, (db: DatabaseSync) => { db.exec(MIGRATION_5); }],
+  [5, (db: DatabaseSync) => {
+    // Check if raw_message column already exists (idempotency guard).
+    // SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+    const cols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'raw_message')) {
+      db.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
+    }
+  }],
   [6, (db: DatabaseSync) => { db.exec(MIGRATION_6); }],
 ]);
 

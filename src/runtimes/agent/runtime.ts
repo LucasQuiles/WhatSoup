@@ -246,7 +246,7 @@ export class AgentRuntime implements Runtime {
     try { registerBusinessTools(getSock, register); } catch (err) { log.error({ err }, 'registerBusinessTools failed'); }
     try { registerAdvancedTools(getSock, register); } catch (err) { log.error({ err }, 'registerAdvancedTools failed'); }
     try { registerCallTools(getSock, register); } catch (err) { log.error({ err }, 'registerCallTools failed'); }
-    try { registerProfileTools(getSock, register); } catch (err) { log.error({ err }, 'registerProfileTools failed'); }
+    try { registerProfileTools(getSock, this.db, register); } catch (err) { log.error({ err }, 'registerProfileTools failed'); }
 
     // Presence needs the shared presenceCache from ConnectionManager
     try { registerPresenceTools(getSock, connection.presenceCache, register); } catch (err) { log.error({ err }, 'registerPresenceTools failed'); }

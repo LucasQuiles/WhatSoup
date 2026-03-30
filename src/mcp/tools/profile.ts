@@ -4,6 +4,10 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { Database } from '../../core/database.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('profile');
 
 // ---------------------------------------------------------------------------
 // get_profile_picture
@@ -409,22 +413,33 @@ function makeGetPrivacySettings(getSock: () => WhatsAppSocket | null): ToolDecla
 // get_blocklist
 // ---------------------------------------------------------------------------
 
-function makeGetBlocklist(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeGetBlocklist(getSock: () => WhatsAppSocket | null, db: Database): ToolDeclaration {
   return {
     name: 'get_blocklist',
-    description: 'Fetch the list of blocked contacts (global).',
+    description: 'Fetch the list of blocked contacts (global). Returns live data when connected, cached DB data otherwise.',
     schema: z.object({}),
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (_params) => {
       const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+
+      if (sock) {
+        // Live fetch — also sync to DB
+        try {
+          const live = await (sock as any).fetchBlocklist();
+          const jids = Array.isArray(live) ? live : [];
+          return { blocklist: jids, source: 'live' };
+        } catch (err) {
+          log.warn({ err }, 'live blocklist fetch failed, falling back to DB');
+        }
       }
 
-      const blocklist = await (sock as any).fetchBlocklist();
-      return { blocklist: blocklist ?? [] };
+      // Fallback: read from DB
+      const rows = db.raw
+        .prepare('SELECT jid FROM blocklist ORDER BY blocked_at')
+        .all() as Array<{ jid: string }>;
+      return { blocklist: rows.map(r => r.jid), source: 'cached' };
     },
   };
 }
@@ -535,6 +550,7 @@ function makeFetchDisappearingDuration(getSock: () => WhatsAppSocket | null): To
 
 export function registerProfileTools(
   getSock: () => WhatsAppSocket | null,
+  db: Database,
   register: (tool: ToolDeclaration) => void,
 ): void {
   register(makeGetProfilePicture(getSock));
@@ -547,7 +563,7 @@ export function registerProfileTools(
   register(makeUpdateProfileName(getSock));
   register(makeUpdatePrivacySettings(getSock));
   register(makeGetPrivacySettings(getSock));
-  register(makeGetBlocklist(getSock));
+  register(makeGetBlocklist(getSock, db));
   register(makeAddOrEditContact(getSock));
   register(makeRemoveContact(getSock));
   register(makeFetchDisappearingDuration(getSock));

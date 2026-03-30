@@ -16,6 +16,7 @@ import { Database } from '../../src/core/database.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { registerChatOperationTools } from '../../src/mcp/tools/chat-operations.ts';
 import { registerChatManagementTools } from '../../src/mcp/tools/chat-management.ts';
+import { registerProfileTools } from '../../src/mcp/tools/profile.ts';
 import {
   handleReaction,
   handleReceipt,
@@ -194,7 +195,7 @@ describe('data-path integration: event write → tool read', () => {
 
   describe('scenario 5: chat upsert → list_chats returns metadata', () => {
     it('returns name and unreadCount from the chats table', async () => {
-      // list_chats LEFT JOINs from messages, so a message row is required
+      // Seed a message so the chat appears in the messages-side of the UNION
       seedMessage(db, '111@s.whatsapp.net', '111', 'seed-msg-1');
 
       handleChatsUpsert(db, [
@@ -269,6 +270,32 @@ describe('data-path integration: event write → tool read', () => {
     });
   });
 
+  // ─── Scenario 7b: Metadata-only chat (no messages) visible via UNION ────────
+
+  describe('scenario 7b: metadata-only chat appears in list_chats (DP-002)', () => {
+    it('chat with metadata but zero messages is returned by list_chats', async () => {
+      // Upsert a chat with NO messages at all
+      handleChatsUpsert(db, [
+        { id: '999@s.whatsapp.net', name: 'No Messages Chat', unreadCount: 3 },
+      ]);
+
+      const result = await registry.call('list_chats', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+
+      const data = parseResult<{
+        chats: Array<{ conversationKey: string; name?: string; unreadCount?: number; messageCount: number; lastTimestamp?: number }>;
+        count: number;
+      }>(result);
+
+      const chat = data.chats.find((c) => c.name === 'No Messages Chat');
+      expect(chat).toBeDefined();
+      expect(chat!.messageCount).toBe(0);
+      expect(chat!.lastTimestamp).toBeUndefined();
+      expect(chat!.name).toBe('No Messages Chat');
+      expect(chat!.unreadCount).toBe(3);
+    });
+  });
+
   // ─── Scenario 8: Label write → DB rows exist ──────────────────────────────
 
   describe('scenario 8: label write → DB rows exist', () => {
@@ -339,9 +366,39 @@ describe('data-path integration: event write → tool read', () => {
     });
   });
 
-  // ─── Scenario 10: Orphan cleanup path ─────────────────────────────────────
+  // ─── Scenario 10: Blocklist DB fallback via get_blocklist tool ────────────
 
-  describe('scenario 10: orphan association cleanup', () => {
+  describe('scenario 10: get_blocklist DB fallback (sock=null)', () => {
+    it('returns cached blocklist from DB when socket is unavailable', async () => {
+      handleBlocklistSet(db, ['bad1@s.whatsapp.net', 'bad2@s.whatsapp.net']);
+
+      // Register profile tools with null socket to exercise DB fallback
+      registerProfileTools(() => null, db, (tool) => registry.register(tool));
+
+      const result = await registry.call('get_blocklist', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+
+      const data = parseResult<{ blocklist: string[]; source: string }>(result);
+      expect(data.source).toBe('cached');
+      expect(data.blocklist).toContain('bad1@s.whatsapp.net');
+      expect(data.blocklist).toContain('bad2@s.whatsapp.net');
+    });
+
+    it('returns empty cached blocklist when blocklist table is empty and socket is null', async () => {
+      registerProfileTools(() => null, db, (tool) => registry.register(tool));
+
+      const result = await registry.call('get_blocklist', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+
+      const data = parseResult<{ blocklist: string[]; source: string }>(result);
+      expect(data.source).toBe('cached');
+      expect(data.blocklist).toHaveLength(0);
+    });
+  });
+
+  // ─── Scenario 11: Orphan cleanup path ─────────────────────────────────────
+
+  describe('scenario 11: orphan association cleanup', () => {
     it('cleanupOrphanedAssociations removes rows whose label no longer exists', () => {
       // Insert an association for a label that does NOT exist in the labels table
       handleLabelsAssociation(db, {

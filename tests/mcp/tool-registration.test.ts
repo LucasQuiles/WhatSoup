@@ -61,7 +61,7 @@ describe('tool registration', () => {
     registerBusinessTools(getSock, register);
     registerAdvancedTools(getSock, register);
     registerCallTools(getSock, register);
-    registerProfileTools(getSock, register);
+    registerProfileTools(getSock, db, register);
 
     // Presence
     registerPresenceTools(getSock, connection.presenceCache, register);
