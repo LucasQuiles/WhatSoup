@@ -292,40 +292,45 @@ export function registerMessagingTools(
 
   registry.register({
     name: 'send_contact',
-    description: 'Send a contact card to the current chat.',
+    description: 'Send one or more contact cards to the current chat.',
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
-      displayName: z.string(),
-      phone: z.string(),
+      contacts: z
+        .array(
+          z.object({
+            displayName: z.string().describe('Contact display name'),
+            phone: z.string().describe('Phone number (digits, optionally with +)'),
+          }),
+        )
+        .min(1)
+        .describe('One or more contacts to send'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
-      const displayName = params['displayName'] as string;
-      const phone = params['phone'] as string;
+      const contacts = params['contacts'] as Array<{ displayName: string; phone: string }>;
 
-      // vCard format required by Baileys contact message
-      const vcard =
-        `BEGIN:VCARD\n` +
-        `VERSION:3.0\n` +
-        `FN:${displayName}\n` +
-        `TEL;type=CELL;type=VOICE;waid=${phone.replace(/\D/g, '')}:+${phone.replace(/\D/g, '')}\n` +
-        `END:VCARD`;
+      const contactCards = contacts.map((c) => {
+        const digits = c.phone.replace(/\D/g, '');
+        return {
+          vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:${c.displayName}\nTEL;type=CELL;type=VOICE;waid=${digits}:+${digits}\nEND:VCARD`,
+        };
+      });
+
+      const displayName =
+        contactCards.length === 1 ? contacts[0].displayName : `${contactCards.length} contacts`;
 
       try {
         await connection.sendRaw(chatJid, {
-          contacts: {
-            displayName,
-            contacts: [{ vcard }],
-          },
+          contacts: { displayName, contacts: contactCards },
         });
       } catch (err) {
         return { error: err instanceof Error ? err.message : String(err) };
       }
 
-      return { sent: true, displayName, phone };
+      return { sent: true, count: contactCards.length };
     },
   });
 
