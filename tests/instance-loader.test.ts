@@ -11,10 +11,10 @@ import { loadInstance } from '../src/instance-loader.ts';
 let tmpDir: string;
 let savedEnv: Record<string, string | undefined>;
 
-// WhatSoup uses "whatsoup-instances" as the namespace for config/data/state.
+// Config + auth read from whatsapp-instances/ (shared). DB/state use whatsoup/ namespace.
 // Auth dir uses "whatsapp-instances" (shared auth state — no QR re-pairing needed).
 function writeInstance(baseDir: string, name: string, content: unknown): void {
-  const instanceDir = path.join(baseDir, 'whatsoup-instances', name);
+  const instanceDir = path.join(baseDir, 'whatsapp-instances', name);
   fs.mkdirSync(instanceDir, { recursive: true });
   const json = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
   fs.writeFileSync(path.join(instanceDir, 'instance.json'), json, 'utf8');
@@ -90,12 +90,12 @@ describe('loadInstance — happy path: chat', () => {
     expect(config.adminPhones).toEqual(['15551234567']);
     expect(config.accessMode).toBe('allowlist');
 
-    // Path resolution — uses whatsoup-instances namespace
+    // Path resolution — uses whatsapp-instances namespace
     expect(config.paths).toBeDefined();
     const p = config.paths;
-    const configRoot = path.join(tmpDir, 'config', 'whatsoup-instances', 'test-chat');
-    const dataRoot = path.join(tmpDir, 'data', 'whatsoup-instances', 'test-chat');
-    const stateRoot = path.join(tmpDir, 'state', 'whatsoup-instances', 'test-chat');
+    const configRoot = path.join(tmpDir, 'config', 'whatsapp-instances', 'test-chat');
+    const dataRoot = path.join(tmpDir, 'data', 'whatsoup', 'test-chat');
+    const stateRoot = path.join(tmpDir, 'state', 'whatsoup', 'test-chat');
 
     expect(p.configRoot).toBe(configRoot);
     // authDir uses whatsapp-instances (shared auth, no re-pairing)
@@ -108,10 +108,10 @@ describe('loadInstance — happy path: chat', () => {
     expect(p.mediaDir).toBe(path.join(dataRoot, 'media', 'tmp'));
 
     // Cross-root checks: data/state must not bleed into config
-    expect(p.dataRoot).toContain('/data/whatsoup-instances/');
-    expect(p.stateRoot).toContain('/state/whatsoup-instances/');
-    expect(p.dataRoot).not.toContain('/config/whatsoup-instances');
-    expect(p.stateRoot).not.toContain('/config/whatsoup-instances');
+    expect(p.dataRoot).toContain('/data/whatsoup/');
+    expect(p.stateRoot).toContain('/state/whatsoup/');
+    expect(p.dataRoot).not.toContain('/config/');
+    expect(p.stateRoot).not.toContain('/config/');
   });
 });
 
@@ -209,7 +209,7 @@ describe('loadInstance — error: empty name', () => {
 
 describe('loadInstance — error: invalid JSON', () => {
   it('throws when instance.json contains invalid JSON', () => {
-    const instanceDir = path.join(tmpDir, 'config', 'whatsoup-instances', 'bad-json');
+    const instanceDir = path.join(tmpDir, 'config', 'whatsapp-instances', 'bad-json');
     fs.mkdirSync(instanceDir, { recursive: true });
     fs.writeFileSync(path.join(instanceDir, 'instance.json'), '{ not valid json', 'utf8');
 
@@ -466,7 +466,7 @@ describe('loadInstance — loops instance.json', () => {
 // ---------------------------------------------------------------------------
 
 describe('loadInstance — XDG fallback', () => {
-  it('falls back to ~/.config/whatsoup-instances when XDG_CONFIG_HOME is not set', () => {
+  it('falls back to ~/.config/whatsapp-instances when XDG_CONFIG_HOME is not set', () => {
     const fakeHome = path.join(tmpDir, 'fake-home');
     fs.mkdirSync(fakeHome, { recursive: true });
     process.env.HOME = fakeHome;
@@ -478,7 +478,7 @@ describe('loadInstance — XDG fallback', () => {
     const fallbackData = path.join(fakeHome, '.local', 'share');
     const fallbackState = path.join(fakeHome, '.local', 'state');
 
-    // Write the instance under the fake fallback path (whatsoup-instances namespace)
+    // Write the instance under the fake fallback path (whatsapp-instances namespace)
     writeInstance(fallbackConfig, 'xdg-fallback-instance', {
       ...minimalChat,
       name: 'xdg-fallback-instance',
@@ -488,17 +488,17 @@ describe('loadInstance — XDG fallback', () => {
 
     const config = JSON.parse(process.env.INSTANCE_CONFIG!);
     expect(config.paths.configRoot).toBe(
-      path.join(fallbackConfig, 'whatsoup-instances', 'xdg-fallback-instance'),
+      path.join(fallbackConfig, 'whatsapp-instances', 'xdg-fallback-instance'),
     );
     // authDir uses whatsapp-instances (shared auth)
     expect(config.paths.authDir).toBe(
       path.join(fallbackConfig, 'whatsapp-instances', 'xdg-fallback-instance', 'auth_info'),
     );
     expect(config.paths.dbPath).toBe(
-      path.join(fallbackData, 'whatsoup-instances', 'xdg-fallback-instance', 'bot.db'),
+      path.join(fallbackData, 'whatsoup', 'xdg-fallback-instance', 'bot.db'),
     );
     expect(config.paths.lockPath).toBe(
-      path.join(fallbackState, 'whatsoup-instances', 'xdg-fallback-instance', 'bot.lock'),
+      path.join(fallbackState, 'whatsoup', 'xdg-fallback-instance', 'bot.lock'),
     );
   });
 });

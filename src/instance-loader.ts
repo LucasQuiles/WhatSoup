@@ -173,21 +173,16 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
 // ---------------------------------------------------------------------------
 // Path resolution
 //
-// XDG paths follow WhatSoup namespace (whatsoup-instances) for config, data,
-// and state roots. Auth dir reads from the shared whatsapp-instances location
-// so no QR re-pairing is needed (auth state lives under whatsapp-instances/
-// for backward compatibility with existing QR pairings).
+// Config + auth read from whatsapp-instances/ (shared with old bot — same instance.json,
+// same QR pairing). DB, logs, state use whatsoup/ namespace (fresh schema, no migration).
 // ---------------------------------------------------------------------------
 
 function resolvePaths(name: string): InstancePaths {
-  // Config (instance.json lives here) uses whatsoup-instances namespace
-  const configRoot = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup-instances', name);
-  // Data and state also use whatsoup-instances namespace
-  const dataRoot = path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup-instances', name);
-  const stateRoot = path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup-instances', name);
+  const configRoot = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsapp-instances', name);
+  const dataRoot = path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', name);
+  const stateRoot = path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', name);
 
-  // Auth dir reads from whatsapp-instances — auth state lives here for backward compatibility with existing QR pairings
-  const authDir = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsapp-instances', name, 'auth_info');
+  const authDir = path.join(configRoot, 'auth_info');
 
   return {
     configRoot,
@@ -210,8 +205,7 @@ export function loadInstance(name: string): void {
     throw new Error('Instance name is required');
   }
 
-  // 1. Resolve path to instance.json — under whatsoup-instances namespace
-  const instanceFile = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup-instances', name, 'instance.json');
+  const instanceFile = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsapp-instances', name, 'instance.json');
 
   // 2. Read file (throws ENOENT if missing)
   let raw: string;
