@@ -6,7 +6,6 @@ import { randomBytes } from 'node:crypto';
 import { Database } from '../../src/core/database.ts';
 import {
   lookupAccess,
-  lookupGroupAccess,
   insertPending,
   updateAccess,
   getPendingCount,
@@ -67,10 +66,10 @@ describe('access-list', () => {
 
   // @check CHK-076
   // @traces REQ-013.AC-03
-  it('lookupGroupAccess returns the entry for a known group JID', () => {
+  it('lookupAccess returns the entry for a known group JID', () => {
     const groupJid = '120363123456789@g.us';
     insertPending(db, 'group', groupJid, 'My Group');
-    const entry = lookupGroupAccess(db, groupJid);
+    const entry = lookupAccess(db, 'group', groupJid);
     expect(entry).not.toBeNull();
     expect(entry!.subjectType).toBe('group');
     expect(entry!.subjectId).toBe(groupJid);
@@ -80,7 +79,7 @@ describe('access-list', () => {
   // @check CHK-077
   // @traces REQ-013.AC-04
   it('unknown group returns null (silent ignore)', () => {
-    const entry = lookupGroupAccess(db, '999363999999999@g.us');
+    const entry = lookupAccess(db, 'group', '999363999999999@g.us');
     expect(entry).toBeNull();
   });
 
@@ -105,7 +104,7 @@ describe('access-list', () => {
     const groupJid = '120363111111111@g.us';
     insertPending(db, 'group', groupJid, 'TestGroup');
     updateAccess(db, 'group', groupJid, 'allowed');
-    const entry = lookupGroupAccess(db, groupJid);
+    const entry = lookupAccess(db, 'group', groupJid);
     expect(entry!.status).toBe('allowed');
     expect(entry!.decidedAt).not.toBeNull();
   });

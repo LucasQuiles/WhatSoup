@@ -1,12 +1,7 @@
-import { loadInstance } from './instance-loader.ts';
+import { bootstrapCommon } from './bootstrap-common.ts';
 
 export async function bootstrapAuth(): Promise<void> {
-  const instanceName = process.argv[2];
-  if (!instanceName) {
-    throw new Error('Usage: whatsoup-auth <instance-name>\nExample: whatsoup-auth personal');
-  }
-  loadInstance(instanceName);
-  await import('./transport/auth.ts');
+  await bootstrapCommon('./transport/auth.ts', 'whatsoup-auth');
 }
 
 const isDirectRun = process.argv[1]?.endsWith('bootstrap-auth.ts');

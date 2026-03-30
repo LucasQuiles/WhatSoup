@@ -1,12 +1,7 @@
-import { loadInstance } from './instance-loader.ts';
+import { bootstrapCommon } from './bootstrap-common.ts';
 
 export async function bootstrap(): Promise<void> {
-  const instanceName = process.argv[2];
-  if (!instanceName) {
-    throw new Error('Usage: whatsoup <instance-name>\nExample: whatsoup loops');
-  }
-  loadInstance(instanceName);
-  await import('./main.ts');
+  await bootstrapCommon('./main.ts', 'whatsoup');
 }
 
 // Auto-execute when run directly

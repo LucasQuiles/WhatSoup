@@ -31,11 +31,6 @@ export function lookupAccess(db: Database, subjectType: SubjectType, subjectId: 
   return row ? rowToAccessEntry(row) : null;
 }
 
-/** Convenience wrapper for group JID lookup. */
-export function lookupGroupAccess(db: Database, groupJid: string): AccessEntry | null {
-  return lookupAccess(db, 'group', groupJid);
-}
-
 export function insertPending(db: Database, subjectType: SubjectType, subjectId: string, displayName: string | null): void {
   db.raw.prepare(
     `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
