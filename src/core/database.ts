@@ -261,6 +261,21 @@ const MIGRATION_5 = `
 ALTER TABLE messages ADD COLUMN raw_message TEXT;
 `;
 
+// ─── Migration 6: blocklist and LID mapping persistence ──────────────────────
+
+const MIGRATION_6 = `
+CREATE TABLE IF NOT EXISTS blocklist (
+  jid TEXT PRIMARY KEY,
+  blocked_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS lid_mappings (
+  lid TEXT PRIMARY KEY,
+  phone_jid TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -271,6 +286,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [3, (db: DatabaseSync) => { db.exec(MIGRATION_3); }],
   [4, (db: DatabaseSync) => { db.exec(MIGRATION_4); }],
   [5, (db: DatabaseSync) => { db.exec(MIGRATION_5); }],
+  [6, (db: DatabaseSync) => { db.exec(MIGRATION_6); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

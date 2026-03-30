@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { handleLabelsEdit, handleLabelsAssociation } from '../../src/core/label-sync.ts';
+import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from '../../src/core/label-sync.ts';
 
 describe('label-sync', () => {
   let db: Database;
@@ -258,6 +258,74 @@ describe('label-sync', () => {
   describe('handleLabelsEdit — edge cases', () => {
     it('returns early with null-like input — no crash', () => {
       expect(() => handleLabelsEdit(db, null as unknown as any[])).not.toThrow();
+    });
+  });
+
+  // ─── cleanupOrphanedAssociations (RES-008) ────────────────────────────────
+
+  describe('cleanupOrphanedAssociations', () => {
+    it('deletes associations whose label_id no longer exists', () => {
+      // Insert label and association, then delete the label
+      handleLabelsEdit(db, [{ id: 'orphan-lbl', name: 'Gone Soon' }]);
+      handleLabelsAssociation(db, {
+        labelId: 'orphan-lbl',
+        type: 'chat',
+        chatJid: '111@s.whatsapp.net',
+        operation: 'add',
+      });
+      // Remove label directly (simulating a label delete)
+      db.raw.prepare("DELETE FROM labels WHERE id = 'orphan-lbl'").run();
+
+      const deleted = cleanupOrphanedAssociations(db);
+      expect(deleted).toBe(1);
+      const count = (
+        db.raw.prepare('SELECT COUNT(*) AS cnt FROM label_associations').get() as { cnt: number }
+      ).cnt;
+      expect(count).toBe(0);
+    });
+
+    it('returns 0 when no orphans exist', () => {
+      handleLabelsEdit(db, [{ id: 'lbl-keep', name: 'Keeper' }]);
+      handleLabelsAssociation(db, {
+        labelId: 'lbl-keep',
+        type: 'chat',
+        chatJid: '111@s.whatsapp.net',
+        operation: 'add',
+      });
+
+      const deleted = cleanupOrphanedAssociations(db);
+      expect(deleted).toBe(0);
+      // Association remains intact
+      const count = (
+        db.raw.prepare('SELECT COUNT(*) AS cnt FROM label_associations').get() as { cnt: number }
+      ).cnt;
+      expect(count).toBe(1);
+    });
+
+    it('deletes multiple orphaned associations', () => {
+      handleLabelsEdit(db, [
+        { id: 'lbl-gone-1', name: 'Gone 1' },
+        { id: 'lbl-gone-2', name: 'Gone 2' },
+        { id: 'lbl-keep', name: 'Keep' },
+      ]);
+      handleLabelsAssociation(db, { labelId: 'lbl-gone-1', type: 'chat', chatJid: 'a@s.whatsapp.net', operation: 'add' });
+      handleLabelsAssociation(db, { labelId: 'lbl-gone-2', type: 'chat', chatJid: 'b@s.whatsapp.net', operation: 'add' });
+      handleLabelsAssociation(db, { labelId: 'lbl-keep', type: 'chat', chatJid: 'c@s.whatsapp.net', operation: 'add' });
+
+      db.raw.prepare("DELETE FROM labels WHERE id IN ('lbl-gone-1', 'lbl-gone-2')").run();
+
+      const deleted = cleanupOrphanedAssociations(db);
+      expect(deleted).toBe(2);
+
+      const remaining = (
+        db.raw.prepare('SELECT COUNT(*) AS cnt FROM label_associations').get() as { cnt: number }
+      ).cnt;
+      expect(remaining).toBe(1);
+    });
+
+    it('returns 0 and does not throw when tables are empty', () => {
+      expect(() => cleanupOrphanedAssociations(db)).not.toThrow();
+      expect(cleanupOrphanedAssociations(db)).toBe(0);
     });
   });
 });

@@ -162,6 +162,12 @@ function makeUpdateProfilePicture(getSock: () => WhatsAppSocket | null): ToolDec
         throw new Error('WhatsApp is not connected');
       }
 
+      // Validate base64 format before decoding — Buffer.from silently drops
+      // invalid characters and returns a non-empty buffer for garbage input.
+      const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+      if (!base64Regex.test(content)) {
+        throw new Error('Invalid base64 content: contains non-base64 characters');
+      }
       let buffer: Buffer;
       try {
         buffer = Buffer.from(content, 'base64');

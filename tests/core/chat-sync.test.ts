@@ -291,4 +291,54 @@ describe('chat-sync', () => {
       handleChatsDelete(db, ['nonexistent@s.whatsapp.net']);
     });
   });
+
+  // ─── Per-item error isolation (RES-003) ────────────────────────────────────
+
+  describe('per-item error isolation', () => {
+    it('handleChatsUpsert: skips invalid JID but persists valid ones', () => {
+      // 'invalid-no-at' has no @ — toConversationKey throws
+      handleChatsUpsert(db, [
+        { id: 'invalid-no-at', name: 'Bad' },
+        { id: '111@s.whatsapp.net', name: 'Good' },
+      ]);
+      // Good chat must be stored
+      const good = db.raw
+        .prepare('SELECT * FROM chats WHERE jid = ?')
+        .get('111@s.whatsapp.net') as any;
+      expect(good).toBeDefined();
+      expect(good.name).toBe('Good');
+      // Bad chat must not be stored
+      const bad = db.raw
+        .prepare('SELECT * FROM chats WHERE jid = ?')
+        .get('invalid-no-at') as any;
+      expect(bad).toBeUndefined();
+    });
+
+    it('handleChatsUpsert: all invalid JIDs — no crash, no rows inserted', () => {
+      expect(() =>
+        handleChatsUpsert(db, [
+          { id: 'no-at-sign', name: 'Bad1' },
+          { id: '', name: 'Bad2' },
+        ]),
+      ).not.toThrow();
+      const count = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM chats').get() as { cnt: number })
+        .cnt;
+      expect(count).toBe(0);
+    });
+
+    it('handleChatsDelete: processes remaining items when one throws', () => {
+      // Insert two valid chats then delete one valid + one that won't throw (deletes are simple)
+      handleChatsUpsert(db, [
+        { id: '111@s.whatsapp.net', name: 'Alice' },
+        { id: '222@s.whatsapp.net', name: 'Bob' },
+      ]);
+      // All deletes should succeed without throwing
+      expect(() =>
+        handleChatsDelete(db, ['111@s.whatsapp.net', '222@s.whatsapp.net']),
+      ).not.toThrow();
+      const count = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM chats').get() as { cnt: number })
+        .cnt;
+      expect(count).toBe(0);
+    });
+  });
 });

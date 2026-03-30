@@ -81,6 +81,12 @@ function makeUpdateCoverPhoto(getSock: () => WhatsAppSocket | null): ToolDeclara
       const { photo } = UpdateCoverPhotoSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
+      // Validate base64 format before decoding — Buffer.from silently drops
+      // invalid characters and returns a non-empty buffer for garbage input.
+      const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+      if (!base64Regex.test(photo)) {
+        throw new Error('Invalid base64 content: contains non-base64 characters');
+      }
       let buffer: Buffer;
       try {
         buffer = Buffer.from(photo, 'base64');

@@ -25,7 +25,8 @@ import {
   handleChatsUpdate,
   handleChatsDelete,
 } from './core/chat-sync.ts';
-import { handleLabelsEdit, handleLabelsAssociation } from './core/label-sync.ts';
+import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
+import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -299,6 +300,11 @@ connectionManager.on('historyMessages', (messages) => {
 connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
   try {
     runtime.handleJidAliasChanged?.(conversationKey, newJid);
+    // Persist mapping so it survives restarts
+    db.raw.prepare(
+      `INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, updated_at = datetime('now')`,
+    ).run(conversationKey, newJid);
     log.info({ conversationKey, newJid }, 'jidAliasChanged: updated delivery JID');
   } catch (err) {
     log.error({ err, conversationKey, newJid }, 'jidAliasChanged: failed to update delivery JID');
@@ -318,11 +324,19 @@ connectionManager.on('groupJoinRequest', (data) => {
 });
 
 connectionManager.on('blocklistSet', (blocklist) => {
-  log.info({ count: blocklist.length }, 'blocklistSet: full blocklist synced');
+  try {
+    handleBlocklistSet(db, blocklist);
+  } catch (err) {
+    log.error({ err }, 'blocklistSet: failed to persist blocklist');
+  }
 });
 
 connectionManager.on('blocklistUpdate', (data) => {
-  log.info({ count: data.blocklist.length, type: data.type }, 'blocklistUpdate: blocklist updated');
+  try {
+    handleBlocklistUpdate(db, data);
+  } catch (err) {
+    log.error({ err }, 'blocklistUpdate: failed to persist blocklist update');
+  }
 });
 
 connectionManager.on('newsletterReaction', (data) => {
@@ -344,6 +358,7 @@ connectionManager.on('newsletterSettingsUpdate', (data) => {
 connectionManager.on('labelsEdit', (labels) => {
   try {
     handleLabelsEdit(db, labels);
+    cleanupOrphanedAssociations(db);
   } catch (err) {
     log.error({ err }, 'labelsEdit: failed to persist labels');
   }

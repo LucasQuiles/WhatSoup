@@ -88,3 +88,18 @@ export function handleLabelsAssociation(db: Database, data: LabelAssociationReco
     .run(labelId, type, chatJid, messageId);
   log.debug({ labelId, type, chatJid, messageId }, 'label association added');
 }
+
+/**
+ * Delete any label_associations rows whose label_id no longer exists in labels.
+ * Call after each labels.edit event to keep associations consistent.
+ * Returns the number of rows deleted.
+ */
+export function cleanupOrphanedAssociations(db: Database): number {
+  const result = db.raw.prepare(`
+    DELETE FROM label_associations
+    WHERE label_id NOT IN (SELECT id FROM labels)
+  `).run();
+  const deleted = (result as unknown as { changes: number }).changes ?? 0;
+  if (deleted > 0) log.info({ deleted }, 'cleaned up orphaned label associations');
+  return deleted;
+}

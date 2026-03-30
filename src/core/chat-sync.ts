@@ -83,21 +83,27 @@ export function handleChatsUpsert(db: Database, chats: BaileysChat[]): void {
       updated_at = datetime('now')
   `);
 
+  let skipped = 0;
   for (const c of chats) {
-    const conversationKey = toConversationKey(c.id);
-    const muteUntil = c.muteEndTime ? new Date(c.muteEndTime * 1000).toISOString() : null;
-    stmt.run(
-      c.id,
-      conversationKey,
-      c.name ?? null,
-      c.unreadCount ?? 0,
-      c.archived ? 1 : 0,
-      c.pinned ? 1 : 0,
-      muteUntil,
-      c.ephemeralExpiration ?? null,
-    );
+    try {
+      const conversationKey = toConversationKey(c.id);
+      const muteUntil = c.muteEndTime ? new Date(c.muteEndTime * 1000).toISOString() : null;
+      stmt.run(
+        c.id,
+        conversationKey,
+        c.name ?? null,
+        c.unreadCount ?? 0,
+        c.archived ? 1 : 0,
+        c.pinned ? 1 : 0,
+        muteUntil,
+        c.ephemeralExpiration ?? null,
+      );
+    } catch (err) {
+      log.warn({ err, jid: c.id }, 'chat upsert: skipping invalid JID');
+      skipped++;
+    }
   }
-  log.debug({ count: chats.length }, 'chats upserted');
+  log.debug({ count: chats.length, skipped }, 'chats upserted');
 }
 
 export function handleChatsUpdate(
@@ -105,58 +111,70 @@ export function handleChatsUpdate(
   updates: Array<{ id: string; [key: string]: unknown }>,
 ): void {
   if (!Array.isArray(updates) || updates.length === 0) return;
+  let skipped = 0;
   for (const u of updates) {
-    // SAFETY: sets[] is built from hardcoded column names only — no user input in SQL fragments.
-    // Values are always parameterized via ? placeholders.
-    const sets: string[] = [];
-    const values: unknown[] = [];
+    try {
+      // SAFETY: sets[] is built from hardcoded column names only — no user input in SQL fragments.
+      // Values are always parameterized via ? placeholders.
+      const sets: string[] = [];
+      const values: unknown[] = [];
 
-    if (u.name !== undefined) {
-      sets.push('name = ?');
-      values.push(u.name);
-    }
-    if (u.unreadCount !== undefined) {
-      sets.push('unread_count = ?');
-      values.push(u.unreadCount);
-    }
-    if (u.archived !== undefined) {
-      sets.push('is_archived = ?');
-      values.push(u.archived ? 1 : 0);
-    }
-    if (u.pinned !== undefined) {
-      sets.push('is_pinned = ?');
-      values.push(u.pinned ? 1 : 0);
-    }
-    if (u.muteEndTime !== undefined) {
-      const val = u.muteEndTime as number;
-      sets.push('mute_until = ?');
-      values.push(val ? new Date(val * 1000).toISOString() : null);
-    }
-    if (u.ephemeralExpiration !== undefined) {
-      sets.push('ephemeral_duration = ?');
-      values.push(u.ephemeralExpiration);
-    }
+      if (u.name !== undefined) {
+        sets.push('name = ?');
+        values.push(u.name);
+      }
+      if (u.unreadCount !== undefined) {
+        sets.push('unread_count = ?');
+        values.push(u.unreadCount);
+      }
+      if (u.archived !== undefined) {
+        sets.push('is_archived = ?');
+        values.push(u.archived ? 1 : 0);
+      }
+      if (u.pinned !== undefined) {
+        sets.push('is_pinned = ?');
+        values.push(u.pinned ? 1 : 0);
+      }
+      if (u.muteEndTime !== undefined) {
+        const val = u.muteEndTime as number;
+        sets.push('mute_until = ?');
+        values.push(val ? new Date(val * 1000).toISOString() : null);
+      }
+      if (u.ephemeralExpiration !== undefined) {
+        sets.push('ephemeral_duration = ?');
+        values.push(u.ephemeralExpiration);
+      }
 
-    if (sets.length === 0) {
-      log.debug({ jid: u.id }, 'chat update: no recognized fields to update');
-      continue;
+      if (sets.length === 0) {
+        log.debug({ jid: u.id }, 'chat update: no recognized fields to update');
+        continue;
+      }
+
+      sets.push("updated_at = datetime('now')");
+      values.push(u.id);
+
+      db.raw
+        .prepare(`UPDATE chats SET ${sets.join(', ')} WHERE jid = ?`)
+        .run(...(values as Array<string | number | null>));
+    } catch (err) {
+      log.warn({ err, jid: u.id }, 'chat update: skipping item due to error');
+      skipped++;
     }
-
-    sets.push("updated_at = datetime('now')");
-    values.push(u.id);
-
-    db.raw
-      .prepare(`UPDATE chats SET ${sets.join(', ')} WHERE jid = ?`)
-      .run(...(values as Array<string | number | null>));
   }
-  log.debug({ count: updates.length }, 'chats updated');
+  log.debug({ count: updates.length, skipped }, 'chats updated');
 }
 
 export function handleChatsDelete(db: Database, jids: string[]): void {
   if (!Array.isArray(jids) || jids.length === 0) return;
   const stmt = db.raw.prepare('DELETE FROM chats WHERE jid = ?');
+  let skipped = 0;
   for (const jid of jids) {
-    stmt.run(jid);
+    try {
+      stmt.run(jid);
+    } catch (err) {
+      log.warn({ err, jid }, 'chat delete: skipping item due to error');
+      skipped++;
+    }
   }
-  log.debug({ count: jids.length }, 'chats deleted');
+  log.debug({ count: jids.length, skipped }, 'chats deleted');
 }
