@@ -250,16 +250,15 @@ describe('Crash Recovery — Scenario 4: turn_done with submitted terminal op', 
   beforeEach(() => { ({ db, engine } = makeEngine()); });
   afterEach(() => { db.close(); });
 
-  it('preConnect leaves turn_done inbound; first postConnect promotes submitted to maybe_sent', () => {
+  it('preConnect leaves turn_done inbound; first postConnect promotes submitted and reconciles in one pass', () => {
     // Simulate: agent finished its turn (markTurnDone), terminal op submitted,
     // then crash before echo arrived.
     //
     // postConnectRecovery() runs in two phases internally:
-    //   Step 1 — reconcile existing maybe_sent ops
-    //   Step 2 — promote stale submitted → maybe_sent
-    // Ops that are `submitted` at call time land at `maybe_sent` after the first
-    // postConnect. A second postConnect (or the sweepStaleSubmitted periodic path)
-    // completes the reconciliation on the next cycle.
+    //   Step 1 — promote stale submitted → maybe_sent
+    //   Step 2 — reconcile all maybe_sent ops (including those just promoted)
+    // Ops that are `submitted` at call time get promoted AND reconciled in the same
+    // pass: safe + wa_message_id not in messages → reset to pending for replay.
     const seq = engine.journalInbound('msg-td-crash-1', 'chat-I', 'chat-I@s.whatsapp.net', 'agent');
     engine.markTurnDone(seq);
     const opId = engine.createOutboundOp({
@@ -278,24 +277,18 @@ describe('Crash Recovery — Scenario 4: turn_done with submitted terminal op', 
     expect(getInbound(db, seq)['processing_status']).toBe('turn_done');
     expect(getOutbound(db, opId)['status']).toBe('submitted');
 
-    // Phase 2: first postConnect — stale `submitted` promoted to `maybe_sent`
-    // (Step 1 of postConnect reconciles existing maybe_sent; Step 2 promotes submitted.
-    // So after one call the op lands at maybe_sent, not yet fully resolved.)
+    // Phase 2: first postConnect — promotes stale submitted and reconciles in same pass.
+    // safe + wa_message_id not in messages → pending for replay (single cycle).
     const firstPostStats = engine.postConnectRecovery();
-    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
-    expect(firstPostStats.outboundReconciled).toBeGreaterThanOrEqual(1);
-
-    // Phase 3: second postConnect — now the op is maybe_sent with no echo in messages,
-    // safe policy → reset to pending for replay
-    const secondPostStats = engine.postConnectRecovery();
     expect(getOutbound(db, opId)['status']).toBe('pending');
-    expect(secondPostStats.outboundReplayed).toBe(1);
+    expect(firstPostStats.outboundReconciled).toBeGreaterThanOrEqual(1);
+    expect(firstPostStats.outboundReplayed).toBe(1);
   });
 
-  it('two-phase recovery: submitted unsafe op with echo → echoes on second postConnect', () => {
-    // postConnectRecovery steps: (1) reconcile maybe_sent, (2) promote submitted→maybe_sent.
-    // An op that is `submitted` at first postConnect call ends up at `maybe_sent`.
-    // On the second call it is reconciled against the messages table.
+  it('single-pass recovery: submitted unsafe op with echo → echoes on first postConnect', () => {
+    // postConnectRecovery steps: (1) promote submitted→maybe_sent, (2) reconcile maybe_sent.
+    // An op that is `submitted` at postConnect call time gets promoted AND reconciled in
+    // the same pass. If the echo is already in the messages table, it transitions to echoed.
     const seq = engine.journalInbound('msg-td-crash-2', 'chat-J', 'chat-J@s.whatsapp.net', 'agent');
     engine.markTurnDone(seq);
     const opId = engine.createOutboundOp({
@@ -315,11 +308,7 @@ describe('Crash Recovery — Scenario 4: turn_done with submitted terminal op', 
     // Echo arrives during history sync window
     ingestEcho(db, 'WA-TD-UNSAFE-ECHOED', 'chat-J@s.whatsapp.net');
 
-    // First postConnect: submitted → maybe_sent (Step 2 promotion)
-    engine.postConnectRecovery();
-    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
-
-    // Second postConnect: maybe_sent with echo in messages → echoed → inbound complete
+    // First postConnect: submitted → maybe_sent (Step 1), then maybe_sent + echo → echoed (Step 2)
     engine.postConnectRecovery();
     expect(getOutbound(db, opId)['status']).toBe('echoed');
     expect(getInbound(db, seq)['processing_status']).toBe('complete');
@@ -478,17 +467,14 @@ describe('Crash Recovery — Scenario 6: maybe_sent reconciliation with wa_messa
     // History sync delivers the echo into the messages table
     ingestEcho(db, 'WA-FULL-CYCLE-1', 'chat-O@s.whatsapp.net');
 
-    // Restart Phase 2a: first postConnect — stale submitted → maybe_sent
+    // Restart Phase 2: postConnect — stale submitted → maybe_sent (Step 1) then
+    // maybe_sent + echo found → echoed (Step 2), all in a single pass
     engine.postConnectRecovery();
-    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
+    expect(getOutbound(db, opId)['status']).toBe('echoed');
+    expect(getInbound(db, seq)['processing_status']).toBe('complete');
     // Recovery run was logged
     const runRow1 = db.raw.prepare("SELECT * FROM recovery_runs WHERE trigger='post_connect' ORDER BY id DESC LIMIT 1").get() as any;
     expect(runRow1).toBeDefined();
     expect(runRow1.completed_at).not.toBeNull();
-
-    // Restart Phase 2b: second postConnect — maybe_sent + echo found → echoed
-    engine.postConnectRecovery();
-    expect(getOutbound(db, opId)['status']).toBe('echoed');
-    expect(getInbound(db, seq)['processing_status']).toBe('complete');
   });
 });

@@ -140,6 +140,13 @@ export class DurabilityEngine {
       `SELECT source_inbound_seq, is_terminal FROM outbound_ops WHERE id = ?`,
     ).get(id) as { source_inbound_seq: number | null; is_terminal: number } | undefined;
     if (row?.is_terminal && row.source_inbound_seq) {
+      // Ensure proper state transition: processing → turn_done → complete
+      const inbound = this.db.raw.prepare(
+        `SELECT processing_status FROM inbound_events WHERE seq = ?`,
+      ).get(row.source_inbound_seq) as { processing_status: string } | undefined;
+      if (inbound?.processing_status === 'processing') {
+        this.markTurnDone(row.source_inbound_seq);
+      }
       this.markInboundComplete(row.source_inbound_seq, 'response_sent');
     }
   }
@@ -324,11 +331,11 @@ export class DurabilityEngine {
       log.warn({ err }, 'preConnectRecovery: error promoting sending ops');
     }
 
-    // Step 3: Recover executing tool calls
+    // Step 3: Recover executing and pending tool calls
     try {
       const executingCalls = this.db.raw.prepare(
         `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
-         FROM tool_calls WHERE status = 'executing'`,
+         FROM tool_calls WHERE status IN ('executing', 'pending')`,
       ).all() as Array<{
         id: number;
         conversation_key: string;
@@ -347,7 +354,7 @@ export class DurabilityEngine {
             { toolCallId: tc.id, outboundOpId: tc.outbound_op_id },
             'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
           );
-        } else if (tc.replay_policy === 'safe') {
+        } else if (tc.replay_policy === 'safe' || tc.replay_policy === 'read_only') {
           // Mark as replayed — safe to re-execute on next run
           this.db.raw.prepare(
             `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
@@ -355,17 +362,17 @@ export class DurabilityEngine {
           stats.toolCallsReplayed = (stats.toolCallsReplayed ?? 0) + 1;
           log.info(
             { toolCallId: tc.id, toolName: tc.tool_name },
-            'preConnectRecovery: safe tool call marked as replayed',
+            'preConnectRecovery: safe/read_only tool call marked as replayed',
           );
         } else {
-          // unsafe or read_only without an outbound op: quarantine
+          // unsafe without an outbound op: quarantine
           this.db.raw.prepare(
             `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
           ).run(tc.id);
           stats.toolCallsQuarantined = (stats.toolCallsQuarantined ?? 0) + 1;
           log.warn(
             { toolCallId: tc.id, toolName: tc.tool_name, replayPolicy: tc.replay_policy },
-            'preConnectRecovery: non-safe executing tool call quarantined',
+            'preConnectRecovery: unsafe tool call quarantined',
           );
         }
       }
@@ -432,7 +439,27 @@ export class DurabilityEngine {
 
     log.info('postConnectRecovery: starting');
 
-    // Step 1: Reconcile `maybe_sent` ops
+    // Step 1: Promote stale `submitted` ops (no echo after 30s grace period) → maybe_sent
+    // Only promote ops submitted before the current session's startup window to avoid
+    // racing with echoes from messages sent in the current reconnect attempt.
+    // Done first so newly-promoted ops are reconciled in the same pass (Step 2).
+    try {
+      const staleSubmitted = this.db.raw.prepare(
+        `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
+      ).all() as Array<{ id: number }>;
+      for (const op of staleSubmitted) {
+        this.markMaybeSent(op.id, 'stale-submitted-no-echo');
+        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+        log.info(
+          { opId: op.id },
+          'postConnectRecovery: stale submitted (no echo) promoted to maybe_sent',
+        );
+      }
+    } catch (err) {
+      log.warn({ err }, 'postConnectRecovery: error handling stale submitted ops');
+    }
+
+    // Step 2: Reconcile `maybe_sent` ops (includes those just promoted in Step 1)
     try {
       const maybeSent = this.getOutboundByStatus('maybe_sent');
       for (const op of maybeSent) {
@@ -450,7 +477,7 @@ export class DurabilityEngine {
               { opId: op.id, waMessageId: op.wa_message_id },
               'postConnectRecovery: maybe_sent confirmed via messages table → echoed',
             );
-          } else if (op.replay_policy === 'safe') {
+          } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
             // Re-enqueue for replay: reset to pending
             this.db.raw.prepare(
               `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
@@ -458,7 +485,7 @@ export class DurabilityEngine {
             stats.outboundReplayed = (stats.outboundReplayed ?? 0) + 1;
             log.info(
               { opId: op.id },
-              'postConnectRecovery: maybe_sent not confirmed, safe → reset to pending for replay',
+              'postConnectRecovery: maybe_sent not confirmed, safe/read_only → reset to pending for replay',
             );
           } else {
             this.markQuarantined(op.id);
@@ -470,14 +497,14 @@ export class DurabilityEngine {
           }
         } else {
           // No wa_message_id: definitely not delivered; apply replay policy
-          if (op.replay_policy === 'safe') {
+          if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
             this.db.raw.prepare(
               `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
             ).run(op.id);
             stats.outboundReplayed = (stats.outboundReplayed ?? 0) + 1;
             log.info(
               { opId: op.id },
-              'postConnectRecovery: maybe_sent (no wa_message_id), safe → reset to pending',
+              'postConnectRecovery: maybe_sent (no wa_message_id), safe/read_only → reset to pending',
             );
           } else {
             this.markQuarantined(op.id);
@@ -491,25 +518,6 @@ export class DurabilityEngine {
       }
     } catch (err) {
       log.warn({ err }, 'postConnectRecovery: error reconciling maybe_sent ops');
-    }
-
-    // Step 2: Promote stale `submitted` ops (no echo after 30s grace period) → maybe_sent
-    // Only promote ops submitted before the current session's startup window to avoid
-    // racing with echoes from messages sent in the current reconnect attempt.
-    try {
-      const staleSubmitted = this.db.raw.prepare(
-        `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
-      ).all() as Array<{ id: number }>;
-      for (const op of staleSubmitted) {
-        this.markMaybeSent(op.id, 'stale-submitted-no-echo');
-        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
-        log.info(
-          { opId: op.id },
-          'postConnectRecovery: stale submitted (no echo) promoted to maybe_sent',
-        );
-      }
-    } catch (err) {
-      log.warn({ err }, 'postConnectRecovery: error handling stale submitted ops');
     }
 
     // Step 3: Log recovery run

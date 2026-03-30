@@ -174,14 +174,15 @@ describe('DurabilityEngine — preConnectRecovery()', () => {
     expect(stats.toolCallsReplayed).toBe(0);
   });
 
-  it('read_only executing tool call (no outbound_op_id) is quarantined', () => {
+  it('read_only executing tool call (no outbound_op_id) is replayed (same as safe)', () => {
     const tcId = engine.recordToolCall('k1', 'ro_tool', '{}', 'read_only');
     engine.markToolExecuting(tcId);
 
     const stats = engine.preConnectRecovery();
 
-    expect(getToolCall(db, tcId)['status']).toBe('quarantined');
-    expect(stats.toolCallsQuarantined).toBe(1);
+    expect(getToolCall(db, tcId)['status']).toBe('replayed');
+    expect(stats.toolCallsReplayed).toBe(1);
+    expect(stats.toolCallsQuarantined).toBe(0);
   });
 
   it('completed tool calls are not touched by recovery', () => {
@@ -407,7 +408,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
 
   // ── Risk 4: turn_done with submitted terminal op ───────────────────────
 
-  it('Risk 4: inbound in turn_done with terminal op in submitted → postConnect promotes to maybe_sent', () => {
+  it('Risk 4: inbound in turn_done with terminal op in submitted → postConnect promotes and reconciles in one pass', () => {
     const seq = engine.journalInbound('msg-td-1', 'k1', 'j1@s.whatsapp.net', 'agent');
     engine.markTurnDone(seq);
     const opId = engine.createOutboundOp({
@@ -419,17 +420,19 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     engine.markSubmitted(opId, 'WA_STALE_1');
     makeSubmittedStale(db, opId);
 
-    // postConnect promotes stale submitted → maybe_sent
+    // postConnect promotes stale submitted → maybe_sent (Step 1), then reconciles
+    // immediately in the same pass (Step 2): safe + wa_message_id not in messages → pending
     engine.postConnectRecovery();
 
-    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
+    expect(getOutbound(db, opId)['status']).toBe('pending');
     // inbound is still turn_done — it's left for next cycle
     expect(getInbound(db, seq)['processing_status']).toBe('turn_done');
   });
 
   // ── Stale submitted promotion ──────────────────────────────────────────
 
-  it('promotes all stale `submitted` ops to `maybe_sent`', () => {
+  it('promotes stale `submitted` ops and immediately reconciles them in the same pass', () => {
+    // id1: unsafe + has wa_message_id → promoted to maybe_sent then quarantined (not in messages)
     const id1 = engine.createOutboundOp({
       conversationKey: 'k1', chatJid: 'j1', opType: 'text',
       payload: '{"text":"a"}', replayPolicy: 'unsafe',
@@ -438,6 +441,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     engine.markSubmitted(id1, 'WA_STALE_A');
     makeSubmittedStale(db, id1);
 
+    // id2: safe + no wa_message_id → promoted to maybe_sent then reset to pending
     const id2 = engine.createOutboundOp({
       conversationKey: 'k2', chatJid: 'j2', opType: 'text',
       payload: '{"text":"b"}', replayPolicy: 'safe',
@@ -448,8 +452,8 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
 
     engine.postConnectRecovery();
 
-    expect(getOutbound(db, id1)['status']).toBe('maybe_sent');
-    expect(getOutbound(db, id2)['status']).toBe('maybe_sent');
+    expect(getOutbound(db, id1)['status']).toBe('quarantined');
+    expect(getOutbound(db, id2)['status']).toBe('pending');
   });
 
   it('does not touch echoed or failed_permanent ops', () => {

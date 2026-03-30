@@ -175,7 +175,8 @@ export class AgentRuntime implements Runtime {
   // Tracks inbound seq for the current turn (single/shared mode)
   private currentInboundSeq: number | undefined;
   // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
-  private perChatInboundSeq: Map<string, number | undefined> = new Map();
+  // FIFO queue: push on dispatch, shift on result to prevent race when turns overlap.
+  private perChatInboundSeqQueue: Map<string, number[]> = new Map();
 
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
@@ -440,11 +441,13 @@ export class AgentRuntime implements Runtime {
         inboundSeq: msg.inboundSeq,
       });
     } else if (this.sessionScope === 'per_chat') {
-      // per_chat: store inbound seq keyed by chat before sending turn
+      // per_chat: enqueue inbound seq keyed by chat before sending turn
       const mapKey = this.sandboxPerChat
         ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
         : chatJid;
-      this.perChatInboundSeq.set(mapKey, msg.inboundSeq);
+      const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+      if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
+      this.perChatInboundSeqQueue.set(mapKey, seqQueue);
       this.getQueueForChat(chatJid)?.setInboundSeq(msg.inboundSeq);
       await this.sendTurnPerChat(chatJid, text);
     } else {
@@ -558,10 +561,11 @@ export class AgentRuntime implements Runtime {
     const session = this.chatSessions.get(mapKey) ?? null;
     // Derive conversationKey from chatJid (mapKey may be workspaceKey, but chatJid is on the queue)
     const conversationKey = toConversationKey(mapKey);
-    const inboundSeq = this.perChatInboundSeq.get(mapKey);
+    const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+    const inboundSeq = seqQueue[0]; // peek — don't shift yet
     if (event.type === 'result') {
-      // Clear per-chat seq after turn completes
-      this.perChatInboundSeq.delete(mapKey);
+      // Consume the seq for this completed turn
+      seqQueue.shift();
     }
     this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq);
   }
@@ -838,10 +842,11 @@ export class AgentRuntime implements Runtime {
         onCrash: () => {
           this.chatQueues.get(workspaceKey)?.abortTurn();
           // Mark inbound event failed so it doesn't stay stuck in processing
-          const inboundSeq = this.perChatInboundSeq.get(workspaceKey);
+          const crashSeqQueue = this.perChatInboundSeqQueue.get(workspaceKey) ?? [];
+          const inboundSeq = crashSeqQueue[0];
           if (this.durability && inboundSeq !== undefined) {
             this.durability.markInboundFailed(inboundSeq);
-            this.perChatInboundSeq.delete(workspaceKey);
+            crashSeqQueue.shift();
           }
         },
         notifyUser: (msg) => {
@@ -891,10 +896,11 @@ export class AgentRuntime implements Runtime {
           onCrash: () => {
             this.chatQueues.get(chatJid)?.abortTurn();
             // Mark inbound event failed so it doesn't stay stuck in processing
-            const inboundSeq = this.perChatInboundSeq.get(chatJid);
+            const crashSeqQueue = this.perChatInboundSeqQueue.get(chatJid) ?? [];
+            const inboundSeq = crashSeqQueue[0];
             if (this.durability && inboundSeq !== undefined) {
               this.durability.markInboundFailed(inboundSeq);
-              this.perChatInboundSeq.delete(chatJid);
+              crashSeqQueue.shift();
             }
           },
           notifyUser: (msg) => {
