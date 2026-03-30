@@ -76,10 +76,11 @@ export async function handleAdminCommand(
  */
 function resolveAdminChatJid(db: Database): string {
   // Try to find a recent message from any admin phone to get their chatJid
+  const stmt = db.raw.prepare(
+    'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
+  );
   for (const phone of config.adminPhones) {
-    const row = db.raw.prepare(
-      'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
-    ).get(`${phone}%`) as { chat_jid: string } | undefined;
+    const row = stmt.get(`${phone}%`) as { chat_jid: string } | undefined;
     if (row) return row.chat_jid;
   }
   // Fallback to phone@s.whatsapp.net format

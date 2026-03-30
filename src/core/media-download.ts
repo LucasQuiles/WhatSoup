@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.ts';
@@ -44,6 +44,7 @@ export async function downloadMedia(
 }
 
 export function writeTempFile(buffer: Buffer, ext: string): string {
+  mkdirSync(config.mediaDir, { recursive: true });
   const name = randomBytes(8).toString('hex');
   const filePath = join(config.mediaDir, `${name}.${ext}`);
   writeFileSync(filePath, buffer);

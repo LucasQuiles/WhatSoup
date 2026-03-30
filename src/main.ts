@@ -2,7 +2,7 @@ import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
-import { logger, createChildLogger } from './logger.ts';
+import logger, { createChildLogger } from './logger.ts';
 import { Database } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages } from './core/messages.ts';

@@ -4,6 +4,8 @@ import { homedir } from 'node:os';
 
 const APP_NAME = 'whatsoup';
 
+export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
+
 // ---------------------------------------------------------------------------
 // Env helpers
 // ---------------------------------------------------------------------------

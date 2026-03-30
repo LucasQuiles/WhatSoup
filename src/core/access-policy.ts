@@ -2,11 +2,9 @@ import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { lookupAccess, extractPhone } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
-import { config } from '../config.ts';
+import { config, type AccessMode } from '../config.ts';
 
 const log = createChildLogger('conversation');
-
-export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 
 /**
  * Structured result from shouldRespond.
@@ -67,27 +65,25 @@ export function shouldRespond(
     return { respond: false, reason: 'self_only_rejected', accessStatus: 'blocked' };
   }
 
-  // ── open_dm mode (REQ-003.AC-03) ──
-  // Anyone can DM, blocked senders still denied, groups by mention only.
-  if (accessMode === 'open_dm') {
-    const entry = lookupAccess(db, 'phone', phone);
-    if (entry?.status === 'blocked') {
-      log.info({ messageId: msg.messageId, phone }, 'trigger: open_dm blocked sender');
-      return { respond: false, reason: 'blocked', accessStatus: 'blocked' };
-    }
-    if (!msg.isGroup) {
-      log.info({ messageId: msg.messageId, phone }, 'trigger: open_dm DM → respond');
-      return { respond: true, reason: 'open_dm', accessStatus: 'allowed' };
-    }
-    // Fall through to group mention check below
-  }
-
-  // ── allowlist / groups_only / open_dm groups — use access_list ──
+  // ── Shared phone lookup for all remaining modes ──
   const entry = lookupAccess(db, 'phone', phone);
 
   if (entry?.status === 'blocked') {
     log.info({ messageId: msg.messageId, phone }, 'trigger: blocked sender');
     return { respond: false, reason: 'blocked', accessStatus: 'blocked' };
+  }
+
+  // ── open_dm mode (REQ-003.AC-03) ──
+  // Anyone can DM (unless blocked, already handled above), groups by mention only.
+  if (accessMode === 'open_dm' && !msg.isGroup) {
+    log.info({ messageId: msg.messageId, phone }, 'trigger: open_dm DM → respond');
+    return { respond: true, reason: 'open_dm', accessStatus: 'allowed' };
+  }
+
+  // ── groups_only mode (REQ-003.AC-04) ── reject all DMs
+  if (accessMode === 'groups_only' && !msg.isGroup) {
+    log.info({ messageId: msg.messageId, phone }, 'trigger: groups_only rejects DMs');
+    return { respond: false, reason: 'groups_only_no_dms' };
   }
 
   if (msg.isGroup) {

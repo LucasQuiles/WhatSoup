@@ -233,22 +233,29 @@ describe('POST /send — Authorization header check', () => {
     expect(JSON.parse(body).ok).toBe(true);
   });
 
-  it('proceeds (200) when no WHATSOUP_HEALTH_TOKEN is set (no auth required)', async () => {
-    // WHATSOUP_HEALTH_TOKEN not set
+  it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {
+    // WHATSOUP_HEALTH_TOKEN not set — endpoint must reject (fail-closed)
     const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net', text: 'hello' });
-    const { status } = await httpReq(port, '/send', 'POST', payload);
-    expect(status).toBe(200);
+    const { status, body } = await httpReq(port, '/send', 'POST', payload);
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
   });
 
   it('returns 400 when chatJid or text is missing', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
     const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net' });
-    const { status, body } = await httpReq(port, '/send', 'POST', payload);
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
     expect(status).toBe(400);
     expect(JSON.parse(body).ok).toBe(false);
   });
 
   it('returns 400 for invalid JSON body', async () => {
-    const { status } = await httpReq(port, '/send', 'POST', 'not-json');
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const { status } = await httpReq(port, '/send', 'POST', 'not-json', {
+      authorization: 'Bearer secret-token',
+    });
     expect(status).toBe(400);
   });
 });

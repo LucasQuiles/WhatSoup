@@ -37,7 +37,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // Shared-secret Authorization header check
       const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
       const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-      if (expectedToken && authHeader !== `Bearer ${expectedToken}`) {
+      if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
