@@ -8,14 +8,21 @@ const log = createChildLogger('blocklist-sync');
 
 /**
  * Replace the entire persisted blocklist (from blocklist.set event).
- * Deletes all existing rows and re-inserts the full list atomically.
+ * Deletes all existing rows and re-inserts the full list within a transaction.
  */
 export function handleBlocklistSet(db: Database, jids: string[]): void {
   if (!Array.isArray(jids)) return;
-  db.raw.exec('DELETE FROM blocklist');
   const stmt = db.raw.prepare('INSERT OR IGNORE INTO blocklist (jid) VALUES (?)');
-  for (const jid of jids) {
-    stmt.run(jid);
+  db.raw.exec('BEGIN');
+  try {
+    db.raw.exec('DELETE FROM blocklist');
+    for (const jid of jids) {
+      stmt.run(jid);
+    }
+    db.raw.exec('COMMIT');
+  } catch (err) {
+    db.raw.exec('ROLLBACK');
+    throw err;
   }
   log.info({ count: jids.length }, 'blocklist synced');
 }

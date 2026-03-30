@@ -414,7 +414,10 @@ function makeManageLabels(getSock: () => WhatsAppSocket | null): ToolDeclaration
             throw new Error('add_label requires a non-empty labels array');
           }
           if (!args.chat_jid) throw new Error('add_label requires chat_jid');
-          await (sock as any).addLabel(args.chat_jid, args.labels);
+          // Baileys addLabel takes a single label object, not an array — loop
+          for (const label of args.labels) {
+            await (sock as any).addLabel(args.chat_jid, label);
+          }
           return { success: true, action: args.action, count: args.labels.length };
         }
 

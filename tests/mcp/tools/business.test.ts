@@ -394,7 +394,7 @@ describe('business tools', () => {
 
   describe('manage_labels', () => {
     describe('add_label action', () => {
-      it('calls addLabel with chat_jid and labels array', async () => {
+      it('calls addLabel per label with chat_jid', async () => {
         const labels = [{ id: 'lbl-1', name: 'Important', color: 1 }];
         const result = await registry.call(
           'manage_labels',
@@ -402,7 +402,9 @@ describe('business tools', () => {
           globalSession(),
         );
         expect(result.isError).toBeUndefined();
-        expect((mockSock as any).addLabel).toHaveBeenCalledWith('111@s.whatsapp.net', labels);
+        // Baileys addLabel takes a single label object — called once per label
+        expect((mockSock as any).addLabel).toHaveBeenCalledTimes(1);
+        expect((mockSock as any).addLabel).toHaveBeenCalledWith('111@s.whatsapp.net', labels[0]);
         const data = JSON.parse(result.content[0].text) as { success: boolean; count: number };
         expect(data.success).toBe(true);
         expect(data.count).toBe(1);
