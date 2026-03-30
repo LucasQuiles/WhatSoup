@@ -78,9 +78,16 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
 }
 
 /**
- * Build a JSON Schema for tools/list output. For global-session injected tools,
- * `chatJid` is added as a required string property. For chat-scoped sessions it
- * is omitted (the registry will auto-fill it from the session).
+ * Build a JSON Schema for tools/list output.
+ *
+ * - Global sessions + injected tools: `chatJid` is ensured present as a
+ *   required string property (it may already be in the Zod schema; we
+ *   normalise to guarantee it).
+ * - Chat-scoped sessions + injected tools: `chatJid` is stripped from both
+ *   `properties` and `required`. The registry auto-fills it from the session
+ *   at call time; exposing it would be misleading and would reveal the
+ *   injection mechanism to the caller.
+ * - All other cases: return the base schema unchanged.
  */
 function buildListSchema(
   tool: ToolDeclaration,
@@ -88,23 +95,32 @@ function buildListSchema(
 ): JsonSchema {
   const base = zodToJsonSchema(tool.schema);
 
-  if (tool.targetMode !== 'injected' || session.tier !== 'global') {
+  if (tool.targetMode !== 'injected') {
     return base;
   }
 
-  // Inject chatJid as a required property into the schema advertised to global
-  // callers.
   const props: Record<string, JsonSchema> =
-    (base.properties as Record<string, JsonSchema>) ?? {};
+    { ...((base.properties as Record<string, JsonSchema>) ?? {}) };
   const existingRequired: string[] = (base.required as string[]) ?? [];
 
+  if (session.tier === 'chat-scoped') {
+    // Strip chatJid — it is auto-filled from session.deliveryJid at call time.
+    delete props['chatJid'];
+    return {
+      ...base,
+      properties: props,
+      required: existingRequired.filter((k) => k !== 'chatJid'),
+    };
+  }
+
+  // Global session: ensure chatJid is present and required.
   return {
     ...base,
     properties: {
       chatJid: { type: 'string' },
       ...props,
     },
-    required: ['chatJid', ...existingRequired],
+    required: ['chatJid', ...existingRequired.filter((k) => k !== 'chatJid')],
   };
 }
 
