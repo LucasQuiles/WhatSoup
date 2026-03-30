@@ -276,6 +276,25 @@ describe('registerMediaTools', () => {
     expect(body.error).toMatch(/Unsupported file extension/);
   });
 
+  // ── mediaType override ────────────────────────────────────────────────────
+
+  it('overrides auto-detected type when mediaType is provided', async () => {
+    const filePath = writeFile('image.png');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, mediaType: 'sticker' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('sticker');
+    // MIME still comes from extension
+    expect(media.mimetype).toBe('image/png');
+  });
+
   // ── path boundary enforcement ─────────────────────────────────────────────
 
   it('rejects absolute path outside allowedRoot', async () => {

@@ -82,6 +82,8 @@ export function registerMediaTools(
       viewOnce: z.boolean().optional(),
       /** Mark a .webp sticker as animated. */
       isAnimated: z.boolean().optional(),
+      /** Force media type (auto-detected from extension if omitted). */
+      mediaType: z.enum(['image', 'video', 'audio', 'document', 'sticker']).optional(),
     }),
     handler: async (params, session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
@@ -94,6 +96,7 @@ export function registerMediaTools(
       const gifPlayback = params['gifPlayback'] as boolean | undefined;
       const viewOnce = params['viewOnce'] as boolean | undefined;
       const isAnimated = params['isAnimated'] as boolean | undefined;
+      const mediaTypeOverride = params['mediaType'] as OutboundMedia['type'] | undefined;
 
       // ── Filesystem boundary enforcement ────────────────────────────────
 
@@ -152,53 +155,24 @@ export function registerMediaTools(
 
       let media: OutboundMedia;
       const basename = filenameOverride ?? resolved.split('/').pop() ?? 'file';
+      const effectiveType = mediaTypeOverride ?? mediaInfo.type;
+      const mime = mediaInfo.mime;
 
-      switch (mediaInfo.type) {
+      switch (effectiveType) {
         case 'image':
-          media = {
-            type: 'image',
-            buffer,
-            caption,
-            mimetype: mediaInfo.mime,
-            viewOnce,
-          };
+          media = { type: 'image', buffer, caption, mimetype: mime, viewOnce };
           break;
         case 'document':
-          media = {
-            type: 'document',
-            buffer,
-            filename: basename,
-            mimetype: mediaInfo.mime,
-            caption,
-          };
+          media = { type: 'document', buffer, filename: basename, mimetype: mime, caption };
           break;
         case 'audio':
-          media = {
-            type: 'audio',
-            buffer,
-            mimetype: mediaInfo.mime,
-            ptt,
-            seconds,
-          };
+          media = { type: 'audio', buffer, mimetype: mime, ptt, seconds };
           break;
         case 'video':
-          media = {
-            type: 'video',
-            buffer,
-            caption,
-            mimetype: mediaInfo.mime,
-            ptv,
-            gifPlayback,
-            viewOnce,
-          };
+          media = { type: 'video', buffer, caption, mimetype: mime, ptv, gifPlayback, viewOnce };
           break;
         case 'sticker':
-          media = {
-            type: 'sticker',
-            buffer,
-            mimetype: mediaInfo.mime,
-            isAnimated,
-          };
+          media = { type: 'sticker', buffer, mimetype: mime, isAnimated };
           break;
       }
 
@@ -207,8 +181,8 @@ export function registerMediaTools(
       return {
         sent: true,
         filePath: resolved,
-        mediaType: mediaInfo.type,
-        mimetype: mediaInfo.mime,
+        mediaType: effectiveType,
+        mimetype: mime,
         sizeBytes: fileSize,
       };
     },
