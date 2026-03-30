@@ -26,7 +26,7 @@ const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string 
   '.jpg':  { type: 'image',    mime: 'image/jpeg' },
   '.jpeg': { type: 'image',    mime: 'image/jpeg' },
   '.gif':  { type: 'image',    mime: 'image/gif' },
-  '.webp': { type: 'image',    mime: 'image/webp' },
+  '.webp': { type: 'sticker',  mime: 'image/webp' },
 
   '.pdf':  { type: 'document', mime: 'application/pdf' },
   '.doc':  { type: 'document', mime: 'application/msword' },
@@ -61,7 +61,7 @@ export function registerMediaTools(
   registry.register({
     name: 'send_media',
     description:
-      'Send a media file (image, document, audio, or video) from the local filesystem to the current chat.',
+      'Send a media file (image, document, audio, video, or sticker) from the local filesystem to the current chat.',
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
@@ -70,12 +70,30 @@ export function registerMediaTools(
       filePath: z.string(),
       caption: z.string().optional(),
       filename: z.string().optional(),
+      /** Pass true to send audio as a voice note (PTT). */
+      ptt: z.boolean().optional(),
+      /** Duration in seconds for voice notes. */
+      seconds: z.number().int().optional(),
+      /** Send video as a round video note (PTV). */
+      ptv: z.boolean().optional(),
+      /** Auto-loop video as a GIF. */
+      gifPlayback: z.boolean().optional(),
+      /** Image or video disappears after viewing once. */
+      viewOnce: z.boolean().optional(),
+      /** Mark a .webp sticker as animated. */
+      isAnimated: z.boolean().optional(),
     }),
     handler: async (params, session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
       const filePath = params['filePath'] as string;
       const caption = params['caption'] as string | undefined;
       const filenameOverride = params['filename'] as string | undefined;
+      const ptt = params['ptt'] as boolean | undefined;
+      const seconds = params['seconds'] as number | undefined;
+      const ptv = params['ptv'] as boolean | undefined;
+      const gifPlayback = params['gifPlayback'] as boolean | undefined;
+      const viewOnce = params['viewOnce'] as boolean | undefined;
+      const isAnimated = params['isAnimated'] as boolean | undefined;
 
       // ── Filesystem boundary enforcement ────────────────────────────────
 
@@ -142,6 +160,7 @@ export function registerMediaTools(
             buffer,
             caption,
             mimetype: mediaInfo.mime,
+            viewOnce,
           };
           break;
         case 'document':
@@ -158,6 +177,8 @@ export function registerMediaTools(
             type: 'audio',
             buffer,
             mimetype: mediaInfo.mime,
+            ptt,
+            seconds,
           };
           break;
         case 'video':
@@ -166,6 +187,17 @@ export function registerMediaTools(
             buffer,
             caption,
             mimetype: mediaInfo.mime,
+            ptv,
+            gifPlayback,
+            viewOnce,
+          };
+          break;
+        case 'sticker':
+          media = {
+            type: 'sticker',
+            buffer,
+            mimetype: mediaInfo.mime,
+            isAnimated,
           };
           break;
       }

@@ -2,10 +2,11 @@
 // Shared types for the core layer.
 
 export type OutboundMedia =
-  | { type: 'image'; buffer: Buffer; caption?: string; mimetype?: string }
+  | { type: 'image'; buffer: Buffer; caption?: string; mimetype?: string; viewOnce?: boolean }
   | { type: 'document'; buffer: Buffer; filename: string; mimetype: string; caption?: string }
-  | { type: 'audio'; buffer: Buffer; mimetype: string; ptt?: boolean }
-  | { type: 'video'; buffer: Buffer; caption?: string; mimetype?: string };
+  | { type: 'audio'; buffer: Buffer; mimetype: string; ptt?: boolean; seconds?: number }
+  | { type: 'video'; buffer: Buffer; caption?: string; mimetype?: string; ptv?: boolean; gifPlayback?: boolean; viewOnce?: boolean }
+  | { type: 'sticker'; buffer: Buffer; mimetype?: string; isAnimated?: boolean };
 
 export interface SubmissionReceipt {
   waMessageId: string | null;

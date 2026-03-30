@@ -189,6 +189,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           image: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
+          viewOnce: media.viewOnce,
         });
         break;
       case 'document':
@@ -204,6 +205,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           audio: media.buffer,
           mimetype: media.mimetype,
           ptt: media.ptt,
+          seconds: media.seconds,
         });
         break;
       case 'video':
@@ -211,6 +213,16 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           video: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
+          ptv: media.ptv,
+          gifPlayback: media.gifPlayback,
+          viewOnce: media.viewOnce,
+        });
+        break;
+      case 'sticker':
+        result = await this.sock.sendMessage(chatJid, {
+          sticker: media.buffer,
+          mimetype: media.mimetype ?? 'image/webp',
+          isAnimated: media.isAnimated,
         });
         break;
     }
