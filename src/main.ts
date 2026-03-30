@@ -267,12 +267,19 @@ connectionManager.on('chatsDelete', (jids) => {
 });
 
 connectionManager.on('historyMessages', (messages) => {
+  if (!Array.isArray(messages)) {
+    log.warn({ type: typeof messages }, 'historyMessages: expected array');
+    return;
+  }
   for (const msg of messages) {
     try {
       const waMsg = msg as { key?: { id?: string; remoteJid?: string; fromMe?: boolean }; messageTimestamp?: number; message?: unknown };
       const msgId = waMsg.key?.id;
       const chatJid = waMsg.key?.remoteJid;
-      if (!msgId || !chatJid) continue;
+      if (!msgId || !chatJid) {
+        log.debug({ msg: typeof msg }, 'historyMessages: skipping message with missing key fields');
+        continue;
+      }
       const existing = db.raw
         .prepare('SELECT 1 FROM messages WHERE message_id = ?')
         .get(msgId);
