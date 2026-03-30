@@ -109,17 +109,99 @@ CREATE TABLE IF NOT EXISTS enrichment_runs (
 );
 `;
 
+// ─── Migration 2: Durability tables ─────────────────────────────────────────
+
+const MIGRATION_2 = `
+CREATE TABLE IF NOT EXISTS inbound_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL,
+  conversation_key TEXT NOT NULL,
+  chat_jid TEXT NOT NULL,
+  received_at TEXT NOT NULL DEFAULT (datetime('now')),
+  routed_to TEXT,
+  processing_status TEXT NOT NULL DEFAULT 'pending',
+  completed_at TEXT,
+  terminal_reason TEXT,
+  UNIQUE(message_id)
+);
+
+CREATE TABLE IF NOT EXISTS outbound_ops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_key TEXT NOT NULL,
+  chat_jid TEXT NOT NULL,
+  op_type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  payload_hash TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  submitted_at TEXT,
+  echoed_at TEXT,
+  wa_message_id TEXT,
+  error TEXT,
+  source_inbound_seq INTEGER,
+  retry_count INTEGER DEFAULT 0,
+  is_terminal INTEGER DEFAULT 0,
+  replay_policy TEXT NOT NULL DEFAULT 'unsafe'
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_ops_status ON outbound_ops(status);
+CREATE INDEX IF NOT EXISTS idx_outbound_ops_source ON outbound_ops(source_inbound_seq);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_key TEXT NOT NULL,
+  session_checkpoint_id INTEGER,
+  tool_name TEXT NOT NULL,
+  tool_input TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  result TEXT,
+  replay_policy TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  outbound_op_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS session_checkpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_key TEXT NOT NULL,
+  session_id TEXT,
+  transcript_path TEXT,
+  active_turn_id TEXT,
+  last_inbound_seq INTEGER,
+  last_flushed_outbound_id INTEGER,
+  watchdog_state TEXT,
+  workspace_path TEXT,
+  claude_pid INTEGER,
+  checkpoint_version INTEGER NOT NULL DEFAULT 1,
+  session_status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(conversation_key)
+);
+
+CREATE TABLE IF NOT EXISTS recovery_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  trigger TEXT NOT NULL,
+  inbound_replayed INTEGER DEFAULT 0,
+  outbound_reconciled INTEGER DEFAULT 0,
+  outbound_replayed INTEGER DEFAULT 0,
+  outbound_quarantined INTEGER DEFAULT 0,
+  tool_calls_recovered INTEGER DEFAULT 0,
+  tool_calls_replayed INTEGER DEFAULT 0,
+  tool_calls_quarantined INTEGER DEFAULT 0,
+  sessions_restored INTEGER DEFAULT 0,
+  notes TEXT
+);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
 
 const MIGRATIONS: Map<number, MigrationFn> = new Map([
-  [
-    1,
-    (db: DatabaseSync) => {
-      db.exec(MIGRATION_1);
-    },
-  ],
+  [1, (db: DatabaseSync) => { db.exec(MIGRATION_1); }],
+  [2, (db: DatabaseSync) => { db.exec(MIGRATION_2); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
