@@ -234,7 +234,14 @@ const retentionInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
 }, 24 * 60 * 60 * 1000);
 
-// 11. Seed contacts directory from message history (so @name mentions work after restart)
+// 11. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
+const echoTimeoutInterval = setInterval(() => {
+  try {
+    durability.sweepStaleSubmitted();
+  } catch (err) { log.error({ err }, 'echo timeout sweep failed'); }
+}, 10_000);
+
+// 12. Seed contacts directory from message history (so @name mentions work after restart)
 {
   const rows = db.raw.prepare(
     `SELECT DISTINCT sender_jid, sender_name FROM messages
@@ -301,6 +308,7 @@ async function shutdown(signal: string): Promise<void> {
   try {
     clearTimeout(startupCleanupTimeout);
     clearInterval(retentionInterval);
+    clearInterval(echoTimeoutInterval);
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally

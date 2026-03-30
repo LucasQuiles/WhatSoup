@@ -472,6 +472,27 @@ export class DurabilityEngine {
   }
 
   /**
+   * Periodic sweep: promote outbound ops stuck in 'submitted' for > 30 s to
+   * 'maybe_sent'. Runs on a short interval while the process is live so that
+   * ops whose echo never arrives are not silently stranded.
+   *
+   * Returns the number of ops promoted.
+   */
+  sweepStaleSubmitted(): number {
+    const stale = this.db.raw.prepare(
+      `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
+    ).all() as Array<{ id: number }>;
+    for (const { id } of stale) {
+      this.markMaybeSent(id, 'echo_timeout');
+      log.info({ opId: id }, 'sweepStaleSubmitted: submitted → maybe_sent (echo_timeout)');
+    }
+    if (stale.length > 0) {
+      log.warn({ count: stale.length }, 'sweepStaleSubmitted: promoted stale submitted ops');
+    }
+    return stale.length;
+  }
+
+  /**
    * Insert a recovery_run record with aggregated stats.
    */
   logRecoveryRun(trigger: string, stats: RecoveryStats): void {
