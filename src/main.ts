@@ -25,6 +25,7 @@ import {
   handleChatsUpdate,
   handleChatsDelete,
 } from './core/chat-sync.ts';
+import { handleLabelsEdit, handleLabelsAssociation } from './core/label-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -331,6 +332,22 @@ connectionManager.on('newsletterParticipantsUpdate', (data) => {
 
 connectionManager.on('newsletterSettingsUpdate', (data) => {
   log.info({ data }, 'newsletterSettingsUpdate: newsletter settings updated');
+});
+
+connectionManager.on('labelsEdit', (labels) => {
+  try {
+    handleLabelsEdit(db, labels);
+  } catch (err) {
+    log.error({ err }, 'labelsEdit: failed to persist labels');
+  }
+});
+
+connectionManager.on('labelsAssociation', (data) => {
+  try {
+    handleLabelsAssociation(db, data);
+  } catch (err) {
+    log.error({ err }, 'labelsAssociation: failed to persist label association');
+  }
 });
 
 // 7. Health server — delegates enrichment stats to runtime health snapshot

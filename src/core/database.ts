@@ -233,6 +233,28 @@ CREATE TABLE IF NOT EXISTS receipts (
 CREATE INDEX IF NOT EXISTS idx_receipts_message_id ON receipts(message_id);
 `;
 
+// ─── Migration 4: Labels tables (Wave 6) ────────────────────────────────────
+
+const MIGRATION_4 = `
+CREATE TABLE IF NOT EXISTS labels (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  color INTEGER,
+  predefined_id TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS label_associations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  chat_jid TEXT NOT NULL DEFAULT '',
+  message_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(label_id, type, chat_jid, message_id)
+);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -241,6 +263,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [1, (db: DatabaseSync) => { db.exec(MIGRATION_1); }],
   [2, (db: DatabaseSync) => { db.exec(MIGRATION_2); }],
   [3, (db: DatabaseSync) => { db.exec(MIGRATION_3); }],
+  [4, (db: DatabaseSync) => { db.exec(MIGRATION_4); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
