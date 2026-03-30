@@ -7,6 +7,8 @@ import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
+import type { DurabilityEngine } from '../../core/durability.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { createSession, incrementMessageCount, updateSessionId, updateSessionStatus, updateTranscriptPath } from './session-db.ts';
 import { parseEvent } from './stream-parser.ts';
@@ -79,6 +81,8 @@ export class SessionManager {
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
 
+  private durability: DurabilityEngine | null = null;
+
   constructor(opts: SessionManagerOptions) {
     this.db = opts.db;
     this.messenger = opts.messenger;
@@ -94,6 +98,10 @@ export class SessionManager {
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
+
+  setDurability(engine: DurabilityEngine): void {
+    this.durability = engine;
+  }
 
   async spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> {
     if (this.active && this.child !== null) {
@@ -158,6 +166,15 @@ export class SessionManager {
     }
 
     log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null }, 'spawned claude process');
+
+    // Checkpoint: record spawn in durability engine
+    if (this.durability) {
+      const conversationKey = toConversationKey(this.chatJid);
+      this.durability.upsertSessionCheckpoint(conversationKey, {
+        claudePid: pid || undefined,
+        sessionStatus: 'active',
+      });
+    }
 
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
     child.on('error', (err) => {
@@ -246,11 +263,17 @@ export class SessionManager {
           log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: child.pid ?? null }, 'session: resume-failed');
           updateSessionStatus(this.db, this.dbRowId, 'resume_failed');
         }
+        if (this.durability) {
+          this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), { sessionStatus: 'orphaned' });
+        }
       } else {
         log.warn({ exitCode: code, signal, rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, wasResumeAttempt, initReceived }, 'claude process exited unexpectedly');
         if (this.dbRowId !== null) {
           log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: child.pid ?? null }, 'session: crashed');
           updateSessionStatus(this.db, this.dbRowId, 'crashed');
+        }
+        if (this.durability) {
+          this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), { sessionStatus: 'orphaned' });
         }
       }
 
@@ -424,6 +447,14 @@ export class SessionManager {
           log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: ended');
           updateSessionStatus(this.db, this.dbRowId, 'ended');
         }
+      }
+
+      // Checkpoint: record suspend/end status
+      if (this.durability) {
+        const conversationKey = toConversationKey(this.chatJid);
+        this.durability.upsertSessionCheckpoint(conversationKey, {
+          sessionStatus: suspend ? 'suspended' : 'ended',
+        });
       }
 
       const terminatedSessionId = this.sessionId;

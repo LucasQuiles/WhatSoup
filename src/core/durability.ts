@@ -137,6 +137,61 @@ export class DurabilityEngine {
     ).run(result, outboundOpId ?? null, id);
   }
 
+  // ── Session checkpoints ──
+  upsertSessionCheckpoint(conversationKey: string, fields: {
+    sessionId?: string; transcriptPath?: string; activeTurnId?: string | null;
+    lastInboundSeq?: number; lastFlushedOutboundId?: number;
+    watchdogState?: string; workspacePath?: string;
+    claudePid?: number; sessionStatus?: string;
+  }): void {
+    this.db.raw.prepare(`
+      INSERT INTO session_checkpoints (conversation_key, session_id, transcript_path, active_turn_id,
+        last_inbound_seq, last_flushed_outbound_id, watchdog_state, workspace_path, claude_pid, session_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_key) DO UPDATE SET
+        session_id = COALESCE(excluded.session_id, session_id),
+        transcript_path = COALESCE(excluded.transcript_path, transcript_path),
+        active_turn_id = excluded.active_turn_id,
+        last_inbound_seq = COALESCE(excluded.last_inbound_seq, last_inbound_seq),
+        last_flushed_outbound_id = COALESCE(excluded.last_flushed_outbound_id, last_flushed_outbound_id),
+        watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
+        workspace_path = COALESCE(excluded.workspace_path, workspace_path),
+        claude_pid = COALESCE(excluded.claude_pid, claude_pid),
+        session_status = COALESCE(excluded.session_status, session_status),
+        checkpoint_version = checkpoint_version + 1,
+        updated_at = datetime('now')
+    `).run(
+      conversationKey, fields.sessionId ?? null, fields.transcriptPath ?? null,
+      fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
+      fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
+      fields.workspacePath ?? null, fields.claudePid ?? null,
+      fields.sessionStatus ?? 'active',
+    );
+  }
+
+  getSessionCheckpoint(conversationKey: string): {
+    id: number; conversation_key: string; session_id: string | null;
+    claude_pid: number | null; session_status: string; checkpoint_version: number;
+  } | undefined {
+    return this.db.raw.prepare(
+      `SELECT * FROM session_checkpoints WHERE conversation_key = ?`,
+    ).get(conversationKey) as any;
+  }
+
+  getAllActiveCheckpoints(): Array<{
+    id: number; conversation_key: string; claude_pid: number | null; session_status: string;
+  }> {
+    return this.db.raw.prepare(
+      `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status = 'active'`,
+    ).all() as any[];
+  }
+
+  markSessionOrphaned(conversationKey: string): void {
+    this.db.raw.prepare(
+      `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,
+    ).run(conversationKey);
+  }
+
   // ── Getters for recovery ──
   getPendingInbound(): Array<{ seq: number; message_id: string; processing_status: string; routed_to: string }> {
     return this.db.raw.prepare(

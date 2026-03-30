@@ -4,6 +4,7 @@
 import type { Runtime } from '../types.ts';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
+import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -177,6 +178,8 @@ export class AgentRuntime implements Runtime {
   // Global socket server (non-sandboxPerChat mode)
   private globalSocketServer: WhatSoupSocketServer | null = null;
 
+  private durability: DurabilityEngine | null = null;
+
   constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
     this.db = db;
     this.messenger = messenger;
@@ -193,6 +196,10 @@ export class AgentRuntime implements Runtime {
 
     this.turnQueue = new TurnQueue();
     this.turnQueue.setProcessor((turn) => this.processTurn(turn));
+  }
+
+  setDurability(engine: DurabilityEngine): void {
+    this.durability = engine;
   }
 
   async start(): Promise<void> {
@@ -505,7 +512,9 @@ export class AgentRuntime implements Runtime {
     const queue = this.chatQueues.get(mapKey);
     if (!queue) return;
     const session = this.chatSessions.get(mapKey) ?? null;
-    this.handleEventWithContext(event, queue, session);
+    // Derive conversationKey from chatJid (mapKey may be workspaceKey, but chatJid is on the queue)
+    const conversationKey = toConversationKey(mapKey);
+    this.handleEventWithContext(event, queue, session, conversationKey);
   }
 
   /**
@@ -513,7 +522,7 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: OutboundQueue, session: SessionManager | null): void {
+  private handleEventWithContext(event: AgentEvent, queue: OutboundQueue, session: SessionManager | null, conversationKey?: string): void {
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -550,6 +559,10 @@ export class AgentRuntime implements Runtime {
         session?.clearTurnWatchdog();
         if (event.text) {
           queue.enqueueText(event.text);
+        }
+        // Checkpoint: clear active turn
+        if (this.durability && conversationKey) {
+          this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
         }
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
@@ -698,7 +711,7 @@ export class AgentRuntime implements Runtime {
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
   }): SessionManager {
-    return new SessionManager({
+    const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
       chatJid: opts.chatJid,
@@ -711,6 +724,10 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: this.model,
     });
+    if (this.durability) {
+      session.setDurability(this.durability);
+    }
+    return session;
   }
 
   /**
@@ -984,6 +1001,11 @@ export class AgentRuntime implements Runtime {
         this.turnHadVisibleOutput = false;
         // Clear turn ownership after result
         this.currentTurnChatJid = null;
+        // Checkpoint: clear active turn
+        if (this.durability && this.activeChatJid) {
+          const conversationKey = toConversationKey(this.activeChatJid);
+          this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
+        }
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
 
