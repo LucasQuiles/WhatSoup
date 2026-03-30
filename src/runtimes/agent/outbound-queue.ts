@@ -105,6 +105,8 @@ export interface IOutboundQueue {
   updateDeliveryJid(jid: string): void;
   /** Set the current inbound seq so outbound ops can link back to inbound events. */
   setInboundSeq(seq: number | undefined): void;
+  /** Mark the last outbound op created by this queue as terminal. */
+  markLastTerminal(): void;
 }
 
 export class OutboundQueue implements IOutboundQueue {
@@ -117,6 +119,8 @@ export class OutboundQueue implements IOutboundQueue {
   private durability: DurabilityEngine | undefined;
   /** inbound_events.seq for the current turn — threaded to outbound ops as sourceInboundSeq */
   private currentInboundSeq: number | undefined;
+  /** The outbound_ops.id of the most recently created op (for markLastTerminal). */
+  private lastOpId: number | undefined;
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -152,6 +156,14 @@ export class OutboundQueue implements IOutboundQueue {
   /** Set the current inbound seq so outbound ops can link back to inbound events. */
   setInboundSeq(seq: number | undefined): void {
     this.currentInboundSeq = seq;
+  }
+
+  /** Mark the last outbound op created by this queue as terminal (defense-in-depth echo fallback). */
+  markLastTerminal(): void {
+    if (this.lastOpId !== undefined && this.durability) {
+      this.durability.markTerminal(this.lastOpId);
+      this.lastOpId = undefined;
+    }
   }
 
   /** Enqueue a text message for immediate sending (after pacing). */
@@ -350,6 +362,7 @@ export class OutboundQueue implements IOutboundQueue {
         replayPolicy: 'unsafe', // agent responses are unsafe to replay
         sourceInboundSeq: this.currentInboundSeq,
       });
+      this.lastOpId = opId;
       this.durability.markSending(opId);
     }
 

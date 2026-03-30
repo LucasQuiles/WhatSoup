@@ -291,6 +291,7 @@ export class ChatRuntime implements Runtime {
           failOpId = this.durability.createOutboundOp({
             conversationKey, chatJid: msg.chatJid, opType: 'text',
             payload: JSON.stringify({ text: failText }), replayPolicy: 'unsafe',
+            isTerminal: true,
           });
           this.durability.markSending(failOpId);
         }
@@ -312,6 +313,7 @@ export class ChatRuntime implements Runtime {
       mainOpId = this.durability.createOutboundOp({
         conversationKey, chatJid: msg.chatJid, opType: 'text',
         payload: JSON.stringify({ text: responseText }), replayPolicy: 'unsafe',
+        isTerminal: true,
       });
       this.durability.markSending(mainOpId);
     }

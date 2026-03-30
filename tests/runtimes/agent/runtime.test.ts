@@ -34,6 +34,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
+    markLastTerminal: vi.fn(),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef };

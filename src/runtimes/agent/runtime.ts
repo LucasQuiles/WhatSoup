@@ -291,7 +291,15 @@ export class AgentRuntime implements Runtime {
         cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
         onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
-        onCrash: () => { this.getActiveQueue()?.abortTurn(); this.turnHadVisibleOutput = false; },
+        onCrash: () => {
+          this.getActiveQueue()?.abortTurn();
+          this.turnHadVisibleOutput = false;
+          // Mark inbound event failed so it doesn't stay stuck in processing
+          if (this.durability && this.currentInboundSeq !== undefined) {
+            this.durability.markInboundFailed(this.currentInboundSeq);
+            this.currentInboundSeq = undefined;
+          }
+        },
         notifyUser: (msg) => this.handleCrashNotify(msg),
       });
 
@@ -610,6 +618,9 @@ export class AgentRuntime implements Runtime {
           this.durability.markTurnDone(inboundSeq);
           this.durability.markInboundComplete(inboundSeq, 'response_sent');
         }
+        // Defense-in-depth: mark last op terminal so echo auto-complete fires if
+        // the process crashes after send but before markInboundComplete runs.
+        queue.markLastTerminal();
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
 
@@ -824,7 +835,15 @@ export class AgentRuntime implements Runtime {
         chatJid,
         cwd: workspacePath,  // scoped cwd instead of this.cwd
         onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
-        onCrash: () => { this.chatQueues.get(workspaceKey)?.abortTurn(); },
+        onCrash: () => {
+          this.chatQueues.get(workspaceKey)?.abortTurn();
+          // Mark inbound event failed so it doesn't stay stuck in processing
+          const inboundSeq = this.perChatInboundSeq.get(workspaceKey);
+          if (this.durability && inboundSeq !== undefined) {
+            this.durability.markInboundFailed(inboundSeq);
+            this.perChatInboundSeq.delete(workspaceKey);
+          }
+        },
         notifyUser: (msg) => {
           this.chatSessions.delete(workspaceKey);
           this.chatQueues.get(workspaceKey)?.abortTurn();
@@ -869,7 +888,15 @@ export class AgentRuntime implements Runtime {
           chatJid,
           cwd: this.cwd,
           onEvent: (event) => this.handleEventPerChat(chatJid, event),
-          onCrash: () => { this.chatQueues.get(chatJid)?.abortTurn(); },
+          onCrash: () => {
+            this.chatQueues.get(chatJid)?.abortTurn();
+            // Mark inbound event failed so it doesn't stay stuck in processing
+            const inboundSeq = this.perChatInboundSeq.get(chatJid);
+            if (this.durability && inboundSeq !== undefined) {
+              this.durability.markInboundFailed(inboundSeq);
+              this.perChatInboundSeq.delete(chatJid);
+            }
+          },
           notifyUser: (msg) => {
             // Remove crashed session so next message spawns a fresh one
             this.chatSessions.delete(chatJid);
@@ -897,7 +924,15 @@ export class AgentRuntime implements Runtime {
         chatJid,
         cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
-        onCrash: () => { this.getActiveQueue()?.abortTurn(); this.turnHadVisibleOutput = false; },
+        onCrash: () => {
+          this.getActiveQueue()?.abortTurn();
+          this.turnHadVisibleOutput = false;
+          // Mark inbound event failed so it doesn't stay stuck in processing
+          if (this.durability && this.currentInboundSeq !== undefined) {
+            this.durability.markInboundFailed(this.currentInboundSeq);
+            this.currentInboundSeq = undefined;
+          }
+        },
         notifyUser: (msg) => this.handleCrashNotify(msg),
       });
       if (this.shared) {
@@ -1066,6 +1101,9 @@ export class AgentRuntime implements Runtime {
           this.durability.markInboundComplete(this.currentInboundSeq, 'response_sent');
           this.currentInboundSeq = undefined;
         }
+        // Defense-in-depth: mark last op terminal so echo auto-complete fires if
+        // the process crashes after send but before markInboundComplete runs.
+        queue.markLastTerminal();
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
 

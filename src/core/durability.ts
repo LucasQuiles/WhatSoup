@@ -160,6 +160,10 @@ export class DurabilityEngine {
     this.db.raw.prepare(`UPDATE outbound_ops SET status = 'quarantined' WHERE id = ?`).run(id);
   }
 
+  markTerminal(id: number): void {
+    this.db.raw.prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`).run(id);
+  }
+
   // ── Echo matching ──
   matchEcho(waMessageId: string): boolean {
     const row = this.db.raw.prepare(

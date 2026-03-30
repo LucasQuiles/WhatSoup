@@ -27,6 +27,7 @@ async function sendTracked(
     opId = durability.createOutboundOp({
       conversationKey, chatJid, opType: 'text',
       payload: JSON.stringify({ text }), replayPolicy: 'safe',
+      isTerminal: true,
     });
     durability.markSending(opId);
   }
