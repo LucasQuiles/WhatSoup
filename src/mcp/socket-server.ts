@@ -23,12 +23,15 @@ interface JsonRpcResponse {
 
 export class WhatSoupSocketServer {
   private server: Server | null = null;
+  private readonly socketPath: string;
+  private readonly registry: ToolRegistry;
+  private readonly session: SessionContext;
 
-  constructor(
-    private readonly socketPath: string,
-    private readonly registry: ToolRegistry,
-    private readonly session: SessionContext,
-  ) {}
+  constructor(socketPath: string, registry: ToolRegistry, session: SessionContext) {
+    this.socketPath = socketPath;
+    this.registry = registry;
+    this.session = session;
+  }
 
   start(): void {
     // Crash recovery: remove stale socket file if present
