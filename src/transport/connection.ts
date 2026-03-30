@@ -374,65 +374,95 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         }
       }
 
-      if (events['messages.reaction']) {
-        const reactions = events['messages.reaction'] as Array<{
-          key: { remoteJid?: string; id?: string; fromMe?: boolean };
-          reaction: { text: string; key: { remoteJid?: string; participant?: string } };
-        }>;
-        for (const r of reactions) {
-          const messageId = r.key.id;
-          const remoteJid = r.key.remoteJid;
-          if (!messageId || !remoteJid) continue;
-          const conversationKey = toConversationKey(remoteJid);
-          const senderJid = r.reaction.key.participant ?? r.reaction.key.remoteJid ?? '';
-          this.emit('reactionReceived', {
-            messageId,
-            conversationKey,
-            senderJid,
-            reaction: r.reaction.text ?? '',
-          });
+      try {
+        if (events['messages.reaction']) {
+          const raw = events['messages.reaction'];
+          const reactions = Array.isArray(raw) ? raw as Array<{
+            key: { remoteJid?: string; id?: string; fromMe?: boolean };
+            reaction: { text: string; key: { remoteJid?: string; participant?: string } };
+          }> : [];
+          for (const r of reactions) {
+            const messageId = r.key.id;
+            const remoteJid = r.key.remoteJid;
+            if (!messageId || !remoteJid) continue;
+            const conversationKey = toConversationKey(remoteJid);
+            const senderJid = r.reaction.key.participant ?? r.reaction.key.remoteJid ?? '';
+            this.emit('reactionReceived', {
+              messageId,
+              conversationKey,
+              senderJid,
+              reaction: r.reaction.text ?? '',
+            });
+          }
         }
+      } catch (err) {
+        this.log.error({ err, event: 'messages.reaction' }, 'event handler failed');
       }
 
-      if (events['message-receipt.update']) {
-        const receipts = events['message-receipt.update'] as Array<{
-          key: { id?: string };
-          receipt: { userJid?: string; receiptTimestamp?: number; readTimestamp?: number; playedTimestamp?: number };
-        }>;
-        for (const r of receipts) {
-          const messageId = r.key.id;
-          const recipientJid = r.receipt?.userJid;
-          if (!messageId || !recipientJid) continue;
-          // Determine receipt type from which timestamp fields are present
-          let type = 'delivery';
-          if (r.receipt.playedTimestamp) type = 'played';
-          else if (r.receipt.readTimestamp) type = 'read';
-          this.emit('receiptUpdate', { messageId, recipientJid, type });
+      try {
+        if (events['message-receipt.update']) {
+          const raw = events['message-receipt.update'];
+          const receipts = Array.isArray(raw) ? raw as Array<{
+            key: { id?: string };
+            receipt: { userJid?: string; receiptTimestamp?: number; readTimestamp?: number; playedTimestamp?: number };
+          }> : [];
+          for (const r of receipts) {
+            const messageId = r.key.id;
+            const recipientJid = r.receipt?.userJid;
+            if (!messageId || !recipientJid) continue;
+            // Determine receipt type from which timestamp fields are present
+            let type = 'delivery';
+            if (r.receipt.playedTimestamp) type = 'played';
+            else if (r.receipt.readTimestamp) type = 'read';
+            this.emit('receiptUpdate', { messageId, recipientJid, type });
+          }
         }
+      } catch (err) {
+        this.log.error({ err, event: 'message-receipt.update' }, 'event handler failed');
       }
 
-      if (events['messages.media-update']) {
-        const updates = events['messages.media-update'] as Array<{
-          key: { id: string };
-          update: Record<string, unknown>;
-        }>;
-        this.log.info({ count: updates.length }, 'media update received');
-        this.emit('mediaUpdate', updates);
+      try {
+        if (events['messages.media-update']) {
+          const raw = events['messages.media-update'];
+          const updates = Array.isArray(raw) ? raw as Array<{
+            key: { id: string };
+            update: Record<string, unknown>;
+          }> : [];
+          this.log.info({ count: updates.length }, 'media update received');
+          this.emit('mediaUpdate', updates);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'messages.media-update' }, 'event handler failed');
       }
 
-      if (events['chats.upsert']) {
-        const chats = events['chats.upsert'] as Array<{ id: string; [key: string]: unknown }>;
-        this.emit('chatsUpsert', chats);
+      try {
+        if (events['chats.upsert']) {
+          const raw = events['chats.upsert'];
+          const chats = Array.isArray(raw) ? raw as Array<{ id: string; [key: string]: unknown }> : [];
+          this.emit('chatsUpsert', chats);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'chats.upsert' }, 'event handler failed');
       }
 
-      if (events['chats.update']) {
-        const updates = events['chats.update'] as Array<{ id: string; [key: string]: unknown }>;
-        this.emit('chatsUpdate', updates);
+      try {
+        if (events['chats.update']) {
+          const raw = events['chats.update'];
+          const updates = Array.isArray(raw) ? raw as Array<{ id: string; [key: string]: unknown }> : [];
+          this.emit('chatsUpdate', updates);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'chats.update' }, 'event handler failed');
       }
 
-      if (events['chats.delete']) {
-        const jids = events['chats.delete'] as string[];
-        this.emit('chatsDelete', jids);
+      try {
+        if (events['chats.delete']) {
+          const raw = events['chats.delete'];
+          const jids = Array.isArray(raw) ? raw as string[] : [];
+          this.emit('chatsDelete', jids);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'chats.delete' }, 'event handler failed');
       }
 
       if (events['messaging-history.set']) {
@@ -454,94 +484,142 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.emit('historySyncComplete');
       }
 
-      if (events['groups.upsert']) {
-        const groups = events['groups.upsert'] as Array<{ id: string; subject?: string }>;
-        this.log.info({ count: groups.length }, 'groups upserted');
-        this.emit('groupsUpsert', groups);
-      }
-
-      if (events['groups.update']) {
-        const updates = events['groups.update'] as Array<{ id: string }>;
-        this.log.info({ count: updates.length }, 'groups updated');
-        this.emit('groupsUpdate', updates);
-      }
-
-      if (events['group.join-request']) {
-        // NOTE: event name has a dot, not a hyphen
-        const request = events['group.join-request'] as any;
-        const groupJid = request?.group ?? request?.id ?? '';
-        const requesterJid = request?.participant ?? '';
-        const requestId = request?.request_id ?? '';
-        if (groupJid && requesterJid) {
-          this.log.info({ groupJid, requesterJid }, 'group join request received');
-          this.emit('groupJoinRequest', { groupJid, requesterJid, requestId });
+      try {
+        if (events['groups.upsert']) {
+          const raw = events['groups.upsert'];
+          const groups = Array.isArray(raw) ? raw as Array<{ id: string; subject?: string }> : [];
+          this.log.info({ count: groups.length }, 'groups upserted');
+          this.emit('groupsUpsert', groups);
         }
+      } catch (err) {
+        this.log.error({ err, event: 'groups.upsert' }, 'event handler failed');
       }
 
-      if (events['blocklist.set']) {
-        const blocklist = events['blocklist.set'] as { blocklist?: string[] };
-        const jids: string[] = blocklist?.blocklist ?? (blocklist as unknown as string[]) ?? [];
-        this.log.info({ count: jids.length }, 'blocklist set (full sync)');
-        this.emit('blocklistSet', jids);
-      }
-
-      if (events['blocklist.update']) {
-        const update = events['blocklist.update'] as { blocklist?: string[]; type?: string };
-        const jids: string[] = update?.blocklist ?? [];
-        const type: 'add' | 'remove' = update?.type === 'remove' ? 'remove' : 'add';
-        this.log.info({ count: jids.length, type }, 'blocklist update');
-        this.emit('blocklistUpdate', { blocklist: jids, type });
-      }
-
-      if (events['newsletter.reaction']) {
-        const data = events['newsletter.reaction'];
-        this.log.info({ data }, 'newsletter reaction received');
-        this.emit('newsletterReaction', data);
-      }
-
-      if (events['newsletter.view']) {
-        const data = events['newsletter.view'];
-        this.log.info({ data }, 'newsletter view received');
-        this.emit('newsletterView', data);
-      }
-
-      if (events['newsletter-participants.update']) {
-        const data = events['newsletter-participants.update'];
-        this.log.info({ data }, 'newsletter participants update received');
-        this.emit('newsletterParticipantsUpdate', data);
-      }
-
-      if (events['newsletter-settings.update']) {
-        const data = events['newsletter-settings.update'];
-        this.log.info({ data }, 'newsletter settings update received');
-        this.emit('newsletterSettingsUpdate', data);
-      }
-
-      if (events['labels.edit']) {
-        const labels = events['labels.edit'] as unknown as Array<{
-          id: string;
-          name: string;
-          color?: number;
-          predefinedId?: string;
-        }>;
-        this.log.info({ count: labels.length }, 'labels edit received');
-        this.emit('labelsEdit', labels);
-      }
-
-      if (events['labels.association']) {
-        const raw = events['labels.association'] as {
-          association?: { labelId?: string; type?: string; chatId?: string; messageId?: string };
-          type?: 'add' | 'remove';
-        };
-        const labelId = raw?.association?.labelId ?? '';
-        const assocType = raw?.association?.type ?? 'chat';
-        const chatJid = raw?.association?.chatId;
-        const messageId = raw?.association?.messageId;
-        const operation: 'add' | 'remove' = raw?.type === 'remove' ? 'remove' : 'add';
-        if (labelId) {
-          this.log.info({ labelId, assocType, chatJid, messageId, operation }, 'labels association received');
-          this.emit('labelsAssociation', { labelId, type: assocType, chatJid, messageId, operation });
+      try {
+        if (events['groups.update']) {
+          const raw = events['groups.update'];
+          const updates = Array.isArray(raw) ? raw as Array<{ id: string }> : [];
+          this.log.info({ count: updates.length }, 'groups updated');
+          this.emit('groupsUpdate', updates);
         }
+      } catch (err) {
+        this.log.error({ err, event: 'groups.update' }, 'event handler failed');
+      }
+
+      try {
+        if (events['group.join-request']) {
+          // NOTE: event name has a dot, not a hyphen
+          const request = events['group.join-request'] as { id?: string; author?: string; participant?: string };
+          const groupJid = request?.id ?? '';
+          const requesterJid = request?.participant ?? '';
+          if (groupJid && requesterJid) {
+            this.log.info({ groupJid, requesterJid }, 'group join request received');
+            this.emit('groupJoinRequest', { groupJid, requesterJid, requestId: '' });
+          }
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'group.join-request' }, 'event handler failed');
+      }
+
+      try {
+        if (events['blocklist.set']) {
+          const raw = events['blocklist.set'] as any;
+          const jids: string[] = Array.isArray(raw?.blocklist) ? raw.blocklist
+                                : Array.isArray(raw) ? raw : [];
+          this.log.info({ count: jids.length }, 'blocklist set (full sync)');
+          this.emit('blocklistSet', jids);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'blocklist.set' }, 'event handler failed');
+      }
+
+      try {
+        if (events['blocklist.update']) {
+          const raw = events['blocklist.update'];
+          const update = raw as { blocklist?: string[]; type?: string };
+          const jids: string[] = Array.isArray(update?.blocklist) ? update.blocklist! : [];
+          const type: 'add' | 'remove' = update?.type === 'remove' ? 'remove' : 'add';
+          this.log.info({ count: jids.length, type }, 'blocklist update');
+          this.emit('blocklistUpdate', { blocklist: jids, type });
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'blocklist.update' }, 'event handler failed');
+      }
+
+      try {
+        if (events['newsletter.reaction']) {
+          const data = events['newsletter.reaction'];
+          this.log.info({ data }, 'newsletter reaction received');
+          this.emit('newsletterReaction', data);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'newsletter.reaction' }, 'event handler failed');
+      }
+
+      try {
+        if (events['newsletter.view']) {
+          const data = events['newsletter.view'];
+          this.log.info({ data }, 'newsletter view received');
+          this.emit('newsletterView', data);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'newsletter.view' }, 'event handler failed');
+      }
+
+      try {
+        if (events['newsletter-participants.update']) {
+          const data = events['newsletter-participants.update'];
+          this.log.info({ data }, 'newsletter participants update received');
+          this.emit('newsletterParticipantsUpdate', data);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'newsletter-participants.update' }, 'event handler failed');
+      }
+
+      try {
+        if (events['newsletter-settings.update']) {
+          const data = events['newsletter-settings.update'];
+          this.log.info({ data }, 'newsletter settings update received');
+          this.emit('newsletterSettingsUpdate', data);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'newsletter-settings.update' }, 'event handler failed');
+      }
+
+      try {
+        if (events['labels.edit']) {
+          const raw = events['labels.edit'];
+          const labels = Array.isArray(raw) ? raw as Array<{
+            id: string;
+            name: string;
+            color?: number;
+            predefinedId?: string;
+          }> : [];
+          this.log.info({ count: labels.length }, 'labels edit received');
+          this.emit('labelsEdit', labels);
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'labels.edit' }, 'event handler failed');
+      }
+
+      try {
+        if (events['labels.association']) {
+          const raw = events['labels.association'] as {
+            association?: { labelId?: string; type?: string; chatId?: string; messageId?: string };
+            type?: 'add' | 'remove';
+          };
+          const labelId = raw?.association?.labelId ?? '';
+          const assocType = raw?.association?.type ?? 'chat';
+          const chatJid = raw?.association?.chatId;
+          const messageId = raw?.association?.messageId;
+          const operation: 'add' | 'remove' = raw?.type === 'remove' ? 'remove' : 'add';
+          if (labelId) {
+            this.log.info({ labelId, assocType, chatJid, messageId, operation }, 'labels association received');
+            this.emit('labelsAssociation', { labelId, type: assocType, chatJid, messageId, operation });
+          }
+        }
+      } catch (err) {
+        this.log.error({ err, event: 'labels.association' }, 'event handler failed');
       }
     });
   }

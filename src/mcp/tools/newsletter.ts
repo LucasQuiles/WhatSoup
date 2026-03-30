@@ -293,7 +293,13 @@ function makeNewsletterUpdatePicture(getSock: () => WhatsAppSocket | null): Tool
       const { jid, content } = NewsletterUpdatePictureSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
-      const buffer = Buffer.from(content, 'base64');
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.from(content, 'base64');
+        if (buffer.length === 0) throw new Error('Empty buffer');
+      } catch {
+        throw new Error('Invalid base64 content');
+      }
       await (sock as any).newsletterUpdatePicture(jid, buffer);
       return { success: true, jid };
     },

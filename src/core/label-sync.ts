@@ -29,6 +29,7 @@ export interface LabelAssociationRecord {
  * Handle labels.edit event — upsert label records into the labels table.
  */
 export function handleLabelsEdit(db: Database, labels: LabelRecord[]): void {
+  if (!Array.isArray(labels) || labels.length === 0) return;
   const stmt = db.raw.prepare(`
     INSERT INTO labels (id, name, color, predefined_id, updated_at)
     VALUES (?, ?, ?, ?, datetime('now'))
@@ -60,6 +61,11 @@ export function handleLabelsAssociation(db: Database, data: LabelAssociationReco
   // Use empty string as NULL sentinel — SQLite treats NULL as distinct in UNIQUE
   // constraints, so we normalize absent fields to '' to keep dedup working.
   const { labelId, type, operation = 'add' } = data;
+
+  if (!labelId) {
+    log.warn({ data }, 'labels association: labelId is empty — skipping');
+    return;
+  }
   const chatJid = data.chatJid ?? '';
   const messageId = data.messageId ?? '';
 

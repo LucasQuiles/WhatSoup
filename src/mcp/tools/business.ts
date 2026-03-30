@@ -81,7 +81,13 @@ function makeUpdateCoverPhoto(getSock: () => WhatsAppSocket | null): ToolDeclara
       const { photo } = UpdateCoverPhotoSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
-      const buffer = Buffer.from(photo, 'base64');
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.from(photo, 'base64');
+        if (buffer.length === 0) throw new Error('Empty buffer');
+      } catch {
+        throw new Error('Invalid base64 content');
+      }
       await (sock as any).updateCoverPhoto(buffer);
       return { success: true };
     },

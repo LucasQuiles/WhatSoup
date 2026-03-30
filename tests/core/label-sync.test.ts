@@ -233,5 +233,31 @@ describe('label-sync', () => {
         }),
       ).not.toThrow();
     });
+
+    it('skips and does not insert when labelId is empty — logs warning', () => {
+      // An empty labelId is invalid; the handler should skip without throwing.
+      expect(() =>
+        handleLabelsAssociation(db, {
+          labelId: '',
+          type: 'chat',
+          chatJid: '111@s.whatsapp.net',
+          operation: 'add',
+        }),
+      ).not.toThrow();
+      const count = (
+        db.raw
+          .prepare("SELECT COUNT(*) AS cnt FROM label_associations WHERE label_id = ''")
+          .get() as { cnt: number }
+      ).cnt;
+      expect(count).toBe(0);
+    });
+  });
+
+  // ─── handleLabelsEdit edge cases ──────────────────────────────────────────
+
+  describe('handleLabelsEdit — edge cases', () => {
+    it('returns early with null-like input — no crash', () => {
+      expect(() => handleLabelsEdit(db, null as unknown as any[])).not.toThrow();
+    });
   });
 });
