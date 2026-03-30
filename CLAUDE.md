@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, 30+ MCP tools.
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, 116 MCP tools.
 
 ## Quick Reference
 
