@@ -18,6 +18,16 @@ function makeMockSock(): WhatsAppSocket {
     fetchStatus: vi.fn().mockResolvedValue([{ status: { status: 'Available!' } }]),
     onWhatsApp: vi.fn().mockResolvedValue([{ jid: '111@s.whatsapp.net', exists: true }]),
     updateBlockStatus: vi.fn().mockResolvedValue(undefined),
+    updateProfilePicture: vi.fn().mockResolvedValue(undefined),
+    removeProfilePicture: vi.fn().mockResolvedValue(undefined),
+    updateProfileStatus: vi.fn().mockResolvedValue(undefined),
+    updateProfileName: vi.fn().mockResolvedValue(undefined),
+    updatePrivacySettings: vi.fn().mockResolvedValue(undefined),
+    fetchPrivacySettings: vi.fn().mockResolvedValue({ lastSeen: 'contacts', online: 'all' }),
+    fetchBlocklist: vi.fn().mockResolvedValue(['111@s.whatsapp.net', '222@s.whatsapp.net']),
+    addOrEditContact: vi.fn().mockResolvedValue(undefined),
+    removeContact: vi.fn().mockResolvedValue(undefined),
+    fetchDisappearingDuration: vi.fn().mockResolvedValue({ '111@s.whatsapp.net': 86400 }),
   } as unknown as WhatsAppSocket;
 }
 
@@ -31,7 +41,22 @@ describe('profile tools', () => {
     registerProfileTools(() => mockSock, (tool) => registry.register(tool));
   });
 
-  const globalTools = ['get_profile_picture', 'get_contact_status', 'check_whatsapp', 'block_contact'];
+  const globalTools = [
+    'get_profile_picture',
+    'get_contact_status',
+    'check_whatsapp',
+    'block_contact',
+    'update_profile_picture',
+    'remove_profile_picture',
+    'update_profile_status',
+    'update_profile_name',
+    'update_privacy_settings',
+    'get_privacy_settings',
+    'get_blocklist',
+    'add_or_edit_contact',
+    'remove_contact',
+    'fetch_disappearing_duration',
+  ];
 
   it.each(globalTools)('%s is global-only (not visible in chat-scoped session)', (name) => {
     const tools = registry.listTools(chatSession('111'));
@@ -42,6 +67,15 @@ describe('profile tools', () => {
     const params: Record<string, unknown> = { jid: '111@s.whatsapp.net' };
     if (name === 'check_whatsapp') params['phone_numbers'] = ['111'];
     if (name === 'block_contact') params['action'] = 'block';
+    if (name === 'update_profile_picture') params['content'] = 'aGVsbG8=';
+    if (name === 'update_profile_status') { delete params['jid']; params['status'] = 'hello'; }
+    if (name === 'update_profile_name') { delete params['jid']; params['name'] = 'Test'; }
+    if (name === 'update_privacy_settings') { delete params['jid']; params['setting'] = 'last_seen'; params['value'] = 'all'; }
+    if (name === 'get_privacy_settings') delete params['jid'];
+    if (name === 'get_blocklist') delete params['jid'];
+    if (name === 'add_or_edit_contact') params['firstName'] = 'Test';
+    if (name === 'remove_contact') { /* jid already set */ }
+    if (name === 'fetch_disappearing_duration') { delete params['jid']; params['jids'] = ['111@s.whatsapp.net']; }
     const result = await registry.call(name, params, chatSession('111'));
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
@@ -146,6 +180,344 @@ describe('profile tools', () => {
       const result = await registry.call(
         'block_contact',
         { jid: '111@s.whatsapp.net', action: 'invalid' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- update_profile_picture ---
+
+  describe('update_profile_picture', () => {
+    it('calls sock.updateProfilePicture with decoded buffer', async () => {
+      const content = Buffer.from('fake-image-data').toString('base64');
+      const result = await registry.call(
+        'update_profile_picture',
+        { jid: '111@s.whatsapp.net', content },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.updateProfilePicture).toHaveBeenCalledWith(
+        '111@s.whatsapp.net',
+        Buffer.from(content, 'base64'),
+      );
+      const data = JSON.parse(result.content[0].text) as { success: boolean };
+      expect(data.success).toBe(true);
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call(
+        'update_profile_picture',
+        { jid: '111@s.whatsapp.net', content: 'aGVsbG8=' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- remove_profile_picture ---
+
+  describe('remove_profile_picture', () => {
+    it('calls sock.removeProfilePicture with jid', async () => {
+      const result = await registry.call(
+        'remove_profile_picture',
+        { jid: '111@s.whatsapp.net' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.removeProfilePicture).toHaveBeenCalledWith('111@s.whatsapp.net');
+      const data = JSON.parse(result.content[0].text) as { success: boolean };
+      expect(data.success).toBe(true);
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('remove_profile_picture', { jid: '111@s.whatsapp.net' }, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- update_profile_status ---
+
+  describe('update_profile_status', () => {
+    it('calls sock.updateProfileStatus with status text', async () => {
+      const result = await registry.call(
+        'update_profile_status',
+        { status: 'Available for chats' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.updateProfileStatus).toHaveBeenCalledWith('Available for chats');
+      const data = JSON.parse(result.content[0].text) as { success: boolean; status: string };
+      expect(data.success).toBe(true);
+      expect(data.status).toBe('Available for chats');
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('update_profile_status', { status: 'hi' }, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- update_profile_name ---
+
+  describe('update_profile_name', () => {
+    it('calls sock.updateProfileName with new name', async () => {
+      const result = await registry.call(
+        'update_profile_name',
+        { name: 'Test Bot' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.updateProfileName).toHaveBeenCalledWith('Test Bot');
+      const data = JSON.parse(result.content[0].text) as { success: boolean; name: string };
+      expect(data.success).toBe(true);
+      expect(data.name).toBe('Test Bot');
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('update_profile_name', { name: 'X' }, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- update_privacy_settings ---
+
+  describe('update_privacy_settings', () => {
+    it('calls sock.updatePrivacySettings with setting object', async () => {
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting: 'last_seen', value: 'contacts' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.updatePrivacySettings).toHaveBeenCalledWith({ last_seen: 'contacts' });
+      const data = JSON.parse(result.content[0].text) as { success: boolean; setting: string; value: string };
+      expect(data.success).toBe(true);
+      expect(data.setting).toBe('last_seen');
+      expect(data.value).toBe('contacts');
+    });
+
+    it('rejects invalid setting enum', async () => {
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting: 'invalid_setting', value: 'all' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+    });
+
+    it.each([
+      'last_seen', 'online', 'profile_picture', 'status',
+      'read_receipts', 'groups_add', 'call', 'messages',
+      'link_previews', 'default_disappearing',
+    ] as const)('accepts setting "%s"', async (setting) => {
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting, value: 'all' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call(
+        'update_privacy_settings',
+        { setting: 'last_seen', value: 'all' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- get_privacy_settings ---
+
+  describe('get_privacy_settings', () => {
+    it('calls sock.fetchPrivacySettings and returns settings', async () => {
+      const result = await registry.call('get_privacy_settings', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.fetchPrivacySettings).toHaveBeenCalled();
+      const data = JSON.parse(result.content[0].text) as { settings: Record<string, string> };
+      expect(data.settings).toEqual({ lastSeen: 'contacts', online: 'all' });
+    });
+
+    it('returns null settings when fetchPrivacySettings returns undefined', async () => {
+      const sock = mockSock as any;
+      sock.fetchPrivacySettings.mockResolvedValue(undefined);
+      const result = await registry.call('get_privacy_settings', {}, globalSession());
+      const data = JSON.parse(result.content[0].text) as { settings: null };
+      expect(data.settings).toBeNull();
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('get_privacy_settings', {}, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- get_blocklist ---
+
+  describe('get_blocklist', () => {
+    it('calls sock.fetchBlocklist and returns list', async () => {
+      const result = await registry.call('get_blocklist', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.fetchBlocklist).toHaveBeenCalled();
+      const data = JSON.parse(result.content[0].text) as { blocklist: string[] };
+      expect(data.blocklist).toEqual(['111@s.whatsapp.net', '222@s.whatsapp.net']);
+    });
+
+    it('returns empty array when fetchBlocklist returns undefined', async () => {
+      const sock = mockSock as any;
+      sock.fetchBlocklist.mockResolvedValue(undefined);
+      const result = await registry.call('get_blocklist', {}, globalSession());
+      const data = JSON.parse(result.content[0].text) as { blocklist: string[] };
+      expect(data.blocklist).toEqual([]);
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('get_blocklist', {}, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- add_or_edit_contact ---
+
+  describe('add_or_edit_contact', () => {
+    it('calls sock.addOrEditContact with jid and contact fields', async () => {
+      const result = await registry.call(
+        'add_or_edit_contact',
+        { jid: '111@s.whatsapp.net', firstName: 'Alice', lastName: 'Smith', company: 'ACME' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.addOrEditContact).toHaveBeenCalledWith('111@s.whatsapp.net', {
+        firstName: 'Alice',
+        lastName: 'Smith',
+        company: 'ACME',
+      });
+      const data = JSON.parse(result.content[0].text) as { success: boolean };
+      expect(data.success).toBe(true);
+    });
+
+    it('omits undefined optional fields from contactAction', async () => {
+      await registry.call(
+        'add_or_edit_contact',
+        { jid: '111@s.whatsapp.net', firstName: 'Bob' },
+        globalSession(),
+      );
+      const sock = mockSock as any;
+      expect(sock.addOrEditContact).toHaveBeenCalledWith('111@s.whatsapp.net', { firstName: 'Bob' });
+    });
+
+    it('passes phone field when provided', async () => {
+      await registry.call(
+        'add_or_edit_contact',
+        { jid: '111@s.whatsapp.net', phone: '+1234567890' },
+        globalSession(),
+      );
+      const sock = mockSock as any;
+      expect(sock.addOrEditContact).toHaveBeenCalledWith('111@s.whatsapp.net', { phone: '+1234567890' });
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('add_or_edit_contact', { jid: '111@s.whatsapp.net' }, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- remove_contact ---
+
+  describe('remove_contact', () => {
+    it('calls sock.removeContact with jid', async () => {
+      const result = await registry.call(
+        'remove_contact',
+        { jid: '111@s.whatsapp.net' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.removeContact).toHaveBeenCalledWith('111@s.whatsapp.net');
+      const data = JSON.parse(result.content[0].text) as { success: boolean };
+      expect(data.success).toBe(true);
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('remove_contact', { jid: '111@s.whatsapp.net' }, globalSession());
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // --- fetch_disappearing_duration ---
+
+  describe('fetch_disappearing_duration', () => {
+    it('calls sock.fetchDisappearingDuration with spread jids', async () => {
+      const result = await registry.call(
+        'fetch_disappearing_duration',
+        { jids: ['111@s.whatsapp.net', '222@s.whatsapp.net'] },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const sock = mockSock as any;
+      expect(sock.fetchDisappearingDuration).toHaveBeenCalledWith(
+        '111@s.whatsapp.net',
+        '222@s.whatsapp.net',
+      );
+      const data = JSON.parse(result.content[0].text) as { result: Record<string, number> };
+      expect(data.result).toEqual({ '111@s.whatsapp.net': 86400 });
+    });
+
+    it('rejects empty jids array', async () => {
+      const result = await registry.call(
+        'fetch_disappearing_duration',
+        { jids: [] },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+    });
+
+    it('returns null when fetchDisappearingDuration returns undefined', async () => {
+      const sock = mockSock as any;
+      sock.fetchDisappearingDuration.mockResolvedValue(undefined);
+      const result = await registry.call(
+        'fetch_disappearing_duration',
+        { jids: ['111@s.whatsapp.net'] },
+        globalSession(),
+      );
+      const data = JSON.parse(result.content[0].text) as { result: null };
+      expect(data.result).toBeNull();
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerProfileTools(() => null, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call(
+        'fetch_disappearing_duration',
+        { jids: ['111@s.whatsapp.net'] },
         globalSession(),
       );
       expect(result.isError).toBe(true);

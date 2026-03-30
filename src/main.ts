@@ -309,6 +309,14 @@ connectionManager.on('groupJoinRequest', (data) => {
   log.info({ groupJid: data.groupJid, requesterJid: data.requesterJid }, 'groupJoinRequest: join request received');
 });
 
+connectionManager.on('blocklistSet', (blocklist) => {
+  log.info({ count: blocklist.length }, 'blocklistSet: full blocklist synced');
+});
+
+connectionManager.on('blocklistUpdate', (data) => {
+  log.info({ count: data.blocklist.length, type: data.type }, 'blocklistUpdate: blocklist updated');
+});
+
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,

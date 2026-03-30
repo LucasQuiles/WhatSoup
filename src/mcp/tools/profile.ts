@@ -138,6 +138,319 @@ function makeBlockContact(getSock: () => WhatsAppSocket | null): ToolDeclaration
 }
 
 // ---------------------------------------------------------------------------
+// update_profile_picture
+// ---------------------------------------------------------------------------
+
+const UpdateProfilePictureSchema = z.object({
+  jid: z.string(),
+  content: z.string().describe('Base64-encoded image content'),
+});
+
+function makeUpdateProfilePicture(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'update_profile_picture',
+    description: 'Update the profile picture for a JID (own account or group). Content is base64-encoded image data (global).',
+    schema: UpdateProfilePictureSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { jid, content } = UpdateProfilePictureSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      const buffer = Buffer.from(content, 'base64');
+      await (sock as any).updateProfilePicture(jid, buffer);
+      return { success: true, jid };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// remove_profile_picture
+// ---------------------------------------------------------------------------
+
+const RemoveProfilePictureSchema = z.object({
+  jid: z.string(),
+});
+
+function makeRemoveProfilePicture(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'remove_profile_picture',
+    description: 'Remove the profile picture for a JID (own account or group) (global).',
+    schema: RemoveProfilePictureSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { jid } = RemoveProfilePictureSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      await (sock as any).removeProfilePicture(jid);
+      return { success: true, jid };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// update_profile_status
+// ---------------------------------------------------------------------------
+
+const UpdateProfileStatusSchema = z.object({
+  status: z.string().describe('New status text (about/bio)'),
+});
+
+function makeUpdateProfileStatus(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'update_profile_status',
+    description: "Update your own WhatsApp profile status (about/bio text) (global).",
+    schema: UpdateProfileStatusSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { status } = UpdateProfileStatusSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      await (sock as any).updateProfileStatus(status);
+      return { success: true, status };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// update_profile_name
+// ---------------------------------------------------------------------------
+
+const UpdateProfileNameSchema = z.object({
+  name: z.string().describe('New display name'),
+});
+
+function makeUpdateProfileName(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'update_profile_name',
+    description: 'Update your own WhatsApp display name (global).',
+    schema: UpdateProfileNameSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { name } = UpdateProfileNameSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      await (sock as any).updateProfileName(name);
+      return { success: true, name };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// update_privacy_settings
+// ---------------------------------------------------------------------------
+
+const UpdatePrivacySettingsSchema = z.object({
+  setting: z.enum([
+    'last_seen',
+    'online',
+    'profile_picture',
+    'status',
+    'read_receipts',
+    'groups_add',
+    'call',
+    'messages',
+    'link_previews',
+    'default_disappearing',
+  ]),
+  value: z.string().describe('WAPrivacyValue variant (e.g. "all", "contacts", "contact_blacklist", "none")'),
+});
+
+function makeUpdatePrivacySettings(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'update_privacy_settings',
+    description:
+      'Update a specific WhatsApp privacy setting. Use setting to specify which privacy option and value for the new setting (global).',
+    schema: UpdatePrivacySettingsSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { setting, value } = UpdatePrivacySettingsSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      await (sock as any).updatePrivacySettings({ [setting]: value });
+      return { success: true, setting, value };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// get_privacy_settings
+// ---------------------------------------------------------------------------
+
+function makeGetPrivacySettings(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'get_privacy_settings',
+    description: 'Fetch all current WhatsApp privacy settings (global).',
+    schema: z.object({}),
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    handler: async (_params) => {
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      const settings = await (sock as any).fetchPrivacySettings();
+      return { settings: settings ?? null };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// get_blocklist
+// ---------------------------------------------------------------------------
+
+function makeGetBlocklist(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'get_blocklist',
+    description: 'Fetch the list of blocked contacts (global).',
+    schema: z.object({}),
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    handler: async (_params) => {
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      const blocklist = await (sock as any).fetchBlocklist();
+      return { blocklist: blocklist ?? [] };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// add_or_edit_contact
+// ---------------------------------------------------------------------------
+
+const AddOrEditContactSchema = z.object({
+  jid: z.string(),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
+  company: z.string().optional(),
+  phone: z.string().optional(),
+});
+
+function makeAddOrEditContact(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'add_or_edit_contact',
+    description: 'Add a new contact or edit an existing contact in the WhatsApp address book (global).',
+    schema: AddOrEditContactSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { jid, firstName, lastName, company, phone } = AddOrEditContactSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      const contactAction: Record<string, string> = {};
+      if (firstName !== undefined) contactAction.firstName = firstName;
+      if (lastName !== undefined) contactAction.lastName = lastName;
+      if (company !== undefined) contactAction.company = company;
+      if (phone !== undefined) contactAction.phone = phone;
+
+      await (sock as any).addOrEditContact(jid, contactAction);
+      return { success: true, jid };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// remove_contact
+// ---------------------------------------------------------------------------
+
+const RemoveContactSchema = z.object({
+  jid: z.string(),
+});
+
+function makeRemoveContact(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'remove_contact',
+    description: 'Remove a contact from the WhatsApp address book (global).',
+    schema: RemoveContactSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { jid } = RemoveContactSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      await (sock as any).removeContact(jid);
+      return { success: true, jid };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// fetch_disappearing_duration
+// ---------------------------------------------------------------------------
+
+const FetchDisappearingDurationSchema = z.object({
+  jids: z.array(z.string()).min(1).describe('One or more JIDs to query disappearing message duration for'),
+});
+
+function makeFetchDisappearingDuration(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+  return {
+    name: 'fetch_disappearing_duration',
+    description: 'Fetch the disappearing message duration for one or more JIDs (global).',
+    schema: FetchDisappearingDurationSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    handler: async (params) => {
+      const { jids } = FetchDisappearingDurationSchema.parse(params);
+
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+
+      const result = await (sock as any).fetchDisappearingDuration(...jids);
+      return { result: result ?? null };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
@@ -149,4 +462,14 @@ export function registerProfileTools(
   register(makeGetContactStatus(getSock));
   register(makeCheckWhatsApp(getSock));
   register(makeBlockContact(getSock));
+  register(makeUpdateProfilePicture(getSock));
+  register(makeRemoveProfilePicture(getSock));
+  register(makeUpdateProfileStatus(getSock));
+  register(makeUpdateProfileName(getSock));
+  register(makeUpdatePrivacySettings(getSock));
+  register(makeGetPrivacySettings(getSock));
+  register(makeGetBlocklist(getSock));
+  register(makeAddOrEditContact(getSock));
+  register(makeRemoveContact(getSock));
+  register(makeFetchDisappearingDuration(getSock));
 }

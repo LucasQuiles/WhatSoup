@@ -66,6 +66,8 @@ export interface TransportEvents {
   groupsUpsert: (groups: Array<{ id: string; subject?: string; [key: string]: unknown }>) => void;
   groupsUpdate: (updates: Array<{ id: string; [key: string]: unknown }>) => void;
   groupJoinRequest: (data: { groupJid: string; requesterJid: string; requestId: string }) => void;
+  blocklistSet: (blocklist: string[]) => void;
+  blocklistUpdate: (data: { blocklist: string[]; type: 'add' | 'remove' }) => void;
 }
 
 // Typed event emitter augmentation
@@ -471,6 +473,21 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           this.log.info({ groupJid, requesterJid }, 'group join request received');
           this.emit('groupJoinRequest', { groupJid, requesterJid, requestId });
         }
+      }
+
+      if (events['blocklist.set']) {
+        const blocklist = events['blocklist.set'] as { blocklist?: string[] };
+        const jids: string[] = blocklist?.blocklist ?? (blocklist as unknown as string[]) ?? [];
+        this.log.info({ count: jids.length }, 'blocklist set (full sync)');
+        this.emit('blocklistSet', jids);
+      }
+
+      if (events['blocklist.update']) {
+        const update = events['blocklist.update'] as { blocklist?: string[]; type?: string };
+        const jids: string[] = update?.blocklist ?? [];
+        const type: 'add' | 'remove' = update?.type === 'remove' ? 'remove' : 'add';
+        this.log.info({ count: jids.length, type }, 'blocklist update');
+        this.emit('blocklistUpdate', { blocklist: jids, type });
       }
     });
   }
