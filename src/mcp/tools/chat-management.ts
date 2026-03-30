@@ -292,8 +292,8 @@ function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null):
 
       if (rawMessage) {
         try {
-          const waMessage = JSON.parse(rawMessage) as object;
-          await sock.sendMessage(to_jid, { forward: waMessage, force: true });
+          const waMessage = JSON.parse(rawMessage);
+          await sock.sendMessage(to_jid, { forward: waMessage, force: true } as any);
           return { forwarded: true, messageId: message_id, toJid: to_jid, method: 'native' };
         } catch {
           // JSON parse failed — fall through to text forward
