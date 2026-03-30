@@ -1,5 +1,6 @@
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
+import { toConversationKey } from './conversation-key.ts';
 
 const log = createChildLogger('contacts-sync');
 
@@ -20,7 +21,13 @@ export function handleContactsUpsert(db: Database, contacts: BaileysContact[]): 
   `);
 
   for (const c of contacts) {
-    const phone = c.id.replace(/@.*$/, '');
+    // Use toConversationKey to correctly strip LID device suffixes (e.g. 123:5@s.whatsapp.net → 123)
+    let phone: string;
+    try {
+      phone = toConversationKey(c.id);
+    } catch {
+      phone = c.id.replace(/@.*$/, '');
+    }
     stmt.run(c.id, phone, c.name ?? null, c.notify ?? null);
   }
   log.debug({ count: contacts.length }, 'contacts upserted');
