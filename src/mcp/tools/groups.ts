@@ -577,7 +577,7 @@ function makeSendGroupInvite(getSock: () => WhatsAppSocket | null): ToolDeclarat
         groupInvite.caption = caption;
       }
 
-      const result = await sock.sendMessage(jid, { groupInvite });
+      const result = await sock.sendMessage(jid, { groupInvite } as any);
       return result;
     },
   };
