@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.sock
+auth_info*/
+.env
+*.db
+*.db-wal
+*.db-shm
