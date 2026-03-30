@@ -9,6 +9,9 @@ import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('chat-management');
 
 // ---------------------------------------------------------------------------
 // list_messages — paginated messages in a conversation (scope: chat)
@@ -295,8 +298,8 @@ function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null):
           const waMessage = JSON.parse(rawMessage);
           await sock.sendMessage(to_jid, { forward: waMessage, force: true } as any);
           return { forwarded: true, messageId: message_id, toJid: to_jid, method: 'native' };
-        } catch {
-          // JSON parse failed — fall through to text forward
+        } catch (err) {
+          log.warn({ err, messageId: message_id }, 'native forward failed, falling back to text');
         }
       }
 
