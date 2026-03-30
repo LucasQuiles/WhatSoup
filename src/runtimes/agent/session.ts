@@ -210,6 +210,12 @@ export class SessionManager {
           if (this.dbRowId !== null) {
             updateTranscriptPath(this.db, this.dbRowId, transcriptPath);
           }
+          // Durability checkpoint: record sessionId once Claude confirms it
+          if (this.durability) {
+            this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), {
+              sessionId: this.sessionId,
+            });
+          }
         }
 
         this.onEvent(event);

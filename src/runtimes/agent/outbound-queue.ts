@@ -107,6 +107,8 @@ export interface IOutboundQueue {
   updateDeliveryJid(jid: string): void;
   /** Set the current inbound seq so outbound ops can link back to inbound events. */
   setInboundSeq(seq: number | undefined): void;
+  /** Return the id of the most recently created outbound op, or undefined if none. */
+  getLastOpId(): number | undefined;
   /** Mark the last outbound op created by this queue as terminal. */
   markLastTerminal(): void;
 }
@@ -159,6 +161,11 @@ export class OutboundQueue implements IOutboundQueue {
 
   setInboundSeq(seq: number | undefined): void {
     this.currentInboundSeq = seq;
+  }
+
+  /** Return the id of the most recently created outbound op, or undefined if none. */
+  getLastOpId(): number | undefined {
+    return this.lastOpId;
   }
 
   /** Mark the last outbound op created by this queue as terminal (defense-in-depth echo fallback). */

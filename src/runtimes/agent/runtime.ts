@@ -614,7 +614,11 @@ export class AgentRuntime implements Runtime {
           queue.enqueueText(event.text);
         }
         if (this.durability && conversationKey) {
-          this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
+          this.durability.upsertSessionCheckpoint(conversationKey, {
+            activeTurnId: null,
+            ...(inboundSeq !== undefined && { lastInboundSeq: inboundSeq }),
+            ...(queue.getLastOpId() !== undefined && { lastFlushedOutboundId: queue.getLastOpId() }),
+          });
         }
         if (this.durability && inboundSeq !== undefined) {
           this.durability.completeInbound(inboundSeq, 'response_sent');
@@ -1086,7 +1090,11 @@ export class AgentRuntime implements Runtime {
         this.currentTurnChatJid = null;
         if (this.durability && this.activeChatJid) {
           const conversationKey = toConversationKey(this.activeChatJid);
-          this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
+          this.durability.upsertSessionCheckpoint(conversationKey, {
+            activeTurnId: null,
+            ...(this.currentInboundSeq !== undefined && { lastInboundSeq: this.currentInboundSeq }),
+            ...(queue.getLastOpId() !== undefined && { lastFlushedOutboundId: queue.getLastOpId() }),
+          });
         }
         if (this.durability && this.currentInboundSeq !== undefined) {
           this.durability.completeInbound(this.currentInboundSeq, 'response_sent');
