@@ -317,6 +317,22 @@ connectionManager.on('blocklistUpdate', (data) => {
   log.info({ count: data.blocklist.length, type: data.type }, 'blocklistUpdate: blocklist updated');
 });
 
+connectionManager.on('newsletterReaction', (data) => {
+  log.info({ data }, 'newsletterReaction: newsletter reaction received');
+});
+
+connectionManager.on('newsletterView', (data) => {
+  log.info({ data }, 'newsletterView: newsletter view received');
+});
+
+connectionManager.on('newsletterParticipantsUpdate', (data) => {
+  log.info({ data }, 'newsletterParticipantsUpdate: newsletter participants updated');
+});
+
+connectionManager.on('newsletterSettingsUpdate', (data) => {
+  log.info({ data }, 'newsletterSettingsUpdate: newsletter settings updated');
+});
+
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,

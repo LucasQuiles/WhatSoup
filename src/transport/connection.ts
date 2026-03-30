@@ -68,6 +68,10 @@ export interface TransportEvents {
   groupJoinRequest: (data: { groupJid: string; requesterJid: string; requestId: string }) => void;
   blocklistSet: (blocklist: string[]) => void;
   blocklistUpdate: (data: { blocklist: string[]; type: 'add' | 'remove' }) => void;
+  newsletterReaction: (data: unknown) => void;
+  newsletterView: (data: unknown) => void;
+  newsletterParticipantsUpdate: (data: unknown) => void;
+  newsletterSettingsUpdate: (data: unknown) => void;
 }
 
 // Typed event emitter augmentation
@@ -488,6 +492,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         const type: 'add' | 'remove' = update?.type === 'remove' ? 'remove' : 'add';
         this.log.info({ count: jids.length, type }, 'blocklist update');
         this.emit('blocklistUpdate', { blocklist: jids, type });
+      }
+
+      if (events['newsletter.reaction']) {
+        const data = events['newsletter.reaction'];
+        this.log.info({ data }, 'newsletter reaction received');
+        this.emit('newsletterReaction', data);
+      }
+
+      if (events['newsletter.view']) {
+        const data = events['newsletter.view'];
+        this.log.info({ data }, 'newsletter view received');
+        this.emit('newsletterView', data);
+      }
+
+      if (events['newsletter-participants.update']) {
+        const data = events['newsletter-participants.update'];
+        this.log.info({ data }, 'newsletter participants update received');
+        this.emit('newsletterParticipantsUpdate', data);
+      }
+
+      if (events['newsletter-settings.update']) {
+        const data = events['newsletter-settings.update'];
+        this.log.info({ data }, 'newsletter settings update received');
+        this.emit('newsletterSettingsUpdate', data);
       }
     });
   }
