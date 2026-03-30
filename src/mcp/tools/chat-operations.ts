@@ -16,7 +16,7 @@ const log = createChildLogger('chat-operations');
 // ---------------------------------------------------------------------------
 
 const ClearChatSchema = z.object({
-  jid: z.string(),
+  chatJid: z.string(),
   messages: z.array(
     z.object({
       id: z.string(),
@@ -31,17 +31,17 @@ function makeClearChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     name: 'clear_chat',
     description: 'Clear messages from a WhatsApp chat. Provide the message IDs, fromMe flag, and timestamps of the messages to clear.',
     schema: ClearChatSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    scope: 'chat',
+    targetMode: 'injected',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { jid, messages } = ClearChatSchema.parse(params);
+      const { chatJid, messages } = ClearChatSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
-      await sock.chatModify({ clear: { messages } } as any, jid);
-      log.info({ jid, count: messages.length }, 'chat cleared');
-      return { success: true, jid, messagesCleared: messages.length };
+      await sock.chatModify({ clear: { messages } } as any, chatJid);
+      log.info({ chatJid, count: messages.length }, 'chat cleared');
+      return { success: true, jid: chatJid, messagesCleared: messages.length };
     },
   };
 }
@@ -51,7 +51,7 @@ function makeClearChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
 // ---------------------------------------------------------------------------
 
 const DeleteChatSchema = z.object({
-  jid: z.string(),
+  chatJid: z.string(),
   last_message_key: z.object({
     id: z.string(),
     fromMe: z.boolean(),
@@ -64,11 +64,11 @@ function makeDeleteChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     name: 'delete_chat',
     description: 'Delete an entire WhatsApp chat. Requires the last message key and timestamp.',
     schema: DeleteChatSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    scope: 'chat',
+    targetMode: 'injected',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { jid, last_message_key, last_message_timestamp } = DeleteChatSchema.parse(params);
+      const { chatJid, last_message_key, last_message_timestamp } = DeleteChatSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
@@ -77,10 +77,10 @@ function makeDeleteChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
           delete: true,
           lastMessages: [{ key: last_message_key, messageTimestamp: last_message_timestamp }],
         },
-        jid,
+        chatJid,
       );
-      log.info({ jid }, 'chat deleted');
-      return { success: true, jid };
+      log.info({ chatJid }, 'chat deleted');
+      return { success: true, jid: chatJid };
     },
   };
 }
@@ -90,7 +90,7 @@ function makeDeleteChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
 // ---------------------------------------------------------------------------
 
 const DeleteMessageForMeSchema = z.object({
-  jid: z.string(),
+  chatJid: z.string(),
   message_id: z.string(),
   from_me: z.boolean(),
   timestamp: z.number(),
@@ -101,26 +101,26 @@ function makeDeleteMessageForMe(getSock: () => WhatsAppSocket | null): ToolDecla
     name: 'delete_message_for_me',
     description: 'Delete a message for yourself only (not for everyone). The message remains visible to others.',
     schema: DeleteMessageForMeSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    scope: 'chat',
+    targetMode: 'injected',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, message_id, from_me, timestamp } = DeleteMessageForMeSchema.parse(params);
+      const { chatJid, message_id, from_me, timestamp } = DeleteMessageForMeSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
       await sock.chatModify(
         {
           deleteForMe: {
-            key: { remoteJid: jid, id: message_id, fromMe: from_me },
+            key: { remoteJid: chatJid, id: message_id, fromMe: from_me },
             timestamp,
             deleteMedia: true,
           },
         } as any,
-        jid,
+        chatJid,
       );
-      log.info({ jid, messageId: message_id }, 'message deleted for me');
-      return { success: true, jid, messageId: message_id };
+      log.info({ chatJid, messageId: message_id }, 'message deleted for me');
+      return { success: true, jid: chatJid, messageId: message_id };
     },
   };
 }
@@ -204,7 +204,7 @@ function makeSendEventMessage(getSock: () => WhatsAppSocket | null): ToolDeclara
 // ---------------------------------------------------------------------------
 
 const MarkChatReadSchema = z.object({
-  jid: z.string(),
+  chatJid: z.string(),
   read: z.boolean(),
   last_message_key: z.object({
     id: z.string(),
@@ -218,11 +218,11 @@ function makeMarkChatRead(getSock: () => WhatsAppSocket | null): ToolDeclaration
     name: 'mark_chat_read',
     description: 'Mark a chat as read or unread. Uses chatModify for whole-chat read state.',
     schema: MarkChatReadSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    scope: 'chat',
+    targetMode: 'injected',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, read, last_message_key, last_message_timestamp } = MarkChatReadSchema.parse(params);
+      const { chatJid, read, last_message_key, last_message_timestamp } = MarkChatReadSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
@@ -231,10 +231,10 @@ function makeMarkChatRead(getSock: () => WhatsAppSocket | null): ToolDeclaration
           markRead: read,
           lastMessages: [{ key: last_message_key, messageTimestamp: last_message_timestamp }],
         },
-        jid,
+        chatJid,
       );
-      log.info({ jid, read }, 'chat read state updated');
-      return { success: true, jid, read };
+      log.info({ chatJid, read }, 'chat read state updated');
+      return { success: true, jid: chatJid, read };
     },
   };
 }

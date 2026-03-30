@@ -22,7 +22,16 @@ function makeMockSock(): WhatsAppSocket {
     removeProfilePicture: vi.fn().mockResolvedValue(undefined),
     updateProfileStatus: vi.fn().mockResolvedValue(undefined),
     updateProfileName: vi.fn().mockResolvedValue(undefined),
-    updatePrivacySettings: vi.fn().mockResolvedValue(undefined),
+    updateLastSeenPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateOnlinePrivacy: vi.fn().mockResolvedValue(undefined),
+    updateProfilePicturePrivacy: vi.fn().mockResolvedValue(undefined),
+    updateStatusPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateReadReceiptsPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateGroupsAddPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateCallPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateMessagesPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateDisableLinkPreviewsPrivacy: vi.fn().mockResolvedValue(undefined),
+    updateDefaultDisappearingMode: vi.fn().mockResolvedValue(undefined),
     fetchPrivacySettings: vi.fn().mockResolvedValue({ lastSeen: 'contacts', online: 'all' }),
     fetchBlocklist: vi.fn().mockResolvedValue(['111@s.whatsapp.net', '222@s.whatsapp.net']),
     addOrEditContact: vi.fn().mockResolvedValue(undefined),
@@ -295,7 +304,7 @@ describe('profile tools', () => {
   // --- update_privacy_settings ---
 
   describe('update_privacy_settings', () => {
-    it('calls sock.updatePrivacySettings with setting object', async () => {
+    it('calls correct Baileys method per setting', async () => {
       const result = await registry.call(
         'update_privacy_settings',
         { setting: 'last_seen', value: 'contacts' },
@@ -303,11 +312,31 @@ describe('profile tools', () => {
       );
       expect(result.isError).toBeUndefined();
       const sock = mockSock as any;
-      expect(sock.updatePrivacySettings).toHaveBeenCalledWith({ last_seen: 'contacts' });
+      expect(sock.updateLastSeenPrivacy).toHaveBeenCalledWith('contacts');
       const data = JSON.parse(result.content[0].text) as { success: boolean; setting: string; value: string };
       expect(data.success).toBe(true);
       expect(data.setting).toBe('last_seen');
       expect(data.value).toBe('contacts');
+    });
+
+    it('dispatches link_previews as boolean', async () => {
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting: 'link_previews', value: 'true' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect((mockSock as any).updateDisableLinkPreviewsPrivacy).toHaveBeenCalledWith(true);
+    });
+
+    it('dispatches default_disappearing as number', async () => {
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting: 'default_disappearing', value: '86400' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect((mockSock as any).updateDefaultDisappearingMode).toHaveBeenCalledWith(86400);
     });
 
     it('rejects invalid setting enum', async () => {

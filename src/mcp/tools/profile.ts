@@ -296,7 +296,21 @@ function makeUpdatePrivacySettings(getSock: () => WhatsAppSocket | null): ToolDe
         throw new Error('WhatsApp is not connected');
       }
 
-      await (sock as any).updatePrivacySettings({ [setting]: value });
+      // Baileys exposes individual privacy methods, not a unified updatePrivacySettings
+      const s = sock as any;
+      switch (setting) {
+        case 'last_seen': await s.updateLastSeenPrivacy(value); break;
+        case 'online': await s.updateOnlinePrivacy(value); break;
+        case 'profile_picture': await s.updateProfilePicturePrivacy(value); break;
+        case 'status': await s.updateStatusPrivacy(value); break;
+        case 'read_receipts': await s.updateReadReceiptsPrivacy(value); break;
+        case 'groups_add': await s.updateGroupsAddPrivacy(value); break;
+        case 'call': await s.updateCallPrivacy(value); break;
+        case 'messages': await s.updateMessagesPrivacy(value); break;
+        case 'link_previews': await s.updateDisableLinkPreviewsPrivacy(value === 'true' || value === '1'); break;
+        case 'default_disappearing': await s.updateDefaultDisappearingMode(parseInt(value, 10) || 0); break;
+        default: throw new Error(`Unknown privacy setting: ${setting}`);
+      }
       return { success: true, setting, value };
     },
   };

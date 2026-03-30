@@ -53,7 +53,7 @@ describe('chat-operations tools', () => {
     it('calls chatModify with clear payload', async () => {
       const result = await registry.call(
         'clear_chat',
-        { jid: '111@s.whatsapp.net', messages: [{ id: 'msg1', fromMe: false, timestamp: 1000 }] },
+        { chatJid: '111@s.whatsapp.net', messages: [{ id: 'msg1', fromMe: false, timestamp: 1000 }] },
         globalSession(),
       );
       expect(result.isError).toBeUndefined();
@@ -63,10 +63,13 @@ describe('chat-operations tools', () => {
       );
     });
 
-    it('is a global-scope tool', () => {
+    it('is visible in global session (requires chatJid)', () => {
       const tools = registry.listTools(globalSession());
       const tool = tools.find((t) => t.name === 'clear_chat');
       expect(tool).toBeDefined();
+      // Injected tools in global sessions get chatJid added to schema
+      const props = (tool!.inputSchema as any).properties;
+      expect(props.chatJid).toBeDefined();
     });
   });
 
@@ -76,7 +79,7 @@ describe('chat-operations tools', () => {
     it('calls chatModify with delete payload', async () => {
       const result = await registry.call(
         'delete_chat',
-        { jid: '111@s.whatsapp.net', last_message_key: { id: 'msg2', fromMe: true }, last_message_timestamp: 2000 },
+        { chatJid: '111@s.whatsapp.net', last_message_key: { id: 'msg2', fromMe: true }, last_message_timestamp: 2000 },
         globalSession(),
       );
       expect(result.isError).toBeUndefined();
@@ -93,7 +96,7 @@ describe('chat-operations tools', () => {
     it('calls chatModify with deleteForMe payload', async () => {
       const result = await registry.call(
         'delete_message_for_me',
-        { jid: '111@s.whatsapp.net', message_id: 'msg1', from_me: false, timestamp: 1000 },
+        { chatJid: '111@s.whatsapp.net', message_id: 'msg1', from_me: false, timestamp: 1000 },
         globalSession(),
       );
       expect(result.isError).toBeUndefined();
@@ -175,7 +178,7 @@ describe('chat-operations tools', () => {
       const result = await registry.call(
         'mark_chat_read',
         {
-          jid: '111@s.whatsapp.net',
+          chatJid: '111@s.whatsapp.net',
           read: true,
           last_message_key: { id: 'msg1', fromMe: false },
           last_message_timestamp: 1000,
@@ -193,7 +196,7 @@ describe('chat-operations tools', () => {
       const result = await registry.call(
         'mark_chat_read',
         {
-          jid: '111@s.whatsapp.net',
+          chatJid: '111@s.whatsapp.net',
           read: false,
           last_message_key: { id: 'msg1', fromMe: false },
           last_message_timestamp: 1000,
@@ -332,7 +335,7 @@ describe('chat-operations tools', () => {
 
       const result = await disconnectedRegistry.call(
         'clear_chat',
-        { jid: '111@s.whatsapp.net', messages: [{ id: 'msg1', fromMe: false, timestamp: 1000 }] },
+        { chatJid: '111@s.whatsapp.net', messages: [{ id: 'msg1', fromMe: false, timestamp: 1000 }] },
         globalSession(),
       );
       expect(result.isError).toBe(true);

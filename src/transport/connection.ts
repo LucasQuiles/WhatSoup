@@ -396,20 +396,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (events['message-receipt.update']) {
         const receipts = events['message-receipt.update'] as Array<{
-          key: { id?: string; remoteJid?: string };
-          receipt: { receiptTimestamp?: number; readTimestamp?: number; playedTimestamp?: number };
-          update: { status?: number };
+          key: { id?: string };
+          receipt: { userJid?: string; receiptTimestamp?: number; readTimestamp?: number; playedTimestamp?: number };
         }>;
         for (const r of receipts) {
           const messageId = r.key.id;
-          const recipientJid = r.key.remoteJid;
+          const recipientJid = r.receipt?.userJid;
           if (!messageId || !recipientJid) continue;
-          // Map Baileys receipt status to type string
-          const status = r.update?.status;
-          let type = 'server';
-          if (status === 3) type = 'delivery';
-          else if (status === 4) type = 'read';
-          else if (status === 5) type = 'played';
+          // Determine receipt type from which timestamp fields are present
+          let type = 'delivery';
+          if (r.receipt.playedTimestamp) type = 'played';
+          else if (r.receipt.readTimestamp) type = 'read';
           this.emit('receiptUpdate', { messageId, recipientJid, type });
         }
       }
