@@ -140,7 +140,7 @@ export function handleChatsUpdate(
 
     db.raw
       .prepare(`UPDATE chats SET ${sets.join(', ')} WHERE jid = ?`)
-      .run(...values);
+      .run(...(values as Array<string | number | null>));
   }
   log.debug({ count: updates.length }, 'chats updated');
 }

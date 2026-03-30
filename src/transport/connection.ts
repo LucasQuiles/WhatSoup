@@ -428,7 +428,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       if (events['messaging-history.set']) {
-        const data = events['messaging-history.set'] as {
+        const data = events['messaging-history.set'] as unknown as {
           messages?: unknown[];
           chats?: Array<{ id: string; [key: string]: unknown }>;
           isLatest?: boolean;

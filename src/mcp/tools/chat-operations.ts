@@ -39,7 +39,7 @@ function makeClearChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
-      await sock.chatModify({ clear: { messages } }, jid);
+      await sock.chatModify({ clear: { messages } } as any, jid);
       log.info({ jid, count: messages.length }, 'chat cleared');
       return { success: true, jid, messagesCleared: messages.length };
     },
@@ -114,8 +114,9 @@ function makeDeleteMessageForMe(getSock: () => WhatsAppSocket | null): ToolDecla
           deleteForMe: {
             key: { remoteJid: jid, id: message_id, fromMe: from_me },
             timestamp,
+            deleteMedia: true,
           },
-        },
+        } as any,
         jid,
       );
       log.info({ jid, messageId: message_id }, 'message deleted for me');

@@ -102,6 +102,7 @@ describe('chat-operations tools', () => {
           deleteForMe: {
             key: { remoteJid: '111@s.whatsapp.net', id: 'msg1', fromMe: false },
             timestamp: 1000,
+            deleteMedia: true,
           },
         },
         '111@s.whatsapp.net',
