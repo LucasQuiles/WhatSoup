@@ -154,7 +154,7 @@ function makeListChats(db: Database): ToolDeclaration {
   return {
     name: 'list_chats',
     description:
-      'List all WhatsApp conversations with their last message timestamp (global). Returns conversations ordered by most recent activity.',
+      'List all WhatsApp conversations with their last message timestamp and metadata (global). Returns conversations ordered by most recent activity.',
     schema: ListChatsSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
@@ -164,13 +164,20 @@ function makeListChats(db: Database): ToolDeclaration {
 
       const rows = db.raw
         .prepare(
-          `SELECT conversation_key,
-                  chat_jid,
-                  MAX(timestamp) AS last_timestamp,
-                  COUNT(*) AS message_count
-           FROM messages
-           WHERE deleted_at IS NULL
-           GROUP BY conversation_key
+          `SELECT m.conversation_key,
+                  m.chat_jid,
+                  MAX(m.timestamp) AS last_timestamp,
+                  COUNT(*) AS message_count,
+                  c.name,
+                  c.unread_count,
+                  c.is_archived,
+                  c.is_pinned,
+                  c.mute_until,
+                  c.ephemeral_duration
+           FROM messages m
+           LEFT JOIN chats c ON c.conversation_key = m.conversation_key
+           WHERE m.deleted_at IS NULL
+           GROUP BY m.conversation_key
            ORDER BY last_timestamp DESC
            LIMIT ?`,
         )
@@ -179,6 +186,12 @@ function makeListChats(db: Database): ToolDeclaration {
           chat_jid: string;
           last_timestamp: number;
           message_count: number;
+          name: string | null;
+          unread_count: number | null;
+          is_archived: number | null;
+          is_pinned: number | null;
+          mute_until: string | null;
+          ephemeral_duration: number | null;
         }>;
 
       return {
@@ -187,6 +200,12 @@ function makeListChats(db: Database): ToolDeclaration {
           chatJid: r.chat_jid,
           lastTimestamp: r.last_timestamp,
           messageCount: r.message_count,
+          name: r.name ?? undefined,
+          unreadCount: r.unread_count ?? undefined,
+          isArchived: r.is_archived ? true : undefined,
+          isPinned: r.is_pinned ? true : undefined,
+          muteUntil: r.mute_until ?? undefined,
+          ephemeralDuration: r.ephemeral_duration ?? undefined,
         })),
         count: rows.length,
       };
