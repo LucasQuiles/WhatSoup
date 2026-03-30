@@ -6,6 +6,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { Runtime } from '../runtimes/types.ts';
+import type { DurabilityEngine } from './durability.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
@@ -22,10 +23,12 @@ const log = createChildLogger('ingest');
  *
  * Steps (in order):
  *   1. Store the message (always, even if later rejected)
+ *   1b. Echo correlation — if isFromMe, call durabilityEngine.matchEcho and return
  *   2. Check admin commands — consumed here, not forwarded to runtime
  *   3. Apply access policy (shouldRespond)
  *   4. Send approval request for unknown senders
- *   5. Dispatch eligible messages to runtime.handleMessage(msg)
+ *   5. Journal inbound event via durabilityEngine.journalInbound
+ *   6. Dispatch eligible messages to runtime.handleMessage(msg)
  */
 export function createIngestHandler(
   db: Database,
@@ -33,13 +36,15 @@ export function createIngestHandler(
   runtime: Runtime,
   getBotJid: () => string,
   getBotLid: () => string | null,
+  durability?: DurabilityEngine,
 ): (msg: IncomingMessage) => void {
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
       // 1. Store the incoming message — always, even if we later reject it.
       //    Atomic insert: INSERT OR IGNORE returns false if message_id already exists.
+      let conversationKey: string;
       try {
-        const conversationKey = toConversationKey(msg.chatJid);
+        conversationKey = toConversationKey(msg.chatJid);
         const isNew = storeMessageIfNew(db, {
           chatJid: msg.chatJid,
           conversationKey,
@@ -61,10 +66,24 @@ export function createIngestHandler(
         return;
       }
 
+      // 1b. Echo correlation — Baileys echoes our own sent messages back through
+      //     messages.upsert with isFromMe=true. Match against submitted outbound_ops
+      //     so they transition submitted → echoed. Never route to runtime.
+      if (msg.isFromMe) {
+        if (durability) {
+          durability.matchEcho(msg.messageId);
+        }
+        return;
+      }
+
       // 2. Check admin commands FIRST (before trigger check)
       if (isAdminMessage(msg) && msg.content) {
         const cmd = parseAdminCommand(msg.content);
         if (cmd) {
+          let seq: number | undefined;
+          if (durability) {
+            seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'admin');
+          }
           try {
             await handleAdminCommand(
               db,
@@ -77,6 +96,9 @@ export function createIngestHandler(
             );
           } catch (err) {
             log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
+          }
+          if (durability && seq !== undefined) {
+            durability.markInboundSkipped(seq, 'admin_command');
           }
           return;
         }
@@ -100,14 +122,29 @@ export function createIngestHandler(
           }
         }
 
+        if (durability) {
+          const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
+          durability.markInboundSkipped(seq, 'access_denied');
+        }
+
         return;
       }
 
-      // 5. Dispatch to runtime
+      // 5. Journal inbound event before dispatch so runtime can link outbound ops
+      const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
+      let seq: number | undefined;
+      if (durability) {
+        seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
+      }
+
+      // 6. Dispatch to runtime
       try {
         await runtime.handleMessage(msg);
       } catch (err) {
         log.error({ err, messageId: msg.messageId }, 'runtime.handleMessage threw');
+        if (durability && seq !== undefined) {
+          durability.markInboundFailed(seq);
+        }
       }
     })();
   };

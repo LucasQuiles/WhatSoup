@@ -52,6 +52,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
 
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler } from '../../src/core/ingest.ts';
+import { DurabilityEngine } from '../../src/core/durability.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand, sendApprovalRequest } from '../../src/core/admin.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
@@ -143,8 +144,9 @@ function makeIngest(
   runtime: Runtime,
   botJid = BOT_JID,
   botLid: string | null = BOT_LID,
+  durability?: DurabilityEngine,
 ) {
-  return createIngestHandler(db, messenger, runtime, () => botJid, () => botLid);
+  return createIngestHandler(db, messenger, runtime, () => botJid, () => botLid, durability);
 }
 
 /** Run the ingest handler and wait for the async fire-and-forget to complete. */
@@ -523,5 +525,206 @@ describe('Bot identity passed to shouldRespond', () => {
     await runIngest(handler, msg);
 
     expect(mockShouldRespond).toHaveBeenCalledWith(msg, BOT_JID, null, db);
+  });
+});
+
+// ===========================================================================
+// Echo correlation (Task 4)
+// ===========================================================================
+
+describe('Echo correlation: isFromMe messages', () => {
+  it('isFromMe message calls durabilityEngine.matchEcho with messageId', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const matchEchoSpy = vi.spyOn(durability, 'matchEcho').mockReturnValue(false);
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage({ isFromMe: true });
+
+    await runIngest(handler, msg);
+
+    expect(matchEchoSpy).toHaveBeenCalledOnce();
+    expect(matchEchoSpy).toHaveBeenCalledWith(msg.messageId);
+  });
+
+  it('isFromMe message does NOT dispatch to runtime', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    vi.spyOn(durability, 'matchEcho').mockReturnValue(false);
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage({ isFromMe: true });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    expect(mockShouldRespond).not.toHaveBeenCalled();
+  });
+
+  it('isFromMe message without durability engine — does NOT dispatch to runtime', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+
+    // No durability passed — graceful degradation
+    const handler = makeIngest(db, messenger, runtime);
+    const msg = makeIncomingMessage({ isFromMe: true });
+
+    await runIngest(handler, msg);
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  it('matchEcho returns true when a submitted outbound_op matches', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    // Seed a submitted outbound_op with a known wa_message_id
+    const opId = durability.createOutboundOp({
+      conversationKey: '15184194479',
+      chatJid: '15184194479@s.whatsapp.net',
+      opType: 'send_message',
+      payload: 'hello',
+      replayPolicy: 'safe',
+    });
+    durability.markSending(opId);
+    durability.markSubmitted(opId, 'WA-ECHO-001');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage({ isFromMe: true, messageId: 'WA-ECHO-001' });
+
+    await runIngest(handler, msg);
+
+    // Verify the outbound_op transitioned to 'echoed'
+    const rows = db.raw.prepare(
+      `SELECT status FROM outbound_ops WHERE id = ?`,
+    ).get(opId) as { status: string } | undefined;
+    expect(rows?.status).toBe('echoed');
+  });
+});
+
+// ===========================================================================
+// Inbound journaling (Task 4)
+// ===========================================================================
+
+describe('Inbound journaling: durabilityEngine.journalInbound', () => {
+  it('eligible message journals inbound event before dispatch', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(42);
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage();
+
+    await runIngest(handler, msg);
+
+    expect(journalSpy).toHaveBeenCalledOnce();
+    expect(journalSpy).toHaveBeenCalledWith(
+      msg.messageId,
+      expect.any(String),   // conversationKey
+      msg.chatJid,
+      expect.any(String),   // routedTo runtime name
+    );
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(msg);
+  });
+
+  it('journalInbound is called before runtime.handleMessage', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    const callOrder: string[] = [];
+    vi.spyOn(durability, 'journalInbound').mockImplementation(() => {
+      callOrder.push('journalInbound');
+      return 1;
+    });
+    vi.mocked(runtime.handleMessage).mockImplementation(async () => {
+      callOrder.push('handleMessage');
+    });
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage());
+
+    expect(callOrder).toEqual(['journalInbound', 'handleMessage']);
+  });
+
+  it('access-denied message: journalInbound + markInboundSkipped(access_denied)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    mockShouldRespond.mockReturnValue({ respond: false, reason: 'blocked', accessStatus: 'blocked' });
+
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(7);
+    const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage());
+
+    expect(journalSpy).toHaveBeenCalledOnce();
+    expect(skipSpy).toHaveBeenCalledWith(7, 'access_denied');
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  it('admin command: journalInbound + markInboundSkipped(admin_command)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    mockIsAdminMessage.mockReturnValue(true);
+    mockParseAdminCommand.mockReturnValue({ action: 'allow', subjectType: 'phone', subjectId: '15551234567' });
+
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(9);
+    const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    const msg = makeIncomingMessage({ content: 'allow 15551234567' });
+    await runIngest(handler, msg);
+
+    expect(journalSpy).toHaveBeenCalledOnce();
+    expect(skipSpy).toHaveBeenCalledWith(9, 'admin_command');
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  it('runtime error marks inbound failed', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    vi.mocked(runtime.handleMessage).mockRejectedValue(new Error('runtime crash'));
+
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(11);
+    const failSpy = vi.spyOn(durability, 'markInboundFailed');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+    await runIngest(handler, makeIncomingMessage());
+
+    expect(journalSpy).toHaveBeenCalledOnce();
+    expect(failSpy).toHaveBeenCalledWith(11);
+  });
+
+  it('no durability engine — existing behaviour unchanged', async () => {
+    // Regression: existing callers that pass no durability engine continue to work.
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+
+    const handler = makeIngest(db, messenger, runtime); // no durability
+    const msg = makeIncomingMessage();
+
+    await expect(runIngest(handler, msg)).resolves.toBeUndefined();
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
   });
 });
