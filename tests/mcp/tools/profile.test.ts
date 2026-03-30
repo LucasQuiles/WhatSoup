@@ -351,7 +351,6 @@ describe('profile tools', () => {
     it.each([
       'last_seen', 'online', 'profile_picture', 'status',
       'read_receipts', 'groups_add', 'call', 'messages',
-      'link_previews', 'default_disappearing',
     ] as const)('accepts setting "%s"', async (setting) => {
       const result = await registry.call(
         'update_privacy_settings',

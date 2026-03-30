@@ -271,6 +271,11 @@ connectionManager.on('historyMessages', (messages) => {
     log.warn({ type: typeof messages }, 'historyMessages: expected array');
     return;
   }
+  const checkStmt = db.raw.prepare('SELECT 1 FROM messages WHERE message_id = ?');
+  const insertStmt = db.raw.prepare(`
+    INSERT OR IGNORE INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+    VALUES (?, ?, ?, ?, 'history', ?, ?)
+  `);
   for (const msg of messages) {
     try {
       const waMsg = msg as { key?: { id?: string; remoteJid?: string; fromMe?: boolean }; messageTimestamp?: number; message?: unknown };
@@ -280,16 +285,11 @@ connectionManager.on('historyMessages', (messages) => {
         log.debug({ msg: typeof msg }, 'historyMessages: skipping message with missing key fields');
         continue;
       }
-      const existing = db.raw
-        .prepare('SELECT 1 FROM messages WHERE message_id = ?')
-        .get(msgId);
+      const existing = checkStmt.get(msgId);
       if (existing) continue;
       const conversationKey = toConversationKey(chatJid);
       const timestamp = waMsg.messageTimestamp ?? Math.floor(Date.now() / 1000);
-      db.raw.prepare(`
-        INSERT OR IGNORE INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
-        VALUES (?, ?, ?, ?, 'history', ?, ?)
-      `).run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
+      insertStmt.run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
     } catch (err) {
       log.error({ err }, 'historyMessages: failed to store message');
     }

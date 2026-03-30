@@ -39,7 +39,7 @@ const UpdateBusinessProfileSchema = z.object({
   category: z.string().optional(),
   description: z.string().optional(),
   email: z.string().optional(),
-  website: z.array(z.string()).optional(),
+  websites: z.array(z.string()).optional().describe('List of website URLs for the business profile.'),
   address: z.string().optional(),
 });
 
@@ -190,7 +190,7 @@ const ProductCreateSchema = z.object({
   currency: z.string().optional().describe('ISO 4217 currency code, e.g. USD.'),
   retailerId: z.string().optional().describe('Your internal product/SKU identifier.'),
   url: z.string().optional().describe('URL to the product listing.'),
-  imageUrls: z.array(z.string()).optional().describe('List of product image URLs.'),
+  images: z.array(z.string()).optional().describe('List of product image URLs (WAMediaUpload).'),
   isHidden: z.boolean().optional(),
 });
 
@@ -224,7 +224,7 @@ const ProductUpdateSchema = z.object({
   currency: z.string().optional(),
   retailerId: z.string().optional(),
   url: z.string().optional(),
-  imageUrls: z.array(z.string()).optional(),
+  images: z.array(z.string()).optional().describe('List of product image URLs (WAMediaUpload).'),
   isHidden: z.boolean().optional(),
 });
 
@@ -407,7 +407,8 @@ function makeManageLabels(getSock: () => WhatsAppSocket | null): ToolDeclaration
           if (!args.labels || args.labels.length === 0) {
             throw new Error('add_label requires a non-empty labels array');
           }
-          await (sock as any).addLabel(args.labels);
+          if (!args.chat_jid) throw new Error('add_label requires chat_jid');
+          await (sock as any).addLabel(args.chat_jid, args.labels);
           return { success: true, action: args.action, count: args.labels.length };
         }
 

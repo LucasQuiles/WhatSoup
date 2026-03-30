@@ -369,7 +369,7 @@ const NewsletterFetchMessagesSchema = z.object({
   jid: z.string(),
   count: z.number().int().positive(),
   since: z.number().optional(),
-  after: z.string().optional(),
+  after: z.number().optional().describe('Cursor offset as a number (message server ID).'),
 });
 
 function makeNewsletterFetchMessages(getSock: () => WhatsAppSocket | null): ToolDeclaration {

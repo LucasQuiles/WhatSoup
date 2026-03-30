@@ -11,7 +11,7 @@ import type { WhatsAppSocket } from '../../transport/connection.ts';
 
 const CreateCallLinkSchema = z.object({
   type: z.enum(['audio', 'video']).describe('Type of call link to create'),
-  event: z.string().optional().describe('Optional event context'),
+  event: z.object({ startTime: z.number() }).optional().describe('Optional event with startTime (Unix seconds)'),
   timeoutMs: z.number().optional().describe('Optional timeout in milliseconds'),
 });
 
@@ -298,8 +298,20 @@ function makeLogout(getSock: () => WhatsAppSocket | null): ToolDeclaration {
 // resync_app_state
 // ---------------------------------------------------------------------------
 
+const WAPatchName = z.enum([
+  'critical_block',
+  'critical_unblock_low',
+  'regular_high',
+  'regular_low',
+  'regular',
+]);
+
 const ResyncAppStateSchema = z.object({
-  collections: z.array(z.string()).describe('List of app-state collection names to resync'),
+  collections: z
+    .array(WAPatchName)
+    .describe(
+      'List of app-state collection names to resync. Valid values: critical_block, critical_unblock_low, regular_high, regular_low, regular',
+    ),
   isInitialSync: z.boolean().describe('Whether this is an initial sync (true) or incremental (false)'),
 });
 

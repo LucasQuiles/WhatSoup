@@ -472,14 +472,14 @@ describe('newsletter tools', () => {
     it('calls newsletterFetchMessages with optional since and after', async () => {
       await registry.call(
         'newsletter_fetch_messages',
-        { jid: 'newsletter1@newsletter', count: 10, since: 1700000000, after: 'cursor123' },
+        { jid: 'newsletter1@newsletter', count: 10, since: 1700000000, after: 123456 },
         globalSession(),
       );
       expect((mockSock as any).newsletterFetchMessages).toHaveBeenCalledWith(
         'newsletter1@newsletter',
         10,
         1700000000,
-        'cursor123',
+        123456,
       );
     });
 

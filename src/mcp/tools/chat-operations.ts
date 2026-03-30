@@ -260,7 +260,9 @@ function makeUpdatePushName(getSock: () => WhatsAppSocket | null): ToolDeclarati
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
-      await sock.chatModify({ pushNameSetting: name } as any, '');
+      // Use the bot's own JID as the target; pushNameSetting is a self-setting
+      const botJid = (sock as any).user?.id ?? '';
+      await sock.chatModify({ pushNameSetting: name } as any, botJid);
       log.info({ name }, 'push name updated');
       return { success: true, name };
     },

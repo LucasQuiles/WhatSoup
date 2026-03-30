@@ -416,9 +416,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             const recipientJid = r.receipt?.userJid;
             if (!messageId || !recipientJid) continue;
             // Determine receipt type from which timestamp fields are present
-            let type = 'delivery';
+            let type = 'server'; // default: server acknowledgement (single tick)
             if (r.receipt.playedTimestamp) type = 'played';
             else if (r.receipt.readTimestamp) type = 'read';
+            else if (r.receipt.receiptTimestamp) type = 'delivery';
             this.emit('receiptUpdate', { messageId, recipientJid, type });
           }
         }
@@ -470,23 +471,27 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.log.error({ err, event: 'chats.delete' }, 'event handler failed');
       }
 
-      if (events['messaging-history.set']) {
-        const data = events['messaging-history.set'] as unknown as {
-          messages?: unknown[];
-          chats?: Array<{ id: string; [key: string]: unknown }>;
-          isLatest?: boolean;
-        };
-        this.log.info(
-          { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
-          'history sync received',
-        );
-        if (data.messages && data.messages.length > 0) {
-          this.emit('historyMessages', data.messages);
+      try {
+        if (events['messaging-history.set']) {
+          const data = events['messaging-history.set'] as unknown as {
+            messages?: unknown[];
+            chats?: Array<{ id: string; [key: string]: unknown }>;
+            isLatest?: boolean;
+          };
+          this.log.info(
+            { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
+            'history sync received',
+          );
+          if (data.messages && data.messages.length > 0) {
+            this.emit('historyMessages', data.messages);
+          }
+          if (data.chats && data.chats.length > 0) {
+            this.emit('chatsUpsert', data.chats);
+          }
+          this.emit('historySyncComplete');
         }
-        if (data.chats && data.chats.length > 0) {
-          this.emit('chatsUpsert', data.chats);
-        }
-        this.emit('historySyncComplete');
+      } catch (err) {
+        this.log.error({ err, event: 'messaging-history.set' }, 'event handler failed');
       }
 
       try {

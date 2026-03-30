@@ -269,6 +269,16 @@ function makeUpdateProfileName(getSock: () => WhatsAppSocket | null): ToolDeclar
 // update_privacy_settings
 // ---------------------------------------------------------------------------
 
+// Per-setting valid values matching Baileys WAPrivacy* types.
+// last_seen, profile_picture, status: WAPrivacyValue = 'all' | 'contacts' | 'contact_blacklist' | 'none'
+// online: WAPrivacyOnlineValue = 'all' | 'match_last_seen'
+// groups_add: WAPrivacyGroupAddValue = 'all' | 'contacts' | 'contact_blacklist'
+// read_receipts: WAReadReceiptsValue = 'all' | 'none'
+// call: WAPrivacyCallValue = 'all' | 'known'
+// messages: WAPrivacyMessagesValue = 'all' | 'contacts'
+// link_previews: boolean string — 'true' / 'false' / '1' / '0'
+// default_disappearing: duration in seconds as a numeric string, e.g. '0', '86400', '604800', '7776000'
+
 const UpdatePrivacySettingsSchema = z.object({
   setting: z.enum([
     'last_seen',
@@ -282,7 +292,29 @@ const UpdatePrivacySettingsSchema = z.object({
     'link_previews',
     'default_disappearing',
   ]),
-  value: z.string().describe('WAPrivacyValue variant (e.g. "all", "contacts", "contact_blacklist", "none")'),
+  value: z
+    .string()
+    .describe(
+      [
+        'Value for the chosen setting:',
+        '  last_seen / profile_picture / status: "all" | "contacts" | "contact_blacklist" | "none"',
+        '  online: "all" | "match_last_seen"',
+        '  groups_add: "all" | "contacts" | "contact_blacklist"',
+        '  read_receipts: "all" | "none"',
+        '  call: "all" | "known"',
+        '  messages: "all" | "contacts"',
+        '  link_previews: "true" | "false"',
+        '  default_disappearing: duration seconds as string, e.g. "0", "86400", "604800", "7776000"',
+      ].join('\n'),
+    )
+    .superRefine((val, ctx) => {
+      // Setting-specific validation is deferred to the handler because zod
+      // doesn't have access to the sibling `setting` field here without
+      // using z.discriminatedUnion or a top-level refine. Validation is
+      // performed in the handler instead.
+      void val;
+      void ctx;
+    }),
 });
 
 function makeUpdatePrivacySettings(getSock: () => WhatsAppSocket | null): ToolDeclaration {
@@ -300,6 +332,27 @@ function makeUpdatePrivacySettings(getSock: () => WhatsAppSocket | null): ToolDe
       const sock = getSock();
       if (!sock) {
         throw new Error('WhatsApp is not connected');
+      }
+
+      // Per-setting value validation (strict enum settings only).
+      // link_previews and default_disappearing accept free-form values and are not validated here.
+      const stdPrivacy = ['all', 'contacts', 'contact_blacklist', 'none'] as const;
+      const strictValidValues: Record<string, readonly string[]> = {
+        last_seen: stdPrivacy,
+        profile_picture: stdPrivacy,
+        status: stdPrivacy,
+        online: ['all', 'match_last_seen'],
+        groups_add: ['all', 'contacts', 'contact_blacklist'],
+        read_receipts: ['all', 'none'],
+        call: ['all', 'known'],
+        messages: ['all', 'contacts'],
+      };
+
+      const allowed = strictValidValues[setting];
+      if (allowed && !allowed.includes(value)) {
+        throw new Error(
+          `Invalid value "${value}" for setting "${setting}". Valid values: ${allowed.join(', ')}`,
+        );
       }
 
       // Baileys exposes individual privacy methods, not a unified updatePrivacySettings

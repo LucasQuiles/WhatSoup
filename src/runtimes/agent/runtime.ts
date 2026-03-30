@@ -222,28 +222,34 @@ export class AgentRuntime implements Runtime {
   private registerAllTools(): void {
     const connection = this.messenger as ConnectionManager;
     const getSock = () => connection.getSocket();
-    const register = (tool: ToolDeclaration) => this.registry.register(tool);
+    const register = (tool: ToolDeclaration) => {
+      try {
+        this.registry.register(tool);
+      } catch (err) {
+        log.error({ err, tool: tool.name }, 'failed to register tool');
+      }
+    };
 
     // Messaging & media (take ToolRegistry + deps directly)
-    registerMessagingTools(this.registry, { connection, db: this.db.raw });
-    registerMediaTools(this.registry, { connection });
+    try { registerMessagingTools(this.registry, { connection, db: this.db.raw }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
+    try { registerMediaTools(this.registry, { connection }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
 
     // DB-dependent tools
-    registerChatManagementTools(this.db, getSock, register);
-    registerChatOperationTools(this.db, getSock, register);
-    registerSearchTools(this.db, register);
+    try { registerChatManagementTools(this.db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }
+    try { registerChatOperationTools(this.db, getSock, register); } catch (err) { log.error({ err }, 'registerChatOperationTools failed'); }
+    try { registerSearchTools(this.db, register); } catch (err) { log.error({ err }, 'registerSearchTools failed'); }
 
     // Socket-only tools
-    registerGroupTools(getSock, register);
-    registerCommunityTools(getSock, register);
-    registerNewsletterTools(getSock, register);
-    registerBusinessTools(getSock, register);
-    registerAdvancedTools(getSock, register);
-    registerCallTools(getSock, register);
-    registerProfileTools(getSock, register);
+    try { registerGroupTools(getSock, register); } catch (err) { log.error({ err }, 'registerGroupTools failed'); }
+    try { registerCommunityTools(getSock, register); } catch (err) { log.error({ err }, 'registerCommunityTools failed'); }
+    try { registerNewsletterTools(getSock, register); } catch (err) { log.error({ err }, 'registerNewsletterTools failed'); }
+    try { registerBusinessTools(getSock, register); } catch (err) { log.error({ err }, 'registerBusinessTools failed'); }
+    try { registerAdvancedTools(getSock, register); } catch (err) { log.error({ err }, 'registerAdvancedTools failed'); }
+    try { registerCallTools(getSock, register); } catch (err) { log.error({ err }, 'registerCallTools failed'); }
+    try { registerProfileTools(getSock, register); } catch (err) { log.error({ err }, 'registerProfileTools failed'); }
 
     // Presence needs the shared presenceCache from ConnectionManager
-    registerPresenceTools(getSock, connection.presenceCache, register);
+    try { registerPresenceTools(getSock, connection.presenceCache, register); } catch (err) { log.error({ err }, 'registerPresenceTools failed'); }
 
     log.info({ toolCount: this.registry.listTools({ tier: 'global' }).length }, 'all tools registered');
   }

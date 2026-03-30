@@ -300,8 +300,7 @@ describe('chat-management tools', () => {
     });
 
     it('uses true Baileys forward when raw_message is available', async () => {
-      // Add raw_message column and seed a message with it
-      db.raw.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
+      // Seed raw_message for the existing message (column added by migration 5)
       db.raw
         .prepare(`UPDATE messages SET raw_message = ? WHERE message_id = 'msg1'`)
         .run(JSON.stringify({ key: { id: 'msg1' }, message: { conversation: 'First message' } }));
@@ -319,7 +318,7 @@ describe('chat-management tools', () => {
     });
 
     it('falls back to text forward when raw_message column is absent', async () => {
-      // Do not add raw_message column — it does not exist in base schema
+      // raw_message column exists (added by migration 5) but value is NULL — falls back to text
       const result = await registry.call(
         'forward_message',
         { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
@@ -333,8 +332,7 @@ describe('chat-management tools', () => {
     });
 
     it('falls back to text when raw_message is null', async () => {
-      db.raw.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
-      // raw_message is NULL for msg1 (not updated)
+      // raw_message is NULL for msg1 (not updated) — column exists from migration 5
       const result = await registry.call(
         'forward_message',
         { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },

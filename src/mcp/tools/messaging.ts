@@ -70,10 +70,12 @@ export function registerMessagingTools(
     schema: z.object({
       chatJid: z.string(),
       text: z.string(),
+      viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
       const text = params['text'] as string;
+      const viewOnce = params['viewOnce'] as boolean | undefined;
 
       const { text: formatted, jids: mentions, hasMentions } = formatMentions(
         text,
@@ -81,11 +83,11 @@ export function registerMessagingTools(
       );
 
       try {
-        if (hasMentions) {
-          await connection.sendRaw(chatJid, { text: formatted, mentions });
-        } else {
-          await connection.sendRaw(chatJid, { text: formatted });
-        }
+        const content: Record<string, unknown> = hasMentions
+          ? { text: formatted, mentions }
+          : { text: formatted };
+        if (viewOnce) content['viewOnce'] = true;
+        await connection.sendRaw(chatJid, content);
       } catch (err) {
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -263,6 +265,7 @@ export function registerMessagingTools(
       longitude: z.number(),
       name: z.string().optional(),
       address: z.string().optional(),
+      viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
@@ -270,16 +273,19 @@ export function registerMessagingTools(
       const longitude = params['longitude'] as number;
       const name = params['name'] as string | undefined;
       const address = params['address'] as string | undefined;
+      const viewOnce = params['viewOnce'] as boolean | undefined;
 
       try {
-        await connection.sendRaw(chatJid, {
+        const content: Record<string, unknown> = {
           location: {
             degreesLatitude: latitude,
             degreesLongitude: longitude,
             name,
             address,
           },
-        });
+        };
+        if (viewOnce) content['viewOnce'] = true;
+        await connection.sendRaw(chatJid, content);
       } catch (err) {
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -307,10 +313,12 @@ export function registerMessagingTools(
         )
         .min(1)
         .describe('One or more contacts to send'),
+      viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
       const contacts = params['contacts'] as Array<{ displayName: string; phone: string }>;
+      const viewOnce = params['viewOnce'] as boolean | undefined;
 
       const contactCards = contacts.map((c) => {
         const digits = c.phone.replace(/\D/g, '');
@@ -323,9 +331,11 @@ export function registerMessagingTools(
         contactCards.length === 1 ? contacts[0].displayName : `${contactCards.length} contacts`;
 
       try {
-        await connection.sendRaw(chatJid, {
+        const content: Record<string, unknown> = {
           contacts: { displayName, contacts: contactCards },
-        });
+        };
+        if (viewOnce) content['viewOnce'] = true;
+        await connection.sendRaw(chatJid, content);
       } catch (err) {
         return { error: err instanceof Error ? err.message : String(err) };
       }

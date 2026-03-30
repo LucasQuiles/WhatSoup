@@ -394,15 +394,15 @@ describe('business tools', () => {
 
   describe('manage_labels', () => {
     describe('add_label action', () => {
-      it('calls addLabel with labels array', async () => {
+      it('calls addLabel with chat_jid and labels array', async () => {
         const labels = [{ id: 'lbl-1', name: 'Important', color: 1 }];
         const result = await registry.call(
           'manage_labels',
-          { action: 'add_label', labels },
+          { action: 'add_label', chat_jid: '111@s.whatsapp.net', labels },
           globalSession(),
         );
         expect(result.isError).toBeUndefined();
-        expect((mockSock as any).addLabel).toHaveBeenCalledWith(labels);
+        expect((mockSock as any).addLabel).toHaveBeenCalledWith('111@s.whatsapp.net', labels);
         const data = JSON.parse(result.content[0].text) as { success: boolean; count: number };
         expect(data.success).toBe(true);
         expect(data.count).toBe(1);
@@ -411,7 +411,7 @@ describe('business tools', () => {
       it('errors when labels array is missing', async () => {
         const result = await registry.call(
           'manage_labels',
-          { action: 'add_label' },
+          { action: 'add_label', chat_jid: '111@s.whatsapp.net' },
           globalSession(),
         );
         expect(result.isError).toBe(true);
@@ -421,10 +421,21 @@ describe('business tools', () => {
       it('errors when labels array is empty', async () => {
         const result = await registry.call(
           'manage_labels',
-          { action: 'add_label', labels: [] },
+          { action: 'add_label', chat_jid: '111@s.whatsapp.net', labels: [] },
           globalSession(),
         );
         expect(result.isError).toBe(true);
+      });
+
+      it('errors when chat_jid is missing for add_label', async () => {
+        const labels = [{ id: 'lbl-1', name: 'Important' }];
+        const result = await registry.call(
+          'manage_labels',
+          { action: 'add_label', labels },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/chat_jid/);
       });
     });
 
@@ -561,7 +572,7 @@ describe('business tools', () => {
       registerBusinessTools(() => null, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call(
         'manage_labels',
-        { action: 'add_label', labels: [{ id: 'lbl-1', name: 'Test' }] },
+        { action: 'add_label', chat_jid: '111@s.whatsapp.net', labels: [{ id: 'lbl-1', name: 'Test' }] },
         globalSession(),
       );
       expect(result.isError).toBe(true);

@@ -97,10 +97,14 @@ describe('advanced tools', () => {
     it('calls createCallLink with all params', async () => {
       await registry.call(
         'create_call_link',
-        { type: 'audio', event: 'meeting', timeoutMs: 3600000 },
+        { type: 'audio', event: { startTime: 1711234567 }, timeoutMs: 3600000 },
         globalSession(),
       );
-      expect((mockSock as any).createCallLink).toHaveBeenCalledWith('audio', 'meeting', 3600000);
+      expect((mockSock as any).createCallLink).toHaveBeenCalledWith(
+        'audio',
+        { startTime: 1711234567 },
+        3600000,
+      );
     });
 
     it('returns the call link result', async () => {
@@ -517,12 +521,12 @@ describe('advanced tools', () => {
     it('calls resyncAppState with collections and isInitialSync', async () => {
       const result = await registry.call(
         'resync_app_state',
-        { collections: ['critical', 'regular_high'], isInitialSync: false },
+        { collections: ['critical_block', 'regular_high'], isInitialSync: false },
         globalSession(),
       );
       expect(result.isError).toBeUndefined();
       expect((mockSock as any).resyncAppState).toHaveBeenCalledWith(
-        ['critical', 'regular_high'],
+        ['critical_block', 'regular_high'],
         false,
       );
     });
@@ -530,16 +534,25 @@ describe('advanced tools', () => {
     it('returns synced: true with collections', async () => {
       const result = await registry.call(
         'resync_app_state',
-        { collections: ['critical'], isInitialSync: true },
+        { collections: ['critical_block'], isInitialSync: true },
         globalSession(),
       );
       const data = JSON.parse(result.content[0].text) as { synced: boolean; collections: string[] };
       expect(data.synced).toBe(true);
-      expect(data.collections).toEqual(['critical']);
+      expect(data.collections).toEqual(['critical_block']);
+    });
+
+    it('rejects invalid collection name', async () => {
+      const result = await registry.call(
+        'resync_app_state',
+        { collections: ['critical'], isInitialSync: false },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
     });
 
     it('requires both collections and isInitialSync (schema validation)', async () => {
-      const result = await registry.call('resync_app_state', { collections: ['critical'] }, globalSession());
+      const result = await registry.call('resync_app_state', { collections: ['critical_block'] }, globalSession());
       expect(result.isError).toBe(true);
     });
 
@@ -548,7 +561,7 @@ describe('advanced tools', () => {
       registerAdvancedTools(() => null, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call(
         'resync_app_state',
-        { collections: ['critical'], isInitialSync: false },
+        { collections: ['critical_block'], isInitialSync: false },
         globalSession(),
       );
       expect(result.isError).toBe(true);
