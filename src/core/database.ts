@@ -195,6 +195,44 @@ CREATE TABLE IF NOT EXISTS recovery_runs (
 );
 `;
 
+// ─── Migration 3: Chat sync tables (Wave 2) ────────────────────────────────
+
+const MIGRATION_3 = `
+CREATE TABLE IF NOT EXISTS chats (
+  jid TEXT PRIMARY KEY,
+  conversation_key TEXT NOT NULL,
+  name TEXT,
+  unread_count INTEGER DEFAULT 0,
+  is_archived INTEGER DEFAULT 0,
+  is_pinned INTEGER DEFAULT 0,
+  mute_until TEXT,
+  ephemeral_duration INTEGER,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chats_conversation_key ON chats(conversation_key);
+
+CREATE TABLE IF NOT EXISTS reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL,
+  conversation_key TEXT NOT NULL,
+  sender_jid TEXT NOT NULL,
+  reaction TEXT NOT NULL,
+  timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(message_id, sender_jid)
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_message_id ON reactions(message_id);
+
+CREATE TABLE IF NOT EXISTS receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL,
+  recipient_jid TEXT NOT NULL,
+  type TEXT NOT NULL,
+  timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(message_id, recipient_jid, type)
+);
+CREATE INDEX IF NOT EXISTS idx_receipts_message_id ON receipts(message_id);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -202,6 +240,7 @@ type MigrationFn = (db: DatabaseSync) => void;
 const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [1, (db: DatabaseSync) => { db.exec(MIGRATION_1); }],
   [2, (db: DatabaseSync) => { db.exec(MIGRATION_2); }],
+  [3, (db: DatabaseSync) => { db.exec(MIGRATION_3); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
