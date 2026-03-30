@@ -19,6 +19,7 @@ import { SessionManager, formatAge } from './session.ts';
 import { OutboundQueue, type ToolUpdate, type ToolCategory } from './outbound-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages } from '../../core/messages.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { extractPhone } from '../../core/access-list.ts';
@@ -514,22 +515,78 @@ export class AgentRuntime implements Runtime {
     const mapKey = this.sandboxPerChat
       ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
       : chatJid;
-    await this.sendTurnToSession(this.chatSessions.get(mapKey)!, chatJid, text);
+    const session = this.chatSessions.get(mapKey);
+    if (!session) {
+      log.warn({ chatJid }, 'no active session for chat — message dropped');
+      return;
+    }
+    await this.sendTurnToSession(session, chatJid, text);
   }
 
   /**
    * Handle events from a per_chat session — routes to that chat's outbound queue.
+   * Resolves queue and session locally from the mapKey to avoid mutating shared
+   * instance fields that another concurrent chat could overwrite.
    */
-  private handleEventPerChat(chatJid: string, event: AgentEvent): void {
-    const queue = this.chatQueues.get(chatJid);
+  private handleEventPerChat(mapKey: string, event: AgentEvent): void {
+    const queue = this.chatQueues.get(mapKey);
     if (!queue) return;
+    const session = this.chatSessions.get(mapKey) ?? null;
+    this.handleEventWithContext(event, queue, session);
+  }
 
-    // Reuse the main handleEvent logic by temporarily setting context
-    this.currentTurnChatJid = chatJid;
-    this.activeChatJid = chatJid;
-    this.queue = queue;
-    this.session = this.chatSessions.get(chatJid) ?? null;
-    this.handleEvent(event);
+  /**
+   * Core event handler that operates on explicitly-passed queue and session
+   * references rather than shared instance fields. Used by handleEventPerChat
+   * so concurrent per_chat events do not overwrite each other's context.
+   */
+  private handleEventWithContext(event: AgentEvent, queue: OutboundQueue, session: SessionManager | null): void {
+    switch (event.type) {
+      case 'init':
+        log.debug({ sessionId: event.sessionId }, 'session init');
+        break;
+
+      case 'assistant_text':
+        session?.tickWatchdog();
+        queue.enqueueText(event.text);
+        break;
+
+      case 'tool_use':
+        session?.tickWatchdog();
+        queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
+        break;
+
+      case 'compact_boundary':
+        session?.tickWatchdog();
+        queue.indicateTyping();
+        queue.enqueueText(
+          'Context compacted — older details summarized. Restate any important context I should carry forward.',
+        );
+        break;
+
+      case 'tool_result':
+        session?.tickWatchdog();
+        if (event.isError) {
+          const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
+          log.warn({ toolId: event.toolId, error: errorPreview }, 'tool error reported by agent');
+          queue.enqueueToolUpdate({ category: 'error', detail: 'Tool Error' });
+        }
+        break;
+
+      case 'result':
+        session?.clearTurnWatchdog();
+        if (event.text) {
+          queue.enqueueText(event.text);
+        }
+        queue.flush().catch((err) => log.error({ err }, 'flush failed'));
+        break;
+
+      case 'ignored':
+      case 'unknown':
+      case 'parse_error':
+        log.debug({ event }, 'ignored/unknown/parse_error event');
+        break;
+    }
   }
 
   /** Pop and return the pending startup notification (set during resume), or null. */
@@ -861,7 +918,7 @@ export class AgentRuntime implements Runtime {
         // context injection wrapped in turnChain to preserve serialization
         this.turnChain = this.turnChain.then(async () => {
           try {
-            const recent = getRecentMessages(this.db, chatJid, 30);
+            const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
             if (recent.length > 0) {
               const lines = recent
                 .reverse()

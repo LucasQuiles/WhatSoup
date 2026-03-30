@@ -38,11 +38,18 @@ export class WhatSoupSocketServer {
       // File didn't exist — that's fine
     }
 
+    const MAX_BUF = 1_024 * 1_024; // 1 MB — prevent memory DoS from no-newline streams
+
     this.server = createServer((socket) => {
       let buf = '';
 
       socket.on('data', (chunk) => {
         buf += chunk.toString();
+        if (buf.length > MAX_BUF) {
+          log.warn('buffer exceeded 1 MB limit — closing connection');
+          socket.destroy();
+          return;
+        }
         const lines = buf.split('\n');
         // Last element may be an incomplete line — keep it in the buffer
         buf = lines.pop() ?? '';
@@ -72,7 +79,7 @@ export class WhatSoupSocketServer {
                 log.error({ err }, 'failed to write response');
               }
             }
-          });
+          }).catch(err => log.error({ err }, 'request handler failed'));
         }
       });
 
@@ -94,6 +101,11 @@ export class WhatSoupSocketServer {
     if (this.server) {
       this.server.close();
       this.server = null;
+      try {
+        unlinkSync(this.socketPath);
+      } catch {
+        // Already gone — that's fine
+      }
     }
   }
 

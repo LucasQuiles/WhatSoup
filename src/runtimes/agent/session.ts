@@ -159,6 +159,16 @@ export class SessionManager {
 
     log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null }, 'spawned claude process');
 
+    // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
+    child.on('error', (err) => {
+      log.error({ err, chatJid: this.chatJid }, 'claude process spawn error');
+      // Clean up session state as if the process crashed
+      this.clearTurnWatchdog();
+      this.active = false;
+      this.child = null;
+      this.sessionId = null;
+    });
+
     // Pipe stdout through line parser
     child.stdout.on('data', (chunk: Buffer) => {
       this.stdoutBuffer += chunk.toString('utf8');
