@@ -1,0 +1,15 @@
+[Unit]
+Description=WhatSoup %i
+Wants=graphical-session.target network-online.target
+After=graphical-session.target network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/home/q/.local/bin/whatsoup %i
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=graphical-session.target

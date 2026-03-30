@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# WhatSoup — multi-instance wrapper
+# Usage: whatsoup <instance-name>
+#
+# Agent instances (type: "agent") use Claude Code's native auth (Max/Pro subscription).
+# Chat instances (type: "chat") use API keys from GNOME Keyring.
+
+INSTANCE="${1:?Usage: whatsoup <instance-name>}"
+
+# Pinned Node path (DES-007: don't rely on PATH in user units)
+NODE=/home/q/.nvm/versions/node/v24.13.0/bin/node
+
+# Ensure PATH includes locations needed by agent instances (claude CLI, tools)
+export PATH="/home/q/.local/bin:/home/q/.nvm/versions/node/v24.13.0/bin:$PATH"
+
+# Detect instance type from instance.json (whatsoup-instances namespace)
+XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+INSTANCE_JSON="$XDG_CONFIG/whatsoup-instances/$INSTANCE/instance.json"
+INSTANCE_TYPE="chat"
+if [ -f "$INSTANCE_JSON" ]; then
+  INSTANCE_TYPE="$($NODE -e "process.stdout.write(JSON.parse(require('fs').readFileSync('$INSTANCE_JSON','utf8')).type ?? 'chat')")"
+fi
+
+if [ "$INSTANCE_TYPE" = "chat" ]; then
+  # Chat instances need API keys for direct LLM calls
+  ANTHROPIC_API_KEY="$(secret-tool lookup service anthropic)" || true
+  OPENAI_API_KEY="$(secret-tool lookup service openai)" || true
+  PINECONE_API_KEY="$(secret-tool lookup service pinecone)" || true
+
+  fail_if_empty() {
+    local name="$1" val="$2"
+    if [ -z "$val" ]; then
+      echo "FATAL: $name is empty or missing from GNOME Keyring" >&2
+      echo "  Fix: secret-tool store --label='$name' service $name <<<'YOUR_KEY'" >&2
+      exit 1
+    fi
+  }
+
+  fail_if_empty "anthropic" "$ANTHROPIC_API_KEY"
+  fail_if_empty "openai" "$OPENAI_API_KEY"
+  fail_if_empty "pinecone" "$PINECONE_API_KEY"
+
+  export ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY
+else
+  # Agent instances use Claude Code's native auth — do NOT export ANTHROPIC_API_KEY
+  # to avoid overriding the subscription-based billing
+  unset ANTHROPIC_API_KEY 2>/dev/null || true
+fi
+
+exec "$NODE" \
+  --disable-warning=ExperimentalWarning \
+  --experimental-strip-types \
+  /home/q/LAB/WhatSoup/src/bootstrap.ts "$INSTANCE"

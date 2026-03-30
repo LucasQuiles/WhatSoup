@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# WhatSoup Auth — multi-instance auth CLI
+# Usage: whatsoup-auth <instance-name>
+
+INSTANCE="${1:?Usage: whatsoup-auth <instance-name>}"
+NODE=/home/q/.nvm/versions/node/v24.13.0/bin/node
+
+exec "$NODE" \
+  --disable-warning=ExperimentalWarning \
+  --experimental-strip-types \
+  /home/q/LAB/WhatSoup/src/bootstrap-auth.ts "$INSTANCE"
