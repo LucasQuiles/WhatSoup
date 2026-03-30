@@ -72,6 +72,8 @@ export interface TransportEvents {
   newsletterView: (data: unknown) => void;
   newsletterParticipantsUpdate: (data: unknown) => void;
   newsletterSettingsUpdate: (data: unknown) => void;
+  labelsEdit: (labels: Array<{ id: string; name: string; color?: number; predefinedId?: string }>) => void;
+  labelsAssociation: (data: { labelId: string; type: string; chatJid?: string; messageId?: string; operation?: 'add' | 'remove' }) => void;
 }
 
 // Typed event emitter augmentation
@@ -516,6 +518,33 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         const data = events['newsletter-settings.update'];
         this.log.info({ data }, 'newsletter settings update received');
         this.emit('newsletterSettingsUpdate', data);
+      }
+
+      if (events['labels.edit']) {
+        const labels = events['labels.edit'] as unknown as Array<{
+          id: string;
+          name: string;
+          color?: number;
+          predefinedId?: string;
+        }>;
+        this.log.info({ count: labels.length }, 'labels edit received');
+        this.emit('labelsEdit', labels);
+      }
+
+      if (events['labels.association']) {
+        const raw = events['labels.association'] as {
+          association?: { labelId?: string; type?: string; chatId?: string; messageId?: string };
+          type?: 'add' | 'remove';
+        };
+        const labelId = raw?.association?.labelId ?? '';
+        const assocType = raw?.association?.type ?? 'chat';
+        const chatJid = raw?.association?.chatId;
+        const messageId = raw?.association?.messageId;
+        const operation: 'add' | 'remove' = raw?.type === 'remove' ? 'remove' : 'add';
+        if (labelId) {
+          this.log.info({ labelId, assocType, chatJid, messageId, operation }, 'labels association received');
+          this.emit('labelsAssociation', { labelId, type: assocType, chatJid, messageId, operation });
+        }
       }
     });
   }
