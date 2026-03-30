@@ -101,6 +101,8 @@ export interface IOutboundQueue {
   flush(): Promise<void>;
   shutdown(): Promise<void>;
   abortTurn(): void;
+  /** The chat JID this queue is currently targeting. */
+  readonly targetChatJid: string;
   /** Retarget all subsequent sends to a different JID variant. */
   updateDeliveryJid(jid: string): void;
   /** Set the current inbound seq so outbound ops can link back to inbound events. */
@@ -116,6 +118,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   private readonly messenger: Messenger;
   private chatJid: string;
+  private cachedConversationKey: string;
   private durability: DurabilityEngine | undefined;
   /** inbound_events.seq for the current turn — threaded to outbound ops as sourceInboundSeq */
   private currentInboundSeq: number | undefined;
@@ -146,6 +149,7 @@ export class OutboundQueue implements IOutboundQueue {
   constructor(messenger: Messenger, chatJid: string) {
     this.messenger = messenger;
     this.chatJid = chatJid;
+    this.cachedConversationKey = toConversationKey(chatJid);
   }
 
   /** Attach an optional DurabilityEngine to track outbound ops. */
@@ -153,7 +157,6 @@ export class OutboundQueue implements IOutboundQueue {
     this.durability = engine;
   }
 
-  /** Set the current inbound seq so outbound ops can link back to inbound events. */
   setInboundSeq(seq: number | undefined): void {
     this.currentInboundSeq = seq;
   }
@@ -233,9 +236,12 @@ export class OutboundQueue implements IOutboundQueue {
     this.abortTyping();
   }
 
+  get targetChatJid(): string { return this.chatJid; }
+
   /** Retarget all subsequent sends to a different JID variant. */
   updateDeliveryJid(jid: string): void {
     this.chatJid = jid;
+    this.cachedConversationKey = toConversationKey(jid);
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
@@ -353,13 +359,12 @@ export class OutboundQueue implements IOutboundQueue {
     // Create an outbound op before first attempt (if durability is wired)
     let opId: number | undefined;
     if (this.durability) {
-      const conversationKey = toConversationKey(this.chatJid);
       opId = this.durability.createOutboundOp({
-        conversationKey,
+        conversationKey: this.cachedConversationKey,
         chatJid: this.chatJid,
         opType: 'text',
         payload: JSON.stringify({ text }),
-        replayPolicy: 'unsafe', // agent responses are unsafe to replay
+        replayPolicy: 'unsafe',
         sourceInboundSeq: this.currentInboundSeq,
       });
       this.lastOpId = opId;

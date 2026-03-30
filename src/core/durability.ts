@@ -1,8 +1,17 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
+import type { Messenger } from './types.ts';
+import { toConversationKey } from './conversation-key.ts';
 
 const log = createChildLogger('durability');
+
+// ── Status string unions ──
+
+export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
+export type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
+export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
+export type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'replayed' | 'quarantined';
 
 // ── SQLite row interfaces ──
 
@@ -106,6 +115,17 @@ export class DurabilityEngine {
     ).run(reason, seq);
   }
 
+  /** Transition inbound event: processing → turn_done → complete. */
+  completeInbound(seq: number, reason: string): void {
+    const row = this.db.raw.prepare(
+      `SELECT processing_status FROM inbound_events WHERE seq = ?`,
+    ).get(seq) as { processing_status: string } | undefined;
+    if (row?.processing_status === 'processing') {
+      this.markTurnDone(seq);
+    }
+    this.markInboundComplete(seq, reason);
+  }
+
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
     const hash = createHash('sha256').update(params.payload).digest('hex');
@@ -140,14 +160,7 @@ export class DurabilityEngine {
       `SELECT source_inbound_seq, is_terminal FROM outbound_ops WHERE id = ?`,
     ).get(id) as { source_inbound_seq: number | null; is_terminal: number } | undefined;
     if (row?.is_terminal && row.source_inbound_seq) {
-      // Ensure proper state transition: processing → turn_done → complete
-      const inbound = this.db.raw.prepare(
-        `SELECT processing_status FROM inbound_events WHERE seq = ?`,
-      ).get(row.source_inbound_seq) as { processing_status: string } | undefined;
-      if (inbound?.processing_status === 'processing') {
-        this.markTurnDone(row.source_inbound_seq);
-      }
-      this.markInboundComplete(row.source_inbound_seq, 'response_sent');
+      this.completeInbound(row.source_inbound_seq, 'response_sent');
     }
   }
 
@@ -324,7 +337,7 @@ export class DurabilityEngine {
       const sending = this.getOutboundByStatus('sending');
       for (const op of sending) {
         this.markMaybeSent(op.id, 'crash-in-flight');
-        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+        stats.outboundReconciled += 1;
         log.info({ opId: op.id }, 'preConnectRecovery: promoted sending → maybe_sent');
       }
     } catch (err) {
@@ -345,7 +358,7 @@ export class DurabilityEngine {
       }>;
 
       for (const tc of executingCalls) {
-        stats.toolCallsRecovered = (stats.toolCallsRecovered ?? 0) + 1;
+        stats.toolCallsRecovered += 1;
         if (tc.outbound_op_id != null) {
           // Delegate to outbound reconciliation — the op was already promoted to
           // maybe_sent above (or was already in a terminal state). No additional
@@ -355,11 +368,10 @@ export class DurabilityEngine {
             'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
           );
         } else if (tc.replay_policy === 'safe' || tc.replay_policy === 'read_only') {
-          // Mark as replayed — safe to re-execute on next run
           this.db.raw.prepare(
             `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
           ).run(tc.id);
-          stats.toolCallsReplayed = (stats.toolCallsReplayed ?? 0) + 1;
+          stats.toolCallsReplayed += 1;
           log.info(
             { toolCallId: tc.id, toolName: tc.tool_name },
             'preConnectRecovery: safe/read_only tool call marked as replayed',
@@ -369,7 +381,7 @@ export class DurabilityEngine {
           this.db.raw.prepare(
             `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
           ).run(tc.id);
-          stats.toolCallsQuarantined = (stats.toolCallsQuarantined ?? 0) + 1;
+          stats.toolCallsQuarantined += 1;
           log.warn(
             { toolCallId: tc.id, toolName: tc.tool_name, replayPolicy: tc.replay_policy },
             'preConnectRecovery: unsafe tool call quarantined',
@@ -449,7 +461,7 @@ export class DurabilityEngine {
       ).all() as Array<{ id: number }>;
       for (const op of staleSubmitted) {
         this.markMaybeSent(op.id, 'stale-submitted-no-echo');
-        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+        stats.outboundReconciled += 1;
         log.info(
           { opId: op.id },
           'postConnectRecovery: stale submitted (no echo) promoted to maybe_sent',
@@ -463,7 +475,7 @@ export class DurabilityEngine {
     try {
       const maybeSent = this.getOutboundByStatus('maybe_sent');
       for (const op of maybeSent) {
-        stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;
+        stats.outboundReconciled += 1;
 
         if (op.wa_message_id) {
           // Check if message was received via normal ingest (echo confirmation)
@@ -482,14 +494,14 @@ export class DurabilityEngine {
             this.db.raw.prepare(
               `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
             ).run(op.id);
-            stats.outboundReplayed = (stats.outboundReplayed ?? 0) + 1;
+            stats.outboundReplayed += 1;
             log.info(
               { opId: op.id },
               'postConnectRecovery: maybe_sent not confirmed, safe/read_only → reset to pending for replay',
             );
           } else {
             this.markQuarantined(op.id);
-            stats.outboundQuarantined = (stats.outboundQuarantined ?? 0) + 1;
+            stats.outboundQuarantined += 1;
             log.warn(
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
@@ -501,14 +513,14 @@ export class DurabilityEngine {
             this.db.raw.prepare(
               `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
             ).run(op.id);
-            stats.outboundReplayed = (stats.outboundReplayed ?? 0) + 1;
+            stats.outboundReplayed += 1;
             log.info(
               { opId: op.id },
               'postConnectRecovery: maybe_sent (no wa_message_id), safe/read_only → reset to pending',
             );
           } else {
             this.markQuarantined(op.id);
-            stats.outboundQuarantined = (stats.outboundQuarantined ?? 0) + 1;
+            stats.outboundQuarantined += 1;
             log.warn(
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
@@ -535,17 +547,15 @@ export class DurabilityEngine {
    * Returns the number of ops promoted.
    */
   sweepStaleSubmitted(): number {
-    const stale = this.db.raw.prepare(
-      `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
-    ).all() as Array<{ id: number }>;
-    for (const { id } of stale) {
-      this.markMaybeSent(id, 'echo_timeout');
-      log.info({ opId: id }, 'sweepStaleSubmitted: submitted → maybe_sent (echo_timeout)');
+    const result = this.db.raw.prepare(
+      `UPDATE outbound_ops SET status = 'maybe_sent', error = 'echo_timeout'
+       WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
+    ).run();
+    const count = Number(result.changes);
+    if (count > 0) {
+      log.warn({ count }, 'sweepStaleSubmitted: promoted stale submitted ops');
     }
-    if (stale.length > 0) {
-      log.warn({ count: stale.length }, 'sweepStaleSubmitted: promoted stale submitted ops');
-    }
-    return stale.length;
+    return count;
   }
 
   /**
@@ -574,5 +584,43 @@ export class DurabilityEngine {
     } catch (err) {
       log.warn({ err, trigger }, 'logRecoveryRun: failed to insert recovery run');
     }
+  }
+}
+
+/**
+ * Send a message and record it as an outbound op with full durability wiring.
+ * Shared helper extracted from admin.ts, health.ts, and chat runtime.
+ */
+export async function sendTracked(
+  messenger: Messenger,
+  chatJid: string,
+  text: string,
+  durability: DurabilityEngine | undefined,
+  opts: { replayPolicy: 'safe' | 'unsafe' | 'read_only'; isTerminal?: boolean; sourceInboundSeq?: number },
+): Promise<void> {
+  let opId: number | undefined;
+  if (durability) {
+    const conversationKey = toConversationKey(chatJid);
+    opId = durability.createOutboundOp({
+      conversationKey,
+      chatJid,
+      opType: 'text',
+      payload: JSON.stringify({ text }),
+      replayPolicy: opts.replayPolicy,
+      sourceInboundSeq: opts.sourceInboundSeq,
+      isTerminal: opts.isTerminal,
+    });
+    durability.markSending(opId);
+  }
+  try {
+    const receipt = await messenger.sendMessage(chatJid, text);
+    if (opId !== undefined && durability) {
+      durability.markSubmitted(opId, receipt.waMessageId);
+    }
+  } catch (err) {
+    if (opId !== undefined && durability) {
+      durability.markMaybeSent(opId, (err as Error)?.message ?? 'send_failed');
+    }
+    throw err;
   }
 }

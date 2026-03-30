@@ -559,8 +559,8 @@ export class AgentRuntime implements Runtime {
     const queue = this.chatQueues.get(mapKey);
     if (!queue) return;
     const session = this.chatSessions.get(mapKey) ?? null;
-    // Derive conversationKey from chatJid (mapKey may be workspaceKey, but chatJid is on the queue)
-    const conversationKey = toConversationKey(mapKey);
+    // Use queue.targetChatJid — mapKey may be a workspaceKey (not a raw JID) when sandboxPerChat=true
+    const conversationKey = toConversationKey(queue.targetChatJid);
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0]; // peek — don't shift yet
     if (event.type === 'result') {
@@ -613,17 +613,14 @@ export class AgentRuntime implements Runtime {
         if (event.text) {
           queue.enqueueText(event.text);
         }
-        // Checkpoint: clear active turn
         if (this.durability && conversationKey) {
           this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
         }
-        // Advance inbound event state machine: processing → turn_done → complete
         if (this.durability && inboundSeq !== undefined) {
-          this.durability.markTurnDone(inboundSeq);
-          this.durability.markInboundComplete(inboundSeq, 'response_sent');
+          this.durability.completeInbound(inboundSeq, 'response_sent');
         }
         // Defense-in-depth: mark last op terminal so echo auto-complete fires if
-        // the process crashes after send but before markInboundComplete runs.
+        // the process crashes after send but before completeInbound runs.
         queue.markLastTerminal();
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
@@ -839,16 +836,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         cwd: workspacePath,  // scoped cwd instead of this.cwd
         onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
-        onCrash: () => {
-          this.chatQueues.get(workspaceKey)?.abortTurn();
-          // Mark inbound event failed so it doesn't stay stuck in processing
-          const crashSeqQueue = this.perChatInboundSeqQueue.get(workspaceKey) ?? [];
-          const inboundSeq = crashSeqQueue[0];
-          if (this.durability && inboundSeq !== undefined) {
-            this.durability.markInboundFailed(inboundSeq);
-            crashSeqQueue.shift();
-          }
-        },
+        onCrash: () => this.handlePerChatCrash(workspaceKey),
         notifyUser: (msg) => {
           this.chatSessions.delete(workspaceKey);
           this.chatQueues.get(workspaceKey)?.abortTurn();
@@ -893,16 +881,7 @@ export class AgentRuntime implements Runtime {
           chatJid,
           cwd: this.cwd,
           onEvent: (event) => this.handleEventPerChat(chatJid, event),
-          onCrash: () => {
-            this.chatQueues.get(chatJid)?.abortTurn();
-            // Mark inbound event failed so it doesn't stay stuck in processing
-            const crashSeqQueue = this.perChatInboundSeqQueue.get(chatJid) ?? [];
-            const inboundSeq = crashSeqQueue[0];
-            if (this.durability && inboundSeq !== undefined) {
-              this.durability.markInboundFailed(inboundSeq);
-              crashSeqQueue.shift();
-            }
-          },
+          onCrash: () => this.handlePerChatCrash(chatJid),
           notifyUser: (msg) => {
             // Remove crashed session so next message spawns a fresh one
             this.chatSessions.delete(chatJid);
@@ -962,6 +941,16 @@ export class AgentRuntime implements Runtime {
       const q = new OutboundQueue(this.messenger, chatJid);
       if (this.durability) q.setDurability(this.durability);
       this.outboundQueues.set(chatJid, q);
+    }
+  }
+
+  private handlePerChatCrash(mapKey: string): void {
+    this.chatQueues.get(mapKey)?.abortTurn();
+    const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+    const inboundSeq = seqQueue[0];
+    if (this.durability && inboundSeq !== undefined) {
+      this.durability.markInboundFailed(inboundSeq);
+      seqQueue.shift();
     }
   }
 
@@ -1094,21 +1083,17 @@ export class AgentRuntime implements Runtime {
           queue.enqueueText('_(no response)_');
         }
         this.turnHadVisibleOutput = false;
-        // Clear turn ownership after result
         this.currentTurnChatJid = null;
-        // Checkpoint: clear active turn
         if (this.durability && this.activeChatJid) {
           const conversationKey = toConversationKey(this.activeChatJid);
           this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
         }
-        // Advance inbound event state machine: processing → turn_done → complete
         if (this.durability && this.currentInboundSeq !== undefined) {
-          this.durability.markTurnDone(this.currentInboundSeq);
-          this.durability.markInboundComplete(this.currentInboundSeq, 'response_sent');
+          this.durability.completeInbound(this.currentInboundSeq, 'response_sent');
           this.currentInboundSeq = undefined;
         }
         // Defense-in-depth: mark last op terminal so echo auto-complete fires if
-        // the process crashes after send but before markInboundComplete runs.
+        // the process crashes after send but before completeInbound runs.
         queue.markLastTerminal();
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;

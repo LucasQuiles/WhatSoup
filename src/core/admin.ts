@@ -6,43 +6,9 @@ import type { SubjectType } from './access-list.ts';
 import { getMessagesBySender } from './messages.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
-import { toConversationKey } from './conversation-key.ts';
+import { sendTracked } from './durability.ts';
 
 const log = createChildLogger('admin');
-
-// ---------------------------------------------------------------------------
-// handleAdminCommand
-// ---------------------------------------------------------------------------
-
-/** Send a message and record it as an outbound op if durability is provided. */
-async function sendTracked(
-  messenger: Messenger,
-  chatJid: string,
-  text: string,
-  durability?: DurabilityEngine,
-): Promise<void> {
-  let opId: number | undefined;
-  if (durability) {
-    const conversationKey = toConversationKey(chatJid);
-    opId = durability.createOutboundOp({
-      conversationKey, chatJid, opType: 'text',
-      payload: JSON.stringify({ text }), replayPolicy: 'safe',
-      isTerminal: true,
-    });
-    durability.markSending(opId);
-  }
-  try {
-    const receipt = await messenger.sendMessage(chatJid, text);
-    if (opId !== undefined && durability) {
-      durability.markSubmitted(opId, receipt.waMessageId);
-    }
-  } catch (err) {
-    if (opId !== undefined && durability) {
-      durability.markMaybeSent(opId, (err as Error)?.message ?? 'send_failed');
-    }
-    throw err;
-  }
-}
 
 export async function handleAdminCommand(
   db: Database,
@@ -59,7 +25,7 @@ export async function handleAdminCommand(
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' });
 
     if (subjectType === 'phone') {
-      await sendTracked(messenger, adminChatJid, `Got it, allowed +${subjectId}`, durability);
+      await sendTracked(messenger, adminChatJid, `Got it, allowed +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
 
       // Replay queued messages: try both JID formats
       const jidFormats = [`${subjectId}@s.whatsapp.net`, `${subjectId}@lid`];
@@ -85,16 +51,16 @@ export async function handleAdminCommand(
       }
     } else {
       // group subject
-      await sendTracked(messenger, adminChatJid, `Got it, allowed group ${subjectId}`, durability);
+      await sendTracked(messenger, adminChatJid, `Got it, allowed group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
   } else {
     updateAccess(db, subjectType, subjectId, 'blocked');
     log.info({ subjectType, subjectId, action: 'blocked_by_admin' });
 
     if (subjectType === 'phone') {
-      await sendTracked(messenger, adminChatJid, `Blocked +${subjectId}`, durability);
+      await sendTracked(messenger, adminChatJid, `Blocked +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     } else {
-      await sendTracked(messenger, adminChatJid, `Blocked group ${subjectId}`, durability);
+      await sendTracked(messenger, adminChatJid, `Blocked group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
   }
 }
@@ -136,7 +102,7 @@ export async function sendApprovalRequest(
     `New contact: ${displayName} (+${phone})\nMessage: "${preview}"\nReply ALLOW ${phone} or BLOCK ${phone}`;
 
   const adminJid = resolveAdminChatJid(db);
-  await sendTracked(messenger, adminJid, text, durability);
+  await sendTracked(messenger, adminJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
   log.info({ phone, displayName, adminJid, action: 'approval_requested' });
 }

@@ -5,6 +5,7 @@ import type { LLMProvider, GenerateRequest, ChatMessage } from './providers/type
 import type { PineconeMemory } from './providers/pinecone.ts';
 import type { Runtime } from '../types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
+import { sendTracked } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
 import { recordResponse } from './rate-limits-db.ts';
@@ -134,20 +135,7 @@ export class ChatRuntime implements Runtime {
 
         log.info({ traceId, senderJid: msg.senderJid }, 'rate limit hit — sending notice');
         try {
-          const rateLimitText = 'chill, I need a minute';
-          let rateLimitOpId: number | undefined;
-          if (this.durability) {
-            const conversationKey = toConversationKey(msg.chatJid);
-            rateLimitOpId = this.durability.createOutboundOp({
-              conversationKey, chatJid: msg.chatJid, opType: 'text',
-              payload: JSON.stringify({ text: rateLimitText }), replayPolicy: 'unsafe',
-            });
-            this.durability.markSending(rateLimitOpId);
-          }
-          const receipt = await this.messenger.sendMessage(msg.chatJid, rateLimitText);
-          if (rateLimitOpId !== undefined && this.durability) {
-            this.durability.markSubmitted(rateLimitOpId, receipt.waMessageId);
-          }
+          await sendTracked(this.messenger, msg.chatJid, 'chill, I need a minute', this.durability, { replayPolicy: 'unsafe' });
         } catch (err) {
           log.error({ traceId, err, chatJid: msg.chatJid }, 'failed to send rate limit notice');
         }
@@ -284,21 +272,7 @@ export class ChatRuntime implements Runtime {
     // 8. On total failure: send fallback message (not stored, not rate-limited)
     if (!responseText) {
       try {
-        const failText = 'lol my brain just broke, give me a sec';
-        let failOpId: number | undefined;
-        if (this.durability) {
-          const conversationKey = toConversationKey(msg.chatJid);
-          failOpId = this.durability.createOutboundOp({
-            conversationKey, chatJid: msg.chatJid, opType: 'text',
-            payload: JSON.stringify({ text: failText }), replayPolicy: 'unsafe',
-            isTerminal: true,
-          });
-          this.durability.markSending(failOpId);
-        }
-        const receipt = await this.messenger.sendMessage(msg.chatJid, failText);
-        if (failOpId !== undefined && this.durability) {
-          this.durability.markSubmitted(failOpId, receipt.waMessageId);
-        }
+        await sendTracked(this.messenger, msg.chatJid, 'lol my brain just broke, give me a sec', this.durability, { replayPolicy: 'unsafe', isTerminal: true });
       } catch (fallbackSendErr) {
         log.error({ traceId, err: fallbackSendErr, chatJid: msg.chatJid }, 'failed to send fallback message');
       }
@@ -348,8 +322,7 @@ export class ChatRuntime implements Runtime {
 
     // Advance inbound event state machine on successful send
     if (sendSucceeded && this.durability && msg.inboundSeq !== undefined) {
-      this.durability.markTurnDone(msg.inboundSeq);
-      this.durability.markInboundComplete(msg.inboundSeq, 'response_sent');
+      this.durability.completeInbound(msg.inboundSeq, 'response_sent');
     }
 
     // 10. Bot reply storage: handled by the Baileys messages.upsert echo

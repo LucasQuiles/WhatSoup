@@ -6,7 +6,7 @@ import { getMessageCount } from './messages.ts';
 import { getPendingCount } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
-import { toConversationKey } from './conversation-key.ts';
+import { sendTracked } from './durability.ts';
 
 const log = createChildLogger('health');
 
@@ -56,31 +56,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             res.end(JSON.stringify({ ok: false, error: 'chatJid and text are required' }));
             return;
           }
-          let opId: number | undefined;
-          if (deps.durability) {
-            try {
-              const conversationKey = toConversationKey(chatJid);
-              opId = deps.durability.createOutboundOp({
-                conversationKey, chatJid, opType: 'text',
-                payload: JSON.stringify({ text }), replayPolicy: 'unsafe',
-              });
-              deps.durability.markSending(opId);
-            } catch (durErr) {
-              log.warn({ durErr, chatJid }, 'POST /send: failed to create outbound op');
-            }
-          }
-          deps.connectionManager.sendMessage(chatJid, text)
-            .then((receipt) => {
-              if (opId !== undefined && deps.durability) {
-                deps.durability.markSubmitted(opId, receipt.waMessageId);
-              }
+          sendTracked(deps.connectionManager, chatJid, text, deps.durability, { replayPolicy: 'unsafe' })
+            .then(() => {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ ok: true }));
             })
             .catch((err) => {
-              if (opId !== undefined && deps.durability) {
-                deps.durability.markMaybeSent(opId, (err as Error).message);
-              }
               log.error({ err, chatJid }, 'POST /send failed');
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
