@@ -116,6 +116,27 @@ export class DurabilityEngine {
     return false;
   }
 
+  // ── Tool calls ──
+  recordToolCall(conversationKey: string, toolName: string, toolInput: string, replayPolicy: string, checkpointId?: number): number {
+    const result = this.db.raw.prepare(
+      `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
+       VALUES (?, ?, ?, ?, 'pending', ?)`,
+    ).run(conversationKey, checkpointId ?? null, toolName, toolInput, replayPolicy);
+    const id = Number(result.lastInsertRowid);
+    log.debug({ id, toolName, replayPolicy }, 'recordToolCall');
+    return id;
+  }
+
+  markToolExecuting(id: number): void {
+    this.db.raw.prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`).run(id);
+  }
+
+  markToolComplete(id: number, result: string, outboundOpId?: number): void {
+    this.db.raw.prepare(
+      `UPDATE tool_calls SET status = 'complete', result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
+    ).run(result, outboundOpId ?? null, id);
+  }
+
   // ── Getters for recovery ──
   getPendingInbound(): Array<{ seq: number; message_id: string; processing_status: string; routed_to: string }> {
     return this.db.raw.prepare(

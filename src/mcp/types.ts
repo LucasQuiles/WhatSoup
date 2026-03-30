@@ -20,6 +20,8 @@ export interface ToolDeclaration {
   schema: ZodType;
   scope: ToolScope;
   targetMode: TargetMode;
+  /** Controls how this tool call is replayed on recovery. Defaults to 'unsafe'. */
+  replayPolicy?: 'safe' | 'unsafe' | 'read_only';
   handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
 }
 
