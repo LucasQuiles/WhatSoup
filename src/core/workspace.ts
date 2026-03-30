@@ -12,23 +12,6 @@ export interface WorkspaceInfo {
 }
 
 /**
- * Returns the canonical chat key for a given JID.
- * - DM (@s.whatsapp.net): the phone number
- * - LID (@lid): the numeric ID, stripping any :device qualifier
- * - Group (@g.us): the full JID with '@' replaced by '_at_'
- *
- * Delegates to toConversationKey for consistent canonicalization.
- */
-export function canonicalChatKey(chatJid: string): string {
-  try {
-    return toConversationKey(chatJid);
-  } catch {
-    // Fallback for malformed JIDs
-    return chatJid;
-  }
-}
-
-/**
  * Maps a chat JID to a WorkspaceInfo containing the kind, key, and absolute path.
  * Uses toConversationKey for consistent workspaceKey computation.
  */
@@ -73,6 +56,29 @@ export interface ProvisionOptions {
 }
 
 /**
+ * Write sandbox-policy.json and settings.json into an existing .claude/ directory.
+ * Both files are always overwritten (deterministic).
+ *
+ * @param claudeDir  Absolute path to the .claude/ directory (must already exist).
+ * @param policy     The sandbox policy object to serialise as sandbox-policy.json.
+ * @param hookPath   Absolute path to agent-sandbox.sh wired as the PreToolUse hook.
+ */
+export function writeSandboxArtifacts(
+  claudeDir: string,
+  policy: Record<string, unknown>,
+  hookPath: string,
+): void {
+  writeFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2));
+
+  const settings = {
+    hooks: {
+      PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
+    },
+  };
+  writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
+}
+
+/**
  * Provision (or re-provision) a workspace directory. Returns the WhatSoup socket path.
  * Deterministic — always overwrites existing files.
  */
@@ -80,40 +86,22 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
   const { workspacePath, instanceCwd, sandbox, hookPath, mcpServerPath } = opts;
 
   // 1. Ensure .claude/ directory exists
-  mkdirSync(join(workspacePath, '.claude'), { recursive: true });
+  const claudeDir = join(workspacePath, '.claude');
+  mkdirSync(claudeDir, { recursive: true });
 
-  // 2. Write sandbox-policy.json with workspacePath as the sole allowedPath
+  // 2. Write sandbox-policy.json and settings.json via shared helper
   const sandboxPolicy = {
     allowedPaths: [workspacePath],
     allowedTools: sandbox.allowedTools,
     ...(sandbox.allowedMcpTools !== undefined ? { allowedMcpTools: sandbox.allowedMcpTools } : {}),
     bash: sandbox.bash,
   };
-  writeFileSync(
-    join(workspacePath, '.claude', 'sandbox-policy.json'),
-    JSON.stringify(sandboxPolicy, null, 2),
-  );
+  writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath);
 
-  // 3. Write settings.json with the PreToolUse hook
-  const settings = {
-    hooks: {
-      PreToolUse: [
-        {
-          matcher: '',
-          hooks: [{ type: 'command', command: hookPath }],
-        },
-      ],
-    },
-  };
-  writeFileSync(
-    join(workspacePath, '.claude', 'settings.json'),
-    JSON.stringify(settings, null, 2),
-  );
+  // 3. Compute socket path (whatsoup.sock)
+  const socketPath = join(claudeDir, 'whatsoup.sock');
 
-  // 4. Compute socket path (whatsoup.sock)
-  const socketPath = join(workspacePath, '.claude', 'whatsoup.sock');
-
-  // 5. Write .mcp.json — whatsoup-proxy entry with WHATSOUP_SOCKET env var
+  // 4. Write .mcp.json — whatsoup-proxy entry with WHATSOUP_SOCKET env var
   const mcpConfig = {
     mcpServers: {
       'whatsoup': {
@@ -128,7 +116,7 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
     JSON.stringify(mcpConfig, null, 2),
   );
 
-  // 6. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
+  // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
   const symlinkPath = join(workspacePath, 'CLAUDE.md');
   const symlinkTarget = join(instanceCwd, 'CLAUDE.md');
   try {
@@ -138,6 +126,6 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
   }
   symlinkSync(symlinkTarget, symlinkPath);
 
-  // 7. Return socket path
+  // 6. Return socket path
   return socketPath;
 }

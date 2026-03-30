@@ -14,7 +14,7 @@ import {
   sweepOrphanedSessions,
   getResumableSessionForChat,
 } from './session-db.ts';
-import { chatJidToWorkspace, provisionWorkspace } from '../../core/workspace.ts';
+import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
 import { SessionManager, formatAge } from './session.ts';
 import { OutboundQueue, type ToolUpdate, type ToolCategory } from './outbound-queue.ts';
 import { classifyInput } from './commands.ts';
@@ -204,41 +204,19 @@ export class AgentRuntime implements Runtime {
       const claudeDir = join(cwd, '.claude');
       mkdirSync(claudeDir, { recursive: true });
 
-      // Write deterministic sandbox-policy.json with resolved absolute paths
+      // Resolve allowedPaths to absolute paths before writing
       const resolvedPolicy = {
         ...this.sandbox,
         allowedPaths: this.sandbox.allowedPaths.map(p =>
           p.startsWith('~/') ? join(homedir(), p.slice(2)) : resolve(p),
         ),
       };
-      writeFileSync(
-        join(claudeDir, 'sandbox-policy.json'),
-        JSON.stringify(resolvedPolicy, null, 2),
-      );
-      log.info({ cwd }, 'wrote sandbox-policy.json');
-
-      // Write .claude/settings.json to wire the hook for this cwd and subagents
       const hookPath = resolve(
         new URL('.', import.meta.url).pathname,
         '../../../deploy/hooks/agent-sandbox.sh',
       );
-      const settings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: '',
-              hooks: [
-                {
-                  type: 'command',
-                  command: hookPath,
-                },
-              ],
-            },
-          ],
-        },
-      };
-      writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
-      log.info({ cwd, hookPath }, 'wrote .claude/settings.json');
+      writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath);
+      log.info({ cwd, hookPath }, 'wrote sandbox-policy.json and settings.json');
     }
 
     // Start global WhatSoup socket server (non-sandboxPerChat mode only)
@@ -291,18 +269,13 @@ export class AgentRuntime implements Runtime {
 
       log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
       this.activeChatJid = resumeChatJid;
-      this.session = new SessionManager({
-        db: this.db,
-        messenger: this.messenger,
+      this.session = this.createSessionManager({
         chatJid: resumeChatJid,
+        cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
-        instanceName: this.instanceName,
         onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
         onCrash: () => { this.getActiveQueue()?.abortTurn(); this.turnHadVisibleOutput = false; },
         notifyUser: (msg) => this.handleCrashNotify(msg),
-        cwd: this.cwd,
-        instructionsPath: this.instructionsPath,
-        model: this.model,
       });
 
       if (this.shared) {
@@ -714,6 +687,33 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Construct a SessionManager with all instance-level fields pre-filled.
+   * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
+   */
+  private createSessionManager(opts: {
+    chatJid: string;
+    cwd: string | undefined;
+    onEvent: (event: AgentEvent) => void;
+    onCrash: () => void;
+    notifyUser: (msg: string) => void;
+    onResumeFailed?: () => void;
+  }): SessionManager {
+    return new SessionManager({
+      db: this.db,
+      messenger: this.messenger,
+      chatJid: opts.chatJid,
+      onEvent: opts.onEvent,
+      instanceName: this.instanceName,
+      onResumeFailed: opts.onResumeFailed,
+      onCrash: opts.onCrash,
+      notifyUser: opts.notifyUser,
+      cwd: opts.cwd,
+      instructionsPath: this.instructionsPath,
+      model: this.model,
+    });
+  }
+
+  /**
    * Async variant of session/queue initialization for sandboxPerChat mode.
    * Called only when sandboxPerChat=true so the async/await overhead doesn't
    * affect the microtask ordering of existing non-sandboxPerChat tests.
@@ -757,13 +757,10 @@ export class AgentRuntime implements Runtime {
       const resumable = getResumableSessionForChat(this.db, workspaceKey);
 
       // Create SessionManager with workspace-scoped cwd
-      const session = new SessionManager({
-        db: this.db,
-        messenger: this.messenger,
+      const session = this.createSessionManager({
         chatJid,
+        cwd: workspacePath,  // scoped cwd instead of this.cwd
         onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
-        instanceName: this.instanceName,
-        onResumeFailed: undefined,
         onCrash: () => { this.chatQueues.get(workspaceKey)?.abortTurn(); },
         notifyUser: (msg) => {
           this.chatSessions.delete(workspaceKey);
@@ -771,9 +768,6 @@ export class AgentRuntime implements Runtime {
           this.chatQueues.delete(workspaceKey);
           this.handleCrashNotify(msg);
         },
-        cwd: workspacePath,  // scoped cwd instead of this.cwd
-        instructionsPath: this.instructionsPath,
-        model: this.model,
       });
       this.chatSessions.set(workspaceKey, session);
       this.chatQueues.set(workspaceKey, new OutboundQueue(this.messenger, chatJid));
@@ -806,13 +800,10 @@ export class AgentRuntime implements Runtime {
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per raw chatJid
       if (!this.chatSessions.has(chatJid)) {
-        const session = new SessionManager({
-          db: this.db,
-          messenger: this.messenger,
+        const session = this.createSessionManager({
           chatJid,
+          cwd: this.cwd,
           onEvent: (event) => this.handleEventPerChat(chatJid, event),
-          instanceName: this.instanceName,
-          onResumeFailed: undefined,
           onCrash: () => { this.chatQueues.get(chatJid)?.abortTurn(); },
           notifyUser: (msg) => {
             // Remove crashed session so next message spawns a fresh one
@@ -821,9 +812,6 @@ export class AgentRuntime implements Runtime {
             this.chatQueues.delete(chatJid);
             this.handleCrashNotify(msg);
           },
-          cwd: this.cwd,
-          instructionsPath: this.instructionsPath,
-          model: this.model,
         });
         this.chatSessions.set(chatJid, session);
         this.chatQueues.set(chatJid, new OutboundQueue(this.messenger, chatJid));
@@ -838,18 +826,12 @@ export class AgentRuntime implements Runtime {
     // single/shared: singleton session
     if (!this.session) {
       this.activeChatJid = chatJid;
-      this.session = new SessionManager({
-        db: this.db,
-        messenger: this.messenger,
+      this.session = this.createSessionManager({
         chatJid,
+        cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
-        instanceName: this.instanceName,
-        onResumeFailed: undefined,
         onCrash: () => { this.getActiveQueue()?.abortTurn(); this.turnHadVisibleOutput = false; },
         notifyUser: (msg) => this.handleCrashNotify(msg),
-        cwd: this.cwd,
-        instructionsPath: this.instructionsPath,
-        model: this.model,
       });
       if (this.shared) {
         this.ensureOutboundQueue(chatJid);

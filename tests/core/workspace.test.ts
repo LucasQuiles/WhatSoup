@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { chatJidToWorkspace, canonicalChatKey, provisionWorkspace } from '../../src/core/workspace.ts';
+import { chatJidToWorkspace, provisionWorkspace } from '../../src/core/workspace.ts';
+import { toConversationKey } from '../../src/core/conversation-key.ts';
 import type { ProvisionOptions } from '../../src/core/workspace.ts';
 
 const CWD = '/instances/test-bot';
@@ -42,10 +43,10 @@ describe('chatJidToWorkspace', () => {
   });
 });
 
-describe('canonicalChatKey', () => {
+describe('toConversationKey (LID canonicalization)', () => {
   it('returns same key for @lid with and without :device qualifier', () => {
-    const withDevice = canonicalChatKey('81536414179557:2@lid');
-    const withoutDevice = canonicalChatKey('81536414179557@lid');
+    const withDevice = toConversationKey('81536414179557:2@lid');
+    const withoutDevice = toConversationKey('81536414179557@lid');
     expect(withDevice).toBe(withoutDevice);
     expect(withDevice).toBe('81536414179557');
   });
