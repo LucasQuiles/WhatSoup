@@ -18,6 +18,7 @@ import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt } from '../core/types.ts';
+import { toConversationKey } from '../core/conversation-key.ts';
 import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 
@@ -37,6 +38,12 @@ export interface TransportEvents {
   chatCleared: (jid: string) => void;
   presenceUpdate: (jid: string, status: string, lastSeen?: number) => void;
   callReceived: (callId: string, callFrom: string) => void;
+  groupParticipantsUpdate: (data: {
+    groupJid: string;
+    author: string;
+    participants: string[];
+    action: 'add' | 'remove' | 'promote' | 'demote';
+  }) => void;
   jidAliasChanged: (conversationKey: string, newJid: string) => void;
   historySyncComplete: () => void;
   exhausted: () => void;
@@ -310,13 +317,32 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (events['group-participants.update']) {
         const update = events['group-participants.update'] as any;
-        if (update.action === 'remove') {
-          const botRemoved = (update.participants || []).some(
+        const { id, author, participants, action } = update;
+        this.log.info({ groupJid: id, author, participants, action }, 'group participants update');
+        this.emit('groupParticipantsUpdate', {
+          groupJid: id,
+          author: author ?? '',
+          participants: participants ?? [],
+          action,
+        });
+
+        // Existing bot-removal detection
+        if (action === 'remove') {
+          const botRemoved = (participants || []).some(
             (p: string) => p === this.botJid || p === this.botLid
           );
           if (botRemoved) {
-            this.log.info({ groupJid: update.id }, 'Bot removed from group');
+            this.log.warn({ groupJid: id }, 'bot was removed from group');
           }
+        }
+      }
+
+      if (events['lid-mapping.update']) {
+        const mapping = events['lid-mapping.update'] as { lid?: string; pn?: string };
+        if (mapping.lid && mapping.pn) {
+          const conversationKey = toConversationKey(mapping.lid);
+          this.log.info({ lid: mapping.lid, pn: mapping.pn, conversationKey }, 'LID mapping updated');
+          this.emit('jidAliasChanged', conversationKey, mapping.pn);
         }
       }
 
