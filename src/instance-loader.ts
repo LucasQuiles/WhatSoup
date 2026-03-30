@@ -175,7 +175,8 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
 //
 // XDG paths follow WhatSoup namespace (whatsoup-instances) for config, data,
 // and state roots. Auth dir reads from the shared whatsapp-instances location
-// so no QR re-pairing is needed (auth is shared with whatsapp-bot).
+// so no QR re-pairing is needed (auth state lives under whatsapp-instances/
+// for backward compatibility with existing QR pairings).
 // ---------------------------------------------------------------------------
 
 function resolvePaths(name: string): InstancePaths {
@@ -185,7 +186,7 @@ function resolvePaths(name: string): InstancePaths {
   const dataRoot = path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup-instances', name);
   const stateRoot = path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup-instances', name);
 
-  // Auth dir reads from whatsapp-instances (shared with whatsapp-bot — no QR re-pairing)
+  // Auth dir reads from whatsapp-instances — auth state lives here for backward compatibility with existing QR pairings
   const authDir = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsapp-instances', name, 'auth_info');
 
   return {

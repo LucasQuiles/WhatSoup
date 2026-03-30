@@ -1,7 +1,7 @@
 import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { config } from './config.ts';
+import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
 import logger, { createChildLogger } from './logger.ts';
 import { Database } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
@@ -104,7 +104,7 @@ process.on('exit', () => releaseLock());
 const db = new Database(config.dbPath);
 db.open();
 
-// 2a. Warm-start import: if WhatSoup DB is empty, try importing from legacy whatsapp-bot DB
+// 2a. Warm-start import: if DB is empty, import from legacy instance DB
 {
   const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
   const instanceName = instanceConfig?.name as string | undefined;
@@ -112,7 +112,7 @@ db.open();
     // Check if we have zero messages (first run)
     const msgCount = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM messages').get() as { cnt: number }).cnt;
     if (msgCount === 0) {
-      // Look for legacy whatsapp-bot DB at the old XDG path
+      // Look for legacy DB at the old XDG path
       const xdgData = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share');
       const legacyDbPath = join(xdgData, 'whatsapp-instances', instanceName, 'bot.db');
       if (existsSync(legacyDbPath)) {
@@ -166,7 +166,7 @@ if (instanceType === 'agent') {
   const openai = createOpenAIProvider();
   const pinecone = new PineconeMemory();
   // Disable enrichment for instances using external Pinecone indexes (e.g., besbot)
-  const enableEnrichment = config.pineconeIndex === 'whatsapp-bot';
+  const enableEnrichment = config.pineconeIndex === DEFAULT_PINECONE_INDEX;
   runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, { enableEnrichment });
 }
 

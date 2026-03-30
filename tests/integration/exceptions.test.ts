@@ -320,7 +320,7 @@ describe('Tool handlers with missing or invalid messages', () => {
 
 describe('WhatSoupError construction via Database operations', () => {
   it('Database constructor with bad path → WhatSoupError with DATABASE_ERROR code', () => {
-    // Exercising WhatSoupError directly (same pattern as whatsapp-bot's AppError test)
+    // Exercising WhatSoupError directly
     const cause = new Error('SQLITE: unable to open database');
     const err = new WhatSoupError('Cannot open database at /bad/path/bot.db', 'DATABASE_ERROR', cause);
 

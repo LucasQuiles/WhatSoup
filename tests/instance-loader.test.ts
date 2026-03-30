@@ -12,7 +12,7 @@ let tmpDir: string;
 let savedEnv: Record<string, string | undefined>;
 
 // WhatSoup uses "whatsoup-instances" as the namespace for config/data/state.
-// Auth dir uses "whatsapp-instances" (shared with whatsapp-bot — no re-pairing).
+// Auth dir uses "whatsapp-instances" (shared auth state — no QR re-pairing needed).
 function writeInstance(baseDir: string, name: string, content: unknown): void {
   const instanceDir = path.join(baseDir, 'whatsoup-instances', name);
   fs.mkdirSync(instanceDir, { recursive: true });

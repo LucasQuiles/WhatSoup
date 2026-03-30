@@ -4,6 +4,10 @@ import { homedir } from 'node:os';
 
 const APP_NAME = 'whatsoup';
 
+// Name of the Pinecone index used for the memory/chat search mode.
+// This is an index name (data), not a project reference.
+export const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
+
 export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 
 // ---------------------------------------------------------------------------
@@ -162,11 +166,11 @@ export const config = {
   enrichmentDedupThreshold: 0.95,
 
   // Pinecone
-  pineconeIndex: (instance?.pineconeIndex as string | undefined) ?? process.env.PINECONE_INDEX ?? 'whatsapp-bot',
+  pineconeIndex: (instance?.pineconeIndex as string | undefined) ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX,
   pineconeContextTopK: 10,
   pineconeSenderTopK: 5,
   pineconeSelfFactTopK: 5,
-  pineconeSearchMode: (instance?.pineconeSearchMode ?? ((instance?.pineconeIndex ?? process.env.PINECONE_INDEX ?? 'whatsapp-bot') === 'whatsapp-bot' ? 'memory' : 'entity')) as 'memory' | 'entity',
+  pineconeSearchMode: (instance?.pineconeSearchMode ?? ((instance?.pineconeIndex ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX) === DEFAULT_PINECONE_INDEX ? 'memory' : 'entity')) as 'memory' | 'entity',
   pineconeRerank: (instance?.pineconeRerank as boolean | undefined) ?? false,
   pineconeTopK: (instance?.pineconeTopK as number | undefined) ?? 20,
   pineconeRerankTopN: (instance?.pineconeRerankTopN as number | undefined) ?? 6,

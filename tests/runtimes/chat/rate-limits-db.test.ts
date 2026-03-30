@@ -12,7 +12,7 @@ import {
 } from '../../../src/runtimes/chat/rate-limits-db.ts';
 
 function tempDbPath(): string {
-  return join(tmpdir(), `whatsapp-bot-test-${randomBytes(4).toString('hex')}.db`);
+  return join(tmpdir(), `whatsoup-test-${randomBytes(4).toString('hex')}.db`);
 }
 
 const dbPath = tempDbPath();

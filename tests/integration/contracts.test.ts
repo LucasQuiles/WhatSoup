@@ -1,8 +1,8 @@
 /**
- * Contract Tests — ported from whatsapp-bot/tests/integration/contracts.test.ts
+ * Contract Tests
  *
  * Covers:
- * 1. WhatSoupError contract (was AppError in whatsapp-bot)
+ * 1. WhatSoupError contract
  * 2. Health endpoint shape
  * 3. Sent message contract (uses ConnectionManager.sendMessage)
  */

@@ -22,7 +22,7 @@ vi.mock('../../../src/logger.ts', () => ({
 }));
 
 function tempDbPath(): string {
-  return join(tmpdir(), `whatsapp-bot-agent-test-${randomBytes(4).toString('hex')}.db`);
+  return join(tmpdir(), `whatsoup-agent-test-${randomBytes(4).toString('hex')}.db`);
 }
 
 const dbPath = tempDbPath();
@@ -201,7 +201,7 @@ describe('agent session-db', () => {
   });
 
   it('backfillWorkspaceKeys: root-cwd row is marked ended', () => {
-    const instanceCwd = '/home/q/LAB/whatsapp-bot';
+    const instanceCwd = '/home/q/LAB/WhatSoup';
     // Row started in instance root — pre-isolation shared session
     const id = createSession(db, 20001, instanceCwd, '9990000001@s.whatsapp.net');
     backfillWorkspaceKeys(db, instanceCwd);
@@ -214,11 +214,11 @@ describe('agent session-db', () => {
   });
 
   it('backfillWorkspaceKeys: row under users/ gets workspace_key backfilled', () => {
-    const instanceCwd = '/home/q/LAB/whatsapp-bot';
+    const instanceCwd = '/home/q/LAB/WhatSoup';
     const id = createSession(
       db,
       20002,
-      '/home/q/LAB/whatsapp-bot/users/9990000002',
+      '/home/q/LAB/WhatSoup/users/9990000002',
       '9990000002@s.whatsapp.net',
     );
     backfillWorkspaceKeys(db, instanceCwd);
@@ -231,11 +231,11 @@ describe('agent session-db', () => {
   });
 
   it('backfillWorkspaceKeys: skips rows that already have workspace_key', () => {
-    const instanceCwd = '/home/q/LAB/whatsapp-bot';
+    const instanceCwd = '/home/q/LAB/WhatSoup';
     const id = createSession(
       db,
       20003,
-      '/home/q/LAB/whatsapp-bot/users/9990000003',
+      '/home/q/LAB/WhatSoup/users/9990000003',
       '9990000003@s.whatsapp.net',
       'already-set',
     );

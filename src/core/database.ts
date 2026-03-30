@@ -225,7 +225,7 @@ export class Database {
   }
 
   /**
-   * Import data from a legacy whatsapp-bot database.
+   * Import data from a legacy database (pre-WhatSoup format).
    *
    * The legacy schema has messages WITHOUT conversation_key; this method
    * backfills the column using toConversationKey(chat_jid).
