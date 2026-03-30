@@ -22,6 +22,7 @@ function makeSubscribePresence(getSock: () => WhatsAppSocket | null): ToolDeclar
     schema: SubscribePresenceSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid } = SubscribePresenceSchema.parse(params);
 
@@ -52,6 +53,7 @@ function makeGetPresence(presenceCache: PresenceCache): ToolDeclaration {
     schema: GetPresenceSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { jid } = GetPresenceSchema.parse(params);
 

@@ -28,6 +28,7 @@ function makeListMessages(db: Database): ToolDeclaration {
     schema: ListMessagesSchema,
     scope: 'chat',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params, session: SessionContext) => {
       const { conversation_key: caller_key, limit = 50, before_pk } = ListMessagesSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
@@ -81,6 +82,7 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
     schema: GetMessageContextSchema,
     scope: 'chat',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params, session: SessionContext) => {
       const { message_id, conversation_key: caller_key, context_size = 5 } = GetMessageContextSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
@@ -153,6 +155,7 @@ function makeListChats(db: Database): ToolDeclaration {
     schema: ListChatsSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { limit = 100 } = ListChatsSchema.parse(params);
 
@@ -203,6 +206,7 @@ function makeGetChat(db: Database): ToolDeclaration {
     schema: GetChatSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { conversation_key } = GetChatSchema.parse(params);
 
@@ -257,6 +261,7 @@ function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null):
     schema: ForwardMessageSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'unsafe',
     handler: async (params) => {
       const { message_id, to_jid } = ForwardMessageSchema.parse(params);
 
@@ -299,6 +304,7 @@ function makeArchiveChat(getSock: () => WhatsAppSocket | null): ToolDeclaration 
     schema: ArchiveChatSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, archive } = ArchiveChatSchema.parse(params);
 
@@ -329,6 +335,7 @@ function makePinChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     schema: PinChatSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, pin } = PinChatSchema.parse(params);
 
@@ -361,6 +368,7 @@ function makeMuteChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     schema: MuteChatSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, mute, until } = MuteChatSchema.parse(params);
 
@@ -399,6 +407,7 @@ function makeMarkMessagesRead(getSock: () => WhatsAppSocket | null): ToolDeclara
     schema: MarkMessagesReadSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, message_ids, from_me = false } = MarkMessagesReadSchema.parse(params);
 
@@ -437,6 +446,7 @@ function makeStarMessage(getSock: () => WhatsAppSocket | null): ToolDeclaration 
     schema: StarMessageSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, message_ids, star, from_me = false } = StarMessageSchema.parse(params);
 

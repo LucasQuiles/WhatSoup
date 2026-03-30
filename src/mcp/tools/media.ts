@@ -64,6 +64,7 @@ export function registerMediaTools(
       'Send a media file (image, document, audio, or video) from the local filesystem to the current chat.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
       filePath: z.string(),

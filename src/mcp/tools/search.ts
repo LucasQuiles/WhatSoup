@@ -24,6 +24,7 @@ function makeSearchMessages(db: Database): ToolDeclaration {
     schema: SearchMessagesSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { query, limit = 20 } = SearchMessagesSchema.parse(params);
 
@@ -62,6 +63,7 @@ function makeSearchChatMessages(db: Database): ToolDeclaration {
     schema: SearchChatMessagesSchema,
     scope: 'chat',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params, session: SessionContext) => {
       const { conversation_key: caller_key, query, limit = 20 } = SearchChatMessagesSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
@@ -110,6 +112,7 @@ function makeSearchContacts(db: Database): ToolDeclaration {
     schema: SearchContactsSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { query, limit = 20 } = SearchContactsSchema.parse(params);
 

@@ -22,6 +22,7 @@ function makeGetProfilePicture(getSock: () => WhatsAppSocket | null): ToolDeclar
     schema: GetProfilePictureSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { jid, type = 'preview' } = GetProfilePictureSchema.parse(params);
 
@@ -51,6 +52,7 @@ function makeGetContactStatus(getSock: () => WhatsAppSocket | null): ToolDeclara
     schema: GetContactStatusSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { jid } = GetContactStatusSchema.parse(params);
 
@@ -89,6 +91,7 @@ function makeCheckWhatsApp(getSock: () => WhatsAppSocket | null): ToolDeclaratio
     schema: CheckWhatsAppSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { phone_numbers } = CheckWhatsAppSchema.parse(params);
 
@@ -119,6 +122,7 @@ function makeBlockContact(getSock: () => WhatsAppSocket | null): ToolDeclaration
     schema: BlockContactSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, action } = BlockContactSchema.parse(params);
 

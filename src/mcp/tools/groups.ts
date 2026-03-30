@@ -18,6 +18,7 @@ function makeListGroups(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     schema: ListGroupsSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async () => {
       const sock = getSock();
       if (!sock) {
@@ -47,6 +48,7 @@ function makeGetGroupMetadata(getSock: () => WhatsAppSocket | null): ToolDeclara
     schema: GetGroupMetadataSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { jid } = GetGroupMetadataSchema.parse(params);
 
@@ -77,6 +79,7 @@ function makeGroupUpdateSubject(getSock: () => WhatsAppSocket | null): ToolDecla
     schema: GroupUpdateSubjectSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, subject } = GroupUpdateSubjectSchema.parse(params);
 
@@ -107,6 +110,7 @@ function makeGroupUpdateDescription(getSock: () => WhatsAppSocket | null): ToolD
     schema: GroupUpdateDescriptionSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, description } = GroupUpdateDescriptionSchema.parse(params);
 
@@ -139,6 +143,7 @@ function makeGroupParticipantsUpdate(getSock: () => WhatsAppSocket | null): Tool
     schema: GroupParticipantsUpdateSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'unsafe',
     handler: async (params) => {
       const { jid, participants, action } = GroupParticipantsUpdateSchema.parse(params);
 
@@ -170,6 +175,7 @@ function makeGroupSettingsUpdate(getSock: () => WhatsAppSocket | null): ToolDecl
     schema: GroupSettingsUpdateSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { jid, setting } = GroupSettingsUpdateSchema.parse(params);
 
@@ -199,6 +205,7 @@ function makeGetGroupInviteLink(getSock: () => WhatsAppSocket | null): ToolDecla
     schema: GetGroupInviteLinkSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
     handler: async (params) => {
       const { jid } = GetGroupInviteLinkSchema.parse(params);
 

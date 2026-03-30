@@ -66,6 +66,7 @@ export function registerMessagingTools(
     description: 'Send a text message to the current chat. Supports @name and @number mentions.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
       text: z.string(),
@@ -100,6 +101,7 @@ export function registerMessagingTools(
     description: 'Reply to a specific message by its ID.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -137,6 +139,7 @@ export function registerMessagingTools(
     description: 'React to a message with an emoji. Pass empty string to remove reaction.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'safe',
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -176,6 +179,7 @@ export function registerMessagingTools(
     description: 'Edit a message you previously sent.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'safe',
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -217,6 +221,7 @@ export function registerMessagingTools(
     description: 'Delete a message (for everyone). Only works on your own messages unless you are a group admin.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'safe',
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
@@ -251,6 +256,7 @@ export function registerMessagingTools(
     description: 'Send a location pin to the current chat.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
       latitude: z.number(),
@@ -289,6 +295,7 @@ export function registerMessagingTools(
     description: 'Send a contact card to the current chat.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
       displayName: z.string(),
@@ -329,6 +336,7 @@ export function registerMessagingTools(
     description: 'Send a poll to the current chat.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'unsafe',
     schema: z.object({
       chatJid: z.string(),
       question: z.string(),
@@ -372,6 +380,7 @@ export function registerMessagingTools(
     description: 'Pin or unpin a message in the current chat.',
     scope: 'chat',
     targetMode: 'injected',
+    replayPolicy: 'safe',
     schema: z.object({
       chatJid: z.string(),
       messageId: z.string(),
