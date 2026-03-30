@@ -5,6 +5,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
+import type { SessionContext } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
@@ -27,8 +28,10 @@ function makeListMessages(db: Database): ToolDeclaration {
     schema: ListMessagesSchema,
     scope: 'chat',
     targetMode: 'caller-supplied',
-    handler: async (params) => {
-      const { conversation_key, limit = 50, before_pk } = ListMessagesSchema.parse(params);
+    handler: async (params, session: SessionContext) => {
+      const { conversation_key: caller_key, limit = 50, before_pk } = ListMessagesSchema.parse(params);
+      // For chat-scoped sessions, ignore caller-supplied key and force session key
+      const conversation_key = session.tier === 'chat-scoped' ? session.conversationKey! : caller_key;
 
       let rows: MessageRow[];
       if (before_pk !== undefined) {
@@ -79,8 +82,10 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
     schema: GetMessageContextSchema,
     scope: 'chat',
     targetMode: 'caller-supplied',
-    handler: async (params) => {
-      const { message_id, conversation_key, context_size = 5 } = GetMessageContextSchema.parse(params);
+    handler: async (params, session: SessionContext) => {
+      const { message_id, conversation_key: caller_key, context_size = 5 } = GetMessageContextSchema.parse(params);
+      // For chat-scoped sessions, ignore caller-supplied key and force session key
+      const conversation_key = session.tier === 'chat-scoped' ? session.conversationKey! : caller_key;
 
       // Fetch the target message and validate ownership
       const target = db.raw

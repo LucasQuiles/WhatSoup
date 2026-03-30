@@ -24,8 +24,9 @@ function makeListGroups(getSock: () => WhatsAppSocket | null): ToolDeclaration {
         throw new Error('WhatsApp is not connected');
       }
 
-      // fetchAllGroups returns GroupMetadata[]
-      const groups = await (sock as any).fetchAllGroups?.() ?? [];
+      // groupFetchAllParticipating returns Record<string, GroupMetadata>
+      const groupMap = await sock.groupFetchAllParticipating();
+      const groups = Object.values(groupMap);
       return { groups };
     },
   };

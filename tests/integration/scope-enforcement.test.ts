@@ -58,7 +58,7 @@ function makeMockSock(): WhatsAppSocket {
     chatModify: async () => undefined,
     readMessages: async () => undefined,
     star: async () => undefined,
-    fetchAllGroups: async () => [],
+    groupFetchAllParticipating: async () => ({}),
   } as unknown as WhatsAppSocket;
 }
 
@@ -129,7 +129,8 @@ describe('chat-scoped session', () => {
     }
   });
 
-  it('list_messages with a different conversation_key returns only those messages (read tools are not scope-gated)', async () => {
+  it('list_messages ignores caller-supplied conversation_key and forces session key in a chat-scoped session', async () => {
+    // Alice session passes BOB_KEY but the scope boundary must force ALICE_KEY
     const result = await registry.call(
       'list_messages',
       { conversation_key: BOB_KEY },
@@ -138,9 +139,10 @@ describe('chat-scoped session', () => {
 
     expect(result.isError).toBeFalsy();
     const data = JSON.parse(result.content[0].text) as { messages: Array<{ conversationKey: string }> };
+    // Should return Alice's messages, not Bob's — scope boundary enforced
     expect(data.messages.length).toBe(2);
     for (const msg of data.messages) {
-      expect(msg.conversationKey).toBe(BOB_KEY);
+      expect(msg.conversationKey).toBe(ALICE_KEY);
     }
   });
 
@@ -169,6 +171,36 @@ describe('chat-scoped session', () => {
     expect(result.isError).toBeFalsy();
     const data = JSON.parse(result.content[0].text) as { results: unknown[] };
     expect(data.results.length).toBe(0);
+  });
+
+  it('search_chat_messages ignores caller-supplied conversation_key and forces session key (scope bypass prevention)', async () => {
+    // Alice session passes BOB_KEY — should be silently overridden to ALICE_KEY
+    const result = await registry.call(
+      'search_chat_messages',
+      { conversation_key: BOB_KEY, query: 'Hello' },
+      aliceSession,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const data = JSON.parse(result.content[0].text) as { results: Array<{ conversationKey: string }> };
+    // Must only return Alice's messages — Bob's conversation is inaccessible
+    for (const msg of data.results) {
+      expect(msg.conversationKey).toBe(ALICE_KEY);
+    }
+  });
+
+  it('get_message_context ignores caller-supplied conversation_key and forces session key (scope bypass prevention)', async () => {
+    // Alice session asks for context on alice-msg-1 but passes BOB_KEY as conversation_key
+    // The scope boundary must force ALICE_KEY, so alice-msg-1 should be found (not a mismatch error)
+    const result = await registry.call(
+      'get_message_context',
+      { message_id: 'alice-msg-1', conversation_key: BOB_KEY },
+      aliceSession,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const data = JSON.parse(result.content[0].text) as { target: { conversationKey: string } };
+    expect(data.target.conversationKey).toBe(ALICE_KEY);
   });
 
   it('search_messages (global-scope) is rejected with a scope error', async () => {

@@ -90,15 +90,13 @@ mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
 // ---------------------------------------------------------------------------
 // Model defaults — priority: instance.models > env vars > hardcoded defaults
 // ---------------------------------------------------------------------------
-const DEFAULT_ADMIN_PHONES = ['18459780919', '16566225768547'];
-
 const instanceModels: Record<string, string> = instance?.models ?? {};
 
-const resolvedAdminPhones = instance
+const resolvedAdminPhones: string[] = instance
   ? (Array.isArray(instance.adminPhones) && instance.adminPhones.length > 0
       ? (instance.adminPhones as string[])
-      : DEFAULT_ADMIN_PHONES)
-  : DEFAULT_ADMIN_PHONES;
+      : [])
+  : [];
 
 // ---------------------------------------------------------------------------
 // Default system prompt (extracted for readability)

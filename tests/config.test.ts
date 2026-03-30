@@ -70,8 +70,7 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.botName).toBe('Loops');
     expect(config.maxTokens).toBe(750);
     expect(config.adminPhones).toBeInstanceOf(Set);
-    expect(config.adminPhones.has('18459780919')).toBe(true);
-    expect(config.adminPhones.has('16566225768547')).toBe(true);
+    expect(config.adminPhones.size).toBe(0);
     expect(config.models.conversation).toBe('claude-opus-4-6');
     expect(config.models.extraction).toBe('claude-sonnet-4-6');
     expect(config.models.validation).toBe('claude-haiku-4-5');

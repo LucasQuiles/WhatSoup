@@ -14,9 +14,9 @@ function chatSession(conversationKey: string): SessionContext {
 
 function makeMockSock(): WhatsAppSocket {
   return {
-    fetchAllGroups: vi.fn().mockResolvedValue([
-      { id: 'group1@g.us', subject: 'Test Group', participants: [] },
-    ]),
+    groupFetchAllParticipating: vi.fn().mockResolvedValue({
+      'group1@g.us': { id: 'group1@g.us', subject: 'Test Group', participants: [] },
+    }),
     groupMetadata: vi.fn().mockResolvedValue({ id: 'group1@g.us', subject: 'Test Group', participants: [] }),
     groupUpdateSubject: vi.fn().mockResolvedValue(undefined),
     groupUpdateDescription: vi.fn().mockResolvedValue(undefined),
@@ -65,10 +65,10 @@ describe('group tools', () => {
   // --- list_groups ---
 
   describe('list_groups', () => {
-    it('calls fetchAllGroups', async () => {
+    it('calls groupFetchAllParticipating', async () => {
       const result = await registry.call('list_groups', {}, globalSession());
       expect(result.isError).toBeUndefined();
-      expect((mockSock as any).fetchAllGroups).toHaveBeenCalled();
+      expect((mockSock as any).groupFetchAllParticipating).toHaveBeenCalled();
     });
 
     it('errors when sock is null', async () => {
