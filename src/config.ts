@@ -5,6 +5,18 @@ import { homedir } from 'node:os';
 const APP_NAME = 'whatsoup';
 
 // ---------------------------------------------------------------------------
+// Env helpers
+// ---------------------------------------------------------------------------
+
+function intEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw || raw.trim() === '') return fallback;
+  const n = parseInt(raw, 10);
+  if (isNaN(n)) return fallback;
+  return n;
+}
+
+// ---------------------------------------------------------------------------
 // INSTANCE_CONFIG — set by bootstrap/instance-loader for multi-instance mode
 // When absent, behavior is identical to before (backward compat for all tests).
 // ---------------------------------------------------------------------------
@@ -188,5 +200,18 @@ export const config = {
   systemPrompt: (instance?.systemPrompt as string | undefined) ?? DEFAULT_SYSTEM_PROMPT,
 
   // Access mode (from instance config, defaults to allowlist for backward compat)
-  accessMode: ((instance?.accessMode as string | undefined) ?? 'allowlist') as 'self_only' | 'allowlist' | 'open_dm' | 'groups_only',
+  accessMode: (() => {
+    const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;
+    type AccessMode = typeof VALID_ACCESS_MODES[number];
+    const raw = (instance?.accessMode as string | undefined) ?? 'allowlist';
+    if (!(VALID_ACCESS_MODES as readonly string[]).includes(raw)) {
+      throw new Error(
+        `Invalid accessMode "${raw}" — must be one of: ${VALID_ACCESS_MODES.join(', ')}`,
+      );
+    }
+    return raw as AccessMode;
+  })(),
 } as const;
+
+// Make intEnv available for external use (e.g. tests, future env-driven fields)
+export { intEnv };

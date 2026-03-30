@@ -132,6 +132,10 @@ export class EnrichmentPoller {
         for (const msg of chatMessages) {
           const current = (this.retryCounters.get(msg.pk) ?? 0) + 1;
           if (current >= config.enrichmentMaxRetries) {
+            log.warn(
+              { pk: msg.pk, chatJid, retries: current },
+              'enrichment: message permanently dropped — max_retries_exceeded; DB-persisted retry counts are P2 scope',
+            );
             failedPks.push(msg.pk);
             this.retryCounters.delete(msg.pk);
           } else {

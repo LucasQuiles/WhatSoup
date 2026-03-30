@@ -153,6 +153,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
   }
 
+  /**
+   * Send a raw Baileys message payload. Used by MCP tools that need to send
+   * message types not covered by the typed sendMessage/sendMedia helpers.
+   */
+  async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<void> {
+    if (!this.sock) throw new Error('WhatsApp is not connected');
+    await this.sock.sendMessage(chatJid, content as any);
+  }
+
   async setTyping(chatJid: string, typing: boolean): Promise<void> {
     if (!this.sock) return;
     try {
@@ -541,6 +550,8 @@ export function unwrapMessage(message: any): any {
   return message;
 }
 
+const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+
 export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   if (!msg.message || !msg.key?.remoteJid) return null;
 
@@ -632,8 +643,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   const isPollVote = !!(innerMessage as any).pollUpdateMessage;
   const isProtocol = !!(innerMessage as any).protocolMessage;
   // Media types are response-worthy even with null text content (we process them via media pipeline)
-  const mediaTypes = new Set(['image', 'video', 'audio', 'document', 'sticker']);
-  const isMedia = mediaTypes.has(contentType);
+  const isMedia = MEDIA_CONTENT_TYPES.has(contentType);
   const hasNoContent = !isMedia && (content === null || (typeof content === 'string' && content.trim() === ''));
 
   const isResponseWorthy = !isStatusBroadcast && !isReaction && !isPollVote && !isProtocol && !hasNoContent;

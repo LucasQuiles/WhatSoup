@@ -64,17 +64,12 @@ function makeCalls(): string[] {
 }
 
 function makeConnection(calls: string[]) {
-  const sock = {
-    sendMessage: async (jid: string, content: unknown) => {
-      calls.push(JSON.stringify({ jid, content }));
-      return { key: { id: 'sent-id' } };
-    },
-  };
-
   return {
-    sock,
     contactsDir: {
       contacts: new Map<string, string>([['alice', '15555550001']]),
+    },
+    sendRaw: async (jid: string, content: unknown) => {
+      calls.push(JSON.stringify({ jid, content }));
     },
     sendMedia: async (jid: string, media: unknown) => {
       calls.push(JSON.stringify({ sendMedia: { jid, media } }));
@@ -139,7 +134,9 @@ describe('registerMessagingTools', () => {
     });
 
     it('returns error when socket is not connected', async () => {
-      (connection as any).sock = null;
+      (connection as any).sendRaw = async () => {
+        throw new Error('WhatsApp is not connected');
+      };
 
       const result = await registry.call(
         'send_message',

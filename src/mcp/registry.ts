@@ -246,13 +246,16 @@ export class ToolRegistry {
     }
 
     // --- Invoke handler ---
+    const start = Date.now();
+    log.debug({ tool: name, tier: session.tier }, 'tool call start');
     try {
       const result = await tool.handler(effectiveParams, session);
       const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
       return { content: [{ type: 'text', text }] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log.error({ tool: name, err }, 'tool handler threw');
+      log.error({ tool: name, durationMs: Date.now() - start, err }, 'tool handler threw');
       return {
         content: [{ type: 'text', text: `Tool "${name}" failed: ${message}` }],
         isError: true,

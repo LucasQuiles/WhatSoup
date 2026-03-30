@@ -5,6 +5,7 @@ export function toConversationKey(jid: string): string {
 
   const atIndex = jid.indexOf('@');
   const local = jid.substring(0, atIndex);
+  if (!local) throw new Error(`Invalid JID: "${jid}" — empty local part`);
   const domain = jid.substring(atIndex + 1);
 
   switch (domain) {

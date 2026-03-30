@@ -89,15 +89,14 @@ export function registerMessagingTools(
         connection.contactsDir.contacts,
       );
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
-      }
-
-      if (hasMentions) {
-        await sock.sendMessage(chatJid, { text: formatted, mentions });
-      } else {
-        await sock.sendMessage(chatJid, { text: formatted });
+      try {
+        if (hasMentions) {
+          await connection.sendRaw(chatJid, { text: formatted, mentions });
+        } else {
+          await connection.sendRaw(chatJid, { text: formatted });
+        }
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
       }
 
       return { sent: true, text: formatted };
@@ -124,19 +123,18 @@ export function registerMessagingTools(
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return { error };
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
+      try {
+        await connection.sendRaw(chatJid, {
+          text,
+          contextInfo: {
+            stanzaId: row!.message_id,
+            participant: row!.sender_jid,
+            quotedMessage: { conversation: text },
+          },
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
       }
-
-      await sock.sendMessage(chatJid, {
-        text,
-        contextInfo: {
-          stanzaId: row!.message_id,
-          participant: row!.sender_jid,
-          quotedMessage: { conversation: text },
-        },
-      });
 
       return { sent: true, quotedMessageId: messageId };
     },
@@ -162,21 +160,20 @@ export function registerMessagingTools(
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return { error };
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
-      }
-
-      await sock.sendMessage(chatJid, {
-        react: {
-          text: emoji,
-          key: {
-            remoteJid: chatJid,
-            id: row!.message_id,
-            fromMe: Boolean(row!.is_from_me),
+      try {
+        await connection.sendRaw(chatJid, {
+          react: {
+            text: emoji,
+            key: {
+              remoteJid: chatJid,
+              id: row!.message_id,
+              fromMe: Boolean(row!.is_from_me),
+            },
           },
-        },
-      });
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
 
       return { sent: true, emoji, messageId };
     },
@@ -206,19 +203,18 @@ export function registerMessagingTools(
         return { error: 'Can only edit your own messages' };
       }
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
+      try {
+        await connection.sendRaw(chatJid, {
+          text: newText,
+          edit: {
+            remoteJid: chatJid,
+            id: row!.message_id,
+            fromMe: true,
+          },
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
       }
-
-      await sock.sendMessage(chatJid, {
-        text: newText,
-        edit: {
-          remoteJid: chatJid,
-          id: row!.message_id,
-          fromMe: true,
-        },
-      });
 
       return { edited: true, messageId, newText };
     },
@@ -242,18 +238,17 @@ export function registerMessagingTools(
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return { error };
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
+      try {
+        await connection.sendRaw(chatJid, {
+          delete: {
+            remoteJid: chatJid,
+            id: row!.message_id,
+            fromMe: Boolean(row!.is_from_me),
+          },
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
       }
-
-      await sock.sendMessage(chatJid, {
-        delete: {
-          remoteJid: chatJid,
-          id: row!.message_id,
-          fromMe: Boolean(row!.is_from_me),
-        },
-      });
 
       return { deleted: true, messageId };
     },
@@ -280,19 +275,18 @@ export function registerMessagingTools(
       const name = params['name'] as string | undefined;
       const address = params['address'] as string | undefined;
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
+      try {
+        await connection.sendRaw(chatJid, {
+          location: {
+            degreesLatitude: latitude,
+            degreesLongitude: longitude,
+            name,
+            address,
+          },
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
       }
-
-      await sock.sendMessage(chatJid, {
-        location: {
-          degreesLatitude: latitude,
-          degreesLongitude: longitude,
-          name,
-          address,
-        },
-      });
 
       return { sent: true, latitude, longitude };
     },
@@ -315,11 +309,6 @@ export function registerMessagingTools(
       const displayName = params['displayName'] as string;
       const phone = params['phone'] as string;
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
-      }
-
       // vCard format required by Baileys contact message
       const vcard =
         `BEGIN:VCARD\n` +
@@ -328,12 +317,16 @@ export function registerMessagingTools(
         `TEL;type=CELL;type=VOICE;waid=${phone.replace(/\D/g, '')}:+${phone.replace(/\D/g, '')}\n` +
         `END:VCARD`;
 
-      await sock.sendMessage(chatJid, {
-        contacts: {
-          displayName,
-          contacts: [{ vcard }],
-        },
-      });
+      try {
+        await connection.sendRaw(chatJid, {
+          contacts: {
+            displayName,
+            contacts: [{ vcard }],
+          },
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
 
       return { sent: true, displayName, phone };
     },
@@ -366,18 +359,17 @@ export function registerMessagingTools(
         return { error: 'Poll allows at most 12 options' };
       }
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
+      try {
+        await connection.sendRaw(chatJid, {
+          poll: {
+            name: question,
+            values: options,
+            selectableCount: selectableCount ?? 1,
+          },
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
       }
-
-      await sock.sendMessage(chatJid, {
-        poll: {
-          name: question,
-          values: options,
-          selectableCount: selectableCount ?? 1,
-        },
-      });
 
       return { sent: true, question, options };
     },
@@ -405,11 +397,6 @@ export function registerMessagingTools(
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return { error };
 
-      const sock = (connection as any).sock;
-      if (!sock) {
-        return { error: 'WhatsApp is not connected' };
-      }
-
       // Duration in seconds mapping
       const durationSeconds: Record<string, 86400 | 604800 | 2592000> = {
         '24h': 86400,
@@ -420,15 +407,19 @@ export function registerMessagingTools(
       // proto.PinInChat.Type — 1 = pin, 2 = unpin
       const pinType = pin ? 1 : 2;
 
-      await sock.sendMessage(chatJid, {
-        pin: {
-          remoteJid: chatJid,
-          id: row!.message_id,
-          fromMe: Boolean(row!.is_from_me),
-        },
-        type: pinType,
-        time: pin ? durationSeconds[duration] : undefined,
-      });
+      try {
+        await connection.sendRaw(chatJid, {
+          pin: {
+            remoteJid: chatJid,
+            id: row!.message_id,
+            fromMe: Boolean(row!.is_from_me),
+          },
+          type: pinType,
+          time: pin ? durationSeconds[duration] : undefined,
+        });
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
 
       return { pinned: pin, messageId, duration: pin ? duration : undefined };
     },
