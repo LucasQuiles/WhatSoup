@@ -150,14 +150,26 @@ describe('registerMediaTools', () => {
     expect(media.mimetype).toBe('video/mp4');
   });
 
-  it('infers MIME type from .webp extension', async () => {
+  it('sends a .webp file as a sticker', async () => {
     const filePath = writeFile('sticker.webp');
     const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
 
     await registry.call('send_media', { filePath }, session);
 
     const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('sticker');
     expect(media.mimetype).toBe('image/webp');
+  });
+
+  it('sends a sticker with isAnimated flag', async () => {
+    const filePath = writeFile('animated.webp');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    await registry.call('send_media', { filePath, isAnimated: true }, session);
+
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('sticker');
+    expect(media.isAnimated).toBe(true);
   });
 
   it('infers MIME type from .ogg extension', async () => {
@@ -168,6 +180,70 @@ describe('registerMediaTools', () => {
 
     const media = mediaCalls[0].media as any;
     expect(media.mimetype).toContain('audio/ogg');
+  });
+
+  // ── new capability: voice note seconds ───────────────────────────────────
+
+  it('passes ptt and seconds for audio', async () => {
+    const filePath = writeFile('voice.ogg');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    await registry.call('send_media', { filePath, ptt: true, seconds: 12 }, session);
+
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('audio');
+    expect(media.ptt).toBe(true);
+    expect(media.seconds).toBe(12);
+  });
+
+  // ── new capability: PTV video note ───────────────────────────────────────
+
+  it('sends video as PTV (round video note)', async () => {
+    const filePath = writeFile('note.mp4');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    await registry.call('send_media', { filePath, ptv: true }, session);
+
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('video');
+    expect(media.ptv).toBe(true);
+  });
+
+  // ── new capability: GIF playback ─────────────────────────────────────────
+
+  it('sends video with gifPlayback flag', async () => {
+    const filePath = writeFile('anim.mp4');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    await registry.call('send_media', { filePath, gifPlayback: true }, session);
+
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('video');
+    expect(media.gifPlayback).toBe(true);
+  });
+
+  // ── new capability: viewOnce ──────────────────────────────────────────────
+
+  it('sends image with viewOnce flag', async () => {
+    const filePath = writeFile('secret.jpg');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    await registry.call('send_media', { filePath, viewOnce: true }, session);
+
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('image');
+    expect(media.viewOnce).toBe(true);
+  });
+
+  it('sends video with viewOnce flag', async () => {
+    const filePath = writeFile('secret.mp4');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    await registry.call('send_media', { filePath, viewOnce: true }, session);
+
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('video');
+    expect(media.viewOnce).toBe(true);
   });
 
   // ── file size rejection ───────────────────────────────────────────────────
@@ -198,6 +274,25 @@ describe('registerMediaTools', () => {
 
     const body = JSON.parse(result.content[0].text);
     expect(body.error).toMatch(/Unsupported file extension/);
+  });
+
+  // ── mediaType override ────────────────────────────────────────────────────
+
+  it('overrides auto-detected type when mediaType is provided', async () => {
+    const filePath = writeFile('image.png');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, mediaType: 'sticker' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as any;
+    expect(media.type).toBe('sticker');
+    // MIME still comes from extension
+    expect(media.mimetype).toBe('image/png');
   });
 
   // ── path boundary enforcement ─────────────────────────────────────────────

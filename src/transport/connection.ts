@@ -18,6 +18,7 @@ import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt } from '../core/types.ts';
+import { toConversationKey } from '../core/conversation-key.ts';
 import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 
@@ -31,12 +32,18 @@ export type WhatsAppSocket = ReturnType<typeof makeWASocket>;
 
 export interface TransportEvents {
   contactsUpsert: (contacts: Array<{ id: string; name?: string; notify?: string }>) => void;
-  contactsUpdate: (updates: Array<{ id: string; notify?: string }>) => void;
+  contactsUpdate: (updates: Array<{ id: string; notify?: string; name?: string }>) => void;
   messageEdited: (messageId: string, newContent: string) => void;
   messageDeleted: (messageIds: string[]) => void;
   chatCleared: (jid: string) => void;
   presenceUpdate: (jid: string, status: string, lastSeen?: number) => void;
   callReceived: (callId: string, callFrom: string) => void;
+  groupParticipantsUpdate: (data: {
+    groupJid: string;
+    author: string;
+    participants: string[];
+    action: 'add' | 'remove' | 'promote' | 'demote';
+  }) => void;
   jidAliasChanged: (conversationKey: string, newJid: string) => void;
   historySyncComplete: () => void;
   exhausted: () => void;
@@ -189,6 +196,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           image: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
+          viewOnce: media.viewOnce,
         });
         break;
       case 'document':
@@ -204,6 +212,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           audio: media.buffer,
           mimetype: media.mimetype,
           ptt: media.ptt,
+          seconds: media.seconds,
         });
         break;
       case 'video':
@@ -211,6 +220,16 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           video: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
+          ptv: media.ptv,
+          gifPlayback: media.gifPlayback,
+          viewOnce: media.viewOnce,
+        });
+        break;
+      case 'sticker':
+        result = await this.sock.sendMessage(chatJid, {
+          sticker: media.buffer,
+          mimetype: media.mimetype ?? 'image/webp',
+          isAnimated: media.isAnimated,
         });
         break;
     }
@@ -284,6 +303,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         const updates = events['contacts.update'] as Array<{
           id: string;
           notify?: string;
+          name?: string;
         }>;
         this.emit('contactsUpdate', updates);
       }
@@ -298,13 +318,32 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (events['group-participants.update']) {
         const update = events['group-participants.update'] as any;
-        if (update.action === 'remove') {
-          const botRemoved = (update.participants || []).some(
+        const { id, author, participants, action } = update;
+        this.log.info({ groupJid: id, author, participants, action }, 'group participants update');
+        this.emit('groupParticipantsUpdate', {
+          groupJid: id,
+          author: author ?? '',
+          participants: participants ?? [],
+          action,
+        });
+
+        // Existing bot-removal detection
+        if (action === 'remove') {
+          const botRemoved = (participants || []).some(
             (p: string) => p === this.botJid || p === this.botLid
           );
           if (botRemoved) {
-            this.log.info({ groupJid: update.id }, 'Bot removed from group');
+            this.log.warn({ groupJid: id }, 'bot was removed from group');
           }
+        }
+      }
+
+      if (events['lid-mapping.update']) {
+        const mapping = events['lid-mapping.update'] as { lid?: string; pn?: string };
+        if (mapping.lid && mapping.pn) {
+          const conversationKey = toConversationKey(mapping.lid);
+          this.log.info({ lid: mapping.lid, pn: mapping.pn, conversationKey }, 'LID mapping updated');
+          this.emit('jidAliasChanged', conversationKey, mapping.pn);
         }
       }
 

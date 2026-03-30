@@ -9,6 +9,9 @@ import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('chat-management');
 
 // ---------------------------------------------------------------------------
 // list_messages — paginated messages in a conversation (scope: chat)
@@ -279,11 +282,32 @@ function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null):
         throw new Error(`Message "${message_id}" not found`);
       }
 
-      // Forward by re-sending the text content (simple forward)
+      // Try true forward via raw Baileys proto (raw_message column may not exist yet)
+      let rawMessage: string | null = null;
+      try {
+        const rawRow = db.raw
+          .prepare('SELECT raw_message FROM messages WHERE message_id = ?')
+          .get(message_id) as { raw_message: string | null } | undefined;
+        rawMessage = rawRow?.raw_message ?? null;
+      } catch {
+        // Column doesn't exist yet — fall through to text forward
+      }
+
+      if (rawMessage) {
+        try {
+          const waMessage = JSON.parse(rawMessage);
+          await sock.sendMessage(to_jid, { forward: waMessage, force: true } as any);
+          return { forwarded: true, messageId: message_id, toJid: to_jid, method: 'native' };
+        } catch (err) {
+          log.warn({ err, messageId: message_id }, 'native forward failed, falling back to text');
+        }
+      }
+
+      // Fallback: re-send as plain text
       const text = row.content ?? `[${row.content_type} message]`;
       await sock.sendMessage(to_jid, { text });
 
-      return { forwarded: true, messageId: message_id, toJid: to_jid };
+      return { forwarded: true, messageId: message_id, toJid: to_jid, method: 'text' };
     },
   };
 }

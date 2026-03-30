@@ -262,6 +262,54 @@ describe('chat-management tools', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/not connected/);
     });
+
+    it('uses true Baileys forward when raw_message is available', async () => {
+      // Add raw_message column and seed a message with it
+      db.raw.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
+      db.raw
+        .prepare(`UPDATE messages SET raw_message = ? WHERE message_id = 'msg1'`)
+        .run(JSON.stringify({ key: { id: 'msg1' }, message: { conversation: 'First message' } }));
+
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        '333@s.whatsapp.net',
+        expect.objectContaining({ forward: expect.any(Object) }),
+      );
+    });
+
+    it('falls back to text forward when raw_message column is absent', async () => {
+      // Do not add raw_message column — it does not exist in base schema
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        '333@s.whatsapp.net',
+        { text: 'First message' },
+      );
+    });
+
+    it('falls back to text when raw_message is null', async () => {
+      db.raw.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
+      // raw_message is NULL for msg1 (not updated)
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '333@s.whatsapp.net' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        '333@s.whatsapp.net',
+        { text: 'First message' },
+      );
+    });
   });
 
   // --- archive_chat ---

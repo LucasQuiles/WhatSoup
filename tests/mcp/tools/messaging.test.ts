@@ -319,11 +319,11 @@ describe('registerMessagingTools', () => {
   // ── send_contact ──────────────────────────────────────────────────────────
 
   describe('send_contact', () => {
-    it('sends a vCard contact', async () => {
+    it('sends a vCard contact via contacts array (single)', async () => {
       const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
       const result = await registry.call(
         'send_contact',
-        { displayName: 'John Doe', phone: '15551234567' },
+        { contacts: [{ displayName: 'John Doe', phone: '15551234567' }] },
         session,
       );
 
@@ -332,6 +332,35 @@ describe('registerMessagingTools', () => {
       expect(call.content.contacts.displayName).toBe('John Doe');
       expect(call.content.contacts.contacts[0].vcard).toContain('John Doe');
       expect(call.content.contacts.contacts[0].vcard).toContain('15551234567');
+    });
+
+    it('sends multiple contacts in a single message', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const result = await registry.call(
+        'send_contact',
+        {
+          contacts: [
+            { displayName: 'Alice Smith', phone: '15551111111' },
+            { displayName: 'Bob Jones', phone: '15552222222' },
+          ],
+        },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      const body = JSON.parse(result.content[0].text);
+      expect(body.count).toBe(2);
+      const call = JSON.parse(calls[0]);
+      expect(call.content.contacts.displayName).toBe('2 contacts');
+      expect(call.content.contacts.contacts).toHaveLength(2);
+      expect(call.content.contacts.contacts[0].vcard).toContain('Alice Smith');
+      expect(call.content.contacts.contacts[1].vcard).toContain('Bob Jones');
+    });
+
+    it('rejects empty contacts array', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const result = await registry.call('send_contact', { contacts: [] }, session);
+      expect(result.isError).toBe(true);
     });
   });
 

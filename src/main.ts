@@ -17,6 +17,7 @@ import { startHealthServer } from './core/health.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
+import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -194,6 +195,31 @@ connectionManager.on('chatCleared', (jid: string) => {
     log.info({ jid, conversationKey, count }, 'chatCleared: soft-deleted messages');
   } catch (err) {
     log.error({ err, jid, conversationKey }, 'chatCleared: failed to soft-delete messages');
+  }
+});
+
+connectionManager.on('contactsUpsert', (contacts) => {
+  try {
+    handleContactsUpsert(db, contacts);
+  } catch (err) {
+    log.error({ err }, 'contactsUpsert: failed to persist contacts');
+  }
+});
+
+connectionManager.on('contactsUpdate', (updates) => {
+  try {
+    handleContactsUpdate(db, updates);
+  } catch (err) {
+    log.error({ err }, 'contactsUpdate: failed to update contacts');
+  }
+});
+
+connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
+  try {
+    runtime.handleJidAliasChanged?.(conversationKey, newJid);
+    log.info({ conversationKey, newJid }, 'jidAliasChanged: updated delivery JID');
+  } catch (err) {
+    log.error({ err, conversationKey, newJid }, 'jidAliasChanged: failed to update delivery JID');
   }
 });
 
