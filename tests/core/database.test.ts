@@ -375,3 +375,93 @@ describe('importFromLegacyDb', () => {
     expect(() => targetDb.importFromLegacyDb('/nonexistent/path.db')).toThrow();
   });
 });
+
+// ─── Migration 3: Chat sync tables ───────────────────────────────────────────
+
+describe('migration 3 — chat sync tables', () => {
+  it('creates chats table with expected columns', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const cols = db.raw
+      .prepare("PRAGMA table_info('chats')")
+      .all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain('jid');
+    expect(names).toContain('conversation_key');
+    expect(names).toContain('name');
+    expect(names).toContain('unread_count');
+    expect(names).toContain('is_archived');
+    expect(names).toContain('is_pinned');
+    expect(names).toContain('mute_until');
+    expect(names).toContain('ephemeral_duration');
+    expect(names).toContain('updated_at');
+    db.close();
+  });
+
+  it('creates reactions table with expected columns', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const cols = db.raw
+      .prepare("PRAGMA table_info('reactions')")
+      .all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain('id');
+    expect(names).toContain('message_id');
+    expect(names).toContain('conversation_key');
+    expect(names).toContain('sender_jid');
+    expect(names).toContain('reaction');
+    expect(names).toContain('timestamp');
+    db.close();
+  });
+
+  it('creates receipts table with expected columns', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const cols = db.raw
+      .prepare("PRAGMA table_info('receipts')")
+      .all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).toContain('id');
+    expect(names).toContain('message_id');
+    expect(names).toContain('recipient_jid');
+    expect(names).toContain('type');
+    expect(names).toContain('timestamp');
+    db.close();
+  });
+
+  it('enforces unique constraint on reactions(message_id, sender_jid)', () => {
+    const db = new Database(':memory:');
+    db.open();
+    db.raw
+      .prepare(
+        "INSERT INTO reactions (message_id, conversation_key, sender_jid, reaction) VALUES (?, ?, ?, ?)",
+      )
+      .run('msg1', 'conv1', 'sender1@s.whatsapp.net', '👍');
+    expect(() => {
+      db.raw
+        .prepare(
+          "INSERT INTO reactions (message_id, conversation_key, sender_jid, reaction) VALUES (?, ?, ?, ?)",
+        )
+        .run('msg1', 'conv1', 'sender1@s.whatsapp.net', '❤️');
+    }).toThrow(); // UNIQUE constraint
+    db.close();
+  });
+
+  it('enforces unique constraint on receipts(message_id, recipient_jid, type)', () => {
+    const db = new Database(':memory:');
+    db.open();
+    db.raw
+      .prepare(
+        "INSERT INTO receipts (message_id, recipient_jid, type) VALUES (?, ?, ?)",
+      )
+      .run('msg1', 'recv1@s.whatsapp.net', 'delivery');
+    expect(() => {
+      db.raw
+        .prepare(
+          "INSERT INTO receipts (message_id, recipient_jid, type) VALUES (?, ?, ?)",
+        )
+        .run('msg1', 'recv1@s.whatsapp.net', 'delivery');
+    }).toThrow();
+    db.close();
+  });
+});

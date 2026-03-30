@@ -200,6 +200,42 @@ describe('chat-management tools', () => {
     });
   });
 
+  // --- list_chats — with chat metadata ---
+
+  describe('list_chats — with chat metadata', () => {
+    it('includes metadata from chats table when available', async () => {
+      // Seed the chats table with metadata
+      db.raw.exec(`
+        INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived)
+        VALUES ('111@s.whatsapp.net', '111', 'Alice Chat', 3, 0)
+      `);
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 10 },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const parsed = JSON.parse(result.content[0].text);
+      const chat = parsed.chats.find((c: any) => c.conversationKey === '111');
+      expect(chat).toBeDefined();
+      expect(chat.name).toBe('Alice Chat');
+      expect(chat.unreadCount).toBe(3);
+    });
+
+    it('works when no metadata exists', async () => {
+      const result = await registry.call(
+        'list_chats',
+        { limit: 10 },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const parsed = JSON.parse(result.content[0].text);
+      // Should still return chats from messages table
+      expect(parsed.chats.length).toBeGreaterThan(0);
+    });
+  });
+
   // --- get_chat ---
 
   describe('get_chat', () => {
