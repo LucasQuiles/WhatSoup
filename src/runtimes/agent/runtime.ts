@@ -213,6 +213,43 @@ export class AgentRuntime implements Runtime {
     for (const q of this.chatQueues.values()) q.setDurability(engine);
   }
 
+  /**
+   * Update delivery JID for active sessions and queues when a LID→phone
+   * mapping changes. Iterates per-chat queues and socket servers keyed
+   * by conversationKey (sandboxPerChat mode) or raw chatJid.
+   */
+  handleJidAliasChanged(conversationKey: string, newJid: string): void {
+    // Per-chat queues (sandboxPerChat or per_chat mode)
+    const queue = this.chatQueues.get(conversationKey);
+    if (queue) {
+      queue.updateDeliveryJid(newJid);
+      log.info({ conversationKey, newJid }, 'updated delivery JID on outbound queue');
+    }
+
+    // Per-chat socket servers
+    const res = this.workspaceResources.get(conversationKey);
+    if (res?.socketServer) {
+      res.socketServer.updateDeliveryJid(newJid);
+      log.info({ conversationKey, newJid }, 'updated delivery JID on socket server');
+    }
+
+    // Shared-mode outbound queues (keyed by raw chatJid)
+    for (const [key, q] of this.outboundQueues) {
+      try {
+        if (toConversationKey(key) === conversationKey) {
+          q.updateDeliveryJid(newJid);
+        }
+      } catch {
+        // key may not be a valid JID — skip
+      }
+    }
+
+    // Single-mode queue
+    if (this.queue) {
+      this.queue.updateDeliveryJid(newJid);
+    }
+  }
+
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
 

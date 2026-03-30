@@ -32,7 +32,7 @@ export type WhatsAppSocket = ReturnType<typeof makeWASocket>;
 
 export interface TransportEvents {
   contactsUpsert: (contacts: Array<{ id: string; name?: string; notify?: string }>) => void;
-  contactsUpdate: (updates: Array<{ id: string; notify?: string }>) => void;
+  contactsUpdate: (updates: Array<{ id: string; notify?: string; name?: string }>) => void;
   messageEdited: (messageId: string, newContent: string) => void;
   messageDeleted: (messageIds: string[]) => void;
   chatCleared: (jid: string) => void;
@@ -303,6 +303,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         const updates = events['contacts.update'] as Array<{
           id: string;
           notify?: string;
+          name?: string;
         }>;
         this.emit('contactsUpdate', updates);
       }

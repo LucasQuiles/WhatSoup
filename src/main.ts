@@ -214,6 +214,15 @@ connectionManager.on('contactsUpdate', (updates) => {
   }
 });
 
+connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
+  try {
+    runtime.handleJidAliasChanged?.(conversationKey, newJid);
+    log.info({ conversationKey, newJid }, 'jidAliasChanged: updated delivery JID');
+  } catch (err) {
+    log.error({ err, conversationKey, newJid }, 'jidAliasChanged: failed to update delivery JID');
+  }
+});
+
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,
