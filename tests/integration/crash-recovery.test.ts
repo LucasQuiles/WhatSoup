@@ -48,6 +48,13 @@ function getInbound(db: Database, seq: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM inbound_events WHERE seq = ?').get(seq) as Record<string, unknown>;
 }
 
+/** Backdate submitted_at to simulate a stale op from before the current session window. */
+function makeSubmittedStale(db: Database, id: number): void {
+  db.raw.prepare(
+    `UPDATE outbound_ops SET submitted_at = datetime('now', '-60 seconds') WHERE id = ?`,
+  ).run(id);
+}
+
 function getToolCall(db: Database, id: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM tool_calls WHERE id = ?').get(id) as Record<string, unknown>;
 }
@@ -262,6 +269,7 @@ describe('Crash Recovery — Scenario 4: turn_done with submitted terminal op', 
     });
     engine.markSending(opId);
     engine.markSubmitted(opId, 'WA-TD-SAFE-1');
+    makeSubmittedStale(db, opId);
     // ↑ crash here — op in `submitted`, inbound in `turn_done`
 
     // Phase 1: preConnect — turn_done inbound is untouched; submitted op stays submitted
@@ -297,6 +305,7 @@ describe('Crash Recovery — Scenario 4: turn_done with submitted terminal op', 
     });
     engine.markSending(opId);
     engine.markSubmitted(opId, 'WA-TD-UNSAFE-ECHOED');
+    makeSubmittedStale(db, opId);
     // ↑ crash here
 
     engine.preConnectRecovery();
@@ -458,6 +467,7 @@ describe('Crash Recovery — Scenario 6: maybe_sent reconciliation with wa_messa
     engine.markSending(opId);
     engine.markTurnDone(seq);
     engine.markSubmitted(opId, 'WA-FULL-CYCLE-1');
+    makeSubmittedStale(db, opId);
     // ↑ crash here — op in `submitted`, inbound in `turn_done`
 
     // Restart Phase 1: preConnect

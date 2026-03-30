@@ -30,9 +30,16 @@ async function sendTracked(
     });
     durability.markSending(opId);
   }
-  const receipt = await messenger.sendMessage(chatJid, text);
-  if (opId !== undefined && durability) {
-    durability.markSubmitted(opId, receipt.waMessageId);
+  try {
+    const receipt = await messenger.sendMessage(chatJid, text);
+    if (opId !== undefined && durability) {
+      durability.markSubmitted(opId, receipt.waMessageId);
+    }
+  } catch (err) {
+    if (opId !== undefined && durability) {
+      durability.markMaybeSent(opId, (err as Error)?.message ?? 'send_failed');
+    }
+    throw err;
   }
 }
 

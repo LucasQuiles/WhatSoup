@@ -200,6 +200,11 @@ export class AgentRuntime implements Runtime {
 
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
+    this.registry.setDurability(engine);
+    // Propagate to any already-created outbound queues
+    if (this.queue) this.queue.setDurability(engine);
+    for (const q of this.outboundQueues.values()) q.setDurability(engine);
+    for (const q of this.chatQueues.values()) q.setDurability(engine);
   }
 
   async start(): Promise<void> {
@@ -286,9 +291,13 @@ export class AgentRuntime implements Runtime {
       });
 
       if (this.shared) {
-        this.outboundQueues.set(resumeChatJid, new OutboundQueue(this.messenger, resumeChatJid));
+        const q = new OutboundQueue(this.messenger, resumeChatJid);
+        if (this.durability) q.setDurability(this.durability);
+        this.outboundQueues.set(resumeChatJid, q);
       } else {
-        this.queue = new OutboundQueue(this.messenger, resumeChatJid);
+        const q = new OutboundQueue(this.messenger, resumeChatJid);
+        if (this.durability) q.setDurability(this.durability);
+        this.queue = q;
       }
 
       await this.session.spawnSession(resumeSessionId, prior.id);
@@ -338,15 +347,23 @@ export class AgentRuntime implements Runtime {
             // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
             const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
             this.chatSessions.delete(workspaceKey);
-            this.chatQueues.set(workspaceKey, new OutboundQueue(this.messenger, chatJid));
+            const q1 = new OutboundQueue(this.messenger, chatJid);
+            if (this.durability) q1.setDurability(this.durability);
+            this.chatQueues.set(workspaceKey, q1);
           } else if (this.shared) {
-            this.outboundQueues.set(chatJid, new OutboundQueue(this.messenger, chatJid));
+            const q2 = new OutboundQueue(this.messenger, chatJid);
+            if (this.durability) q2.setDurability(this.durability);
+            this.outboundQueues.set(chatJid, q2);
           } else if (this.sessionScope === 'per_chat') {
             // non-sandboxPerChat per_chat: keyed by raw chatJid
             this.chatSessions.delete(chatJid);
-            this.chatQueues.set(chatJid, new OutboundQueue(this.messenger, chatJid));
+            const q3 = new OutboundQueue(this.messenger, chatJid);
+            if (this.durability) q3.setDurability(this.durability);
+            this.chatQueues.set(chatJid, q3);
           } else {
-            this.queue = new OutboundQueue(this.messenger, chatJid);
+            const q4 = new OutboundQueue(this.messenger, chatJid);
+            if (this.durability) q4.setDurability(this.durability);
+            this.queue = q4;
           }
           await this.session!.handleNew();
           // Reset turn flag — stale value from the old session must not suppress the
@@ -787,7 +804,9 @@ export class AgentRuntime implements Runtime {
         },
       });
       this.chatSessions.set(workspaceKey, session);
-      this.chatQueues.set(workspaceKey, new OutboundQueue(this.messenger, chatJid));
+      const chatQ = new OutboundQueue(this.messenger, chatJid);
+      if (this.durability) chatQ.setDurability(this.durability);
+      this.chatQueues.set(workspaceKey, chatQ);
 
       // Spawn with resume if available
       if (resumable) {
@@ -831,7 +850,9 @@ export class AgentRuntime implements Runtime {
           },
         });
         this.chatSessions.set(chatJid, session);
-        this.chatQueues.set(chatJid, new OutboundQueue(this.messenger, chatJid));
+        const perChatQ = new OutboundQueue(this.messenger, chatJid);
+        if (this.durability) perChatQ.setDurability(this.durability);
+        this.chatQueues.set(chatJid, perChatQ);
       }
       // Also set the single-session reference for /status /new compatibility
       this.session = this.chatSessions.get(chatJid)!;
@@ -853,7 +874,9 @@ export class AgentRuntime implements Runtime {
       if (this.shared) {
         this.ensureOutboundQueue(chatJid);
       } else {
-        this.queue = new OutboundQueue(this.messenger, chatJid);
+        const singletonQ = new OutboundQueue(this.messenger, chatJid);
+        if (this.durability) singletonQ.setDurability(this.durability);
+        this.queue = singletonQ;
       }
     } else if (this.shared) {
       this.ensureOutboundQueue(chatJid);
@@ -866,7 +889,9 @@ export class AgentRuntime implements Runtime {
    */
   private ensureOutboundQueue(chatJid: string): void {
     if (!this.outboundQueues.has(chatJid)) {
-      this.outboundQueues.set(chatJid, new OutboundQueue(this.messenger, chatJid));
+      const q = new OutboundQueue(this.messenger, chatJid);
+      if (this.durability) q.setDurability(this.durability);
+      this.outboundQueues.set(chatJid, q);
     }
   }
 

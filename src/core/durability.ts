@@ -449,9 +449,13 @@ export class DurabilityEngine {
       log.warn({ err }, 'postConnectRecovery: error reconciling maybe_sent ops');
     }
 
-    // Step 2: Promote stale `submitted` ops (no echo after grace period) → maybe_sent
+    // Step 2: Promote stale `submitted` ops (no echo after 30s grace period) → maybe_sent
+    // Only promote ops submitted before the current session's startup window to avoid
+    // racing with echoes from messages sent in the current reconnect attempt.
     try {
-      const staleSubmitted = this.getOutboundByStatus('submitted');
+      const staleSubmitted = this.db.raw.prepare(
+        `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
+      ).all() as Array<{ id: number }>;
       for (const op of staleSubmitted) {
         this.markMaybeSent(op.id, 'stale-submitted-no-echo');
         stats.outboundReconciled = (stats.outboundReconciled ?? 0) + 1;

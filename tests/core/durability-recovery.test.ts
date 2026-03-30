@@ -47,6 +47,13 @@ function getInbound(db: Database, seq: number): Record<string, unknown> {
   return db.raw.prepare('SELECT * FROM inbound_events WHERE seq = ?').get(seq) as Record<string, unknown>;
 }
 
+/** Backdate submitted_at on an outbound op to simulate a stale submission. */
+function makeSubmittedStale(db: Database, id: number): void {
+  db.raw.prepare(
+    `UPDATE outbound_ops SET submitted_at = datetime('now', '-60 seconds') WHERE id = ?`,
+  ).run(id);
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -410,6 +417,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     });
     engine.markSending(opId);
     engine.markSubmitted(opId, 'WA_STALE_1');
+    makeSubmittedStale(db, opId);
 
     // postConnect promotes stale submitted → maybe_sent
     engine.postConnectRecovery();
@@ -428,6 +436,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     });
     engine.markSending(id1);
     engine.markSubmitted(id1, 'WA_STALE_A');
+    makeSubmittedStale(db, id1);
 
     const id2 = engine.createOutboundOp({
       conversationKey: 'k2', chatJid: 'j2', opType: 'text',
@@ -435,6 +444,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     });
     engine.markSending(id2);
     engine.markSubmitted(id2, null);
+    makeSubmittedStale(db, id2);
 
     engine.postConnectRecovery();
 

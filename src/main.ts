@@ -175,13 +175,16 @@ if (instanceType === 'agent') {
   runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, { enableEnrichment });
 }
 
-// 6. Wire message callback — getters resolve botJid/botLid at dispatch time
+// 6. Wire durability to runtime and message handler
+runtime.setDurability(durability);
+
 connectionManager.onMessage = createIngestHandler(
   db,
   connectionManager,
   runtime,
   () => connectionManager.botJid ?? '',
   () => connectionManager.botLid,
+  durability,
 );
 
 connectionManager.on('chatCleared', (jid: string) => {
@@ -199,6 +202,7 @@ const healthServer = startHealthServer({
   db,
   connectionManager,
   startedAt,
+  durability,
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
