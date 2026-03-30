@@ -34,6 +34,7 @@ export interface TransportEvents {
   contactsUpdate: (updates: Array<{ id: string; notify?: string }>) => void;
   messageEdited: (messageId: string, newContent: string) => void;
   messageDeleted: (messageIds: string[]) => void;
+  chatCleared: (jid: string) => void;
   presenceUpdate: (jid: string, status: string, lastSeen?: number) => void;
   callReceived: (callId: string, callFrom: string) => void;
   jidAliasChanged: (conversationKey: string, newJid: string) => void;
@@ -484,6 +485,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (ids.length > 0) {
         this.emit('messageDeleted', ids);
       }
+    }
+    if (data?.all && data?.jid) {
+      // Clear-chat: mark all messages in this conversation as deleted
+      this.emit('chatCleared', data.jid);
     }
   }
 

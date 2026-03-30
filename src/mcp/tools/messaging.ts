@@ -28,6 +28,7 @@ interface MessageRow {
   conversation_key: string;
   sender_jid: string;
   is_from_me: number;
+  content: string | null;
 }
 
 interface OwnershipResult {
@@ -48,12 +49,13 @@ function validateMessageOwnership(
     return { error: 'Message not found' };
   }
 
-  if (
-    session.tier === 'chat-scoped' &&
-    session.conversationKey &&
-    row.conversation_key !== session.conversationKey
-  ) {
-    return { error: 'Access denied: message belongs to a different conversation' };
+  if (session.tier === 'chat-scoped') {
+    if (!session.conversationKey) {
+      return { error: 'Chat-scoped session has no conversation key' };
+    }
+    if (row.conversation_key !== session.conversationKey) {
+      return { error: 'Access denied: message belongs to a different conversation' };
+    }
   }
 
   return { row };
@@ -129,7 +131,7 @@ export function registerMessagingTools(
           contextInfo: {
             stanzaId: row!.message_id,
             participant: row!.sender_jid,
-            quotedMessage: { conversation: text },
+            quotedMessage: { conversation: row!.content ?? '' },
           },
         });
       } catch (err) {

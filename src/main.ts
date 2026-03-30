@@ -15,6 +15,7 @@ import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts'
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
 import { createIngestHandler } from './core/ingest.ts';
+import { toConversationKey } from './core/conversation-key.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -89,6 +90,10 @@ log.info({
   accessMode: config.accessMode,
   model: config.models.conversation,
 }, 'starting bot');
+
+if (config.adminPhones.size === 0) {
+  log.warn('No admin phones configured — approval requests will not be delivered');
+}
 
 // 1. Lock
 acquireLock();
@@ -173,6 +178,17 @@ connectionManager.onMessage = createIngestHandler(
   () => connectionManager.botJid ?? '',
   () => connectionManager.botLid,
 );
+
+// 6a. Wire clear-chat: soft-delete all messages when WhatsApp fires a clear-chat event
+connectionManager.on('chatCleared', (jid: string) => {
+  const conversationKey = toConversationKey(jid);
+  try {
+    const count = db.clearChat(conversationKey);
+    log.info({ jid, conversationKey, count }, 'chatCleared: soft-deleted messages');
+  } catch (err) {
+    log.error({ err, jid, conversationKey }, 'chatCleared: failed to soft-delete messages');
+  }
+});
 
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({

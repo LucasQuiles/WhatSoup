@@ -270,13 +270,19 @@ export class ChatRuntime implements Runtime {
       return;
     }
 
-    // 9. Send the response
+    // 9. Send the response (with one retry on failure)
     const sendStart = Date.now();
     try {
       await this.messenger.sendMessage(msg.chatJid, responseText);
     } catch (err) {
-      log.error({ traceId, err, chatJid: msg.chatJid }, 'failed to send response');
-      return;
+      log.warn({ traceId, err, chatJid: msg.chatJid }, 'send failed — retrying in 2s');
+      try {
+        await new Promise(r => setTimeout(r, 2000));
+        await this.messenger.sendMessage(msg.chatJid, responseText);
+      } catch (retryErr) {
+        log.error({ traceId, err: retryErr, chatJid: msg.chatJid }, 'send retry failed — response lost');
+        return;
+      }
     }
     const sendDurationMs = Date.now() - sendStart;
 
