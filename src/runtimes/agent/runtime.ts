@@ -29,7 +29,21 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import type { SessionContext } from '../../mcp/types.ts';
+import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
+import type { ConnectionManager } from '../../transport/connection.ts';
+import { registerMessagingTools } from '../../mcp/tools/messaging.ts';
+import { registerMediaTools } from '../../mcp/tools/media.ts';
+import { registerChatManagementTools } from '../../mcp/tools/chat-management.ts';
+import { registerChatOperationTools } from '../../mcp/tools/chat-operations.ts';
+import { registerSearchTools } from '../../mcp/tools/search.ts';
+import { registerGroupTools } from '../../mcp/tools/groups.ts';
+import { registerCommunityTools } from '../../mcp/tools/community.ts';
+import { registerNewsletterTools } from '../../mcp/tools/newsletter.ts';
+import { registerBusinessTools } from '../../mcp/tools/business.ts';
+import { registerAdvancedTools } from '../../mcp/tools/advanced.ts';
+import { registerCallTools } from '../../mcp/tools/calls.ts';
+import { registerPresenceTools } from '../../mcp/tools/presence.ts';
+import { registerProfileTools } from '../../mcp/tools/profile.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -199,9 +213,39 @@ export class AgentRuntime implements Runtime {
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
 
     this.registry = new ToolRegistry();
+    this.registerAllTools();
 
     this.turnQueue = new TurnQueue();
     this.turnQueue.setProcessor((turn) => this.processTurn(turn));
+  }
+
+  private registerAllTools(): void {
+    const connection = this.messenger as ConnectionManager;
+    const getSock = () => connection.getSocket();
+    const register = (tool: ToolDeclaration) => this.registry.register(tool);
+
+    // Messaging & media (take ToolRegistry + deps directly)
+    registerMessagingTools(this.registry, { connection, db: this.db.raw });
+    registerMediaTools(this.registry, { connection });
+
+    // DB-dependent tools
+    registerChatManagementTools(this.db, getSock, register);
+    registerChatOperationTools(this.db, getSock, register);
+    registerSearchTools(this.db, register);
+
+    // Socket-only tools
+    registerGroupTools(getSock, register);
+    registerCommunityTools(getSock, register);
+    registerNewsletterTools(getSock, register);
+    registerBusinessTools(getSock, register);
+    registerAdvancedTools(getSock, register);
+    registerCallTools(getSock, register);
+    registerProfileTools(getSock, register);
+
+    // Presence needs the shared presenceCache from ConnectionManager
+    registerPresenceTools(getSock, connection.presenceCache, register);
+
+    log.info({ toolCount: this.registry.listTools({ tier: 'global' }).length }, 'all tools registered');
   }
 
   setDurability(engine: DurabilityEngine): void {

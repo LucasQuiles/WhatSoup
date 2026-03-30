@@ -119,6 +119,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   /** When true, incoming calls are automatically rejected via sock.rejectCall(). */
   autoRejectCalls = false;
 
+  /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
+  getSocket(): WhatsAppSocket | null {
+    return this.sock;
+  }
+
   private static readonly MAX_RECONNECT_ATTEMPTS = 10;
   private static readonly BASE_BACKOFF_MS = 1_000;
   private static readonly MAX_BACKOFF_MS = 60_000;
