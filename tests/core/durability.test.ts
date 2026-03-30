@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { DurabilityEngine } from '../../src/core/durability.ts';
+import { DurabilityEngine, sendTracked } from '../../src/core/durability.ts';
 import type { OutboundOpParams } from '../../src/core/durability.ts';
 
 const BASE_OP: OutboundOpParams = {
@@ -205,6 +205,68 @@ describe('DurabilityEngine', () => {
         return r.status as string;
       });
       expect(rows).toEqual(['pending', 'sending', 'echoed', 'maybe_sent']);
+    });
+  });
+
+  describe('completeInbound', () => {
+    it('transitions processing → turn_done → complete', () => {
+      const seq = engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent');
+      engine.completeInbound(seq, 'response_sent');
+      const row = db.raw.prepare('SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('response_sent');
+    });
+
+    it('skips markTurnDone if already in turn_done', () => {
+      const seq = engine.journalInbound('msg-2', 'key-1', 'jid-2', 'agent');
+      engine.markTurnDone(seq);
+      engine.completeInbound(seq, 'response_sent');
+      const row = db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(row.processing_status).toBe('complete');
+    });
+
+    it('is idempotent on already-complete events', () => {
+      const seq = engine.journalInbound('msg-3', 'key-1', 'jid-3', 'agent');
+      engine.completeInbound(seq, 'response_sent');
+      // Calling again should not throw
+      engine.completeInbound(seq, 'response_sent');
+      const row = db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as any;
+      expect(row.processing_status).toBe('complete');
+    });
+  });
+
+  describe('sendTracked', () => {
+    it('creates outbound op, marks sending, marks submitted on success', async () => {
+      const mockMessenger = {
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: 'WA_123' }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      await sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', engine, { replayPolicy: 'safe' });
+      const op = db.raw.prepare('SELECT * FROM outbound_ops WHERE wa_message_id = ?').get('WA_123') as any;
+      expect(op).toBeDefined();
+      expect(op.status).toBe('submitted');
+      expect(op.replay_policy).toBe('safe');
+    });
+
+    it('marks maybe_sent and rethrows on send failure', async () => {
+      const mockMessenger = {
+        sendMessage: vi.fn().mockRejectedValue(new Error('network down')),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      await expect(sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', engine, { replayPolicy: 'unsafe' }))
+        .rejects.toThrow('network down');
+      const op = db.raw.prepare('SELECT * FROM outbound_ops ORDER BY id DESC LIMIT 1').get() as any;
+      expect(op.status).toBe('maybe_sent');
+      expect(op.error).toBe('network down');
+    });
+
+    it('works without durability engine (no-op tracking)', async () => {
+      const mockMessenger = {
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+      };
+      await sendTracked(mockMessenger, 'jid@s.whatsapp.net', 'hello', undefined, { replayPolicy: 'safe' });
+      expect(mockMessenger.sendMessage).toHaveBeenCalledWith('jid@s.whatsapp.net', 'hello');
     });
   });
 });

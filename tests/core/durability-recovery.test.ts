@@ -284,6 +284,37 @@ describe('DurabilityEngine — preConnectRecovery()', () => {
     expect(stats.toolCallsQuarantined).toBe(0);
     expect(stats.sessionsRestored).toBe(0);
   });
+
+  // ── Item 6: Pending tool call recovery ────────────────────────────────
+
+  it('recovers pending tool call — safe: replayed, unsafe: quarantined', () => {
+    engine.recordToolCall('key-1', 'search_messages', '{}', 'safe');
+    engine.recordToolCall('key-1', 'send_message', '{}', 'unsafe');
+    // Don't call markToolExecuting — they stay in 'pending'
+
+    engine.preConnectRecovery();
+
+    const safe = db.raw.prepare("SELECT status FROM tool_calls WHERE tool_name = 'search_messages'").get() as any;
+    expect(safe.status).toBe('replayed');
+
+    const unsafe = db.raw.prepare("SELECT status FROM tool_calls WHERE tool_name = 'send_message'").get() as any;
+    expect(unsafe.status).toBe('quarantined');
+  });
+
+  // ── Item 7: FIFO inbound seq pattern ──────────────────────────────────
+
+  it('multiple concurrent inbound events — first failed does not affect second', () => {
+    const seq1 = engine.journalInbound('msg-fifo-1', 'key-1', 'jid-1', 'agent');
+    const seq2 = engine.journalInbound('msg-fifo-2', 'key-1', 'jid-1', 'agent');
+
+    engine.markInboundFailed(seq1);
+
+    const row1 = db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq1) as any;
+    expect(row1.processing_status).toBe('failed');
+
+    const row2 = db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq2) as any;
+    expect(row2.processing_status).toBe('processing');
+  });
 });
 
 // ---------------------------------------------------------------------------

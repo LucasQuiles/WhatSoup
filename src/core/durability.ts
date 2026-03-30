@@ -558,6 +558,23 @@ export class DurabilityEngine {
     return count;
   }
 
+  getHealthStats(): { pendingOutbound: number; quarantinedOutbound: number; lastRecoveryAt: string | null } {
+    const pending = this.db.raw.prepare(
+      `SELECT COUNT(*) as count FROM outbound_ops WHERE status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
+    ).get() as { count: number };
+    const quarantined = this.db.raw.prepare(
+      `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
+    ).get() as { count: number };
+    const lastRecovery = this.db.raw.prepare(
+      `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
+    ).get() as { completed_at: string } | undefined;
+    return {
+      pendingOutbound: pending.count,
+      quarantinedOutbound: quarantined.count,
+      lastRecoveryAt: lastRecovery?.completed_at ?? null,
+    };
+  }
+
   /**
    * Insert a recovery_run record with aggregated stats.
    */

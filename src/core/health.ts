@@ -143,6 +143,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           validation: config.models.validation,
           fallback: config.models.fallback,
         },
+        durability: deps.durability?.getHealthStats() ?? null,
       });
 
       // 'degraded' returns 200: enrichment staleness is a warning, not a

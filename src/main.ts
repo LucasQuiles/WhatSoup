@@ -16,7 +16,7 @@ import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { DurabilityEngine } from './core/durability.ts';
+import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -290,7 +290,7 @@ async function start(): Promise<void> {
         })();
 
     setTimeout(() => {
-      connectionManager.sendMessage(notifyTarget.chatJid, notifyTarget.text)
+      sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'safe' })
         .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
         .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
     }, 3_000);

@@ -21,7 +21,7 @@ function makeRejectCall(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     schema: RejectCallSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
-    replayPolicy: 'unsafe',
+    replayPolicy: 'safe',
     handler: async (params) => {
       const { call_id, call_from } = RejectCallSchema.parse(params);
 
