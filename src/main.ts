@@ -297,6 +297,18 @@ connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
   }
 });
 
+connectionManager.on('groupsUpsert', (groups) => {
+  log.info({ count: groups.length }, 'groupsUpsert: received group metadata');
+});
+
+connectionManager.on('groupsUpdate', (updates) => {
+  log.info({ count: updates.length }, 'groupsUpdate: received group updates');
+});
+
+connectionManager.on('groupJoinRequest', (data) => {
+  log.info({ groupJid: data.groupJid, requesterJid: data.requesterJid }, 'groupJoinRequest: join request received');
+});
+
 // 7. Health server — delegates enrichment stats to runtime health snapshot
 const healthServer = startHealthServer({
   db,
