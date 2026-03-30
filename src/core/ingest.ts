@@ -56,6 +56,7 @@ export function createIngestHandler(
           isFromMe: msg.isFromMe,
           timestamp: msg.timestamp,
           quotedMessageId: msg.quotedMessageId,
+          rawMessage: msg.rawMessage != null ? JSON.stringify(msg.rawMessage) : null,
         });
         if (!isNew) {
           log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');

@@ -274,6 +274,22 @@ CREATE TABLE IF NOT EXISTS lid_mappings (
 );
 `;
 
+// ─── Migration 7: groups table for group metadata persistence ────────────────
+
+const MIGRATION_7 = `
+CREATE TABLE IF NOT EXISTS groups (
+  jid TEXT PRIMARY KEY,
+  subject TEXT,
+  description TEXT,
+  owner TEXT,
+  creation_time INTEGER,
+  participant_count INTEGER,
+  restrict_mode INTEGER DEFAULT 0,
+  announce_mode INTEGER DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -292,6 +308,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
     }
   }],
   [6, (db: DatabaseSync) => { db.exec(MIGRATION_6); }],
+  [7, (db: DatabaseSync) => { db.exec(MIGRATION_7); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

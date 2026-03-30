@@ -27,6 +27,7 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
+import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -312,11 +313,21 @@ connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
 });
 
 connectionManager.on('groupsUpsert', (groups) => {
-  log.info({ count: groups.length }, 'groupsUpsert: received group metadata');
+  try {
+    handleGroupsUpsert(db, groups as any);
+    log.info({ count: groups.length }, 'groupsUpsert: persisted group metadata');
+  } catch (err) {
+    log.error({ err }, 'groupsUpsert: failed to persist group metadata');
+  }
 });
 
 connectionManager.on('groupsUpdate', (updates) => {
-  log.info({ count: updates.length }, 'groupsUpdate: received group updates');
+  try {
+    handleGroupsUpdate(db, updates as any);
+    log.info({ count: updates.length }, 'groupsUpdate: persisted group updates');
+  } catch (err) {
+    log.error({ err }, 'groupsUpdate: failed to persist group updates');
+  }
 });
 
 connectionManager.on('groupJoinRequest', (data) => {

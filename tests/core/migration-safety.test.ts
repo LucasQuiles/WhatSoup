@@ -180,7 +180,7 @@ describe('Test 1 — incremental migration apply preserves existing data', () =>
 
   afterEach(() => cleanup(dbPath));
 
-  it('messages inserted after migration 1 survive migrations 2-6', () => {
+  it('messages inserted after migration 1 survive migrations 2-7', () => {
     dbPath = tmpFile();
 
     // Step 1: Bootstrap DB with only migration 1 applied, insert data
@@ -201,7 +201,7 @@ describe('Test 1 — incremental migration apply preserves existing data', () =>
       raw.close();
     }
 
-    // Step 2: Open via Database class — should apply migrations 2-6
+    // Step 2: Open via Database class — should apply migrations 2-7
     const db = new Database(dbPath);
     expect(() => db.open()).not.toThrow();
 
@@ -216,7 +216,7 @@ describe('Test 1 — incremental migration apply preserves existing data', () =>
     expect(rows[1].message_id).toBe('pre-msg-2');
     expect(rows[1].content).toBe('pre-existing message beta');
 
-    // Step 4: Verify new tables from migrations 2-6 were created
+    // Step 4: Verify new tables from migrations 2-7 were created
     const tableNames = (
       db.raw
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -255,7 +255,7 @@ describe('Test 2 — ALTER TABLE ADD COLUMN preserves 100 pre-existing messages'
   it('all 100 messages survive migration 5 with raw_message = NULL', () => {
     dbPath = tmpFile();
 
-    // Apply migrations 1-4 manually, insert 100 messages, then let DB.open() apply 5+6
+    // Apply migrations 1-4 manually, insert 100 messages, then let DB.open() apply 5+6+7
     {
       const raw = new DatabaseSync(dbPath);
       raw.exec('PRAGMA journal_mode = WAL');
@@ -316,7 +316,7 @@ describe('Test 2 — ALTER TABLE ADD COLUMN preserves 100 pre-existing messages'
       raw.close();
     }
 
-    // Database.open() should apply migrations 5 and 6
+    // Database.open() should apply migrations 5, 6, and 7
     const db = new Database(dbPath);
     expect(() => db.open()).not.toThrow();
 
@@ -353,14 +353,14 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
   it('opening a fully-migrated file DB a second time does not throw', () => {
     dbPath = tmpFile();
 
-    // First open — applies all 6 migrations
+    // First open — applies all 7 migrations
     {
       const db = new Database(dbPath);
       db.open();
       db.close();
     }
 
-    // Second open — schema_migrations has all 6; migration 5 must NOT re-run
+    // Second open — schema_migrations has all 7; migration 5 must NOT re-run
     const db2 = new Database(dbPath);
     expect(() => db2.open()).not.toThrow();
 
@@ -369,7 +369,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
     db2.close();
   });
@@ -464,7 +464,7 @@ describe('Test 4 — UNIQUE constraints on Wave 2/4 tables fire correctly', () =
 // ─── Test 5: schema_migrations version tracking ───────────────────────────────
 
 describe('Test 5 — schema_migrations version tracking', () => {
-  it('records all 6 migration versions in order', () => {
+  it('records all 7 migration versions in order', () => {
     const db = new Database(':memory:');
     db.open();
 
@@ -472,7 +472,7 @@ describe('Test 5 — schema_migrations version tracking', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
     db.close();
   });
@@ -662,8 +662,8 @@ describe('Test 7 — FK behaviour: reactions/receipts do not cascade-delete', ()
 
 // ─── Test 8: Happy path — empty DB gets all migrations at once ────────────────
 
-describe('Test 8 — fresh :memory: DB receives all 6 migrations', () => {
-  it('all tables exist and all 6 versions recorded', () => {
+describe('Test 8 — fresh :memory: DB receives all 7 migrations', () => {
+  it('all tables exist and all 7 versions recorded', () => {
     const db = new Database(':memory:');
     db.open();
 
@@ -672,7 +672,7 @@ describe('Test 8 — fresh :memory: DB receives all 6 migrations', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
     const tables = (
       db.raw
@@ -687,6 +687,7 @@ describe('Test 8 — fresh :memory: DB receives all 6 migrations', () => {
       'chats',
       'contacts',
       'enrichment_runs',
+      'groups',
       'inbound_events',
       'label_associations',
       'labels',
@@ -716,12 +717,12 @@ describe('Test 8 — fresh :memory: DB receives all 6 migrations', () => {
 
 // ─── Test 9: Migration ordering — partial state ───────────────────────────────
 
-describe('Test 9 — migration ordering: only version 1 recorded, 2-6 apply in order', () => {
+describe('Test 9 — migration ordering: only version 1 recorded, 2-7 apply in order', () => {
   let dbPath: string;
 
   afterEach(() => cleanup(dbPath));
 
-  it('opens cleanly and applies 2-6 when only version 1 is in schema_migrations', () => {
+  it('opens cleanly and applies 2-7 when only version 1 is in schema_migrations', () => {
     dbPath = tmpFile();
 
     {
@@ -747,7 +748,7 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-6 apply in o
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
 
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
     // raw_message column from migration 5
     const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
@@ -761,6 +762,9 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-6 apply in o
     ).map((r) => r.name);
     expect(tables).toContain('blocklist');
     expect(tables).toContain('lid_mappings');
+
+    // groups table from migration 7
+    expect(tables).toContain('groups');
 
     db.close();
   });

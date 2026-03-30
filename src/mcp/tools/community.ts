@@ -221,28 +221,49 @@ function makeCommunityParticipantsUpdate(getSock: () => WhatsAppSocket | null): 
 }
 
 // ---------------------------------------------------------------------------
-// community_invite_code
+// community_invite_code — get, revoke, or accept a community invite
 // ---------------------------------------------------------------------------
 
 const CommunityInviteCodeSchema = z.object({
-  jid: z.string(),
+  jid: z.string().describe('Community JID — required for get and revoke actions; unused for accept'),
+  action: z
+    .enum(['get', 'revoke', 'accept'])
+    .optional()
+    .describe('get (default): fetch current invite code; revoke: rotate and return new code; accept: join via invite code'),
+  code: z.string().optional().describe('Invite code — required for accept action'),
 });
 
 function makeCommunityInviteCode(getSock: () => WhatsAppSocket | null): ToolDeclaration {
   return {
     name: 'community_invite_code',
-    description: 'Get the invite code for a WhatsApp community by JID (global).',
+    description:
+      'Get, revoke, or accept a WhatsApp community invite. action=get (default) returns the current invite code; action=revoke rotates it and returns the new code; action=accept joins the community via an invite code (requires code param).',
     schema: CommunityInviteCodeSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
-    replayPolicy: 'read_only',
+    // revoke and accept are mutating — use the most conservative policy
+    replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { jid } = CommunityInviteCodeSchema.parse(params);
+      const { jid, action = 'get', code } = CommunityInviteCodeSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
-      const code = await (sock as any).communityInviteCode(jid);
-      const link = code ? `https://chat.whatsapp.com/${code}` : null;
-      return { jid, inviteCode: code ?? null, inviteLink: link };
+
+      if (action === 'get') {
+        const inviteCode = await (sock as any).communityInviteCode(jid);
+        const inviteLink = inviteCode ? `https://chat.whatsapp.com/${inviteCode}` : null;
+        return { jid, inviteCode: inviteCode ?? null, inviteLink };
+      }
+
+      if (action === 'revoke') {
+        const newCode = await (sock as any).communityRevokeInvite(jid);
+        const inviteLink = newCode ? `https://chat.whatsapp.com/${newCode}` : null;
+        return { jid, inviteCode: newCode ?? null, inviteLink, revoked: true };
+      }
+
+      // action === 'accept'
+      if (!code) throw new Error('code is required for action=accept');
+      const communityJid = await (sock as any).communityAcceptInvite(code);
+      return { communityJid: communityJid ?? null, code, accepted: true };
     },
   };
 }

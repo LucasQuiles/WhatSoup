@@ -63,6 +63,8 @@ export interface StoreMessageInput {
   isFromMe: boolean;
   timestamp: number; // unix epoch seconds
   quotedMessageId?: string | null;
+  /** JSON-serialised WAMessage — stored in raw_message for native forward support */
+  rawMessage?: string | null;
 }
 
 // --- Row mapping ---
@@ -99,6 +101,7 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
     is_from_me: msg.isFromMe ? 1 : 0,
     timestamp: msg.timestamp,
     quoted_message_id: msg.quotedMessageId ?? null,
+    raw_message: msg.rawMessage ?? null,
   };
 }
 
@@ -111,17 +114,18 @@ export function storeMessage(db: Database, msg: StoreMessageInput): void {
   db.raw.prepare(`
     INSERT INTO messages
       (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type,
-       is_from_me, timestamp, quoted_message_id)
+       is_from_me, timestamp, quoted_message_id, raw_message)
     VALUES
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
-       @is_from_me, @timestamp, @quoted_message_id)
+       @is_from_me, @timestamp, @quoted_message_id, @raw_message)
     ON CONFLICT(message_id) DO UPDATE SET
-      sender_name      = COALESCE(excluded.sender_name, sender_name),
-      content          = excluded.content,
-      content_type     = excluded.content_type,
-      is_from_me       = excluded.is_from_me,
-      timestamp        = excluded.timestamp,
-      quoted_message_id = COALESCE(excluded.quoted_message_id, quoted_message_id)
+      sender_name       = COALESCE(excluded.sender_name, sender_name),
+      content           = excluded.content,
+      content_type      = excluded.content_type,
+      is_from_me        = excluded.is_from_me,
+      timestamp         = excluded.timestamp,
+      quoted_message_id = COALESCE(excluded.quoted_message_id, quoted_message_id),
+      raw_message       = COALESCE(excluded.raw_message, raw_message)
   `).run(toInsertParams(msg));
 }
 
@@ -134,10 +138,10 @@ export function storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean
   const result = db.raw.prepare(`
     INSERT OR IGNORE INTO messages
       (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type,
-       is_from_me, timestamp, quoted_message_id)
+       is_from_me, timestamp, quoted_message_id, raw_message)
     VALUES
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
-       @is_from_me, @timestamp, @quoted_message_id)
+       @is_from_me, @timestamp, @quoted_message_id, @raw_message)
   `).run(toInsertParams(msg));
   return (result.changes as number) > 0;
 }
