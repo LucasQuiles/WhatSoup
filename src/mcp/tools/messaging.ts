@@ -8,6 +8,7 @@ import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { formatMentions } from '../../core/mentions.ts';
+import type { MessageRow } from '../../core/messages.ts';
 
 // ---------------------------------------------------------------------------
 // Deps interface
@@ -16,19 +17,6 @@ import { formatMentions } from '../../core/mentions.ts';
 export interface MessagingDeps {
   connection: ConnectionManager;
   db: DatabaseSync;
-}
-
-// ---------------------------------------------------------------------------
-// Ownership validation helper
-// ---------------------------------------------------------------------------
-
-interface MessageRow {
-  message_id: string;
-  chat_jid: string;
-  conversation_key: string;
-  sender_jid: string;
-  is_from_me: number;
-  content: string | null;
 }
 
 interface OwnershipResult {

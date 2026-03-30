@@ -277,7 +277,7 @@ export class ChatRuntime implements Runtime {
     } catch (err) {
       log.warn({ traceId, err, chatJid: msg.chatJid }, 'send failed — retrying in 2s');
       try {
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, jitteredDelay(2000, 0)));
         await this.messenger.sendMessage(msg.chatJid, responseText);
       } catch (retryErr) {
         log.error({ traceId, err: retryErr, chatJid: msg.chatJid }, 'send retry failed — response lost');

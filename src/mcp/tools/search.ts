@@ -2,8 +2,8 @@
 // FTS5 search tools: search_messages, search_chat_messages, search_contacts.
 
 import { z } from 'zod';
-import type { ToolDeclaration } from '../types.ts';
-import type { SessionContext } from '../types.ts';
+import type { ToolDeclaration, SessionContext } from '../types.ts';
+import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 
@@ -64,8 +64,7 @@ function makeSearchChatMessages(db: Database): ToolDeclaration {
     targetMode: 'caller-supplied',
     handler: async (params, session: SessionContext) => {
       const { conversation_key: caller_key, query, limit = 20 } = SearchChatMessagesSchema.parse(params);
-      // For chat-scoped sessions, ignore caller-supplied key and force session key
-      const conversation_key = session.tier === 'chat-scoped' ? session.conversationKey! : caller_key;
+      const conversation_key = resolveConversationKey(session, caller_key);
 
       const rows = db.raw
         .prepare(

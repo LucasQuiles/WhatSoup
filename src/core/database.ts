@@ -290,11 +290,7 @@ export class Database {
         this.db.exec(`
           INSERT INTO main.rate_limits (sender_jid, response_at)
           SELECT sender_jid, response_at FROM old.rate_limits
-          WHERE NOT EXISTS (
-            SELECT 1 FROM main.rate_limits r
-            WHERE r.sender_jid = old.rate_limits.sender_jid
-            AND r.response_at = old.rate_limits.response_at
-          )
+          GROUP BY sender_jid, response_at
         `);
         const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
         counts['rate_limits'] = row.n;
@@ -430,12 +426,11 @@ export class Database {
    * The messages_fts_soft_delete trigger removes them from FTS automatically.
    */
   clearChat(conversationKey: string): number {
-    this.db.prepare(
+    const result = this.db.prepare(
       `UPDATE messages SET deleted_at = datetime('now')
        WHERE conversation_key = ? AND deleted_at IS NULL`,
     ).run(conversationKey);
-    const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-    return row.n;
+    return Number(result.changes);
   }
 
   /** Expose the underlying DatabaseSync for query modules. */

@@ -179,7 +179,6 @@ connectionManager.onMessage = createIngestHandler(
   () => connectionManager.botLid,
 );
 
-// 6a. Wire clear-chat: soft-delete all messages when WhatsApp fires a clear-chat event
 connectionManager.on('chatCleared', (jid: string) => {
   const conversationKey = toConversationKey(jid);
   try {

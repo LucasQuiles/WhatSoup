@@ -27,3 +27,7 @@ export interface ToolCallResult {
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
 }
+
+export function resolveConversationKey(session: SessionContext, callerKey: string): string {
+  return session.tier === 'chat-scoped' ? session.conversationKey! : callerKey;
+}
