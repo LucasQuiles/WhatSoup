@@ -4,6 +4,8 @@ import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types
 import type { LLMProvider, GenerateRequest, ChatMessage } from './providers/types.ts';
 import type { PineconeMemory } from './providers/pinecone.ts';
 import type { Runtime } from '../types.ts';
+import type { DurabilityEngine } from '../../core/durability.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
 import { recordResponse } from './rate-limits-db.ts';
 import { config } from '../../config.ts';
@@ -58,6 +60,7 @@ export class ChatRuntime implements Runtime {
   private fallbackProvider: LLMProvider;
   private chatQueue: ChatQueue;
   private enrichmentPoller: EnrichmentPoller | null;
+  private durability: DurabilityEngine | undefined;
 
   constructor(
     db: Database,
@@ -76,6 +79,11 @@ export class ChatRuntime implements Runtime {
     this.enrichmentPoller = (options?.enableEnrichment ?? true)
       ? new EnrichmentPoller(db, pinecone, primaryProvider, primaryProvider)
       : null;
+  }
+
+  /** Attach an optional DurabilityEngine to track outbound ops. */
+  setDurability(engine: DurabilityEngine): void {
+    this.durability = engine;
   }
 
   async start(): Promise<void> {
@@ -126,7 +134,20 @@ export class ChatRuntime implements Runtime {
 
         log.info({ traceId, senderJid: msg.senderJid }, 'rate limit hit — sending notice');
         try {
-          await this.messenger.sendMessage(msg.chatJid, 'chill, I need a minute');
+          const rateLimitText = 'chill, I need a minute';
+          let rateLimitOpId: number | undefined;
+          if (this.durability) {
+            const conversationKey = toConversationKey(msg.chatJid);
+            rateLimitOpId = this.durability.createOutboundOp({
+              conversationKey, chatJid: msg.chatJid, opType: 'text',
+              payload: JSON.stringify({ text: rateLimitText }), replayPolicy: 'unsafe',
+            });
+            this.durability.markSending(rateLimitOpId);
+          }
+          const receipt = await this.messenger.sendMessage(msg.chatJid, rateLimitText);
+          if (rateLimitOpId !== undefined && this.durability) {
+            this.durability.markSubmitted(rateLimitOpId, receipt.waMessageId);
+          }
         } catch (err) {
           log.error({ traceId, err, chatJid: msg.chatJid }, 'failed to send rate limit notice');
         }
@@ -263,7 +284,20 @@ export class ChatRuntime implements Runtime {
     // 8. On total failure: send fallback message (not stored, not rate-limited)
     if (!responseText) {
       try {
-        await this.messenger.sendMessage(msg.chatJid, 'lol my brain just broke, give me a sec');
+        const failText = 'lol my brain just broke, give me a sec';
+        let failOpId: number | undefined;
+        if (this.durability) {
+          const conversationKey = toConversationKey(msg.chatJid);
+          failOpId = this.durability.createOutboundOp({
+            conversationKey, chatJid: msg.chatJid, opType: 'text',
+            payload: JSON.stringify({ text: failText }), replayPolicy: 'unsafe',
+          });
+          this.durability.markSending(failOpId);
+        }
+        const receipt = await this.messenger.sendMessage(msg.chatJid, failText);
+        if (failOpId !== undefined && this.durability) {
+          this.durability.markSubmitted(failOpId, receipt.waMessageId);
+        }
       } catch (fallbackSendErr) {
         log.error({ traceId, err: fallbackSendErr, chatJid: msg.chatJid }, 'failed to send fallback message');
       }
@@ -272,15 +306,33 @@ export class ChatRuntime implements Runtime {
 
     // 9. Send the response (with one retry on failure)
     const sendStart = Date.now();
+    let mainOpId: number | undefined;
+    if (this.durability) {
+      const conversationKey = toConversationKey(msg.chatJid);
+      mainOpId = this.durability.createOutboundOp({
+        conversationKey, chatJid: msg.chatJid, opType: 'text',
+        payload: JSON.stringify({ text: responseText }), replayPolicy: 'unsafe',
+      });
+      this.durability.markSending(mainOpId);
+    }
     try {
-      await this.messenger.sendMessage(msg.chatJid, responseText);
+      const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);
+      if (mainOpId !== undefined && this.durability) {
+        this.durability.markSubmitted(mainOpId, receipt.waMessageId);
+      }
     } catch (err) {
       log.warn({ traceId, err, chatJid: msg.chatJid }, 'send failed — retrying in 2s');
       try {
         await new Promise(r => setTimeout(r, jitteredDelay(2000, 0)));
-        await this.messenger.sendMessage(msg.chatJid, responseText);
+        const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);
+        if (mainOpId !== undefined && this.durability) {
+          this.durability.markSubmitted(mainOpId, receipt.waMessageId);
+        }
       } catch (retryErr) {
         log.error({ traceId, err: retryErr, chatJid: msg.chatJid }, 'send retry failed — response lost');
+        if (mainOpId !== undefined && this.durability) {
+          this.durability.markMaybeSent(mainOpId, (retryErr as Error)?.message ?? 'send_retry_failed');
+        }
         return;
       }
     }

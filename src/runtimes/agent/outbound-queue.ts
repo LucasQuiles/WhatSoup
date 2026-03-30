@@ -2,6 +2,8 @@
 // Serialized outbound queue for WhatsApp messages with batching and pacing.
 
 import type { Messenger } from '../../core/types.ts';
+import type { DurabilityEngine } from '../../core/durability.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('outbound-queue');
@@ -110,6 +112,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   private readonly messenger: Messenger;
   private chatJid: string;
+  private durability: DurabilityEngine | undefined;
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -135,6 +138,11 @@ export class OutboundQueue implements IOutboundQueue {
   constructor(messenger: Messenger, chatJid: string) {
     this.messenger = messenger;
     this.chatJid = chatJid;
+  }
+
+  /** Attach an optional DurabilityEngine to track outbound ops. */
+  setDurability(engine: DurabilityEngine): void {
+    this.durability = engine;
   }
 
   /** Enqueue a text message for immediate sending (after pacing). */
@@ -321,12 +329,27 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private async sendWithRetry(text: string): Promise<void> {
+    // Create an outbound op before first attempt (if durability is wired)
+    let opId: number | undefined;
+    if (this.durability) {
+      const conversationKey = toConversationKey(this.chatJid);
+      opId = this.durability.createOutboundOp({
+        conversationKey,
+        chatJid: this.chatJid,
+        opType: 'text',
+        payload: JSON.stringify({ text }),
+        replayPolicy: 'unsafe', // agent responses are unsafe to replay
+      });
+      this.durability.markSending(opId);
+    }
+
     let lastErr: unknown;
     for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
       try {
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        let receipt;
         try {
-          await Promise.race([
+          receipt = await Promise.race([
             this.messenger.sendMessage(this.chatJid, text),
             new Promise<never>((_, reject) => {
               timeoutHandle = setTimeout(
@@ -337,6 +360,9 @@ export class OutboundQueue implements IOutboundQueue {
           ]);
         } finally {
           clearTimeout(timeoutHandle);
+        }
+        if (opId !== undefined && this.durability) {
+          this.durability.markSubmitted(opId, receipt.waMessageId);
         }
         return;
       } catch (err) {
@@ -355,6 +381,10 @@ export class OutboundQueue implements IOutboundQueue {
     // All attempts exhausted — log and give up (do NOT re-throw, queue must keep draining)
     const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
     log.error({ chatJid: this.chatJid, attempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, err: lastErr, textLength: text.length }, 'outbound send failed after all retries');
+
+    if (opId !== undefined && this.durability) {
+      this.durability.markMaybeSent(opId, (lastErr as Error)?.message ?? 'send_failed');
+    }
 
     // Best-effort: notify the user that part of the response was lost.
     // Send directly (not through queue) to avoid re-entry loops.

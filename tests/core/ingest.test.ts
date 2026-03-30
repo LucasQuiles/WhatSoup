@@ -278,6 +278,7 @@ describe('REQ-002.AC-02: admin command routing', () => {
       '15551234567',
       msg.chatJid,
       expect.any(Function),
+      undefined,
     );
 
     // Runtime NOT called — ingest consumed the command
@@ -306,6 +307,7 @@ describe('REQ-002.AC-02: admin command routing', () => {
       '15559876543',
       msg.chatJid,
       expect.any(Function),
+      undefined,
     );
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
   });
@@ -408,6 +410,7 @@ describe('REQ-002.AC-03: dispatch to runtime', () => {
       '17779990000',
       'Bob',
       'hi',
+      undefined,
     );
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
   });

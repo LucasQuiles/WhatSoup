@@ -93,6 +93,7 @@ export function createIngestHandler(
               cmd.subjectId,
               msg.chatJid,
               (m) => runtime.handleMessage(m),
+              durability,
             );
           } catch (err) {
             log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
@@ -116,7 +117,7 @@ export function createIngestHandler(
         if (triggerResult.accessStatus === 'unknown') {
           const phone = extractPhone(msg.senderJid);
           try {
-            await sendApprovalRequest(db, messenger, phone, msg.senderName ?? '', msg.content ?? '');
+            await sendApprovalRequest(db, messenger, phone, msg.senderName ?? '', msg.content ?? '', durability);
           } catch (err) {
             log.error({ err, phone }, 'failed to send approval request');
           }
