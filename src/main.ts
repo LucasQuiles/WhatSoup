@@ -18,6 +18,13 @@ import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
+import {
+  handleReaction,
+  handleReceipt,
+  handleChatsUpsert,
+  handleChatsUpdate,
+  handleChatsDelete,
+} from './core/chat-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
 function resolveTilde(p: string): string {
@@ -211,6 +218,73 @@ connectionManager.on('contactsUpdate', (updates) => {
     handleContactsUpdate(db, updates);
   } catch (err) {
     log.error({ err }, 'contactsUpdate: failed to update contacts');
+  }
+});
+
+connectionManager.on('reactionReceived', (data) => {
+  try {
+    handleReaction(db, data);
+  } catch (err) {
+    log.error({ err }, 'reactionReceived: failed to persist reaction');
+  }
+});
+
+connectionManager.on('receiptUpdate', (data) => {
+  try {
+    handleReceipt(db, data);
+  } catch (err) {
+    log.error({ err }, 'receiptUpdate: failed to persist receipt');
+  }
+});
+
+connectionManager.on('mediaUpdate', (updates) => {
+  log.info({ count: updates.length }, 'media URLs refreshed');
+});
+
+connectionManager.on('chatsUpsert', (chats) => {
+  try {
+    handleChatsUpsert(db, chats as any);
+  } catch (err) {
+    log.error({ err }, 'chatsUpsert: failed to persist chats');
+  }
+});
+
+connectionManager.on('chatsUpdate', (updates) => {
+  try {
+    handleChatsUpdate(db, updates);
+  } catch (err) {
+    log.error({ err }, 'chatsUpdate: failed to update chats');
+  }
+});
+
+connectionManager.on('chatsDelete', (jids) => {
+  try {
+    handleChatsDelete(db, jids);
+  } catch (err) {
+    log.error({ err }, 'chatsDelete: failed to delete chats');
+  }
+});
+
+connectionManager.on('historyMessages', (messages) => {
+  for (const msg of messages) {
+    try {
+      const waMsg = msg as { key?: { id?: string; remoteJid?: string; fromMe?: boolean }; messageTimestamp?: number; message?: unknown };
+      const msgId = waMsg.key?.id;
+      const chatJid = waMsg.key?.remoteJid;
+      if (!msgId || !chatJid) continue;
+      const existing = db.raw
+        .prepare('SELECT 1 FROM messages WHERE message_id = ?')
+        .get(msgId);
+      if (existing) continue;
+      const conversationKey = toConversationKey(chatJid);
+      const timestamp = waMsg.messageTimestamp ?? Math.floor(Date.now() / 1000);
+      db.raw.prepare(`
+        INSERT OR IGNORE INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, 'history', ?, ?)
+      `).run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
+    } catch (err) {
+      log.error({ err }, 'historyMessages: failed to store message');
+    }
   }
 });
 

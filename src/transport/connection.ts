@@ -47,6 +47,22 @@ export interface TransportEvents {
   jidAliasChanged: (conversationKey: string, newJid: string) => void;
   historySyncComplete: () => void;
   exhausted: () => void;
+  reactionReceived: (data: {
+    messageId: string;
+    conversationKey: string;
+    senderJid: string;
+    reaction: string;
+  }) => void;
+  receiptUpdate: (data: {
+    messageId: string;
+    recipientJid: string;
+    type: string;
+  }) => void;
+  mediaUpdate: (updates: Array<{ key: { id: string }; update: Record<string, unknown> }>) => void;
+  chatsUpsert: (chats: Array<{ id: string; [key: string]: unknown }>) => void;
+  chatsUpdate: (updates: Array<{ id: string; [key: string]: unknown }>) => void;
+  chatsDelete: (jids: string[]) => void;
+  historyMessages: (messages: unknown[]) => void;
 }
 
 // Typed event emitter augmentation
@@ -347,12 +363,86 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         }
       }
 
+      if (events['messages.reaction']) {
+        const reactions = events['messages.reaction'] as Array<{
+          key: { remoteJid?: string; id?: string; fromMe?: boolean };
+          reaction: { text: string; key: { remoteJid?: string; participant?: string } };
+        }>;
+        for (const r of reactions) {
+          const messageId = r.key.id;
+          const remoteJid = r.key.remoteJid;
+          if (!messageId || !remoteJid) continue;
+          const conversationKey = toConversationKey(remoteJid);
+          const senderJid = r.reaction.key.participant ?? r.reaction.key.remoteJid ?? '';
+          this.emit('reactionReceived', {
+            messageId,
+            conversationKey,
+            senderJid,
+            reaction: r.reaction.text ?? '',
+          });
+        }
+      }
+
+      if (events['message-receipt.update']) {
+        const receipts = events['message-receipt.update'] as Array<{
+          key: { id?: string; remoteJid?: string };
+          receipt: { receiptTimestamp?: number; readTimestamp?: number; playedTimestamp?: number };
+          update: { status?: number };
+        }>;
+        for (const r of receipts) {
+          const messageId = r.key.id;
+          const recipientJid = r.key.remoteJid;
+          if (!messageId || !recipientJid) continue;
+          // Map Baileys receipt status to type string
+          const status = r.update?.status;
+          let type = 'server';
+          if (status === 3) type = 'delivery';
+          else if (status === 4) type = 'read';
+          else if (status === 5) type = 'played';
+          this.emit('receiptUpdate', { messageId, recipientJid, type });
+        }
+      }
+
+      if (events['messages.media-update']) {
+        const updates = events['messages.media-update'] as Array<{
+          key: { id: string };
+          update: Record<string, unknown>;
+        }>;
+        this.log.info({ count: updates.length }, 'media update received');
+        this.emit('mediaUpdate', updates);
+      }
+
+      if (events['chats.upsert']) {
+        const chats = events['chats.upsert'] as Array<{ id: string; [key: string]: unknown }>;
+        this.emit('chatsUpsert', chats);
+      }
+
+      if (events['chats.update']) {
+        const updates = events['chats.update'] as Array<{ id: string; [key: string]: unknown }>;
+        this.emit('chatsUpdate', updates);
+      }
+
+      if (events['chats.delete']) {
+        const jids = events['chats.delete'] as string[];
+        this.emit('chatsDelete', jids);
+      }
+
       if (events['messaging-history.set']) {
-        const data = events['messaging-history.set'] as { messages?: unknown[]; isLatest?: boolean };
+        const data = events['messaging-history.set'] as {
+          messages?: unknown[];
+          chats?: Array<{ id: string; [key: string]: unknown }>;
+          isLatest?: boolean;
+        };
         this.log.info(
           { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
           'history sync received',
         );
+        if (data.messages && data.messages.length > 0) {
+          this.emit('historyMessages', data.messages);
+        }
+        if (data.chats && data.chats.length > 0) {
+          this.emit('chatsUpsert', data.chats);
+        }
         this.emit('historySyncComplete');
       }
     });
