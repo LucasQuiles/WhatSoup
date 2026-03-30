@@ -444,7 +444,7 @@ describe('config — entity-search fields', () => {
     expect(config.pineconeSearchMode).toBe('memory');
   });
 
-  it('pineconeSearchMode defaults to "entity" when PINECONE_INDEX is set to a non-whatsapp-bot value', async () => {
+  it('pineconeSearchMode defaults to "entity" when PINECONE_INDEX is set to a non-default value', async () => {
     process.env.PINECONE_INDEX = 'crm-entities';
     const { config } = await import('../src/config.ts');
     expect(config.pineconeSearchMode).toBe('entity');
