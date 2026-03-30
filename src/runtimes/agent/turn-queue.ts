@@ -12,6 +12,8 @@ export interface QueuedTurn {
   text: string;
   isGroup: boolean;
   groupName?: string;
+  /** durability: inbound_events.seq for this turn — threaded to outbound ops */
+  inboundSeq?: number;
 }
 
 export class TurnQueue {

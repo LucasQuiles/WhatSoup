@@ -136,6 +136,7 @@ export function createIngestHandler(
       let seq: number | undefined;
       if (durability) {
         seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
+        msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
       }
 
       // 6. Dispatch to runtime

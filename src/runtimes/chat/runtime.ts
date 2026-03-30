@@ -315,11 +315,13 @@ export class ChatRuntime implements Runtime {
       });
       this.durability.markSending(mainOpId);
     }
+    let sendSucceeded = false;
     try {
       const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);
       if (mainOpId !== undefined && this.durability) {
         this.durability.markSubmitted(mainOpId, receipt.waMessageId);
       }
+      sendSucceeded = true;
     } catch (err) {
       log.warn({ traceId, err, chatJid: msg.chatJid }, 'send failed — retrying in 2s');
       try {
@@ -328,15 +330,25 @@ export class ChatRuntime implements Runtime {
         if (mainOpId !== undefined && this.durability) {
           this.durability.markSubmitted(mainOpId, receipt.waMessageId);
         }
+        sendSucceeded = true;
       } catch (retryErr) {
         log.error({ traceId, err: retryErr, chatJid: msg.chatJid }, 'send retry failed — response lost');
         if (mainOpId !== undefined && this.durability) {
           this.durability.markMaybeSent(mainOpId, (retryErr as Error)?.message ?? 'send_retry_failed');
         }
+        if (this.durability && msg.inboundSeq !== undefined) {
+          this.durability.markInboundFailed(msg.inboundSeq);
+        }
         return;
       }
     }
     const sendDurationMs = Date.now() - sendStart;
+
+    // Advance inbound event state machine on successful send
+    if (sendSucceeded && this.durability && msg.inboundSeq !== undefined) {
+      this.durability.markTurnDone(msg.inboundSeq);
+      this.durability.markInboundComplete(msg.inboundSeq, 'response_sent');
+    }
 
     // 10. Bot reply storage: handled by the Baileys messages.upsert echo
     //     (via ingest → storeMessageIfNew). The echo carries the real WhatsApp

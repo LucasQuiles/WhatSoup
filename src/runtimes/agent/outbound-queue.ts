@@ -103,6 +103,8 @@ export interface IOutboundQueue {
   abortTurn(): void;
   /** Retarget all subsequent sends to a different JID variant. */
   updateDeliveryJid(jid: string): void;
+  /** Set the current inbound seq so outbound ops can link back to inbound events. */
+  setInboundSeq(seq: number | undefined): void;
 }
 
 export class OutboundQueue implements IOutboundQueue {
@@ -113,6 +115,8 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly messenger: Messenger;
   private chatJid: string;
   private durability: DurabilityEngine | undefined;
+  /** inbound_events.seq for the current turn — threaded to outbound ops as sourceInboundSeq */
+  private currentInboundSeq: number | undefined;
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -143,6 +147,11 @@ export class OutboundQueue implements IOutboundQueue {
   /** Attach an optional DurabilityEngine to track outbound ops. */
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
+  }
+
+  /** Set the current inbound seq so outbound ops can link back to inbound events. */
+  setInboundSeq(seq: number | undefined): void {
+    this.currentInboundSeq = seq;
   }
 
   /** Enqueue a text message for immediate sending (after pacing). */
@@ -339,6 +348,7 @@ export class OutboundQueue implements IOutboundQueue {
         opType: 'text',
         payload: JSON.stringify({ text }),
         replayPolicy: 'unsafe', // agent responses are unsafe to replay
+        sourceInboundSeq: this.currentInboundSeq,
       });
       this.durability.markSending(opId);
     }

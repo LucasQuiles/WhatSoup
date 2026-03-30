@@ -172,6 +172,11 @@ export class AgentRuntime implements Runtime {
   private turnHadVisibleOutput = false;
   private turnChain: Promise<void> = Promise.resolve();
 
+  // Tracks inbound seq for the current turn (single/shared mode)
+  private currentInboundSeq: number | undefined;
+  // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
+  private perChatInboundSeq: Map<string, number | undefined> = new Map();
+
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
 
@@ -424,10 +429,20 @@ export class AgentRuntime implements Runtime {
         text,
         isGroup: msg.isGroup,
         groupName: msg.isGroup ? chatJid : undefined,
+        inboundSeq: msg.inboundSeq,
       });
     } else if (this.sessionScope === 'per_chat') {
+      // per_chat: store inbound seq keyed by chat before sending turn
+      const mapKey = this.sandboxPerChat
+        ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
+        : chatJid;
+      this.perChatInboundSeq.set(mapKey, msg.inboundSeq);
+      this.getQueueForChat(chatJid)?.setInboundSeq(msg.inboundSeq);
       await this.sendTurnPerChat(chatJid, text);
     } else {
+      // single mode: store inbound seq on runtime + queue
+      this.currentInboundSeq = msg.inboundSeq;
+      this.queue?.setInboundSeq(msg.inboundSeq);
       await this.sendTurnNonShared(chatJid, text);
     }
   }
@@ -458,7 +473,11 @@ export class AgentRuntime implements Runtime {
     // Track which chat this turn belongs to for event routing
     // @check CHK-065 // @traces REQ-012.AC-03
     this.currentTurnChatJid = chatJid;
+    this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
+
+    // Thread inbound seq into the outbound queue so ops can link back
+    this.getActiveQueue()?.setInboundSeq(turn.inboundSeq);
 
     try {
       await this.session!.sendTurn(prefixedText);
@@ -531,7 +550,12 @@ export class AgentRuntime implements Runtime {
     const session = this.chatSessions.get(mapKey) ?? null;
     // Derive conversationKey from chatJid (mapKey may be workspaceKey, but chatJid is on the queue)
     const conversationKey = toConversationKey(mapKey);
-    this.handleEventWithContext(event, queue, session, conversationKey);
+    const inboundSeq = this.perChatInboundSeq.get(mapKey);
+    if (event.type === 'result') {
+      // Clear per-chat seq after turn completes
+      this.perChatInboundSeq.delete(mapKey);
+    }
+    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq);
   }
 
   /**
@@ -539,7 +563,7 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: OutboundQueue, session: SessionManager | null, conversationKey?: string): void {
+  private handleEventWithContext(event: AgentEvent, queue: OutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number): void {
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -580,6 +604,11 @@ export class AgentRuntime implements Runtime {
         // Checkpoint: clear active turn
         if (this.durability && conversationKey) {
           this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
+        }
+        // Advance inbound event state machine: processing → turn_done → complete
+        if (this.durability && inboundSeq !== undefined) {
+          this.durability.markTurnDone(inboundSeq);
+          this.durability.markInboundComplete(inboundSeq, 'response_sent');
         }
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
@@ -1030,6 +1059,12 @@ export class AgentRuntime implements Runtime {
         if (this.durability && this.activeChatJid) {
           const conversationKey = toConversationKey(this.activeChatJid);
           this.durability.upsertSessionCheckpoint(conversationKey, { activeTurnId: null });
+        }
+        // Advance inbound event state machine: processing → turn_done → complete
+        if (this.durability && this.currentInboundSeq !== undefined) {
+          this.durability.markTurnDone(this.currentInboundSeq);
+          this.durability.markInboundComplete(this.currentInboundSeq, 'response_sent');
+          this.currentInboundSeq = undefined;
         }
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;

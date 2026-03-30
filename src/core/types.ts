@@ -36,6 +36,8 @@ export interface IncomingMessage {
   isResponseWorthy: boolean;
   /** Raw Baileys message — needed for media download */
   rawMessage?: unknown;
+  /** durability: seq from inbound_events journal — threads the inbound event through the runtime lifecycle */
+  inboundSeq?: number;
 }
 
 export interface RuntimeHealth {
