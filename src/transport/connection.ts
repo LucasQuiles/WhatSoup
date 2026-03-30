@@ -63,6 +63,9 @@ export interface TransportEvents {
   chatsUpdate: (updates: Array<{ id: string; [key: string]: unknown }>) => void;
   chatsDelete: (jids: string[]) => void;
   historyMessages: (messages: unknown[]) => void;
+  groupsUpsert: (groups: Array<{ id: string; subject?: string; [key: string]: unknown }>) => void;
+  groupsUpdate: (updates: Array<{ id: string; [key: string]: unknown }>) => void;
+  groupJoinRequest: (data: { groupJid: string; requesterJid: string; requestId: string }) => void;
 }
 
 // Typed event emitter augmentation
@@ -444,6 +447,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           this.emit('chatsUpsert', data.chats);
         }
         this.emit('historySyncComplete');
+      }
+
+      if (events['groups.upsert']) {
+        const groups = events['groups.upsert'] as Array<{ id: string; subject?: string }>;
+        this.log.info({ count: groups.length }, 'groups upserted');
+        this.emit('groupsUpsert', groups);
+      }
+
+      if (events['groups.update']) {
+        const updates = events['groups.update'] as Array<{ id: string }>;
+        this.log.info({ count: updates.length }, 'groups updated');
+        this.emit('groupsUpdate', updates);
+      }
+
+      if (events['group.join-request']) {
+        // NOTE: event name has a dot, not a hyphen
+        const request = events['group.join-request'] as any;
+        const groupJid = request?.group ?? request?.id ?? '';
+        const requesterJid = request?.participant ?? '';
+        const requestId = request?.request_id ?? '';
+        if (groupJid && requesterJid) {
+          this.log.info({ groupJid, requesterJid }, 'group join request received');
+          this.emit('groupJoinRequest', { groupJid, requesterJid, requestId });
+        }
       }
     });
   }
