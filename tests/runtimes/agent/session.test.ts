@@ -85,6 +85,7 @@ function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: str
   const messenger: Messenger = {
     sendMessage: vi.fn(async (jid: string, text: string) => {
       sentMessages.push({ jid, text });
+      return { waMessageId: null };
     }),
   };
   return { messenger, sentMessages };

@@ -67,8 +67,8 @@ function makeMockConnection(): ConnectionManager {
     contactsDir: {
       contacts: new Map<string, string>(),
     },
-    sendRaw: async (_jid: string, _content: unknown) => undefined,
-    sendMedia: async (_jid: string, _media: unknown) => undefined,
+    sendRaw: async (_jid: string, _content: unknown) => ({ waMessageId: null }),
+    sendMedia: async (_jid: string, _media: unknown) => ({ waMessageId: null }),
     botJid: null,
     botLid: null,
   } as unknown as ConnectionManager;

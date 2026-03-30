@@ -28,6 +28,7 @@ function makeMessenger(): { messenger: Messenger; calls: string[]; typingCalls: 
   const messenger: Messenger = {
     sendMessage: vi.fn(async (_jid: string, text: string) => {
       calls.push(text);
+      return { waMessageId: null };
     }),
     setTyping: vi.fn(async (_jid: string, typing: boolean) => {
       typingCalls.push(typing);
@@ -241,6 +242,7 @@ describe('OutboundQueue', () => {
     const timedMessenger: Messenger = {
       sendMessage: vi.fn(async () => {
         sendTimes.push(Date.now());
+        return { waMessageId: null };
       }),
     };
 
@@ -520,6 +522,7 @@ describe('OutboundQueue', () => {
         // Simulate async delay
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
         concurrent -= 1;
+        return { waMessageId: null };
       }),
     };
 
@@ -547,6 +550,7 @@ describe('OutboundQueue', () => {
           throw new Error('transient error');
         }
         // 3rd call succeeds
+        return { waMessageId: null };
       }),
     };
 
@@ -583,6 +587,7 @@ describe('OutboundQueue', () => {
           throw new Error('permanent failure');
         }
         successCalls.push(text);
+        return { waMessageId: null };
       }),
     };
 
@@ -696,6 +701,7 @@ describe('OutboundQueue', () => {
         if (callNum <= 3) throw new Error('permanent failure');
         // Call 4 is the best-effort notice — capture it
         noticeCalls.push(text);
+        return { waMessageId: null };
       }),
     };
 
@@ -717,6 +723,7 @@ describe('OutboundQueue', () => {
       sendMessage: vi.fn(async () => {
         callCount += 1;
         if (callCount < 3) throw new Error('transient');
+        return { waMessageId: null };
       }),
     };
 
@@ -743,6 +750,7 @@ describe('OutboundQueue', () => {
       sendMessage: vi.fn(async () => {
         callNum += 1;
         if (callNum <= 3) throw new Error('hard fail');
+        return { waMessageId: null };
       }),
     };
 

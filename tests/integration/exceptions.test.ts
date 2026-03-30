@@ -32,7 +32,7 @@ function makeDb(): Database {
 
 function makeMockSock(): WhatsAppSocket {
   return {
-    sendMessage: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
     chatModify: vi.fn().mockResolvedValue(undefined),
     readMessages: vi.fn().mockResolvedValue(undefined),
     star: vi.fn().mockResolvedValue(undefined),

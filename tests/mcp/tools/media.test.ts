@@ -27,6 +27,7 @@ function makeConnection(mediaCalls: Array<{ chatJid: string; media: unknown }>) 
   return {
     sendMedia: async (chatJid: string, media: unknown) => {
       mediaCalls.push({ chatJid, media });
+      return { waMessageId: null };
     },
   } as unknown as import('../../../src/transport/connection.ts').ConnectionManager;
 }

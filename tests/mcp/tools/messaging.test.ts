@@ -70,9 +70,11 @@ function makeConnection(calls: string[]) {
     },
     sendRaw: async (jid: string, content: unknown) => {
       calls.push(JSON.stringify({ jid, content }));
+      return { waMessageId: null };
     },
     sendMedia: async (jid: string, media: unknown) => {
       calls.push(JSON.stringify({ sendMedia: { jid, media } }));
+      return { waMessageId: null };
     },
   } as unknown as import('../../../src/transport/connection.ts').ConnectionManager;
 }

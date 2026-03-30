@@ -201,7 +201,7 @@ describe('Health endpoint contract', () => {
   const db = makeInMemoryDb();
   const connectionManager = {
     botJid: '15551234567@s.whatsapp.net' as string | null,
-    sendMessage: async () => undefined,
+    sendMessage: async () => ({ waMessageId: null }),
   };
 
   const startedAt = Date.now() - 5000;
@@ -394,8 +394,9 @@ describe('Sent message contract', () => {
     const sent: Array<{ chatJid: string; text: string }> = [];
     return {
       sent,
-      async sendMessage(chatJid: string, text: string): Promise<void> {
+      async sendMessage(chatJid: string, text: string): Promise<{ waMessageId: string | null }> {
         sent.push({ chatJid, text });
+        return { waMessageId: null };
       },
     };
   }
