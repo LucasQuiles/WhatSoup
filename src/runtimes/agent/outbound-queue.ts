@@ -1,0 +1,366 @@
+// src/runtimes/agent/outbound-queue.ts
+// Serialized outbound queue for WhatsApp messages with batching and pacing.
+
+import type { Messenger } from '../../core/types.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('outbound-queue');
+
+export type ToolCategory =
+  | 'reading'
+  | 'searching'
+  | 'modifying'
+  | 'running'
+  | 'agent'
+  | 'fetching'
+  | 'planning'
+  | 'skill'
+  | 'other'
+  | 'error';
+
+export interface ToolUpdate {
+  category: ToolCategory;
+  detail: string;
+}
+
+export const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
+  reading:   { label: 'Reading',   emoji: '📖' },
+  searching: { label: 'Searching', emoji: '🔎' },
+  modifying: { label: 'Modifying', emoji: '✏️' },
+  running:   { label: 'Running',   emoji: '🔧' },
+  agent:     { label: 'Agent',     emoji: '🤖' },
+  fetching:  { label: 'Fetching',  emoji: '🌐' },
+  planning:  { label: 'Planning',  emoji: '📝' },
+  skill:     { label: 'Skill',     emoji: '🧠' },
+  other:     { label: 'Using',     emoji: '🛠️' },
+  error:     { label: 'Error',     emoji: '⚠️' },
+};
+
+const MAX_MESSAGE_LENGTH = 4000;
+// Exported so tests can import the exact values rather than hardcoding them.
+// Changing a constant here will automatically break tests that rely on it.
+export const TOOL_BATCH_DELAY_MS = 5000;
+export const TOOL_BATCH_MAX_AGE_MS = 30_000;
+export const MIN_SEND_GAP_MS = 500;
+/** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
+export const TYPING_REFRESH_MS = 8_000;
+export const SEND_TIMEOUT_MS = 15_000;
+
+/**
+ * Convert markdown task-list syntax to WhatsApp-friendly checkbox characters.
+ *   - [ ] task  →  ▫︎ task   (unchecked)
+ *   - [x] task  →  ▪︎ task   (checked)
+ */
+function preprocessText(text: string): string {
+  return text
+    .replace(/^- \[x\] /gim, '▪︎ ')
+    .replace(/^- \[X\] /gim, '▪︎ ')
+    .replace(/^- \[ \] /gim, '▫︎ ');
+}
+
+/** Split a string into chunks that fit within maxLen characters. */
+function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string[] {
+  if (text.length <= maxLen) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    let splitAt = remaining.lastIndexOf('\n\n', maxLen);
+    if (splitAt <= 0) {
+      splitAt = remaining.lastIndexOf(' ', maxLen);
+    }
+    if (splitAt <= 0) {
+      splitAt = maxLen;
+    }
+    chunks.push(remaining.slice(0, splitAt).trimEnd());
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+/**
+ * Public interface of OutboundQueue. Imported by tests to enforce that mocks
+ * stay in sync with the real implementation — if a new public method is added
+ * here, TypeScript will reject any mock that doesn't include it.
+ */
+export interface IOutboundQueue {
+  enqueueText(text: string): void;
+  enqueueToolUpdate(update: ToolUpdate): void;
+  /** Start the composing indicator immediately without adding any content to the queue. */
+  indicateTyping(): void;
+  flush(): Promise<void>;
+  shutdown(): Promise<void>;
+  abortTurn(): void;
+  /** Retarget all subsequent sends to a different JID variant. */
+  updateDeliveryJid(jid: string): void;
+}
+
+export class OutboundQueue implements IOutboundQueue {
+  private static readonly MAX_SEND_ATTEMPTS = 3;
+  private static readonly SEND_RETRY_BASE_MS = 1_000;
+  private static readonly SEND_RETRY_MAX_MS = 8_000;
+
+  private readonly messenger: Messenger;
+  private chatJid: string;
+
+  /** Queue of text chunks ready to send. */
+  private sendQueue: string[] = [];
+  /** Whether a send is currently in-flight. */
+  private sending = false;
+  /** Timestamp (ms) of the last completed send. */
+  private lastSentAt = 0;
+
+  /** Buffered tool update objects, waiting to be flushed as a batch. */
+  private toolBuffer: ToolUpdate[] = [];
+  /** Timer handle for the idle batch window (resets on each new tool call). */
+  private toolTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Timer handle for the max-age flush (set once when the buffer first fills, never reset). */
+  private toolMaxAgeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Whether a composing presence update is currently active. */
+  private isTyping = false;
+  /** Interval that periodically re-asserts composing while a turn is in progress. */
+  private typingRefreshInterval: ReturnType<typeof setInterval> | null = null;
+
+  /** Promise chain used to serialize sends. */
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(messenger: Messenger, chatJid: string) {
+    this.messenger = messenger;
+    this.chatJid = chatJid;
+  }
+
+  /** Enqueue a text message for immediate sending (after pacing). */
+  enqueueText(text: string): void {
+    if (!text || text.trim() === '') return;
+    const chunks = splitMessage(preprocessText(text));
+    for (const chunk of chunks) {
+      this.enqueue(chunk);
+    }
+  }
+
+  /**
+   * Buffer a tool progress update. Updates are sent either when there is a
+   * 3-second idle gap between tool calls, or after 30 seconds maximum —
+   * whichever comes first. This prevents silent gaps during long tool chains.
+   */
+  enqueueToolUpdate(update: ToolUpdate): void {
+    this.toolBuffer.push(update);
+    this.startTyping();
+
+    // Idle timer: reset on each new tool call, fires after 5s of silence
+    if (this.toolTimer !== null) clearTimeout(this.toolTimer);
+    this.toolTimer = setTimeout(() => this.flushToolBuffer(), TOOL_BATCH_DELAY_MS);
+
+    // Max-age timer: set once when the buffer first fills, never reset
+    if (this.toolMaxAgeTimer === null) {
+      this.toolMaxAgeTimer = setTimeout(() => {
+        this.toolMaxAgeTimer = null;
+        this.flushToolBuffer();
+      }, TOOL_BATCH_MAX_AGE_MS);
+    }
+  }
+
+  /** Start the composing indicator immediately without queuing any content. */
+  indicateTyping(): void {
+    this.startTyping();
+  }
+
+  /** Flush all pending messages (tool buffer + send queue) immediately. */
+  async flush(): Promise<void> {
+    this.flushToolBuffer();
+    // Wait for the current chain to drain
+    await this.chain;
+    // All messages delivered — clear typing indicator
+    this.stopTyping();
+  }
+
+  /** Flush pending messages and clear all timers. */
+  async shutdown(): Promise<void> {
+    await this.flush();
+    if (this.toolTimer !== null) {
+      clearTimeout(this.toolTimer);
+      this.toolTimer = null;
+    }
+  }
+
+  /**
+   * Called on session crash — cancels tool timers and the typing heartbeat
+   * without sending a 'paused' update. The composing indicator will time out
+   * naturally on the recipient's side (~10-15s), acting as a soft signal that
+   * the session is in trouble.
+   */
+  abortTurn(): void {
+    if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
+    if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
+    this.toolBuffer = [];
+    this.abortTyping();
+  }
+
+  /** Retarget all subsequent sends to a different JID variant. */
+  updateDeliveryJid(jid: string): void {
+    this.chatJid = jid;
+  }
+
+  // ─── Private helpers ──────────────────────────────────────────────────────
+
+  /** Start composing indicator and keep it alive with a periodic refresh. Idempotent. */
+  private startTyping(): void {
+    if (this.isTyping) return;
+    this.isTyping = true;
+    this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
+    // Re-assert composing every 8s — WA auto-clears it on the recipient side after ~10-15s.
+    // This keeps the indicator alive during long tool chains with no intermediate messages.
+    this.typingRefreshInterval = setInterval(() => {
+      this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
+    }, TYPING_REFRESH_MS);
+  }
+
+  /** Graceful stop — send 'paused' and clear the refresh interval. */
+  private stopTyping(): void {
+    if (!this.isTyping) return;
+    this.isTyping = false;
+    if (this.typingRefreshInterval !== null) {
+      clearInterval(this.typingRefreshInterval);
+      this.typingRefreshInterval = null;
+    }
+    this.messenger.setTyping?.(this.chatJid, false).catch(() => {});
+  }
+
+  /** Abort — clear the refresh interval without sending 'paused'. */
+  private abortTyping(): void {
+    this.isTyping = false;
+    if (this.typingRefreshInterval !== null) {
+      clearInterval(this.typingRefreshInterval);
+      this.typingRefreshInterval = null;
+    }
+  }
+
+  private flushToolBuffer(): void {
+    if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
+    if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
+    if (this.toolBuffer.length === 0) return;
+
+    // Group updates by category, preserving first-appearance order of categories.
+    const categoryOrder: ToolCategory[] = [];
+    const groups = new Map<ToolCategory, string[]>();
+    for (const { category, detail } of this.toolBuffer) {
+      if (!groups.has(category)) {
+        categoryOrder.push(category);
+        groups.set(category, []);
+      }
+      groups.get(category)!.push(detail);
+    }
+
+    // Render each group as "{emoji} {Label}:\n  • detail\n  • detail"
+    const sections: string[] = [];
+    for (const category of categoryOrder) {
+      const { emoji, label } = TOOL_CATEGORY_META[category];
+      const details = groups.get(category)!;
+      const bullets = details.map((d) => `  • ${d}`).join('\n');
+      sections.push(`${emoji} ${label}:\n${bullets}`);
+    }
+
+    this.toolBuffer = [];
+    // Typing indicator stays active — the turn is still in progress.
+    // WhatsApp clears the composing state on delivery, but the heartbeat
+    // will re-assert it within TYPING_REFRESH_MS.
+    this.enqueueText(sections.join('\n\n'));
+  }
+
+  private enqueue(chunk: string): void {
+    this.sendQueue.push(chunk);
+    if (!this.sending) {
+      this.drainQueue();
+    }
+  }
+
+  private drainQueue(): void {
+    this.sending = true;
+    this.chain = this.chain
+      .then(async () => {
+        while (this.sendQueue.length > 0) {
+          const chunk = this.sendQueue.shift()!;
+          await this.sendWithPacing(chunk);
+          // WA clears the composing indicator on message delivery. Re-assert
+          // it immediately so there's no visible gap between mid-turn messages
+          // (e.g. compact_boundary notification followed by continued output).
+          if (this.isTyping) {
+            this.messenger.setTyping?.(this.chatJid, true).catch(() => {});
+          }
+        }
+        this.sending = false;
+      })
+      .catch((err) => {
+        // Reset sending flag so the next enqueue() re-triggers draining.
+        // Any items remaining in sendQueue at the time of the error will be
+        // re-drained once a new message arrives and calls enqueue().
+        // (sendWithRetry never throws, so this branch requires a future bug
+        // in sendWithPacing — keeping it here as a safety net.)
+        log.error({ err }, 'drain queue error — resetting');
+        this.sending = false;
+      });
+  }
+
+  private async sendWithPacing(text: string): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastSentAt;
+    if (elapsed < MIN_SEND_GAP_MS && this.lastSentAt !== 0) {
+      const wait = MIN_SEND_GAP_MS - elapsed;
+      await new Promise<void>((resolve) => setTimeout(resolve, wait));
+    }
+    await this.sendWithRetry(text);
+    this.lastSentAt = Date.now();
+  }
+
+  private async sendWithRetry(text: string): Promise<void> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < OutboundQueue.MAX_SEND_ATTEMPTS; attempt++) {
+      try {
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            this.messenger.sendMessage(this.chatJid, text),
+            new Promise<never>((_, reject) => {
+              timeoutHandle = setTimeout(
+                () => reject(new Error('SEND_TIMEOUT')),
+                SEND_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < OutboundQueue.MAX_SEND_ATTEMPTS - 1) {
+          const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
+          const isTimeout = (err as Error).message === 'SEND_TIMEOUT';
+          log.warn({ chatJid: this.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }) }, 'outbound send failed — retrying');
+          const base = OutboundQueue.SEND_RETRY_BASE_MS * Math.pow(2, attempt);
+          const capped = Math.min(base, OutboundQueue.SEND_RETRY_MAX_MS);
+          const jittered = capped * (0.75 + Math.random() * 0.5);
+          await new Promise<void>((resolve) => setTimeout(resolve, jittered));
+        }
+      }
+    }
+    // All attempts exhausted — log and give up (do NOT re-throw, queue must keep draining)
+    const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
+    log.error({ chatJid: this.chatJid, attempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, err: lastErr, textLength: text.length }, 'outbound send failed after all retries');
+
+    // Best-effort: notify the user that part of the response was lost.
+    // Send directly (not through queue) to avoid re-entry loops.
+    Promise.race([
+      this.messenger.sendMessage(this.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
+    ]).catch(() => { /* best effort only */ });
+  }
+}

@@ -1,0 +1,639 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import type { Database } from '../../../src/core/database.ts';
+import type { Messenger } from '../../../src/core/types.ts';
+import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+
+// ─── Mocks ────────────────────────────────────────────────────────────────────
+
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => ({
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
+
+vi.mock('node:os', () => ({
+  homedir: vi.fn(() => '/mock/home'),
+  userInfo: vi.fn(() => ({ username: 'testuser' })),
+}));
+
+/** Create a mock child process. */
+function makeMockChild(pid = 12345) {
+  const stdin = new EventEmitter() as EventEmitter & {
+    write: ReturnType<typeof vi.fn>;
+  };
+  (stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
+    (_data: unknown, _enc: unknown, cb: (err?: Error | null) => void) => cb(),
+  );
+
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+
+  const killFn = vi.fn();
+  const onFn = vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+    // Store exit handler so tests can trigger it
+    if (event === 'exit') {
+      (child as unknown as { _exitCb: (...args: unknown[]) => void })._exitCb = cb;
+    }
+  });
+
+  const child = {
+    pid,
+    stdin,
+    stdout,
+    stderr,
+    kill: killFn,
+    on: onFn,
+    _exitCb: null as ((...args: unknown[]) => void) | null,
+  };
+
+  return child;
+}
+
+type MockChild = ReturnType<typeof makeMockChild>;
+
+vi.mock('node:child_process', () => ({
+  spawn: vi.fn(),
+}));
+
+vi.mock('node:fs', () => ({
+  readFileSync: vi.fn(),
+}));
+
+// Import after mocks are registered
+import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS } from '../../../src/runtimes/agent/session.ts';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function makeDb(): Database {
+  return {
+    raw: {
+      prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
+      exec: vi.fn(),
+    },
+  } as unknown as Database;
+}
+
+function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
+  const sentMessages: Array<{ jid: string; text: string }> = [];
+  const messenger: Messenger = {
+    sendMessage: vi.fn(async (jid: string, text: string) => {
+      sentMessages.push({ jid, text });
+    }),
+  };
+  return { messenger, sentMessages };
+}
+
+// ─── DB mock helpers ──────────────────────────────────────────────────────────
+
+vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
+  createSession: vi.fn(() => 42),
+  incrementMessageCount: vi.fn(),
+  updateSessionId: vi.fn(),
+  updateSessionStatus: vi.fn(),
+  updateLastMessage: vi.fn(),
+  updateTranscriptPath: vi.fn(),
+}));
+
+import {
+  createSession,
+  updateSessionId,
+  updateSessionStatus,
+} from '../../../src/runtimes/agent/session-db.ts';
+
+const CHAT_JID = 'test@s.whatsapp.net';
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+describe('SessionManager', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // @check CHK-018
+  // @traces REQ-005.AC-01
+  it('spawnSession calls spawn with correct args', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: (e) => events.push(e) });
+    await sm.spawnSession();
+
+    expect(spawn).toHaveBeenCalledWith(
+      'claude',
+      expect.arrayContaining([
+        '-p',
+        '--verbose',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--permission-mode', 'bypassPermissions',
+        '--system-prompt', expect.stringContaining('personal'),
+      ]),
+      expect.objectContaining({
+        cwd: '/mock/home',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }),
+    );
+  });
+
+  // @check CHK-019
+  // @traces CON-003.AC-02
+  it('spawnSession passes bypassPermissions in args', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(callArgs[1]).toContain('bypassPermissions');
+  });
+
+  it('sendTurn writes JSONL to stdin', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.sendTurn('hello world');
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"text":"hello world"'),
+      'utf8',
+      expect.any(Function),
+    );
+
+    // Verify full JSONL structure
+    const written = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    const parsed = JSON.parse(written.trim());
+    expect(parsed).toEqual({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: 'hello world' }] },
+    });
+  });
+
+  it('handleNew kills current child, marks session ended, spawns new', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    // Spawn a second mock child for the re-spawn
+    const mockChild2 = makeMockChild(99999);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
+
+    await sm.handleNew();
+
+    // First child should be killed
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+    // Session should be marked ended
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'ended');
+    // A new spawn should have occurred
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('child exit marks session crashed and notifies user', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    // Trigger the exit callback with a non-zero code
+    if (mockChild._exitCb) {
+      mockChild._exitCb(1, null);
+    }
+
+    // Flush microtasks so the messenger.send promise resolves
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].jid).toBe(CHAT_JID);
+    expect(sentMessages[0].text).toContain('crashed');
+  });
+
+  it('getStatus returns correct state when active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+
+    await sm.spawnSession();
+
+    const status = sm.getStatus();
+    expect(status.active).toBe(true);
+    expect(status.pid).toBe(12345);
+  });
+
+  it('getStatus returns inactive after shutdown', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.shutdown();
+
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+  });
+
+  it('init event updates sessionId via updateSessionId', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: (e) => events.push(e) });
+    await sm.spawnSession();
+
+    // Simulate init line from stdout
+    const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_abc123' }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(initLine));
+
+    expect(updateSessionId).toHaveBeenCalledWith(db, 42, 'ses_abc123');
+    expect(sm.getStatus().sessionId).toBe('ses_abc123');
+    expect(events.some((e) => e.type === 'init')).toBe(true);
+  });
+
+  it('spawnSession is a no-op if already active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.spawnSession(); // second call
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('createSession is called with pid, cwd, and chatJid', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    expect(createSession).toHaveBeenCalledWith(db, 12345, '/mock/home', CHAT_JID);
+  });
+
+  it('spawnSession with resumeSessionId includes --resume flag', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession('abc-session-id');
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const args: string[] = callArgs[1];
+    expect(args).toContain('--resume');
+    expect(args).toContain('abc-session-id');
+    // --resume should immediately precede the session id
+    const resumeIdx = args.indexOf('--resume');
+    expect(args[resumeIdx + 1]).toBe('abc-session-id');
+  });
+
+  it('spawnSession without resumeSessionId does not include --resume', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const args: string[] = callArgs[1];
+    expect(args).not.toContain('--resume');
+  });
+
+  // ─── B02: stdin write timeout ──────────────────────────────────────────────
+
+  it('sendTurn rejects with STDIN_WRITE_TIMEOUT when stdin.write never calls back', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // Make stdin.write hang forever — callback is never invoked
+    mockChild.stdin.write = vi.fn((_data: unknown, _enc: unknown, _cb: (err?: Error | null) => void) => {
+      // intentionally do nothing; never call _cb
+    });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    // Attach error handler immediately to prevent unhandled rejection warnings
+    const sendPromise = sm.sendTurn('hello');
+    const caught = sendPromise.catch((err: Error) => err);
+
+    // Advance past the 30-second timeout
+    await vi.advanceTimersByTimeAsync(30_001);
+
+    const result = await caught;
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain('STDIN_WRITE_TIMEOUT');
+
+    vi.useRealTimers();
+  });
+
+  // ─── B09: crash notification dedup ────────────────────────────────────────
+
+  it('3 rapid crashes within 60 s send only 1 notification', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+
+    // First crash
+    await sm.spawnSession();
+    mockChild._exitCb?.(1, null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // Second crash — spawn fresh child, crash immediately
+    const mockChild2 = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
+    await sm.spawnSession();
+    mockChild2._exitCb?.(1, null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // Third crash
+    const mockChild3 = makeMockChild(33333);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild3);
+    await sm.spawnSession();
+    mockChild3._exitCb?.(1, null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // Only the first crash should have sent a notification
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toContain('crashed');
+  });
+
+  // ─── P3-A: Watchdog tests ─────────────────────────────────────────────────
+
+  it('sendTurn arms the 3-tier watchdog and SIGKILL fires after WATCHDOG_HARD_MS (30 min)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    // Nothing should fire before 10 min
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).not.toHaveBeenCalled();
+
+    // Advance to soft probe (10 min)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS + 1);
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser.mock.calls[0][0]).toContain('10+ minutes');
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    // Advance to warn probe (20 min)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS - WATCHDOG_SOFT_MS);
+    expect(notifyUser).toHaveBeenCalledTimes(2);
+    expect(notifyUser.mock.calls[1][0]).toContain('20+ minutes');
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    // Advance to hard kill (30 min)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS - WATCHDOG_WARN_MS);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('clearTurnWatchdog prevents all 3 tiers from firing', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    // Disarm the watchdog before any tier fires
+    sm.clearTurnWatchdog();
+
+    // Advance well past the hard kill timeout
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+
+    // Nothing should have fired
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('tickWatchdog resets all tiers — agent activity prevents kill', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    // Advance to just before soft probe
+    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS - 1_000);
+    expect(notifyUser).not.toHaveBeenCalled();
+
+    // Simulate agent activity — resets all timers
+    sm.tickWatchdog();
+
+    // Advance another 9 minutes — no probe should fire (timer was reset)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS - 1_000);
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    // Now advance past the reset soft threshold
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('tickWatchdog is a no-op when session is inactive', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    // No session spawned — tickWatchdog should not throw
+    sm.tickWatchdog();
+
+    vi.useRealTimers();
+  });
+
+  it('repeated tickWatchdog keeps session alive indefinitely', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    // Simulate 60 minutes of continuous activity (tick every 5 min)
+    for (let i = 0; i < 12; i++) {
+      await vi.advanceTimersByTimeAsync(5 * 60_000); // 5 minutes
+      sm.tickWatchdog();
+    }
+
+    // After 60 min of continuous ticks, session should still be alive
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  // ─── P3-B: Resume-fail branch ─────────────────────────────────────────────
+
+  it('child exits code 1 with no init event and resume attempt — calls markSessionResumeFailed and onResumeFailed', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onResumeFailedCb = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', onResumeFailed: onResumeFailedCb });
+    await sm.spawnSession('some-session-id');
+
+    // No init event received — sessionId stays null
+    // Trigger exit with code 1 (resume failure pattern)
+    mockChild._exitCb?.(1, null);
+
+    // Flush microtasks
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'resume_failed');
+    expect(onResumeFailedCb).toHaveBeenCalledTimes(1);
+    // Should NOT call updateSessionStatus with 'crashed' for a resume failure
+    expect(updateSessionStatus).not.toHaveBeenCalledWith(db, 42, 'crashed');
+  });
+
+  // ─── Configurable cwd + instructionsPath ─────────────────────────────────
+
+  it('spawnSession uses configurable cwd when provided', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      instanceName: 'personal',
+      cwd: '/custom/cwd',
+    });
+    await sm.spawnSession();
+
+    expect(spawn).toHaveBeenCalledWith(
+      'claude',
+      expect.any(Array),
+      expect.objectContaining({ cwd: '/custom/cwd' }),
+    );
+  });
+
+  it('spawnSession uses homedir() when cwd is not provided', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    expect(spawn).toHaveBeenCalledWith(
+      'claude',
+      expect.any(Array),
+      expect.objectContaining({ cwd: '/mock/home' }),
+    );
+  });
+
+  it('spawnSession reads instructionsPath and prepends identity line', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('Custom instructions here.');
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      instanceName: 'mybot',
+      cwd: '/agent/dir', instructionsPath: 'CLAUDE.md',
+    });
+    await sm.spawnSession();
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const args: string[] = callArgs[1];
+    const systemPromptIdx = args.indexOf('--system-prompt');
+    expect(systemPromptIdx).toBeGreaterThan(-1);
+    const systemPrompt = args[systemPromptIdx + 1];
+    expect(systemPrompt).toContain('mybot');
+    expect(systemPrompt).toContain('Custom instructions here.');
+    expect(readFileSync).toHaveBeenCalledWith('/agent/dir/CLAUDE.md', 'utf8');
+  });
+
+  it('crash then 61 s later another crash sends 2 notifications', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+
+    // First crash at t=0
+    const baseTime = 1_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+
+    await sm.spawnSession();
+    mockChild._exitCb?.(1, null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(sentMessages).toHaveLength(1);
+
+    // Second crash at t=61s (past the 60s cooldown)
+    vi.spyOn(Date, 'now').mockReturnValue(baseTime + 61_000);
+
+    const mockChild2 = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
+    await sm.spawnSession();
+    mockChild2._exitCb?.(1, null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(sentMessages).toHaveLength(2);
+    expect(sentMessages[1].text).toContain('crashed');
+  });
+});
+
+// ─── formatAge tests ──────────────────────────────────────────────────────────
+
+describe('formatAge', () => {
+  it('returns seconds for < 60s', () => {
+    const isoString = new Date(Date.now() - 30_000).toISOString();
+    expect(formatAge(isoString)).toBe('30s ago');
+  });
+
+  it('returns minutes for 1-59m', () => {
+    const isoString = new Date(Date.now() - 5 * 60_000).toISOString();
+    expect(formatAge(isoString)).toBe('5m ago');
+  });
+
+  it('returns hours for >= 1h', () => {
+    const isoString = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    expect(formatAge(isoString)).toBe('2h ago');
+  });
+});
