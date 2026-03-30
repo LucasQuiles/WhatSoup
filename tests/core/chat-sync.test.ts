@@ -84,6 +84,19 @@ describe('chat-sync', () => {
       expect(rows).toHaveLength(0);
     });
 
+    it('handles empty messageId and senderJid — treats as valid row key', () => {
+      // Baileys may occasionally emit events with empty/missing identifiers;
+      // the handler should not throw — it will store or delete a degenerate row.
+      expect(() =>
+        handleReaction(db, {
+          messageId: '',
+          conversationKey: '',
+          senderJid: '',
+          reaction: '👍',
+        }),
+      ).not.toThrow();
+    });
+
     it('allows different senders to react to same message', () => {
       handleReaction(db, {
         messageId: 'msg1',
@@ -161,6 +174,19 @@ describe('chat-sync', () => {
   // --- Chats ---
 
   describe('handleChatsUpsert', () => {
+    it('returns early with empty array — no crash', () => {
+      expect(() => handleChatsUpsert(db, [])).not.toThrow();
+      const count = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM chats').get() as { cnt: number }).cnt;
+      expect(count).toBe(0);
+    });
+
+    it('returns early with null-like input — no crash', () => {
+      // Simulates Baileys passing unexpected non-array value at runtime
+      expect(() => handleChatsUpsert(db, null as unknown as any[])).not.toThrow();
+      const count = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM chats').get() as { cnt: number }).cnt;
+      expect(count).toBe(0);
+    });
+
     it('inserts a new chat', () => {
       handleChatsUpsert(db, [
         { id: '111@s.whatsapp.net', conversationTimestamp: 1000, name: 'Alice' },
@@ -227,6 +253,23 @@ describe('chat-sync', () => {
         .prepare('SELECT * FROM chats WHERE jid = ?')
         .get('nonexistent@s.whatsapp.net') as any;
       expect(row).toBeUndefined();
+    });
+
+    it('skips update when no recognized fields are present — no crash', () => {
+      handleChatsUpsert(db, [{ id: '111@s.whatsapp.net', name: 'Alice' }]);
+      // Pass an update with only an unrecognized field — sets[] stays empty
+      expect(() =>
+        handleChatsUpdate(db, [{ id: '111@s.whatsapp.net', unknownField: 'ignored' }]),
+      ).not.toThrow();
+      // Name should be unchanged
+      const row = db.raw
+        .prepare('SELECT name FROM chats WHERE jid = ?')
+        .get('111@s.whatsapp.net') as any;
+      expect(row.name).toBe('Alice');
+    });
+
+    it('returns early with empty updates array — no crash', () => {
+      expect(() => handleChatsUpdate(db, [])).not.toThrow();
     });
   });
 

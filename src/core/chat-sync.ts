@@ -69,6 +69,7 @@ interface BaileysChat {
 }
 
 export function handleChatsUpsert(db: Database, chats: BaileysChat[]): void {
+  if (!Array.isArray(chats) || chats.length === 0) return;
   const stmt = db.raw.prepare(`
     INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived, is_pinned, mute_until, ephemeral_duration, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -103,7 +104,10 @@ export function handleChatsUpdate(
   db: Database,
   updates: Array<{ id: string; [key: string]: unknown }>,
 ): void {
+  if (!Array.isArray(updates) || updates.length === 0) return;
   for (const u of updates) {
+    // SAFETY: sets[] is built from hardcoded column names only — no user input in SQL fragments.
+    // Values are always parameterized via ? placeholders.
     const sets: string[] = [];
     const values: unknown[] = [];
 
@@ -133,7 +137,10 @@ export function handleChatsUpdate(
       values.push(u.ephemeralExpiration);
     }
 
-    if (sets.length === 0) continue;
+    if (sets.length === 0) {
+      log.debug({ jid: u.id }, 'chat update: no recognized fields to update');
+      continue;
+    }
 
     sets.push("updated_at = datetime('now')");
     values.push(u.id);
@@ -146,6 +153,7 @@ export function handleChatsUpdate(
 }
 
 export function handleChatsDelete(db: Database, jids: string[]): void {
+  if (!Array.isArray(jids) || jids.length === 0) return;
   const stmt = db.raw.prepare('DELETE FROM chats WHERE jid = ?');
   for (const jid of jids) {
     stmt.run(jid);
