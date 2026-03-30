@@ -279,11 +279,32 @@ function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null):
         throw new Error(`Message "${message_id}" not found`);
       }
 
-      // Forward by re-sending the text content (simple forward)
+      // Try true forward via raw Baileys proto (raw_message column may not exist yet)
+      let rawMessage: string | null = null;
+      try {
+        const rawRow = db.raw
+          .prepare('SELECT raw_message FROM messages WHERE message_id = ?')
+          .get(message_id) as { raw_message: string | null } | undefined;
+        rawMessage = rawRow?.raw_message ?? null;
+      } catch {
+        // Column doesn't exist yet — fall through to text forward
+      }
+
+      if (rawMessage) {
+        try {
+          const waMessage = JSON.parse(rawMessage) as object;
+          await sock.sendMessage(to_jid, { forward: waMessage, force: true });
+          return { forwarded: true, messageId: message_id, toJid: to_jid, method: 'native' };
+        } catch {
+          // JSON parse failed — fall through to text forward
+        }
+      }
+
+      // Fallback: re-send as plain text
       const text = row.content ?? `[${row.content_type} message]`;
       await sock.sendMessage(to_jid, { text });
 
-      return { forwarded: true, messageId: message_id, toJid: to_jid };
+      return { forwarded: true, messageId: message_id, toJid: to_jid, method: 'text' };
     },
   };
 }
