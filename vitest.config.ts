@@ -7,5 +7,9 @@ export default defineConfig({
     env: {
       INSTANCE_CONFIG: '',
     },
+    poolOptions: {
+      forks: { maxForks: 4 },
+      threads: { maxThreads: 4 },
+    },
   },
 });

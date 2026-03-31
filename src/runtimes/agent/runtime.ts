@@ -36,6 +36,51 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 
 const log = createChildLogger('agent-runtime');
 
+/**
+ * Prepare a plain-text content string for the agent runtime from any message type.
+ *
+ * The agent runtime sends turns to Claude Code via stream-json, which only supports
+ * text — no vision blocks. So images/video frames are described in text; audio is
+ * transcribed via Whisper. All other media types fall back to a descriptive label.
+ *
+ * Requires OPENAI_API_KEY in the environment for audio transcription (Whisper).
+ */
+export async function prepareContentForAgent(msg: IncomingMessage): Promise<string> {
+  const { contentType, content } = msg;
+
+  // Text messages: use as-is (URL expansion is chat-only; keep agent lean)
+  if (contentType === 'text') {
+    return content ?? '';
+  }
+
+  // Build download function from rawMessage (same pattern as chat runtime)
+  const downloadFn = msg.rawMessage
+    ? async () => {
+        const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+        return downloadMediaMessage(msg.rawMessage as any, 'buffer', {}) as Promise<Buffer>;
+      }
+    : null;
+
+  // Use the existing media pipeline
+  const { processMedia } = await import('../chat/media/processor.ts');
+  const processed = await processMedia(msg, downloadFn);
+
+  // For images/stickers/video: we have image buffers but can't send vision blocks.
+  // Return the text portion (caption / timestamp summary); note that visuals exist.
+  if (processed.images.length > 0) {
+    const caption = processed.content ? processed.content.trim() : '';
+    const visualLabel = contentType === 'sticker'
+      ? '[Sticker received — visual not available in text mode]'
+      : contentType === 'video'
+        ? '[Video received — frames not available in text mode]'
+        : '[Image received — visual not available in text mode]';
+    return caption ? `${caption}\n${visualLabel}` : visualLabel;
+  }
+
+  // Audio, documents, location, contact, poll, unknown: use the processed text directly
+  return processed.content || `[${contentType} message received]`;
+}
+
 export interface SandboxPolicy {
   allowedPaths: string[];
   allowedTools: string[];
@@ -388,6 +433,21 @@ export class AgentRuntime implements Runtime {
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
+    // Process media messages (transcription, text extraction, etc.) before routing.
+    // For text messages this is a no-op. For all other types we attempt to convert
+    // to a plain-text representation suitable for the stream-json agent protocol.
+    if (msg.contentType !== 'text') {
+      try {
+        msg.content = await prepareContentForAgent(msg);
+      } catch (err) {
+        log.warn(
+          { err, contentType: msg.contentType, messageId: msg.messageId },
+          'media processing failed — using fallback label',
+        );
+        msg.content = `[${msg.contentType} message — processing failed]`;
+      }
+    }
+
     const content = msg.content;
     if (content === null || content.trim() === '') return;
     this.turnChain = this.turnChain
