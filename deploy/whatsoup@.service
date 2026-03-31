@@ -2,14 +2,28 @@
 Description=WhatSoup %i
 Wants=graphical-session.target network-online.target
 After=graphical-session.target network-online.target
-StartLimitIntervalSec=120
-StartLimitBurst=5
+# 10 crashes in 5 minutes before systemd gives up (was 5 in 2 minutes).
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
 ExecStart=/home/q/.local/bin/whatsoup %i
 Restart=on-failure
+# Base restart delay — matches Baileys reconnect cooldown.
 RestartSec=15
+# Exponential backoff: delays increase from RestartSec (15s) toward
+# RestartMaxDelaySec (120s) over RestartSteps increments. Prevents burning
+# through StartLimitBurst during persistent crash loops.
+# Requires systemd 254+. Silently ignored on older versions.
+RestartSteps=5
+RestartMaxDelaySec=120
+# Send SIGTERM only to the main process — it handles child (Claude Code)
+# shutdown internally. control-group (default) sends SIGTERM to all cgroup
+# members simultaneously, causing a race where child exit events fire before
+# session.shutdown() can mark them as clean.
+KillMode=mixed
+TimeoutStopSec=15
 
 [Install]
 WantedBy=graphical-session.target

@@ -592,12 +592,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
+  if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
   const done = shutdown('uncaughtException').then(() => process.exit(1));
   setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
+  if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
   const done = shutdown('unhandledRejection').then(() => process.exit(1));
   setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
