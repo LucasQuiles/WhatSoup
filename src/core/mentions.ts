@@ -2,6 +2,7 @@
 // Utility for detecting, resolving, and formatting @mentions in outgoing text.
 
 import { extractPhone } from './access-list.ts';
+import { toPersonalJid } from './jid-constants.ts';
 
 /**
  * Result of formatting + extracting mentions from a text string.
@@ -141,7 +142,7 @@ export function formatMentions(text: string, contacts?: ContactsMap): FormattedM
       if (phone && !seen.has(phone)) {
         seen.add(phone);
         // Emit only @s.whatsapp.net — no @lid variant
-        jids.push(`${phone}@s.whatsapp.net`);
+        jids.push(toPersonalJid(phone));
       }
 
       if (phone) {

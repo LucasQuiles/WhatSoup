@@ -3,6 +3,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
+import { toPersonalJid, toLidJid } from './jid-constants.ts';
 import { getMessagesBySender } from './messages.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
@@ -28,7 +29,7 @@ export async function handleAdminCommand(
       await sendTracked(messenger, adminChatJid, `Got it, allowed +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
 
       // Replay queued messages: try both JID formats
-      const jidFormats = [`${subjectId}@s.whatsapp.net`, `${subjectId}@lid`];
+      const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
         for (const msg of stored) {
@@ -73,7 +74,7 @@ export async function handleAdminCommand(
  * Find the admin's chat JID — checks both phone@s.whatsapp.net and known LID formats
  * from the access_list (pre-seeded admin phones).
  */
-function resolveAdminChatJid(db: Database): string {
+function resolveAdminChatJid(db: Database): string | null {
   // Try to find a recent message from any admin phone to get their chatJid
   const stmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
@@ -84,7 +85,11 @@ function resolveAdminChatJid(db: Database): string {
   }
   // Fallback to phone@s.whatsapp.net format
   const firstAdmin = [...config.adminPhones][0];
-  return `${firstAdmin}@s.whatsapp.net`;
+  if (!firstAdmin) {
+    log.error('resolveAdminJid: no admin phones configured — cannot resolve admin JID');
+    return null;
+  }
+  return toPersonalJid(firstAdmin);
 }
 
 export async function sendApprovalRequest(
@@ -102,6 +107,10 @@ export async function sendApprovalRequest(
     `New contact: ${displayName} (+${phone})\nMessage: "${preview}"\nReply ALLOW ${phone} or BLOCK ${phone}`;
 
   const adminJid = resolveAdminChatJid(db);
+  if (!adminJid) {
+    log.warn({ phone, displayName }, 'cannot send approval request — no admin phones configured');
+    return;
+  }
   await sendTracked(messenger, adminJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
   log.info({ phone, displayName, adminJid, action: 'approval_requested' });

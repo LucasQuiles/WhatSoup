@@ -290,8 +290,8 @@ export class AgentRuntime implements Runtime {
         if (toConversationKey(key) === conversationKey) {
           q.updateDeliveryJid(newJid);
         }
-      } catch {
-        // key may not be a valid JID — skip
+      } catch (err) {
+        log.debug({ err, key }, 'JID parsing failed during session resume — skipping');
       }
     }
 
@@ -757,9 +757,28 @@ export class AgentRuntime implements Runtime {
   }
 
   getHealthSnapshot(): RuntimeHealth {
+    if (this.sessionScope === 'per_chat') {
+      const sessions = [...this.chatSessions.values()];
+      let healthStatus: RuntimeHealth['status'] = 'healthy'; // idle (no sessions)
+      if (sessions.length > 0) {
+        const anyActive = sessions.some(s => s.getStatus().active);
+        healthStatus = anyActive ? 'healthy' : 'degraded';
+      }
+      return {
+        status: healthStatus,
+        details: {
+          sessionCount: sessions.length,
+          activeSessions: sessions.filter(s => s.getStatus().active).length,
+        },
+      };
+    }
+
     const status = this.session?.getStatus();
+    // If a session exists but its child process is not active, it has crashed
+    const healthStatus: RuntimeHealth['status'] =
+      this.session !== null && status?.active === false ? 'degraded' : 'healthy';
     return {
-      status: 'healthy',
+      status: healthStatus,
       details: {
         active: status?.active ?? false,
         pid: status?.pid ?? null,

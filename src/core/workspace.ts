@@ -4,6 +4,7 @@
 import { mkdirSync, writeFileSync, symlinkSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { toConversationKey } from './conversation-key.ts';
+import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 
 export interface WorkspaceInfo {
   kind: 'dm' | 'group';
@@ -18,14 +19,14 @@ export interface WorkspaceInfo {
 export function chatJidToWorkspace(instanceCwd: string, chatJid: string): WorkspaceInfo {
   const key = toConversationKey(chatJid);
 
-  if (chatJid.endsWith('@s.whatsapp.net') || chatJid.endsWith('@lid')) {
+  if (chatJid.endsWith(JID_PERSONAL) || chatJid.endsWith(JID_LID)) {
     return {
       kind: 'dm',
       workspaceKey: key,
       workspacePath: join(instanceCwd, 'users', key),
     };
   }
-  if (chatJid.endsWith('@g.us')) {
+  if (chatJid.endsWith(JID_GROUP)) {
     return {
       kind: 'group',
       workspaceKey: key,

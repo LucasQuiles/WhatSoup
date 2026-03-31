@@ -19,8 +19,10 @@ export interface MessagingDeps {
   db: DatabaseSync;
 }
 
+type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
+
 interface OwnershipResult {
-  row?: MessageRow;
+  row?: OwnershipRow;
   error?: string;
 }
 
@@ -30,8 +32,8 @@ function validateMessageOwnership(
   session: SessionContext,
 ): OwnershipResult {
   const row = db
-    .prepare('SELECT * FROM messages WHERE message_id = ?')
-    .get(messageId) as MessageRow | undefined;
+    .prepare('SELECT conversation_key, is_from_me, chat_jid, message_id, sender_jid, content FROM messages WHERE message_id = ?')
+    .get(messageId) as OwnershipRow | undefined;
 
   if (!row) {
     return { error: 'Message not found' };

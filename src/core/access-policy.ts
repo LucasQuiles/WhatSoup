@@ -36,12 +36,12 @@ export function shouldRespond(
   db: Database,
 ): TriggerResult {
   if (msg.isFromMe) {
-    log.info({ messageId: msg.messageId }, 'trigger: skipping own message');
+    log.debug({ messageId: msg.messageId }, 'trigger: skipping own message');
     return { respond: false, reason: 'own_message' };
   }
 
   if (!msg.isResponseWorthy) {
-    log.info({ messageId: msg.messageId }, 'trigger: not response worthy');
+    log.debug({ messageId: msg.messageId }, 'trigger: not response worthy');
     return { respond: false, reason: 'not_response_worthy' };
   }
 
@@ -54,14 +54,14 @@ export function shouldRespond(
   // both JID and LID phone formats.
   if (accessMode === 'self_only') {
     if (msg.isGroup) {
-      log.info({ messageId: msg.messageId }, 'trigger: self_only rejects groups');
+      log.debug({ messageId: msg.messageId }, 'trigger: self_only rejects groups');
       return { respond: false, reason: 'self_only_no_groups' };
     }
     if (config.adminPhones.has(phone)) {
-      log.info({ messageId: msg.messageId, phone }, 'trigger: self_only admin DM → respond');
+      log.debug({ messageId: msg.messageId, phone }, 'trigger: self_only admin DM → respond');
       return { respond: true, reason: 'self_only_admin', accessStatus: 'allowed' };
     }
-    log.info({ messageId: msg.messageId, phone }, 'trigger: self_only rejects non-admin');
+    log.debug({ messageId: msg.messageId, phone }, 'trigger: self_only rejects non-admin');
     return { respond: false, reason: 'self_only_rejected', accessStatus: 'blocked' };
   }
 
@@ -76,13 +76,13 @@ export function shouldRespond(
   // ── open_dm mode (REQ-003.AC-03) ──
   // Anyone can DM (unless blocked, already handled above), groups by mention only.
   if (accessMode === 'open_dm' && !msg.isGroup) {
-    log.info({ messageId: msg.messageId, phone }, 'trigger: open_dm DM → respond');
+    log.debug({ messageId: msg.messageId, phone }, 'trigger: open_dm DM → respond');
     return { respond: true, reason: 'open_dm', accessStatus: 'allowed' };
   }
 
   // ── groups_only mode (REQ-003.AC-04) ── reject all DMs
   if (accessMode === 'groups_only' && !msg.isGroup) {
-    log.info({ messageId: msg.messageId, phone }, 'trigger: groups_only rejects DMs');
+    log.debug({ messageId: msg.messageId, phone }, 'trigger: groups_only rejects DMs');
     return { respond: false, reason: 'groups_only_no_dms' };
   }
 
@@ -90,7 +90,7 @@ export function shouldRespond(
     // Check if this group is set to auto-respond (access_list entry with subject_type='group', status='allowed')
     const groupEntry = lookupAccess(db, 'group', msg.chatJid);
     if (groupEntry?.status === 'allowed') {
-      log.info({ messageId: msg.messageId, chatJid: msg.chatJid }, 'trigger: group auto-respond');
+      log.debug({ messageId: msg.messageId, chatJid: msg.chatJid }, 'trigger: group auto-respond');
       return { respond: true, reason: 'group_auto_respond' };
     }
 
@@ -107,7 +107,7 @@ export function shouldRespond(
       (jid) => botIds.has(jid) || botIds.has(jid.split('@')[0]),
     );
 
-    log.info({ messageId: msg.messageId, chatJid: msg.chatJid, mentioned }, 'trigger: group message');
+    log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, mentioned }, 'trigger: group message');
     return { respond: mentioned, reason: mentioned ? 'mentioned' : 'not_mentioned' };
   }
 
@@ -123,6 +123,6 @@ export function shouldRespond(
   }
 
   // entry.status === 'allowed'
-  log.info({ messageId: msg.messageId, chatJid: msg.chatJid }, 'trigger: DM allowed → respond');
+  log.debug({ messageId: msg.messageId, chatJid: msg.chatJid }, 'trigger: DM allowed → respond');
   return { respond: true, reason: 'dm_allowed', accessStatus: 'allowed' };
 }

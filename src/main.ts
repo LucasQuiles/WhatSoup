@@ -16,6 +16,7 @@ import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
+import { toPersonalJid } from './core/jid-constants.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
@@ -397,14 +398,15 @@ const healthServer = startHealthServer({
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
+    const runtimeDegraded = snap.status === 'degraded' || snap.status === 'unhealthy';
     let unprocessed = 0;
     try {
       const row = db.raw.prepare(
         'SELECT COUNT(*) AS cnt FROM messages WHERE enrichment_processed_at IS NULL AND is_from_me = 0',
       ).get() as { cnt: number };
       unprocessed = row.cnt;
-    } catch { /* ignore */ }
-    return { lastRun, unprocessed };
+    } catch (err) { log.warn({ err }, 'failed to get enrichment stats'); }
+    return { lastRun, unprocessed, runtimeDegraded };
   },
 });
 
@@ -477,14 +479,19 @@ async function start(): Promise<void> {
       ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
       : (() => {
           const adminPhone = [...config.adminPhones][0];
-          return { chatJid: `${adminPhone}@s.whatsapp.net`, text: '*Agent back online* ✓', isResume: false };
+          if (!adminPhone) return null; // no admin phones — skip startup notification
+          return { chatJid: toPersonalJid(adminPhone), text: '*Agent back online* ✓', isResume: false };
         })();
 
-    setTimeout(() => {
-      sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'safe' })
-        .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
-        .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
-    }, 3_000);
+    if (notifyTarget) {
+      setTimeout(() => {
+        sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'safe' })
+          .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
+          .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
+      }, 3_000);
+    } else {
+      log.warn('no admin phones configured — skipping startup notification');
+    }
   }
 }
 

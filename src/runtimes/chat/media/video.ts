@@ -102,8 +102,8 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
         try {
           const { readFile } = await import('node:fs/promises');
           frames.push({ timestamp: '0:00', buffer: await readFile(framePath) });
-        } catch {
-          // skip unreadable frame
+        } catch (err) {
+          log.debug({ err }, 'failed to read/process frame — skipping');
         } finally {
           cleanupTempFile(join(outputDir, file));
         }
@@ -132,8 +132,8 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
           timestamp: formatTimestamp(intervalS),
           buffer: await readFile(framePath),
         });
-      } catch {
-        // skip unreadable frame
+      } catch (err) {
+        log.debug({ err }, 'failed to read/process frame — skipping');
       } finally {
         cleanupTempFile(framePath);
       }

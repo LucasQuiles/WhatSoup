@@ -19,14 +19,15 @@ export interface Messenger {
   sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;
 }
 
+export type ContentType = 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location' | 'contact' | 'poll' | 'unknown';
+
 export interface IncomingMessage {
   messageId: string;
   chatJid: string;
   senderJid: string;
   senderName: string | null;
   content: string | null;
-  /** 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location' | 'contact' | 'poll' | 'unknown' */
-  contentType: string;
+  contentType: ContentType;
   isFromMe: boolean;
   isGroup: boolean;
   /** JIDs @mentioned in the message */

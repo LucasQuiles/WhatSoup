@@ -14,7 +14,7 @@ export interface HealthDeps {
   db: Database;
   connectionManager: ConnectionManager;
   startedAt: number;
-  getEnrichmentStats: () => { lastRun: string | null; unprocessed: number };
+  getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
 }
 
@@ -46,9 +46,24 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         return;
       }
 
+      const MAX_BODY_BYTES = 64 * 1024; // 64 KB
       let body = '';
-      req.on('data', (chunk) => { body += chunk; });
+      let byteCount = 0;
+      let destroyed = false;
+      req.on('data', (chunk) => {
+        if (destroyed) return;
+        byteCount += Buffer.byteLength(chunk);
+        if (byteCount > MAX_BODY_BYTES) {
+          destroyed = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'request body too large' }));
+          req.destroy();
+          return;
+        }
+        body += chunk;
+      });
       req.on('end', () => {
+        if (destroyed) return;
         try {
           const { chatJid, text } = JSON.parse(body) as { chatJid?: string; text?: string };
           if (!chatJid || !text) {
@@ -91,7 +106,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (!isConnected) {
         status = 'unhealthy';
-      } else if (enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS) {
+      } else if (
+        (enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS) ||
+        enrichmentStats.runtimeDegraded
+      ) {
         status = 'degraded';
       } else {
         status = 'healthy';

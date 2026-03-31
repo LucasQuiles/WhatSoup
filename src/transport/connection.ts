@@ -912,7 +912,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   // --- Content extraction ---
   let content: string | null = null;
-  let contentType = 'unknown';
+  let contentType: import('../core/types.ts').ContentType = 'unknown';
 
   if (innerMessage.conversation) {
     content = innerMessage.conversation;

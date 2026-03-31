@@ -1,4 +1,5 @@
 import type { Database } from './database.ts';
+import type { ContentType } from './types.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -12,7 +13,7 @@ export interface MessageRow {
   sender_jid: string;
   sender_name: string | null;
   content: string | null;
-  content_type: string;
+  content_type: ContentType;
   is_from_me: number;
   timestamp: number;
   quoted_message_id: string | null;
@@ -44,7 +45,7 @@ export interface StoredMessage {
   senderName: string | null;
   messageId: string;
   content: string | null;
-  contentType: string;
+  contentType: ContentType;
   isFromMe: boolean;
   timestamp: number; // unix epoch seconds
   quotedMessageId: string | null;
@@ -79,7 +80,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     senderName: (row.sender_name as string | null) ?? null,
     messageId: row.message_id as string,
     content: (row.content as string | null) ?? null,
-    contentType: (row.content_type as string) ?? 'text',
+    contentType: (row.content_type as ContentType) ?? 'text',
     isFromMe: Boolean(row.is_from_me),
     timestamp: row.timestamp as number,
     quotedMessageId: (row.quoted_message_id as string | null) ?? null,

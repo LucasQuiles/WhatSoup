@@ -115,11 +115,24 @@ export class ChatRuntime implements Runtime {
 
   getHealthSnapshot(): RuntimeHealth {
     const queue = this.chatQueue.stats;
+    const enrichmentLastRunAt = this.enrichmentPoller?.lastRunAt ?? null;
+
+    let status: RuntimeHealth['status'] = 'healthy';
+    if ((queue?.queuedChats ?? 0) > 0) {
+      // Waiters are backed up — signal degraded
+      status = 'degraded';
+    } else if (enrichmentLastRunAt !== null) {
+      const staleness = Date.now() - new Date(enrichmentLastRunAt).getTime();
+      if (staleness > 10 * 60 * 1000) {
+        status = 'degraded';
+      }
+    }
+
     return {
-      status: 'healthy',
+      status,
       details: {
         queue,
-        enrichmentLastRunAt: this.enrichmentPoller?.lastRunAt ?? null,
+        enrichmentLastRunAt,
       },
     };
   }

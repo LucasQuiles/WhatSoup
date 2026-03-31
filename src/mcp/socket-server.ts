@@ -43,8 +43,16 @@ export class WhatSoupSocketServer {
 
     const MAX_BUF = 1_024 * 1_024; // 1 MB — prevent memory DoS from no-newline streams
 
+    let clientCounter = 0;
+
     this.server = createServer((socket) => {
+      const clientId = ++clientCounter;
+      log.info({ clientId, socketPath: this.socketPath }, 'client connected');
       let buf = '';
+
+      socket.on('close', () => {
+        log.info({ clientId }, 'client disconnected');
+      });
 
       socket.on('data', (chunk) => {
         buf += chunk.toString();

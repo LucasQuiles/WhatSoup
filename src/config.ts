@@ -100,7 +100,7 @@ const resolvedAdminPhones: string[] = instance
   ? (Array.isArray(instance.adminPhones) && instance.adminPhones.length > 0
       ? (instance.adminPhones as string[])
       : [])
-  : [];
+  : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
 
 // ---------------------------------------------------------------------------
 // Default system prompt (extracted for readability)
@@ -150,13 +150,13 @@ export const config = {
   },
 
   // Conversation
-  maxTokens: (instance?.maxTokens as number | undefined) ?? 750,
+  maxTokens: (instance?.maxTokens as number | undefined) ?? intEnv('MAX_TOKENS', 750),
   conversationWindow: 50,
   conversationWindowExtended: 100,
   windowExtensionThresholdMs: 10 * 60 * 1000, // 10 minutes
 
   // Rate limiting
-  rateLimitPerHour: (instance?.rateLimitPerHour as number | undefined) ?? 45,
+  rateLimitPerHour: (instance?.rateLimitPerHour as number | undefined) ?? intEnv('RATE_LIMIT_PER_HOUR', 45),
   rateLimitNoticeWindowMs: 60 * 60 * 1000, // 1 hour
 
   // Enrichment
@@ -176,7 +176,7 @@ export const config = {
   pineconeRerankTopN: (instance?.pineconeRerankTopN as number | undefined) ?? 6,
 
   // Health
-  healthPort: (instance?.healthPort as number | undefined) ?? 9090,
+  healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),
 
   // API
   apiTimeoutMs: 30_000,

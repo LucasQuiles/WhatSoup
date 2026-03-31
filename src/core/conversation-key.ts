@@ -1,3 +1,5 @@
+import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from './jid-constants.ts';
+
 export function toConversationKey(jid: string): string {
   if (!jid || !jid.includes('@')) {
     throw new Error(`Invalid JID: "${jid}" -- must contain @`);
@@ -9,13 +11,13 @@ export function toConversationKey(jid: string): string {
   const domain = jid.substring(atIndex + 1);
 
   switch (domain) {
-    case 's.whatsapp.net':
+    case DOMAIN_PERSONAL:
       return local;
-    case 'lid': {
+    case DOMAIN_LID: {
       const colonIndex = local.indexOf(':');
       return colonIndex >= 0 ? local.substring(0, colonIndex) : local;
     }
-    case 'g.us':
+    case DOMAIN_GROUP:
       return `${local}_at_g.us`;
     default:
       return `${local}_at_${domain}`;

@@ -326,8 +326,8 @@ function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null):
           .prepare('SELECT raw_message FROM messages WHERE message_id = ?')
           .get(message_id) as { raw_message: string | null } | undefined;
         rawMessage = rawRow?.raw_message ?? null;
-      } catch {
-        // Column doesn't exist yet — fall through to text forward
+      } catch (err) {
+        log.debug({ err, messageId: message_id }, 'raw_message lookup failed — falling back to text forward');
       }
 
       if (rawMessage) {
