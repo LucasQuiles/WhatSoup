@@ -187,6 +187,10 @@ export class AgentRuntime implements Runtime {
   private turnHadVisibleOutput = false;
   private turnChain: Promise<void> = Promise.resolve();
 
+  // Crash tracking — survives session map deletions for accurate health reporting.
+  // Incremented on every crash, decremented on successful session spawn (capped at 0).
+  private recentCrashCount = 0;
+
   // Tracks inbound seq for the current turn (single/shared mode)
   private currentInboundSeq: number | undefined;
   // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
@@ -384,6 +388,7 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEvent(event),
         onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
         onCrash: () => {
+          this.recentCrashCount++;
           this.getActiveQueue()?.abortTurn();
           this.turnHadVisibleOutput = false;
           // Mark inbound event failed so it doesn't stay stuck in processing
@@ -623,6 +628,8 @@ export class AgentRuntime implements Runtime {
   private async sendTurnToSession(session: SessionManager, chatJid: string, text: string): Promise<void> {
     if (!session.getStatus().active) {
       await session.spawnSession();
+      // Successful spawn after a crash — decay the crash counter
+      if (this.recentCrashCount > 0) this.recentCrashCount--;
     }
 
     try {
@@ -764,11 +771,17 @@ export class AgentRuntime implements Runtime {
         const anyActive = sessions.some(s => s.getStatus().active);
         healthStatus = anyActive ? 'healthy' : 'degraded';
       }
+      // Crash counter survives session map deletions — if sessions have been crashing
+      // recently but were cleaned up before this health check, recentCrashCount captures it.
+      if (this.recentCrashCount > 0 && healthStatus === 'healthy') {
+        healthStatus = 'degraded';
+      }
       return {
         status: healthStatus,
         details: {
           sessionCount: sessions.length,
           activeSessions: sessions.filter(s => s.getStatus().active).length,
+          recentCrashes: this.recentCrashCount,
         },
       };
     }
@@ -1062,6 +1075,7 @@ export class AgentRuntime implements Runtime {
         cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
         onCrash: () => {
+          this.recentCrashCount++;
           this.getActiveQueue()?.abortTurn();
           this.turnHadVisibleOutput = false;
           // Mark inbound event failed so it doesn't stay stuck in processing
@@ -1097,6 +1111,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private handlePerChatCrash(mapKey: string): void {
+    this.recentCrashCount++;
     this.chatQueues.get(mapKey)?.abortTurn();
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];

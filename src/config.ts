@@ -87,6 +87,9 @@ if (instance) {
 
 const logDir = instance ? (instance.paths.logDir as string) : join(dataRoot, 'logs');
 mkdirSync(logDir, { recursive: true, mode: 0o700 });
+// Expose logDir to logger.ts via env var — logger.ts evaluates after config.ts in the
+// ESM module graph (no transitive dependency between them), so this is available in time.
+process.env.LOG_DIR = logDir;
 
 const mediaDir = instance ? (instance.paths.mediaDir as string) : join(dataRoot, 'media', 'tmp');
 mkdirSync(mediaDir, { recursive: true, mode: 0o700 });

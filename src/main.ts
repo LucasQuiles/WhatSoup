@@ -2,7 +2,7 @@ import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
-import logger, { createChildLogger } from './logger.ts';
+import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages } from './core/messages.ts';
@@ -524,8 +524,9 @@ async function shutdown(signal: string): Promise<void> {
     try { db.close(); } catch (err) { log.error({ err }, 'db.close() failed during shutdown'); }
     releaseLock();
     clearTimeout(timeout);
-    // Allow pino to flush
-    setTimeout(() => process.exit(0), 200);
+    // Flush pino-roll transport before exit (async — waits up to 2s)
+    await flushLogger();
+    process.exit(0);
   }
 }
 
