@@ -36,6 +36,14 @@ function makeNewsletterCreate(getSock: () => WhatsAppSocket | null): ToolDeclara
 // ---------------------------------------------------------------------------
 // newsletter_update
 // ---------------------------------------------------------------------------
+// NOTE: newsletter_update, newsletter_update_name, and newsletter_update_description
+// are intentionally separate tools. They call three distinct Baileys methods:
+//   - newsletterUpdate(jid, record)      — low-level, freeform metadata patch
+//   - newsletterUpdateName(jid, string)  — typed name-only update
+//   - newsletterUpdateDescription(jid, string) — typed description-only update
+// newsletter_update is NOT a superset that makes the others redundant: the specific
+// tools have stricter schemas (required typed fields) and invoke dedicated Baileys
+// handlers. Keep all three.
 
 const NewsletterUpdateSchema = z.object({
   jid: z.string(),
