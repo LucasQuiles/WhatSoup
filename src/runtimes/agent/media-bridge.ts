@@ -88,11 +88,18 @@ export function startMediaBridge(
 ): MediaBridge {
   const resolvedRoot = resolve(allowedRoot);
 
+  const MAX_BUF = 1_024 * 1_024; // 1 MB — match WhatSoupSocketServer's limit
+
   const server = createServer((socket) => {
     let buf = '';
 
     socket.on('data', (chunk) => {
       buf += chunk.toString();
+      if (buf.length > MAX_BUF) {
+        log.warn('media bridge buffer limit exceeded — closing socket');
+        socket.destroy();
+        return;
+      }
       const lines = buf.split('\n');
       buf = lines.pop() ?? '';
 

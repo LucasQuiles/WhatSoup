@@ -1162,6 +1162,14 @@ export class AgentRuntime implements Runtime {
   private handleResumeFailed(chatJid: string): void {
     log.warn({ chatJid }, 'resume failed — spawning fresh session');
 
+    // Defensive guard: this callback is only registered in single/shared mode (line ~391),
+    // but protect against future refactors that might wire it in per_chat mode where
+    // this.session is intentionally null.
+    if (!this.session) {
+      log.warn({ chatJid }, 'handleResumeFailed: no session — skipping');
+      return;
+    }
+
     const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
 
     if (this.pendingStartupMessage !== null) {

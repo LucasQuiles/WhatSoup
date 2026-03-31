@@ -58,6 +58,10 @@ export function flushLogger(): Promise<void> {
   return new Promise<void>((resolve) => {
     // pino transport streams emit 'close' when fully flushed
     transport.on('close', resolve);
+    // Drain pino's in-process ring buffer to the worker thread before signalling stop.
+    // Without this, log lines buffered in pino's internal buffer at the moment
+    // transport.end() is called may be silently dropped.
+    logger.flush();
     transport.end();
     // Safety timeout — don't block shutdown forever
     setTimeout(resolve, 2_000);
