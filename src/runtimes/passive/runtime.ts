@@ -17,15 +17,21 @@ import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('passive-runtime');
 
 export class PassiveRuntime implements Runtime {
+  private db: Database;
+  private connection: ConnectionManager;
+  private config: { name: string; paths: { stateRoot: string }; socketPath?: string };
   private socketServer: WhatSoupSocketServer | null = null;
   private registry: ToolRegistry;
   private durability: DurabilityEngine | null = null;
 
   constructor(
-    private db: Database,
-    private connection: ConnectionManager,
-    private config: { name: string; paths: { stateRoot: string }; socketPath?: string },
+    db: Database,
+    connection: ConnectionManager,
+    config: { name: string; paths: { stateRoot: string }; socketPath?: string },
   ) {
+    this.db = db;
+    this.connection = connection;
+    this.config = config;
     this.registry = new ToolRegistry();
     // NOTE: registerAllTools is called in start(), not here.
     // This mirrors AgentRuntime's pattern where connection-dependent
