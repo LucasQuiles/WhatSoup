@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createConnection } from 'node:net';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
-import { tmpdir, type } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Messenger, OutboundMedia, SubmissionReceipt } from '../../../src/core/types.ts';

@@ -3,7 +3,7 @@
 // Ported from legacy whatsapp-bot/src/runtimes/agent/media-bridge.ts.
 
 import { createServer, type Server } from 'node:net';
-import { readFile, access } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { unlinkSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
@@ -134,6 +134,7 @@ export function startMediaBridge(
 
   const cleanup = function () {
     server.close(() => {
+      try { unlinkSync(socketPath); } catch { /* already gone */ }
       log.info({ socketPath }, 'media bridge closed');
     });
   } as MediaBridge;
@@ -202,17 +203,12 @@ async function handleRequest(
     return { ok: false, error: 'chatJid is required (not in request and no current chat set)' };
   }
 
-  // Check file exists and read it
-  try {
-    await access(resolvedPath);
-  } catch {
-    return { ok: false, error: `file not found: ${resolvedPath}` };
-  }
-
   let buffer: Buffer;
   try {
     buffer = await readFile(resolvedPath);
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { ok: false, error: `file not found: ${resolvedPath}` };
     log.error({ err, resolvedPath }, 'failed to read file');
     return { ok: false, error: `failed to read file: ${(err as Error).message}` };
   }

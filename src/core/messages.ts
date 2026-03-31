@@ -61,7 +61,7 @@ export interface StoreMessageInput {
   senderName?: string | null;
   messageId: string;
   content?: string | null;
-  contentType?: string;
+  contentType?: ContentType;
   isFromMe: boolean;
   timestamp: number; // unix epoch seconds
   quotedMessageId?: string | null;

@@ -107,6 +107,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   /** The bot's own LID (number@lid) — used for @mention matching in groups. */
   botLid: string | null = null;
 
+  private selfMentionRegexJid: RegExp | null = null;
+  private selfMentionRegexLid: RegExp | null = null;
+
   /** Callback invoked for every parsed incoming message. Set by the conversation layer. */
   onMessage: ((msg: IncomingMessage) => void) | null = null;
 
@@ -183,13 +186,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
-    const ownBare = this.botJid?.split('@')[0];
-    const ownLidBare = this.botLid?.split('@')[0];
-    if (ownBare) {
-      cleaned = cleaned.replace(new RegExp(`@${ownBare}\\b`, 'g'), ownBare);
+    if (this.selfMentionRegexJid) {
+      const ownBare = this.botJid!.split('@')[0];
+      cleaned = cleaned.replace(this.selfMentionRegexJid, ownBare);
+      this.selfMentionRegexJid.lastIndex = 0; // reset global regex state
     }
-    if (ownLidBare && ownLidBare !== ownBare) {
-      cleaned = cleaned.replace(new RegExp(`@${ownLidBare}\\b`, 'g'), ownLidBare);
+    if (this.selfMentionRegexLid) {
+      const lidBare = this.botLid!.split('@')[0];
+      cleaned = cleaned.replace(this.selfMentionRegexLid, lidBare);
+      this.selfMentionRegexLid.lastIndex = 0;
     }
     if (cleaned !== text) {
       this.log.warn('stripped self-mention from outbound message');
@@ -676,6 +681,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const rawLid: string | undefined = user?.lid ?? (sock as any).authState?.creds?.me?.lid;
       this.botJid = rawId ? jidNormalizedUser(rawId) : null;
       this.botLid = rawLid ? jidNormalizedUser(rawLid) : null;
+      const bare = this.botJid?.split('@')[0];
+      this.selfMentionRegexJid = bare ? new RegExp(`@${bare}\\b`, 'g') : null;
+      const lidBare = this.botLid?.split('@')[0];
+      this.selfMentionRegexLid = (lidBare && lidBare !== bare) ? new RegExp(`@${lidBare}\\b`, 'g') : null;
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
     }

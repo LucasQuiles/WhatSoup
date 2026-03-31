@@ -18,6 +18,7 @@ import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
 import type { ProcessedMedia } from './media/processor.ts';
 import { EnrichmentPoller } from './enrichment/poller.ts';
+import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 
 const log = createChildLogger('conversation');
@@ -75,6 +76,8 @@ export class ChatRuntime implements Runtime {
   private getBotJid: () => string;
   private getBotLid: () => string | null;
   private botName: string;
+  private cachedIdentityBlock: string | null = null;
+  private cachedIdentityJid: string = '';
 
   constructor(
     db: Database,
@@ -123,7 +126,7 @@ export class ChatRuntime implements Runtime {
       status = 'degraded';
     } else if (enrichmentLastRunAt !== null) {
       const staleness = Date.now() - new Date(enrichmentLastRunAt).getTime();
-      if (staleness > 10 * 60 * 1000) {
+      if (staleness > ENRICHMENT_STALE_MS) {
         status = 'degraded';
       }
     }
@@ -207,17 +210,20 @@ export class ChatRuntime implements Runtime {
     // Tells the LLM its own JID/LID/name so it avoids self-tagging and identity bleed.
     const botJid = this.getBotJid();
     const botLid = this.getBotLid();
-    const identityBlock = [
-      '[IDENTITY]',
-      `You are ${this.botName}.`,
-      botJid ? `Your WhatsApp JID is ${botJid}.` : null,
-      botLid ? `Your WhatsApp LID is ${botLid}.` : null,
-      'NEVER @mention yourself. NEVER adopt another bot\'s persona or respond to tool-use narration.',
-      'If you do not have information about something, say so naturally — do not speculate.',
-      '[/IDENTITY]',
-    ].filter(Boolean).join('\n');
+    if (!this.cachedIdentityBlock || botJid !== this.cachedIdentityJid) {
+      this.cachedIdentityJid = botJid;
+      this.cachedIdentityBlock = [
+        '[IDENTITY]',
+        `You are ${this.botName}.`,
+        botJid ? `Your WhatsApp JID is ${botJid}.` : null,
+        botLid ? `Your WhatsApp LID is ${botLid}.` : null,
+        'NEVER @mention yourself. NEVER adopt another bot\'s persona or respond to tool-use narration.',
+        'If you do not have information about something, say so naturally — do not speculate.',
+        '[/IDENTITY]',
+      ].filter(Boolean).join('\n');
+    }
 
-    const systemPrompt = [config.systemPrompt, identityBlock, contextBlock]
+    const systemPrompt = [config.systemPrompt, this.cachedIdentityBlock, contextBlock]
       .filter(Boolean)
       .join('\n\n');
 

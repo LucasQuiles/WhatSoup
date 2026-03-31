@@ -31,7 +31,7 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
   }
 }
 
-const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
+export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -121,17 +121,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count messages',
       );
 
-      const unprocessed = safeDbQuery(
-        () => {
-          const row = deps.db.raw.prepare(
-            'SELECT COUNT(*) AS cnt FROM messages WHERE enrichment_processed_at IS NULL AND is_from_me = 0',
-          ).get() as { cnt: number };
-          return row.cnt;
-        },
-        0,
-        'failed to count unprocessed messages',
-      );
-
       const pendingCount = safeDbQuery(
         () => getPendingCount(deps.db),
         0,
@@ -147,7 +136,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         sqlite: {
           messages_total: messagesTotal,
-          unprocessed,
+          unprocessed: enrichmentStats.unprocessed,
         },
         access_control: {
           pending_count: pendingCount,

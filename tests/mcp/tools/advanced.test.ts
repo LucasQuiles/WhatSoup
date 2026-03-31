@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerAdvancedTools } from '../../../src/mcp/tools/advanced.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
@@ -678,10 +678,6 @@ describe('reset_enrichment_errors', () => {
     registry = new ToolRegistry();
     // pass null sock — tool doesn't need it
     registerAdvancedTools(() => null, (tool) => registry.register(tool), db);
-  });
-
-  afterAll(() => {
-    // nothing persistent to clean up (in-memory)
   });
 
   it('reset_enrichment_errors is registered and visible in global session', () => {
