@@ -1,9 +1,49 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Runtime artifacts
 *.sock
-auth_info*/
-.env
 *.db
 *.db-wal
 *.db-shm
+*.lock
+
+# Auth state (contains session credentials)
+auth_info*/
+
+# Environment / secrets
+.env
+.env.*
+
+# Instance config (contains phone numbers, API keys in JSON)
+instances/*/instance.json
+
+# Per-chat workspaces (generated at runtime)
+users/
+groups/
+
+# Logs
+*.log
+logs/
+
+# Media temp files
+media/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git worktrees
 .worktrees/
+
+# SDLC working state (ephemeral)
+docs/sdlc/active/*/beads/
