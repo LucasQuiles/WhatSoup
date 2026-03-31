@@ -5,6 +5,7 @@ import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
+import { jitteredDelay } from '../../core/retry.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -406,10 +407,7 @@ export class OutboundQueue implements IOutboundQueue {
           const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
           const isTimeout = (err as Error).message === 'SEND_TIMEOUT';
           log.warn({ chatJid: this.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }) }, 'outbound send failed — retrying');
-          const base = OutboundQueue.SEND_RETRY_BASE_MS * Math.pow(2, attempt);
-          const capped = Math.min(base, OutboundQueue.SEND_RETRY_MAX_MS);
-          const jittered = capped * (0.75 + Math.random() * 0.5);
-          await new Promise<void>((resolve) => setTimeout(resolve, jittered));
+          await new Promise<void>((resolve) => setTimeout(resolve, jitteredDelay(OutboundQueue.SEND_RETRY_BASE_MS, attempt, OutboundQueue.SEND_RETRY_MAX_MS)));
         }
       }
     }

@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'LLM_TIMEOUT'
   | 'PINECONE_UNAVAILABLE'
   | 'SEND_FAILED'
+  | 'SEND_TIMEOUT'
   | 'SEND_UNCERTAIN'
   | 'ENRICHMENT_ERROR'
   | 'INTERNAL_ERROR'

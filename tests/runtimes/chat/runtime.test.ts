@@ -108,7 +108,8 @@ import { loadContext } from '../../../src/runtimes/chat/context.ts';
 import { storeMessage } from '../../../src/core/messages.ts';
 import { recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
-import { ConversationHandler, jitteredDelay } from '../../../src/runtimes/chat/runtime.ts';
+import { ConversationHandler } from '../../../src/runtimes/chat/runtime.ts';
+import { jitteredDelay } from '../../../src/core/retry.ts';
 
 // ---------------------------------------------------------------------------
 // Logger mock accessors (globalThis storage avoids vi.mock hoisting issue)
@@ -600,10 +601,13 @@ describe('Concurrency', () => {
 
 describe('Error handling', () => {
   it('send fails → reply NOT stored, rate limit NOT charged', async () => {
+    vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     messenger.sendMessage.mockRejectedValue(new Error('send error'));
 
-    await handleAndDrain(handler, makeIncomingMessage());
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
 
     // storeMessage not called (no reply stored when send fails)
     expect(mockStoreMessage).not.toHaveBeenCalled();
@@ -651,20 +655,26 @@ describe('Error handling', () => {
 
 describe('Negative contract tests', () => {
   it('bot MUST NOT store reply if send failed', async () => {
+    vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     messenger.sendMessage.mockRejectedValue(new Error('network error'));
 
-    await handleAndDrain(handler, makeIncomingMessage());
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
 
     // No storeMessage calls (bot reply not stored on send failure)
     expect(mockStoreMessage).not.toHaveBeenCalled();
   });
 
   it('bot MUST NOT charge rate limit if send failed', async () => {
+    vi.useFakeTimers();
     const { handler, messenger } = makeHandler();
     messenger.sendMessage.mockRejectedValue(new Error('network error'));
 
-    await handleAndDrain(handler, makeIncomingMessage());
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
 
     expect(mockRecordResponse).not.toHaveBeenCalled();
   });
@@ -1086,5 +1096,91 @@ describe('ChatRuntime — no MCP socket leakage (Gap #104)', () => {
     expect(
       () => new ConversationHandler(db, messenger, pinecone, provider, provider, { enableEnrichment: false }),
     ).not.toThrow();
+  });
+});
+
+// ===========================================================================
+// B02 — WhatsApp send retry with exponential backoff
+// ===========================================================================
+
+describe('Send retry with exponential backoff (B02)', () => {
+  it('send fails on first attempt, succeeds on second → response delivered, rate limit charged', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage
+      .mockRejectedValueOnce(new Error('transient network error'))
+      .mockResolvedValueOnce({ waMessageId: null });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(2);
+    expect(mockRecordResponse).toHaveBeenCalledOnce();
+  });
+
+  it('send fails on first two attempts, succeeds on third → response delivered', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage
+      .mockRejectedValueOnce(new Error('error 1'))
+      .mockRejectedValueOnce(new Error('error 2'))
+      .mockResolvedValueOnce({ waMessageId: null });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
+    expect(mockRecordResponse).toHaveBeenCalledOnce();
+  });
+
+  it('all 3 send attempts fail → error logged with responseText for recovery', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage.mockRejectedValue(new Error('permanent failure'));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
+    // The error log must include responseText so the response is recoverable
+    expect(mockLogError()).toHaveBeenCalledWith(
+      expect.objectContaining({ responseText: 'hey whats up' }),
+      expect.stringContaining('all send attempts failed'),
+    );
+  });
+
+  it('all 3 send attempts fail → rate limit NOT charged, reply NOT stored', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage.mockRejectedValue(new Error('permanent failure'));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(mockRecordResponse).not.toHaveBeenCalled();
+    expect(mockStoreMessage).not.toHaveBeenCalled();
+  });
+
+  it('retry warns on each failed attempt before the next try', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage
+      .mockRejectedValueOnce(new Error('attempt 1 failed'))
+      .mockRejectedValueOnce(new Error('attempt 2 failed'))
+      .mockResolvedValueOnce({ waMessageId: null });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Two warn calls: one before attempt 2, one before attempt 3
+    const warnCalls = mockLogWarn().mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('send failed — retrying'),
+    );
+    expect(warnCalls).toHaveLength(2);
   });
 });

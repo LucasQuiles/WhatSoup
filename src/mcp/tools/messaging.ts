@@ -11,6 +11,32 @@ import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 
 // ---------------------------------------------------------------------------
+// Error sanitization — prevent raw API/protocol errors from leaking to agents
+// ---------------------------------------------------------------------------
+
+function sanitizeError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  // Map known error patterns to user-friendly messages
+  if (/not connected|connection closed|socket|ECONNRESET/i.test(raw)) {
+    return 'WhatsApp is temporarily disconnected. Try again in a moment.';
+  }
+  if (/timeout|ETIMEDOUT/i.test(raw)) {
+    return 'The request timed out. Try again.';
+  }
+  if (/rate.?limit|429|too many/i.test(raw)) {
+    return 'Too many requests. Wait a moment and try again.';
+  }
+  if (/not found|404/i.test(raw)) {
+    return 'The requested resource was not found.';
+  }
+  if (/unauthorized|forbidden|403|401/i.test(raw)) {
+    return 'Permission denied for this operation.';
+  }
+  // Generic fallback — don't expose raw error details
+  return 'Operation failed. Try again.';
+}
+
+// ---------------------------------------------------------------------------
 // Deps interface
 // ---------------------------------------------------------------------------
 
@@ -91,7 +117,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { sent: true, text: formatted };
@@ -129,7 +155,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { sent: true, quotedMessageId: messageId };
@@ -169,7 +195,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { sent: true, emoji, messageId };
@@ -211,7 +237,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { edited: true, messageId, newText };
@@ -246,7 +272,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { deleted: true, messageId };
@@ -289,7 +315,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { sent: true, latitude, longitude };
@@ -339,7 +365,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { sent: true, count: contactCards.length };
@@ -383,7 +409,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { sent: true, question, options };
@@ -434,7 +460,7 @@ export function registerMessagingTools(
           time: pin ? durationSeconds[duration] : undefined,
         });
       } catch (err) {
-        return { error: err instanceof Error ? err.message : String(err) };
+        return { error: sanitizeError(err) };
       }
 
       return { pinned: pin, messageId, duration: pin ? duration : undefined };

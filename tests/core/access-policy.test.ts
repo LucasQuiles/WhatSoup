@@ -21,6 +21,11 @@ const ALLOWED_USER = '15184194479';
 const BLOCKED_USER = '19999999999';
 const PENDING_USER = '18888888888';
 const UNKNOWN_USER = '17777777777';
+const MENTION_TEST_GROUP = '12223334444-group@g.us';  // no access_list entry — mention-gated
+const AUTO_RESPOND_GROUP = '44445556666-group@g.us';  // status=allowed → auto-respond
+const KNOWN_GROUP = '55556667777-group@g.us';          // status=pending → media implicit mention
+const UNKNOWN_GROUP = '99998887777-group@g.us';        // no access_list entry
+const BLOCKED_GROUP = '77778889999-group@g.us';        // status=blocked → should NOT trigger implicit mention
 
 // ---------------------------------------------------------------------------
 // DB setup
@@ -54,6 +59,25 @@ beforeAll(() => {
     `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
      VALUES ('phone', ?, 'pending', 'PendingUser', datetime('now'))`
   ).run(PENDING_USER);
+
+  // Seed an auto-respond group (status=allowed → group_auto_respond fires for all messages)
+  db.raw.prepare(
+    `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+     VALUES ('group', ?, 'allowed', 'AutoRespondGroup', datetime('now'))`
+  ).run(AUTO_RESPOND_GROUP);
+  // Note: MENTION_TEST_GROUP intentionally has NO access_list entry — relies on @mention matching
+
+  // Seed a known group with non-allowed status (triggers media implicit mention path)
+  db.raw.prepare(
+    `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+     VALUES ('group', ?, 'pending', 'KnownGroup', datetime('now'))`
+  ).run(KNOWN_GROUP);
+
+  // Seed a blocked group — must NOT trigger implicit mention for media
+  db.raw.prepare(
+    `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+     VALUES ('group', ?, 'blocked', 'BlockedGroup', datetime('now'))`
+  ).run(BLOCKED_GROUP);
 
   // Set accessMode to 'allowlist' via env so config picks it up
   process.env.WHATSOUP_ACCESS_MODE = 'allowlist';
@@ -479,5 +503,97 @@ describe('edge cases', () => {
     const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
     expect(result.respond).toBe(true);
     expect(result.reason).toBe('mentioned');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Media implicit mention in known groups
+// ---------------------------------------------------------------------------
+
+describe('media implicit mention in known groups', () => {
+  it.each(['image', 'sticker', 'video', 'audio'] as const)(
+    '%s in known group triggers implicit mention',
+    (contentType) => {
+      const msg = makeMsg({
+        chatJid: KNOWN_GROUP,
+        senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
+        isGroup: true,
+        contentType,
+        content: null,
+        mentionedJids: [],
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(true);
+      expect(result.reason).toBe('media_implicit_mention');
+    },
+  );
+
+  it('image in unknown group does NOT trigger implicit mention', () => {
+    const msg = makeMsg({
+      chatJid: UNKNOWN_GROUP,
+      senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
+      isGroup: true,
+      contentType: 'image',
+      content: null,
+      mentionedJids: [],
+    });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('not_mentioned');
+  });
+
+  it('text in known group without mention does NOT trigger implicit mention', () => {
+    const msg = makeMsg({
+      chatJid: KNOWN_GROUP,
+      senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
+      isGroup: true,
+      contentType: 'text',
+      content: 'hello',
+      mentionedJids: [],
+    });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('not_mentioned');
+  });
+
+  it('blocked sender image in known group is still blocked', () => {
+    const msg = makeMsg({
+      chatJid: KNOWN_GROUP,
+      senderJid: `${BLOCKED_USER}@s.whatsapp.net`,
+      isGroup: true,
+      contentType: 'image',
+      content: null,
+      mentionedJids: [],
+    });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+    expect(result.reason).toBe('blocked');
+  });
+
+  it('image in blocked group does NOT trigger implicit mention', () => {
+    const msg = makeMsg({
+      chatJid: BLOCKED_GROUP,
+      senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
+      isGroup: true,
+      contentType: 'image',
+      content: null,
+      mentionedJids: [],
+    });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(false);
+  });
+
+  it('image in auto-respond group uses group_auto_respond (not implicit mention)', () => {
+    const msg = makeMsg({
+      chatJid: AUTO_RESPOND_GROUP,
+      senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
+      isGroup: true,
+      contentType: 'image',
+      content: null,
+      mentionedJids: [],
+    });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(true);
+    expect(result.reason).toBe('group_auto_respond');
   });
 });

@@ -589,6 +589,158 @@ describe('SessionManager', () => {
     expect(readFileSync).toHaveBeenCalledWith('/agent/dir/CLAUDE.md', 'utf8');
   });
 
+  // ─── P3-C: Pending tool tracking ─────────────────────────────────────────
+
+  it('trackToolStart/trackToolEnd tracks pending tools correctly', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    expect(sm.hasPendingTools).toBe(false);
+
+    sm.trackToolStart('tool-1');
+    expect(sm.hasPendingTools).toBe(true);
+
+    sm.trackToolStart('tool-2');
+    expect(sm.hasPendingTools).toBe(true);
+
+    sm.trackToolEnd('tool-1');
+    expect(sm.hasPendingTools).toBe(true);
+
+    sm.trackToolEnd('tool-2');
+    expect(sm.hasPendingTools).toBe(false);
+  });
+
+  it('hasPendingTools returns true when tools are pending', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    expect(sm.hasPendingTools).toBe(false);
+    sm.trackToolStart('tool-abc');
+    expect(sm.hasPendingTools).toBe(true);
+    sm.trackToolEnd('tool-abc');
+    expect(sm.hasPendingTools).toBe(false);
+  });
+
+  it('clearTurnWatchdog clears pending tools', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    sm.trackToolStart('tool-x');
+    expect(sm.hasPendingTools).toBe(true);
+
+    sm.clearTurnWatchdog();
+    expect(sm.hasPendingTools).toBe(false);
+  });
+
+  it('shutdown clears pending tools', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    sm.trackToolStart('tool-y');
+    expect(sm.hasPendingTools).toBe(true);
+
+    await sm.shutdown();
+    expect(sm.hasPendingTools).toBe(false);
+  });
+
+  it('soft watchdog shows busy message when tools are pending', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    sm.trackToolStart('long-tool-1');
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS + 1);
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser.mock.calls[0][0]).toContain('long operation');
+    expect(notifyUser.mock.calls[0][0]).toContain('10+ min');
+
+    vi.useRealTimers();
+  });
+
+  it('warn watchdog shows busy message when tools are pending', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    sm.trackToolStart('long-tool-2');
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS + 1);
+    expect(notifyUser).toHaveBeenCalledTimes(2);
+    // soft fires first (busy message)
+    expect(notifyUser.mock.calls[0][0]).toContain('long operation');
+    // warn fires second (busy message)
+    expect(notifyUser.mock.calls[1][0]).toContain('20+ min');
+
+    vi.useRealTimers();
+  });
+
+  it('hard watchdog kills regardless of pending tools', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    sm.trackToolStart('long-tool-3');
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('soft/warn watchdog shows idle message when no tools pending', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    // No pending tools — should show idle message
+    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS + 1);
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser.mock.calls[0][0]).toContain('without responding');
+
+    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS - WATCHDOG_SOFT_MS);
+    expect(notifyUser).toHaveBeenCalledTimes(2);
+    expect(notifyUser.mock.calls[1][0]).toContain('silent for 20+ minutes');
+
+    vi.useRealTimers();
+  });
+
   it('crash then 61 s later another crash sends 2 notifications', async () => {
     const db = makeDb();
     const { messenger, sentMessages } = makeMessenger();

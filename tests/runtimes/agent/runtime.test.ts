@@ -19,6 +19,8 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
     shutdown: vi.fn(async () => {}),
     clearTurnWatchdog: vi.fn(() => {}),
     tickWatchdog: vi.fn(() => {}),
+    trackToolStart: vi.fn((_toolId: string) => {}),
+    trackToolEnd: vi.fn((_toolId: string) => {}),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),
@@ -1501,6 +1503,8 @@ describe('AgentRuntime', () => {
           shutdown: vi.fn(async () => {}),
           clearTurnWatchdog: vi.fn(() => {}),
           tickWatchdog: vi.fn(() => {}),
+          trackToolStart: vi.fn((_toolId: string) => {}),
+          trackToolEnd: vi.fn((_toolId: string) => {}),
         };
         sessionsByKey.set(key, perChatSession);
         return perChatSession;
@@ -1570,6 +1574,8 @@ describe('AgentRuntime', () => {
           shutdown: vi.fn(async () => {}),
           clearTurnWatchdog: vi.fn(() => {}),
           tickWatchdog: vi.fn(() => {}),
+          trackToolStart: vi.fn((_toolId: string) => {}),
+          trackToolEnd: vi.fn((_toolId: string) => {}),
         };
       },
     );

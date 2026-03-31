@@ -187,15 +187,19 @@ export function getUnprocessedMessages(db: Database, limit: number): StoredMessa
 export function markMessagesProcessed(db: Database, pks: number[]): void {
   if (pks.length === 0) return;
 
-  // Build a single UPDATE with a VALUES list for efficiency.
-  // node:sqlite DatabaseSync does not support array bindings, so we use a
-  // parameterised IN clause built from positional ?-placeholders.
-  const placeholders = pks.map(() => '?').join(', ');
-  db.raw.prepare(`
-    UPDATE messages
-    SET enrichment_processed_at = datetime('now')
-    WHERE pk IN (${placeholders})
-  `).run(...pks);
+  // SQLite has a 999-parameter limit. Chunk to stay safely under it.
+  const CHUNK_SIZE = 500;
+  for (let i = 0; i < pks.length; i += CHUNK_SIZE) {
+    const chunk = pks.slice(i, i + CHUNK_SIZE);
+    // node:sqlite DatabaseSync does not support array bindings, so we use a
+    // parameterised IN clause built from positional ?-placeholders.
+    const placeholders = chunk.map(() => '?').join(', ');
+    db.raw.prepare(`
+      UPDATE messages
+      SET enrichment_processed_at = datetime('now')
+      WHERE pk IN (${placeholders})
+    `).run(...chunk);
+  }
 }
 
 /** Total number of messages stored. */

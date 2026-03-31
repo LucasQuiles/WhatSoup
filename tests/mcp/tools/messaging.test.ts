@@ -147,7 +147,7 @@ describe('registerMessagingTools', () => {
       );
 
       const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/not connected/);
+      expect(body.error).toMatch(/temporarily disconnected/);
     });
 
     // Gap #13: viewOnce flag passes through to the Baileys sendRaw call

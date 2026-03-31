@@ -23,7 +23,7 @@ export async function handleAdminCommand(
 ): Promise<void> {
   if (action === 'allow') {
     updateAccess(db, subjectType, subjectId, 'allowed');
-    log.info({ subjectType, subjectId, action: 'allowed_by_admin' });
+    log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
     if (subjectType === 'phone') {
       await sendTracked(messenger, adminChatJid, `Got it, allowed +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
@@ -56,7 +56,7 @@ export async function handleAdminCommand(
     }
   } else {
     updateAccess(db, subjectType, subjectId, 'blocked');
-    log.info({ subjectType, subjectId, action: 'blocked_by_admin' });
+    log.info({ subjectType, subjectId, action: 'blocked_by_admin' }, 'access blocked by admin');
 
     if (subjectType === 'phone') {
       await sendTracked(messenger, adminChatJid, `Blocked +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
@@ -113,5 +113,5 @@ export async function sendApprovalRequest(
   }
   await sendTracked(messenger, adminJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
-  log.info({ phone, displayName, adminJid, action: 'approval_requested' });
+  log.info({ phone, displayName, adminJid, action: 'approval_requested' }, 'approval requested');
 }

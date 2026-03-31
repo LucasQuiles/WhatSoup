@@ -210,7 +210,7 @@ async function handleRequest(
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return { ok: false, error: `file not found: ${resolvedPath}` };
     log.error({ err, resolvedPath }, 'failed to read file');
-    return { ok: false, error: `failed to read file: ${(err as Error).message}` };
+    return { ok: false, error: 'failed to read file' };
   }
 
   // Infer media type and mimetype from extension
@@ -245,6 +245,6 @@ async function handleRequest(
     return { ok: true };
   } catch (err) {
     log.error({ err, chatJid }, 'sendMedia failed');
-    return { ok: false, error: `sendMedia failed: ${(err as Error).message}` };
+    return { ok: false, error: 'failed to send media — try again' };
   }
 }

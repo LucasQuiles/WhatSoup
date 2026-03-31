@@ -24,8 +24,8 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { extractPhone } from '../../core/access-list.ts';
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
+import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
@@ -33,8 +33,12 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
+import { extractRawMime } from '../../core/media-mime.ts';
 
 const log = createChildLogger('agent-runtime');
+
+/** Tracks workspace media directories already created — avoids redundant mkdirSync calls. */
+const createdMediaDirs = new Set<string>();
 
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
@@ -83,8 +87,14 @@ export async function prepareContentForAgent(msg: IncomingMessage): Promise<stri
     return content || `[${contentType} message received]`;
   }
 
+  // For documents, try to extract the real MIME type from the raw WhatsApp message
+  let downloadMime = typeInfo.mime;
+  if (contentType === 'document') {
+    downloadMime = extractRawMime(msg.rawMessage, 'document') ?? typeInfo.mime;
+  }
+
   // Download the file
-  const result = await downloadMedia(downloadFn, typeInfo.mime);
+  const result = await downloadMedia(downloadFn, downloadMime);
   if (!result) {
     return `[${contentType} — download failed]${content ? '\n' + content : ''}`;
   }
@@ -121,6 +131,34 @@ export async function prepareContentForAgent(msg: IncomingMessage): Promise<stri
   }
 }
 
+/**
+ * Relocate media files from the global temp dir into the user's workspace.
+ * Rewrites file paths in the content string so the agent can read them
+ * within its sandbox-allowed directory.
+ */
+function relocateMediaToWorkspace(content: string, workspacePath: string): string {
+  const mediaTmpDir = config.mediaDir;
+  if (!mediaTmpDir || !content.includes(mediaTmpDir)) return content;
+
+  const mediaDestDir = join(workspacePath, 'media');
+  if (!createdMediaDirs.has(mediaDestDir)) {
+    mkdirSync(mediaDestDir, { recursive: true });
+    createdMediaDirs.add(mediaDestDir);
+  }
+
+  // Match file paths from the global media temp dir
+  const regex = new RegExp(mediaTmpDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/[\\w.-]+', 'g');
+  return content.replace(regex, (match) => {
+    const destPath = join(mediaDestDir, basename(match));
+    try {
+      copyFileSync(match, destPath);
+      return destPath;
+    } catch {
+      return match; // keep original path if copy fails
+    }
+  });
+}
+
 export interface SandboxPolicy {
   allowedPaths: string[];
   allowedTools: string[];
@@ -151,9 +189,10 @@ export interface AgentRuntimeOptions {
 export function buildToolUpdate(toolName: string, input: Record<string, unknown>): ToolUpdate {
   const str = (key: string): string => String(input[key] ?? '');
 
-  /** Make a path repo-relative and middle-truncate to 80 chars. */
+  /** Strip home-dir prefixes, make relative, and middle-truncate to 80 chars. */
   function shortPath(p: string): string {
-    const rel = p.replace(/^\/home\/q\/LAB\/WhatSoup\//, '');
+    // Strip any /home/<user>/ prefix to avoid leaking absolute paths
+    const rel = p.replace(/^\/home\/[^/]+\//, '~/').replace(/^~\/LAB\/[^/]+\//, '');
     if (rel.length <= 80) return rel;
     const half = 38;
     return rel.slice(0, half) + '…' + rel.slice(-(80 - half - 1));
@@ -279,6 +318,15 @@ export class AgentRuntime implements Runtime {
 
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
+
+  // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
+  // Used to replay a message when session resume fails and the turn was lost.
+  private pendingTurnText: Map<string, string> = new Map();
+
+  // Set of mapKeys for which handleResumeFailed is currently managing context
+  // injection + pending-turn replay. Used to suppress context injection in any
+  // concurrent sendTurnToSession call for the same chat, preventing double injection.
+  private resumeFailedHandling: Set<string> = new Set();
 
   // Global socket server (non-sandboxPerChat mode)
   private globalSocketServer: WhatSoupSocketServer | null = null;
@@ -489,17 +537,45 @@ export class AgentRuntime implements Runtime {
     }
 
     const content = msg.content;
-    if (content === null || content.trim() === '') return;
+    if (content === null || content.trim() === '') {
+      log.warn(
+        { messageId: msg.messageId, contentType: msg.contentType },
+        'empty content after media processing — skipping',
+      );
+      // Mark inbound event as skipped so it doesn't stay stuck in 'processing'
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundSkipped(msg.inboundSeq, 'empty_content');
+      }
+      return;
+    }
     this.turnChain = this.turnChain
       .then(() => this._handleMessageInner(msg))
-      .catch(() => {});
+      .catch((err) => {
+        log.error(
+          { err, messageId: msg.messageId, chatJid: msg.chatJid },
+          'unhandled error in message processing',
+        );
+        // Mark inbound event as failed so it doesn't stay stuck in 'processing'
+        if (this.durability && msg.inboundSeq !== undefined) {
+          this.durability.markInboundFailed(msg.inboundSeq);
+        }
+        // Notify user of failure
+        this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+      });
   }
 
   private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
-    const content = msg.content;
+    let content = msg.content;
     const chatJid = msg.chatJid;
     if (this.sandboxPerChat) {
       await this.ensureSessionAndQueue(chatJid);
+      // Relocate media files from global temp dir into user's workspace
+      // so the agent can read them within its sandbox-allowed paths.
+      if (content) {
+        const { workspacePath } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
+        content = relocateMediaToWorkspace(content, workspacePath);
+        msg.content = content;
+      }
     } else {
       this.ensureSessionAndQueueSync(chatJid);
     }
@@ -689,11 +765,47 @@ export class AgentRuntime implements Runtime {
    * Shared helper: spawn session if needed, send the turn, and handle the
    * STDIN_WRITE_TIMEOUT error consistently across all non-shared modes.
    */
-  private async sendTurnToSession(session: SessionManager, chatJid: string, text: string): Promise<void> {
-    if (!session.getStatus().active) {
+  private async sendTurnToSession(
+    session: SessionManager,
+    chatJid: string,
+    text: string,
+  ): Promise<void> {
+    // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
+    // context injection when handleResumeFailed is already handling recovery).
+    const mapKeyForChat = this.sandboxPerChat
+      ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
+      : undefined;
+
+    const wasInactive = !session.getStatus().active;
+    if (wasInactive) {
       await session.spawnSession();
       // Successful spawn after a crash — decay the crash counter
       if (this.recentCrashCount > 0) this.recentCrashCount--;
+
+      // Inject recent chat history so the agent has conversational context.
+      // This runs on every fresh session spawn (not just resume failures),
+      // giving the agent awareness of what's been discussed recently.
+      // Skipped when handleResumeFailed manages its own context recovery to
+      // avoid sending two context blocks to the same fresh session.
+      const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
+      if (!resumeFailedOwnsContext) {
+        try {
+          const convKey = toConversationKey(chatJid);
+          const recent = getRecentMessages(this.db, convKey, 20);
+          if (recent.length > 0) {
+            const lines = recent
+              .reverse()
+              .map(
+                (m) =>
+                  `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
+              )
+              .join('\n');
+            await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+          }
+        } catch (err) {
+          log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
+        }
+      }
     }
 
     try {
@@ -725,9 +837,31 @@ export class AgentRuntime implements Runtime {
     const mapKey = this.sandboxPerChat
       ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
       : chatJid;
+
+    // Store the turn text so it can be replayed if a session resume fails
+    // before the agent can process it.
+    this.pendingTurnText.set(mapKey, text);
+
     const session = this.chatSessions.get(mapKey);
     if (!session) {
-      log.warn({ chatJid }, 'no active session for chat — message dropped');
+      log.warn({ chatJid, mapKey }, 'no active session for chat — spawning new session');
+      // Instead of silently dropping, initialize session and queue so message is handled
+      if (this.sandboxPerChat) {
+        await this.ensureSessionAndQueue(chatJid);
+      } else {
+        this.ensureSessionAndQueueSync(chatJid);
+      }
+      const retrySession = this.chatSessions.get(mapKey);
+      if (!retrySession) {
+        log.error({ chatJid, mapKey }, 'failed to create session for chat — message dropped');
+        this.pendingTurnText.delete(mapKey);
+        if (this.durability && this.perChatInboundSeqQueue.get(mapKey)?.[0] !== undefined) {
+          this.durability.markInboundFailed(this.perChatInboundSeqQueue.get(mapKey)![0]);
+        }
+        this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
+        return;
+      }
+      await this.sendTurnToSession(retrySession, chatJid, text);
       return;
     }
     await this.sendTurnToSession(session, chatJid, text);
@@ -749,6 +883,8 @@ export class AgentRuntime implements Runtime {
     if (event.type === 'result') {
       // Consume the seq for this completed turn
       seqQueue.shift();
+      // Turn completed successfully — clear pending replay text
+      this.pendingTurnText.delete(mapKey);
     }
     this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq);
   }
@@ -770,6 +906,7 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_use':
+        session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
@@ -783,6 +920,7 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_result':
+        session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         if (event.isError) {
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
@@ -1076,15 +1214,21 @@ export class AgentRuntime implements Runtime {
           this.chatQueues.delete(workspaceKey);
           this.handleCrashNotify(msg, chatJid);
         },
+        onResumeFailed: () => this.handleResumeFailed(chatJid),
       });
       this.chatSessions.set(workspaceKey, session);
       const chatQ = new OutboundQueue(this.messenger, chatJid);
       if (this.durability) chatQ.setDurability(this.durability);
       this.chatQueues.set(workspaceKey, chatQ);
 
-      // Spawn with resume if available
+      // Spawn with resume if available — fall back to fresh session if resume fails
       if (resumable) {
-        await session.spawnSession(resumable.session_id, resumable.id);
+        try {
+          await session.spawnSession(resumable.session_id, resumable.id);
+        } catch (err) {
+          log.warn({ err, workspaceKey, sessionId: resumable.session_id }, 'resume threw — spawning fresh session');
+          await session.spawnSession();
+        }
       }
     }
 
@@ -1224,31 +1368,70 @@ export class AgentRuntime implements Runtime {
   private handleResumeFailed(chatJid: string): void {
     log.warn({ chatJid }, 'resume failed — spawning fresh session');
 
-    // Defensive guard: this callback is only registered in single/shared mode (line ~391),
-    // but protect against future refactors that might wire it in per_chat mode where
-    // this.session is intentionally null.
-    if (!this.session) {
+    // Resolve the correct session and mapKey — sandboxPerChat uses the per-chat map,
+    // single/shared mode uses the shared this.session field.
+    let session: SessionManager | undefined;
+    let mapKey: string | undefined;
+    if (this.sandboxPerChat) {
+      const ws = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
+      mapKey = ws.workspaceKey;
+      session = this.chatSessions.get(mapKey);
+    } else {
+      session = this.session ?? undefined;
+    }
+    if (!session) {
       log.warn({ chatJid }, 'handleResumeFailed: no session — skipping');
       return;
     }
 
-    const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
+    // Pending-turn replay only applies to sandboxPerChat (per_chat) mode.
+    // sendTurnPerChat sets pendingTurnText[mapKey] before calling sendTurnToSession,
+    // so if a resume fails mid-send the turn text is available for replay.
+    // single/shared mode uses sendTurnNonShared → sendTurnToSession directly and never
+    // populates pendingTurnText, so mapKey is undefined here and pendingText will
+    // always be undefined — which is correct, as no turn is in-flight at resume time.
+    const pendingText = mapKey ? this.pendingTurnText.get(mapKey) : undefined;
 
-    if (this.pendingStartupMessage !== null) {
-      // WA not yet connected: override the deferred startup message so the
-      // user sees the correct status once the connection comes up.
-      this.pendingStartupMessage = { chatJid, text: msg };
-    } else {
-      // WA already connected: send immediately.
-      this.sendDirect(chatJid, msg);
+    if (!pendingText) {
+      // No pending message — notify user to resend
+      const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
+      if (this.pendingStartupMessage !== null) {
+        this.pendingStartupMessage = { chatJid, text: msg };
+      } else {
+        this.sendDirect(chatJid, msg);
+      }
     }
 
-    // Spawn a clean session — no resume ID, user sends first message to activate.
-    this.session!
+    // Mark this mapKey as owned by handleResumeFailed before spawning
+    // so that any concurrent sendTurnToSession call for the same chat skips its own
+    // context injection (preventing double context blocks on the fresh session).
+    if (mapKey) this.resumeFailedHandling.add(mapKey);
+
+    // Spawn a clean session and replay the pending turn if one exists.
+    // The `pendingText && mapKey` guard below is a no-op for single/shared mode
+    // (mapKey is always undefined) — replay is sandboxPerChat-only by design.
+    session
       .spawnSession()
       .then(async () => {
-        // context injection wrapped in turnChain to preserve serialization
+        // Re-check the session reference after spawn — race condition guard. The crash
+        // callback (notifyUser) may have deleted it from chatSessions during spawn.
+        // Continuing with an orphaned reference would send turns to a dead session.
+        if (mapKey) {
+          const currentSession = this.chatSessions.get(mapKey);
+          if (!currentSession || currentSession !== session) {
+            log.warn({ chatJid, mapKey }, 'handleResumeFailed: session was replaced or removed during spawn — aborting replay');
+            this.resumeFailedHandling.delete(mapKey);
+            return;
+          }
+        }
+
+        // context injection + replay wrapped in turnChain to preserve serialization
         this.turnChain = this.turnChain.then(async () => {
+          // Clear the resumeFailedHandling flag once we are inside the chain —
+          // the context injection below is about to run, after which concurrent
+          // sendTurnToSession calls may inject normally.
+          if (mapKey) this.resumeFailedHandling.delete(mapKey);
+
           try {
             const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
             if (recent.length > 0) {
@@ -1259,14 +1442,28 @@ export class AgentRuntime implements Runtime {
                     `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
                 )
                 .join('\n');
-              await this.session!.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
+              await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
           }
+
+          // Replay the pending turn that was lost during the failed resume
+          if (pendingText && mapKey) {
+            log.info({ chatJid, mapKey, textPreview: pendingText.slice(0, 80) }, 'replaying pending turn after resume failure');
+            try {
+              await session.sendTurn(pendingText);
+            } catch (err) {
+              log.warn({ err, chatJid }, 'pending turn replay failed');
+              this.pendingTurnText.delete(mapKey);
+            }
+          }
         }).catch(() => {});
       })
-      .catch((err) => log.error({ err }, 'failed to spawn fresh session after resume failure'));
+      .catch((err) => {
+        if (mapKey) this.resumeFailedHandling.delete(mapKey);
+        log.error({ err }, 'failed to spawn fresh session after resume failure');
+      });
   }
 
   private handleEvent(event: AgentEvent): void {
@@ -1289,6 +1486,7 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_use':
+        this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
@@ -1308,6 +1506,7 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_result':
+        this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
         if (event.isError) {
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;

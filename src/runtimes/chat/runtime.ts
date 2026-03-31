@@ -20,15 +20,9 @@ import type { ProcessedMedia } from './media/processor.ts';
 import { EnrichmentPoller } from './enrichment/poller.ts';
 import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { jitteredDelay } from '../../core/retry.ts';
 
 const log = createChildLogger('conversation');
-
-/** Full jitter: delay = base * 2^attempt * random(0.75, 1.25), capped at maxMs */
-export function jitteredDelay(baseMs: number, attempt: number, maxMs = 30_000): number {
-  const exp = baseMs * Math.pow(2, attempt);
-  const capped = Math.min(exp, maxMs);
-  return capped * (0.75 + Math.random() * 0.5);
-}
 
 const CHAT_DDL = `
 CREATE TABLE IF NOT EXISTS rate_limits (
@@ -171,6 +165,10 @@ export class ChatRuntime implements Runtime {
         } catch (err) {
           log.error({ traceId, err, chatJid: msg.chatJid }, 'failed to send rate limit notice');
         }
+      }
+      // Mark inbound event as skipped so it doesn't stay stuck in 'processing'
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundSkipped(msg.inboundSeq, 'rate_limited');
       }
       return;
     }
@@ -328,7 +326,7 @@ export class ChatRuntime implements Runtime {
       return;
     }
 
-    // 9. Send the response (with one retry on failure)
+    // 9. Send the response (with exponential-backoff retries on failure)
     const sendStart = Date.now();
     let mainOpId: number | undefined;
     if (this.durability) {
@@ -341,31 +339,37 @@ export class ChatRuntime implements Runtime {
       this.durability.markSending(mainOpId);
     }
     let sendSucceeded = false;
-    try {
-      const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);
-      if (mainOpId !== undefined && this.durability) {
-        this.durability.markSubmitted(mainOpId, receipt.waMessageId);
+    const MAX_SEND_ATTEMPTS = 3;
+    let lastSendErr: unknown;
+    for (let attempt = 0; attempt < MAX_SEND_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        const delay = jitteredDelay(2000, attempt - 1);
+        log.warn({ traceId, err: lastSendErr, chatJid: msg.chatJid, attempt }, `send failed — retrying (attempt ${attempt + 1}/${MAX_SEND_ATTEMPTS})`);
+        await new Promise(r => setTimeout(r, delay));
       }
-      sendSucceeded = true;
-    } catch (err) {
-      log.warn({ traceId, err, chatJid: msg.chatJid }, 'send failed — retrying in 2s');
       try {
-        await new Promise(r => setTimeout(r, jitteredDelay(2000, 0)));
         const receipt = await this.messenger.sendMessage(msg.chatJid, responseText);
         if (mainOpId !== undefined && this.durability) {
           this.durability.markSubmitted(mainOpId, receipt.waMessageId);
         }
         sendSucceeded = true;
-      } catch (retryErr) {
-        log.error({ traceId, err: retryErr, chatJid: msg.chatJid }, 'send retry failed — response lost');
-        if (mainOpId !== undefined && this.durability) {
-          this.durability.markMaybeSent(mainOpId, (retryErr as Error)?.message ?? 'send_retry_failed');
-        }
-        if (this.durability && msg.inboundSeq !== undefined) {
-          this.durability.markInboundFailed(msg.inboundSeq);
-        }
-        return;
+        break;
+      } catch (err) {
+        lastSendErr = err;
       }
+    }
+    if (!sendSucceeded) {
+      log.error(
+        { traceId, err: lastSendErr, chatJid: msg.chatJid, responseText },
+        'all send attempts failed — response text logged for recovery',
+      );
+      if (mainOpId !== undefined && this.durability) {
+        this.durability.markMaybeSent(mainOpId, (lastSendErr as Error)?.message ?? 'send_retry_failed');
+      }
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundFailed(msg.inboundSeq);
+      }
+      return;
     }
     const sendDurationMs = Date.now() - sendStart;
 

@@ -38,6 +38,13 @@ export function insertPending(db: Database, subjectType: SubjectType, subjectId:
   ).run(subjectType, subjectId, displayName);
 }
 
+export function insertAllowed(db: Database, subjectType: SubjectType, subjectId: string): void {
+  db.raw.prepare(
+    `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, decided_at)
+     VALUES (?, ?, 'allowed', NULL, datetime('now'))`
+  ).run(subjectType, subjectId);
+}
+
 export function updateAccess(db: Database, subjectType: SubjectType, subjectId: string, status: 'allowed' | 'blocked'): void {
   db.raw.prepare(
     `UPDATE access_list SET status = ?, decided_at = datetime('now') WHERE subject_type = ? AND subject_id = ?`

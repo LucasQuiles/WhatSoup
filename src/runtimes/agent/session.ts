@@ -62,6 +62,7 @@ export class SessionManager {
   private watchdogSoft: ReturnType<typeof setTimeout> | null = null;
   private watchdogWarn: ReturnType<typeof setTimeout> | null = null;
   private watchdogHard: ReturnType<typeof setTimeout> | null = null;
+  private pendingToolIds: Set<string> = new Set();
   /** @deprecated Alias for backward-compat in tests. */
   private get turnWatchdog() { return this.watchdogHard; }
   /** Session ID passed to --resume, cleared once the process exits. */
@@ -98,6 +99,18 @@ export class SessionManager {
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
+
+  trackToolStart(toolId: string): void {
+    this.pendingToolIds.add(toolId);
+  }
+
+  trackToolEnd(toolId: string): void {
+    this.pendingToolIds.delete(toolId);
+  }
+
+  get hasPendingTools(): boolean {
+    return this.pendingToolIds.size > 0;
+  }
 
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
@@ -331,6 +344,7 @@ export class SessionManager {
     this.watchdogSoft = null;
     this.watchdogWarn = null;
     this.watchdogHard = null;
+    this.pendingToolIds.clear();
   }
 
   /**
@@ -350,15 +364,25 @@ export class SessionManager {
   }
 
   private handleWatchdogSoft(): void {
-    log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_soft' }, 'agent idle 10 min — still alive, notifying user');
     this.watchdogSoft = null;
-    this.notifyUser?.('_Agent has been working for 10+ minutes without responding. Still running..._');
+    if (this.hasPendingTools) {
+      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_soft', pendingTools: this.pendingToolIds.size }, 'agent busy 10 min — long-running tool in progress');
+      this.notifyUser?.('_Agent is running a long operation (10+ min). Still working..._');
+    } else {
+      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_soft' }, 'agent idle 10 min — still alive, notifying user');
+      this.notifyUser?.('_Agent has been working for 10+ minutes without responding. Still running..._');
+    }
   }
 
   private handleWatchdogWarn(): void {
-    log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_warn' }, 'agent idle 20 min — may be stalled');
     this.watchdogWarn = null;
-    this.notifyUser?.('⚠️ _Agent has been silent for 20+ minutes. Will be terminated in 10 minutes if no activity. Send any message to keep alive._');
+    if (this.hasPendingTools) {
+      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_warn', pendingTools: this.pendingToolIds.size }, 'agent busy 20 min — long-running tool, may be stalled');
+      this.notifyUser?.('⚠️ _Agent has been running a long operation for 20+ min. Send any message to check in._');
+    } else {
+      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_warn' }, 'agent idle 20 min — may be stalled');
+      this.notifyUser?.('⚠️ _Agent has been silent for 20+ minutes. Will be terminated in 10 minutes if no activity. Send any message to keep alive._');
+    }
   }
 
   private handleWatchdogHard(): void {
@@ -442,6 +466,7 @@ export class SessionManager {
   async shutdown(suspend = true): Promise<void> {
     if (this.child !== null) {
       this.clearTurnWatchdog();
+      this.pendingToolIds.clear();
       this.active = false; // Suppress crash notification for clean shutdown
 
       const currentPid = this.child.pid ?? null;

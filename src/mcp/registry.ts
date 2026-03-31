@@ -301,8 +301,13 @@ export class ToolRegistry {
       if (durabilityId !== undefined) {
         this.durability!.markToolComplete(durabilityId, `error: ${message}`);
       }
+      // Sanitize transport/protocol errors but keep application-level errors readable.
+      // Raw stack traces, socket internals, and TLS details must never reach the agent.
+      const safeMessage = /ECONNRESET|EPIPE|ENOTCONN|ETIMEDOUT|TLS|certificate|socket hang up/i.test(message)
+        ? `Tool "${name}" failed: connection error — try again`
+        : `Tool "${name}" failed: ${message}`;
       return {
-        content: [{ type: 'text', text: `Tool "${name}" failed: ${message}` }],
+        content: [{ type: 'text', text: safeMessage }],
         isError: true,
       };
     }

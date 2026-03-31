@@ -461,7 +461,8 @@ export class Database {
         `);
         const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
         counts['access_list'] = row.n;
-      } catch {
+      } catch (err) {
+        log.warn({ err, table: 'access_list' }, 'legacy import failed for table');
         counts['access_list'] = 0;
       }
 
@@ -477,7 +478,8 @@ export class Database {
         `);
         const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
         counts['agent_sessions'] = row.n;
-      } catch {
+      } catch (err) {
+        log.warn({ err, table: 'agent_sessions' }, 'legacy import failed for table');
         counts['agent_sessions'] = 0;
       }
 
@@ -490,7 +492,8 @@ export class Database {
         `);
         const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
         counts['rate_limits'] = row.n;
-      } catch {
+      } catch (err) {
+        log.warn({ err, table: 'rate_limits' }, 'legacy import failed for table');
         counts['rate_limits'] = 0;
       }
 
@@ -506,7 +509,8 @@ export class Database {
         `);
         const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
         counts['enrichment_runs'] = row.n;
-      } catch {
+      } catch (err) {
+        log.warn({ err, table: 'enrichment_runs' }, 'legacy import failed for table');
         counts['enrichment_runs'] = 0;
       }
 

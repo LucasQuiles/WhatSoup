@@ -29,6 +29,7 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
+import { lookupAccess, updateAccess, insertAllowed, extractPhone } from './core/access-list.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
@@ -361,6 +362,40 @@ connectionManager.on('groupJoinRequest', (data) => {
   log.info({ groupJid: data.groupJid, requesterJid: data.requesterJid }, 'groupJoinRequest: join request received');
 });
 
+connectionManager.on('groupParticipantsUpdate', (data) => {
+  const { groupJid, author, participants, action } = data;
+  if (action !== 'add') return;
+
+  // Check if the bot was added to this group
+  const botJid = connectionManager.botJid ?? '';
+  const botLid = connectionManager.botLid;
+  const botAdded = participants.some(
+    (p: string) => p === botJid || p === botLid,
+  );
+  if (!botAdded) return;
+
+  // Check if the person who added the bot is an admin
+  const authorPhone = extractPhone(author);
+  if (!config.adminPhones.has(authorPhone)) {
+    log.info({ groupJid, author, authorPhone }, 'bot added to group by non-admin — not auto-allowing');
+    return;
+  }
+
+  // Admin added the bot — auto-allow the group
+  const existing = lookupAccess(db, 'group', groupJid);
+  if (existing?.status === 'allowed') {
+    log.info({ groupJid }, 'bot added to already-allowed group');
+    return;
+  }
+
+  if (existing) {
+    updateAccess(db, 'group', groupJid, 'allowed');
+  } else {
+    insertAllowed(db, 'group', groupJid);
+  }
+  log.info({ groupJid, author }, 'bot added to group by admin — auto-allowed');
+});
+
 connectionManager.on('blocklistSet', (blocklist) => {
   try {
     handleBlocklistSet(db, blocklist);
@@ -556,16 +591,20 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-  log.fatal({ err }, 'uncaught exception');
+  log.fatal({ err, shutdownInProgress }, 'uncaught exception');
   const done = shutdown('uncaughtException').then(() => process.exit(1));
   setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
-  log.fatal({ reason }, 'unhandled rejection');
+  log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
   const done = shutdown('unhandledRejection').then(() => process.exit(1));
   setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
+});
+// Diagnostic: log actual exit code (uses stderr to avoid writing to closed pino transport)
+process.on('exit', (code) => {
+  if (code !== 0) process.stderr.write(`exit code ${code}\n`);
 });
 
 // --- Go ---

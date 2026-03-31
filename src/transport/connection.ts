@@ -26,6 +26,21 @@ export type { IncomingMessage } from '../core/types.ts';
 
 export type WhatsAppSocket = ReturnType<typeof makeWASocket>;
 
+/** Maximum time to wait for a send operation before aborting. */
+const SEND_TIMEOUT_MS = 30_000;
+
+/** Wrap a promise with a timeout. Rejects with a descriptive error if it takes too long. */
+function withSendTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+  let handle: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    handle = setTimeout(
+      () => reject(new WhatSoupError(`${operation} timed out after ${SEND_TIMEOUT_MS / 1000}s`, 'SEND_TIMEOUT')),
+      SEND_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(handle!));
+}
+
 // ---------------------------------------------------------------------------
 // Typed transport events
 // ---------------------------------------------------------------------------
@@ -209,9 +224,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     let result;
     if (hasMentions) {
       this.log.info({ mentions }, 'Outbound message includes mentions');
-      result = await this.sock.sendMessage(chatJid, { text: formatted, mentions });
+      result = await withSendTimeout(
+        this.sock.sendMessage(chatJid, { text: formatted, mentions }),
+        'sendMessage',
+      );
     } else {
-      result = await this.sock.sendMessage(chatJid, { text: formatted });
+      result = await withSendTimeout(
+        this.sock.sendMessage(chatJid, { text: formatted }),
+        'sendMessage',
+      );
     }
     return { waMessageId: result?.key?.id ?? null };
   }
@@ -221,8 +242,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    * message types not covered by the typed sendMessage/sendMedia helpers.
    */
   async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt> {
-    if (!this.sock) throw new Error('WhatsApp is not connected');
-    const result = await this.sock.sendMessage(chatJid, content as any);
+    if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
+    const result = await withSendTimeout(
+      this.sock.sendMessage(chatJid, content as any),
+      'sendRaw',
+    );
     return { waMessageId: result?.key?.id ?? null };
   }
 
@@ -244,45 +268,45 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     let result;
     switch (media.type) {
       case 'image':
-        result = await this.sock.sendMessage(chatJid, {
+        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
           image: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
           viewOnce: media.viewOnce,
-        });
+        }), 'sendMedia:image');
         break;
       case 'document':
-        result = await this.sock.sendMessage(chatJid, {
+        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
           document: media.buffer,
           fileName: media.filename,
           mimetype: media.mimetype,
           caption: media.caption,
-        });
+        }), 'sendMedia:document');
         break;
       case 'audio':
-        result = await this.sock.sendMessage(chatJid, {
+        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
           audio: media.buffer,
           mimetype: media.mimetype,
           ptt: media.ptt,
           seconds: media.seconds,
-        });
+        }), 'sendMedia:audio');
         break;
       case 'video':
-        result = await this.sock.sendMessage(chatJid, {
+        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
           video: media.buffer,
           caption: media.caption,
           mimetype: media.mimetype,
           ptv: media.ptv,
           gifPlayback: media.gifPlayback,
           viewOnce: media.viewOnce,
-        });
+        }), 'sendMedia:video');
         break;
       case 'sticker':
-        result = await this.sock.sendMessage(chatJid, {
+        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
           sticker: media.buffer,
           mimetype: media.mimetype ?? 'image/webp',
           isAnimated: media.isAnimated,
-        });
+        }), 'sendMedia:sticker');
         break;
     }
     return { waMessageId: result?.key?.id ?? null };

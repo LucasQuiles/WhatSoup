@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform. One process, one Baileys v7 connection, one SQLite database, 117 MCP tools.
+Consolidated WhatsApp platform. One process, one Baileys v7 connection, one SQLite database, 127 MCP tools.
 
 Replaces two legacy repos (`whatsapp-bot` + `whatsapp-mcp`) into a single codebase with embedded tool registry, dual runtime modes, and a durability engine.
 

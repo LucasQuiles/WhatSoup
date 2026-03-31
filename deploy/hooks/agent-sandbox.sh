@@ -42,11 +42,17 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
       });
     }
 
-    // MCP tools: empty allowedMcpTools = allow all MCP tools
+    // MCP tools: missing field = allow all, explicit empty array = deny all
     if (toolName.startsWith('mcp__')) {
-      const allowed = policy.allowedMcpTools ?? [];
-      if (allowed.length === 0) {
+      const allowed = policy.allowedMcpTools;
+      if (allowed === undefined || allowed === null) {
+        // Field omitted = no MCP restriction (allow all)
         console.log(JSON.stringify({ decision: 'allow' }));
+        process.exit(0);
+      }
+      if (allowed.length === 0) {
+        // Explicit empty array = deny all MCP tools
+        console.log(JSON.stringify({ decision: 'block', reason: 'MCP tool ' + toolName + ' blocked — allowedMcpTools is empty (deny-all)' }));
         process.exit(0);
       }
       const parts = toolName.split('__');
@@ -65,10 +71,48 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
         console.log(JSON.stringify({ decision: 'block', reason: 'Bash is disabled by sandbox policy' }));
         process.exit(0);
       }
-      if (policy.bash?.pathRestricted) {
-        // Check the command for paths outside the sandbox
-        // Can't fully validate shell commands — trust CLAUDE.md instructions
-        // but block obvious escapes via cd to outside paths
+      if (policy.bash?.pathRestricted && allowedPaths.length > 0) {
+        const cmd = toolInput.command ?? '';
+        // Block commands that reference paths outside the sandbox.
+        // Strategy: extract path-like tokens and validate each one.
+        // Also block known escape patterns.
+        // Use includes() to avoid bash double-quote escaping issues with \$
+        const blockedStrings = [
+          '../',           // directory traversal
+          '/etc/',         // system config
+          '/proc/',        // process info
+          '/sys/',         // sysfs
+          '/root/',        // root home
+          'secret-tool',   // credential access
+          '.ssh/',         // ssh keys
+          '.ssh ',         // ssh keys (space after)
+          '.gnupg/',       // gpg keys
+          '\$HOME',        // home variable
+          '\${HOME}',      // home variable (braces)
+        ];
+        const blocked = blockedStrings.some((s) => cmd.includes(s));
+        if (blocked) {
+          console.log(JSON.stringify({ decision: 'block', reason: 'Bash command references paths or patterns outside the sandbox' }));
+          process.exit(0);
+        }
+        // Also check for absolute paths that aren't within allowedPaths
+        const absPathMatches = cmd.match(/\\/[a-zA-Z0-9_\\-\\.\\/]+/g) || [];
+        for (const p of absPathMatches) {
+          const absP = resolve(p);
+          const inAllowed = allowedPaths.some((root) => {
+            const absRoot = resolve(root);
+            return absP === absRoot || absP.startsWith(absRoot + '/');
+          });
+          if (!inAllowed) {
+            // Allow common system binaries but block file-path access
+            const systemBinPrefixes = ['/usr/bin/', '/usr/local/bin/', '/bin/', '/usr/sbin/', '/sbin/', '/usr/lib/', '/dev/null', '/dev/stdout', '/dev/stderr'];
+            const isBin = systemBinPrefixes.some((bp) => absP.startsWith(bp) || absP === bp.slice(0, -1));
+            if (!isBin) {
+              console.log(JSON.stringify({ decision: 'block', reason: 'Bash command references path ' + absP + ' outside allowed directories' }));
+              process.exit(0);
+            }
+          }
+        }
       }
       // Bash allowed
       console.log(JSON.stringify({ decision: 'allow' }));

@@ -167,6 +167,23 @@ describe('messages', () => {
     expect(unprocessed).toHaveLength(1);
   });
 
+  it('markMessagesProcessed handles >999 PKs without hitting SQLite param limit', () => {
+    // Insert 1500 messages and mark them all processed — exceeds the 999-param limit
+    // so the chunking path (CHUNK_SIZE=500) must be exercised.
+    const COUNT = 1500;
+    for (let i = 0; i < COUNT; i++) {
+      storeMessage(db, makeMsg({ timestamp: BASE_TS + i, isFromMe: false }));
+    }
+    const all = getUnprocessedMessages(db, COUNT + 10);
+    expect(all.length).toBe(COUNT);
+
+    const pks = all.map((m) => m.pk);
+    expect(() => markMessagesProcessed(db, pks)).not.toThrow();
+
+    const remaining = getUnprocessedMessages(db, COUNT + 10);
+    expect(remaining).toHaveLength(0);
+  });
+
   it('deleteOldMessages removes messages older than retentionDays', () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const oldTs = nowSec - 31 * 86400; // 31 days ago

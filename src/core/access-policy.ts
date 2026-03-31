@@ -6,6 +6,8 @@ import { config, type AccessMode } from '../config.ts';
 
 const log = createChildLogger('conversation');
 
+const IMPLICIT_MENTION_TYPES = new Set(['audio', 'image', 'sticker', 'video']);
+
 /**
  * Structured result from shouldRespond.
  */
@@ -92,6 +94,15 @@ export function shouldRespond(
     if (groupEntry?.status === 'allowed') {
       log.debug({ messageId: msg.messageId, chatJid: msg.chatJid }, 'trigger: group auto-respond');
       return { respond: true, reason: 'group_auto_respond' };
+    }
+
+    // Media messages (audio, image, sticker, video) can't contain @mentions in
+    // WhatsApp, so treat them as implicit mentions in groups the bot is known to
+    // (has an access_list entry). This allows media to reach the bot without
+    // requiring a separate text @tag.
+    if (IMPLICIT_MENTION_TYPES.has(msg.contentType) && groupEntry && groupEntry.status !== 'blocked') {
+      log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, contentType: msg.contentType }, 'trigger: media in known group — implicit mention');
+      return { respond: true, reason: 'media_implicit_mention' };
     }
 
     // Build set of identifiers the bot is known by (normalized — number before @)

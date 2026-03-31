@@ -5,6 +5,7 @@ import { downloadMedia } from '../../../core/media-download.ts';
 import { extractFrames } from './video.ts';
 import { extractUrls, extractLinkContent } from './links.ts';
 import { extractDocumentText } from './documents.ts';
+import { extractRawMime } from '../../../core/media-mime.ts';
 
 const log = createChildLogger('media:processor');
 
@@ -50,7 +51,11 @@ export async function processMedia(
       return { content: `[${label} — couldn't download]`, images: [] };
     }
 
-    const mimeType = contentType === 'sticker' ? 'image/webp' : 'image/jpeg';
+    let mimeType = contentType === 'sticker' ? 'image/webp' : 'image/jpeg';
+    // Extract real MIME type from raw WhatsApp message when available
+    if (contentType === 'image') {
+      mimeType = extractRawMime(msg.rawMessage, 'image') ?? mimeType;
+    }
     const result = await downloadMedia(downloadFn, mimeType);
     if (!result) {
       return { content: `[${label} — couldn't download]`, images: [] };
@@ -68,13 +73,20 @@ export async function processMedia(
       return { content: "[audio — couldn't download]", images: [] };
     }
 
-    const result = await downloadMedia(downloadFn, 'audio/ogg');
+    // Extract real MIME type from raw WhatsApp message when available
+    const audioMime = extractRawMime(msg.rawMessage, 'audio') ?? 'audio/ogg';
+    const result = await downloadMedia(downloadFn, audioMime);
     if (!result) {
       return { content: "[audio — couldn't download]", images: [] };
     }
 
-    const transcript = await transcribeAudio(result.buffer, result.mimeType);
-    return { content: transcript, images: [] };
+    try {
+      const transcript = await transcribeAudio(result.buffer, result.mimeType);
+      return { content: transcript, images: [] };
+    } catch (err) {
+      log.error({ err }, 'audio transcription failed');
+      return { content: '[voice message — transcription failed]', images: [] };
+    }
   }
 
   // Video: download → extract frames → images array with timestamps
@@ -83,12 +95,20 @@ export async function processMedia(
       return { content: "[video — couldn't download]", images: [] };
     }
 
-    const result = await downloadMedia(downloadFn, 'video/mp4');
+    // Extract real MIME type from raw WhatsApp message when available
+    const videoMime = extractRawMime(msg.rawMessage, 'video') ?? 'video/mp4';
+    const result = await downloadMedia(downloadFn, videoMime);
     if (!result) {
       return { content: "[video — couldn't download]", images: [] };
     }
 
-    const frames = await extractFrames(result.buffer);
+    let frames: Awaited<ReturnType<typeof extractFrames>>;
+    try {
+      frames = await extractFrames(result.buffer);
+    } catch (err) {
+      log.error({ err }, 'video frame extraction failed');
+      return { content: content ?? '[video — processing failed]', images: [] };
+    }
     if (frames.length === 0) {
       return { content: content ?? "[video — no frames extracted]", images: [] };
     }
@@ -113,14 +133,20 @@ export async function processMedia(
     }
 
     const fileName = content ?? 'document';
-    const mimeType = 'application/octet-stream';
-    const result = await downloadMedia(downloadFn, mimeType);
+    // Extract real MIME type from raw WhatsApp message when available
+    const docMime = extractRawMime(msg.rawMessage, 'document') ?? 'application/octet-stream';
+    const result = await downloadMedia(downloadFn, docMime);
     if (!result) {
       return { content: "[document — couldn't download]", images: [] };
     }
 
-    const text = await extractDocumentText(result.buffer, result.mimeType, fileName);
-    return { content: text, images: [] };
+    try {
+      const text = await extractDocumentText(result.buffer, result.mimeType, fileName);
+      return { content: text, images: [] };
+    } catch (err) {
+      log.error({ err, fileName }, 'document text extraction failed');
+      return { content: `[document: ${fileName} — could not extract text]`, images: [] };
+    }
   }
 
   // Location
