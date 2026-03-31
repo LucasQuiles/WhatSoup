@@ -9,11 +9,11 @@ import * as os from 'node:os';
 // Types
 // ---------------------------------------------------------------------------
 
-type InstanceType = 'chat' | 'agent';
+type InstanceType = 'chat' | 'agent' | 'passive';
 type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 type SessionScope = 'single' | 'shared' | 'per_chat';
 
-const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent']);
+const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
 const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set(['single', 'shared', 'per_chat']);
 
@@ -167,6 +167,16 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
   // Chat requires systemPrompt
   if (raw['type'] === 'chat' && !raw['systemPrompt']) {
     throw new Error('Chat instances must have a non-empty systemPrompt');
+  }
+
+  // Passive: no systemPrompt, self_only access only
+  if (raw['type'] === 'passive') {
+    if (raw['systemPrompt']) {
+      throw new Error('Passive instances must not have a systemPrompt');
+    }
+    if (raw['accessMode'] !== 'self_only') {
+      throw new Error(`Passive instances require accessMode "self_only", got "${raw['accessMode']}"`);
+    }
   }
 }
 

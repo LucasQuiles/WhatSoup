@@ -432,6 +432,48 @@ describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope'
 });
 
 // ---------------------------------------------------------------------------
+// passive instance type
+// ---------------------------------------------------------------------------
+
+describe('passive instance type', () => {
+  it('accepts type passive with self_only access', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'my-passive', {
+      name: 'my-passive',
+      type: 'passive',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+    });
+    loadInstance('my-passive');
+
+    expect(process.env.INSTANCE_CONFIG).toBeDefined();
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.type).toBe('passive');
+    expect(config.accessMode).toBe('self_only');
+  });
+
+  it('rejects passive with systemPrompt', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'my-passive', {
+      name: 'my-passive',
+      type: 'passive',
+      systemPrompt: 'Should not be here.',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+    });
+    expect(() => loadInstance('my-passive')).toThrow(/must not have a systemPrompt/i);
+  });
+
+  it('rejects passive with accessMode other than self_only', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'my-passive', {
+      name: 'my-passive',
+      type: 'passive',
+      adminPhones: ['15551234567'],
+      accessMode: 'open_dm',
+    });
+    expect(() => loadInstance('my-passive')).toThrow(/self_only/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // loops instance.json loads and validates correctly
 // ---------------------------------------------------------------------------
 
