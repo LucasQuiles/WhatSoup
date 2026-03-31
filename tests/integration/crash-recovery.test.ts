@@ -16,6 +16,8 @@
  *   5. Full round-trip — happy path journal → send → submit → echo → complete
  *   6. maybe_sent with wa_message_id match — postConnect reconciles to echoed
  *   7. historySyncComplete race — timeout vs. event (fake timers)
+ *   8. Chat runtime crash — processing inbound with no terminal op → failed
+ *   9. MCP tool mid-flight — standalone tool calls handled per replay policy
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -606,5 +608,229 @@ describe('Crash Recovery — Scenario 7: historySyncComplete race (fake timers)'
     // Race resolved at ~1s, postConnect at ~11s — both well under 25s
     expect(elapsed[0]! - t0).toBeLessThan(15_000);
     expect(elapsed[1]! - t0).toBeLessThan(15_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('Crash Recovery — Scenario 8: chat runtime crash mid-response', () => {
+  /**
+   * ChatRuntime journalInbound() when a message arrives, then calls completeInbound()
+   * once the LLM response is fully sent. If the process dies between those two points,
+   * the inbound row is left in `processing` with no terminal outbound op.
+   *
+   * preConnectRecovery Step 4 should detect this and call markInboundFailed().
+   */
+
+  let db: Database;
+  let engine: DurabilityEngine;
+
+  beforeEach(() => { ({ db, engine } = makeEngine()); });
+  afterEach(() => { db.close(); });
+
+  it('processing inbound with no terminal op is marked failed on preConnectRecovery', () => {
+    // Simulate: ChatRuntime journalled the inbound event, then crash before completeInbound
+    const seq = engine.journalInbound('chat-msg-crash-1', 'chat-P', 'chat-P@s.whatsapp.net', 'chat');
+
+    // Verify initial state
+    expect(getInbound(db, seq)['processing_status']).toBe('processing');
+
+    // No outbound op created — chat runtime died before responding
+    const stats = engine.preConnectRecovery();
+
+    // Step 4: no terminal op linked → marked failed
+    const inbound = getInbound(db, seq);
+    expect(inbound['processing_status']).toBe('failed');
+    expect(inbound['terminal_reason']).toBe('error');
+  });
+
+  it('processing inbound WITH a non-terminal outbound op is still marked failed', () => {
+    // A non-terminal op does not count as a terminal response — inbound still fails
+    const seq = engine.journalInbound('chat-msg-crash-2', 'chat-Q', 'chat-Q@s.whatsapp.net', 'chat');
+    engine.createOutboundOp({
+      conversationKey: 'chat-Q', chatJid: 'chat-Q@s.whatsapp.net', opType: 'text',
+      payload: '{"text":"typing..."}', replayPolicy: 'safe',
+      sourceInboundSeq: seq, isTerminal: false,
+    });
+    // ↑ crash here — non-terminal op exists but no terminal op
+
+    const stats = engine.preConnectRecovery();
+
+    // Non-terminal op does not satisfy the "terminal op" check
+    expect(getInbound(db, seq)['processing_status']).toBe('failed');
+  });
+
+  it('processing inbound WITH a terminal outbound op is left for postConnect', () => {
+    // If there is a surviving terminal op (e.g. in sending/maybe_sent), preConnect
+    // should leave the inbound for postConnect to resolve once the op is reconciled.
+    const seq = engine.journalInbound('chat-msg-crash-3', 'chat-R', 'chat-R@s.whatsapp.net', 'chat');
+    const opId = engine.createOutboundOp({
+      conversationKey: 'chat-R', chatJid: 'chat-R@s.whatsapp.net', opType: 'text',
+      payload: '{"text":"response"}', replayPolicy: 'safe',
+      sourceInboundSeq: seq, isTerminal: true,
+    });
+    engine.markSending(opId);
+    // ↑ crash here — terminal op exists in `sending`
+
+    const stats = engine.preConnectRecovery();
+
+    // `sending` → `maybe_sent` (Step 2), and because a terminal op exists,
+    // Step 4 leaves the inbound for postConnect
+    expect(getInbound(db, seq)['processing_status']).toBe('processing');
+    expect(getOutbound(db, opId)['status']).toBe('maybe_sent');
+  });
+
+  it('multiple chat runtimes crash simultaneously — each processing inbound is failed independently', () => {
+    const seq1 = engine.journalInbound('chat-multi-1', 'chat-S', 'chat-S@s.whatsapp.net', 'chat');
+    const seq2 = engine.journalInbound('chat-multi-2', 'chat-T', 'chat-T@s.whatsapp.net', 'chat');
+    const seq3 = engine.journalInbound('chat-multi-3', 'chat-U', 'chat-U@s.whatsapp.net', 'chat');
+    // No terminal ops for any of the three
+
+    engine.preConnectRecovery();
+
+    expect(getInbound(db, seq1)['processing_status']).toBe('failed');
+    expect(getInbound(db, seq2)['processing_status']).toBe('failed');
+    expect(getInbound(db, seq3)['processing_status']).toBe('failed');
+  });
+
+  it('inboundReplayed stat reflects the count of failed inbound events', () => {
+    // Note: markInboundFailed does not increment inboundReplayed in the current
+    // implementation (Step 4 has no stats counter). This test asserts the actual
+    // behaviour so any future regression is caught.
+    const seq = engine.journalInbound('chat-stat-check', 'chat-V', 'chat-V@s.whatsapp.net', 'chat');
+
+    const stats = engine.preConnectRecovery();
+
+    // The inbound is marked failed but inboundReplayed stays 0 (Step 4 does not
+    // increment it; the stat tracks re-queued events, not failed ones).
+    expect(getInbound(db, seq)['processing_status']).toBe('failed');
+    expect(stats.inboundReplayed).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('Crash Recovery — Scenario 9: MCP tool mid-flight', () => {
+  /**
+   * MCP tools are recorded via recordToolCall() then markToolExecuting(). If the process
+   * dies while a tool is executing — before markToolComplete() — preConnectRecovery
+   * must handle the stranded tool call per its replay_policy:
+   *   - safe / read_only (no outbound_op_id): mark as `replayed`
+   *   - unsafe (no outbound_op_id): quarantine
+   *   - any policy with outbound_op_id: delegate to outbound reconciliation (no status change)
+   *
+   * These tests focus on standalone tool calls (no outbound_op_id linkage).
+   * The delegated case is already covered in Scenario 2.
+   */
+
+  let db: Database;
+  let engine: DurabilityEngine;
+
+  beforeEach(() => { ({ db, engine } = makeEngine()); });
+  afterEach(() => { db.close(); });
+
+  it('safe executing tool call without outbound_op_id is marked replayed', () => {
+    // Simulate: safe MCP tool (e.g. list_messages) was executing when process died
+    const tcId = engine.recordToolCall('chat-W', 'list_messages', '{"limit":10}', 'safe');
+    engine.markToolExecuting(tcId);
+    // ↑ crash here
+
+    const stats = engine.preConnectRecovery();
+
+    const tc = getToolCall(db, tcId);
+    expect(tc['status']).toBe('replayed');
+    expect(stats.toolCallsReplayed).toBe(1);
+    expect(stats.toolCallsQuarantined).toBe(0);
+    expect(stats.toolCallsRecovered).toBe(1);
+  });
+
+  it('read_only executing tool call without outbound_op_id is marked replayed', () => {
+    // read_only is treated same as safe: can be re-run without side effects
+    const tcId = engine.recordToolCall('chat-X', 'get_contact_info', '{"jid":"a@s.whatsapp.net"}', 'read_only');
+    engine.markToolExecuting(tcId);
+
+    const stats = engine.preConnectRecovery();
+
+    const tc = getToolCall(db, tcId);
+    expect(tc['status']).toBe('replayed');
+    expect(stats.toolCallsReplayed).toBe(1);
+    expect(stats.toolCallsQuarantined).toBe(0);
+  });
+
+  it('pending tool call (never started executing) with safe policy is also marked replayed', () => {
+    // A tool that was queued but never started is still recovered the same way —
+    // preConnectRecovery queries status IN ('executing', 'pending').
+    const tcId = engine.recordToolCall('chat-Y', 'search_messages', '{"query":"hi"}', 'safe');
+    // No markToolExecuting call — tool is still `pending`
+
+    const stats = engine.preConnectRecovery();
+
+    const tc = getToolCall(db, tcId);
+    expect(tc['status']).toBe('replayed');
+    expect(stats.toolCallsReplayed).toBe(1);
+  });
+
+  it('pending tool call with unsafe policy is quarantined', () => {
+    // Unsafe pending tools — e.g. send_whatsapp_message not yet started — are
+    // quarantined because we cannot tell if they would have had side effects.
+    const tcId = engine.recordToolCall('chat-Z', 'send_whatsapp_message', '{"text":"hi"}', 'unsafe');
+    // Still pending (never executed)
+
+    const stats = engine.preConnectRecovery();
+
+    const tc = getToolCall(db, tcId);
+    expect(tc['status']).toBe('quarantined');
+    expect(stats.toolCallsQuarantined).toBe(1);
+    expect(stats.toolCallsReplayed).toBe(0);
+  });
+
+  it('mixed tool calls recovered in a single preConnectRecovery pass', () => {
+    // Three tools: safe executing, read_only executing, unsafe executing (no outbound link)
+    const safeTc = engine.recordToolCall('chat-AA', 'list_groups', '{}', 'safe');
+    engine.markToolExecuting(safeTc);
+
+    const roTc = engine.recordToolCall('chat-AA', 'get_group_info', '{"jid":"g@g.us"}', 'read_only');
+    engine.markToolExecuting(roTc);
+
+    const unsafeTc = engine.recordToolCall('chat-AA', 'leave_group', '{"jid":"g@g.us"}', 'unsafe');
+    engine.markToolExecuting(unsafeTc);
+
+    const stats = engine.preConnectRecovery();
+
+    expect(getToolCall(db, safeTc)['status']).toBe('replayed');
+    expect(getToolCall(db, roTc)['status']).toBe('replayed');
+    expect(getToolCall(db, unsafeTc)['status']).toBe('quarantined');
+
+    expect(stats.toolCallsRecovered).toBe(3);
+    expect(stats.toolCallsReplayed).toBe(2);
+    expect(stats.toolCallsQuarantined).toBe(1);
+  });
+
+  it('safe tool call mid-flight does not affect an unrelated inbound event', () => {
+    // An unrelated inbound in `processing` with no terminal op should still be
+    // marked failed — tool call recovery happens independently (Step 3 vs Step 4).
+    const seq = engine.journalInbound('mcp-inbound-1', 'chat-BB', 'chat-BB@s.whatsapp.net', 'chat');
+    const tcId = engine.recordToolCall('chat-CC', 'list_messages', '{}', 'safe');
+    engine.markToolExecuting(tcId);
+
+    engine.preConnectRecovery();
+
+    // Inbound (different conversation, no terminal op) → failed
+    expect(getInbound(db, seq)['processing_status']).toBe('failed');
+    // Safe tool → replayed
+    expect(getToolCall(db, tcId)['status']).toBe('replayed');
+  });
+
+  it('safe tool call mid-flight on same conversation as processing inbound — inbound still failed', () => {
+    // Tool calls are not terminal outbound ops. A safe tool call recovery does not
+    // rescue the inbound event; only a linked terminal outbound op would do that.
+    const seq = engine.journalInbound('mcp-same-conv', 'chat-DD', 'chat-DD@s.whatsapp.net', 'chat');
+    const tcId = engine.recordToolCall('chat-DD', 'list_messages', '{}', 'safe');
+    engine.markToolExecuting(tcId);
+
+    engine.preConnectRecovery();
+
+    expect(getInbound(db, seq)['processing_status']).toBe('failed');
+    expect(getToolCall(db, tcId)['status']).toBe('replayed');
   });
 });
