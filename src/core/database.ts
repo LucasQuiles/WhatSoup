@@ -290,6 +290,27 @@ CREATE TABLE IF NOT EXISTS groups (
 );
 `;
 
+// ─── Migration 9: decryption_failures table ──────────────────────────────────
+
+const MIGRATION_9 = `
+CREATE TABLE IF NOT EXISTS decryption_failures (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL UNIQUE,
+  chat_jid TEXT NOT NULL,
+  conversation_key TEXT NOT NULL,
+  sender_jid TEXT NOT NULL,
+  error_message TEXT,
+  raw_key TEXT NOT NULL,
+  seen_count INTEGER DEFAULT 1,
+  resolved INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_df_unresolved ON decryption_failures (resolved, created_at);
+CREATE INDEX IF NOT EXISTS idx_df_conversation ON decryption_failures (conversation_key, created_at);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -316,6 +337,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       db.exec('ALTER TABLE messages ADD COLUMN enrichment_retries INTEGER DEFAULT 0');
     }
   }],
+  [9, (db: DatabaseSync) => { db.exec(MIGRATION_9); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
