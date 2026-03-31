@@ -10,6 +10,12 @@ import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 // ---------------------------------------------------------------------------
 // search_messages — global FTS5 across all conversations
 // ---------------------------------------------------------------------------
+// NOTE: search_messages (scope: 'global') and search_chat_messages (scope: 'chat')
+// are intentionally separate tools. Scope is not just a label — the ToolRegistry
+// routes each scope to a different MCP socket/session surface (global vs chat-scoped).
+// Merging them into one tool would require a single scope declaration, which would
+// either block the tool from chat sessions entirely or expose unrestricted global
+// search to sandboxed chat-scoped agents. Keep them separate.
 
 const SearchMessagesSchema = z.object({
   query: z.string(),
