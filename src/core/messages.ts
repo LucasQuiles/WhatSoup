@@ -1,4 +1,5 @@
 import type { Database } from './database.ts';
+import { resolveDecryptionFailure } from './database.ts';
 import type { ContentType } from './types.ts';
 
 // ---------------------------------------------------------------------------
@@ -146,7 +147,11 @@ export function storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
        @is_from_me, @timestamp, @quoted_message_id, @raw_message)
   `).run(toInsertParams(msg));
-  return (result.changes as number) > 0;
+  const inserted = (result.changes as number) > 0;
+  if (inserted) {
+    resolveDecryptionFailure(db, msg.messageId);
+  }
+  return inserted;
 }
 
 // --- Read path ---
