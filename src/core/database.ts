@@ -660,3 +660,56 @@ export class Database {
     return this.db;
   }
 }
+
+// ─── Decryption failure helpers ──────────────────────────────────────────────
+
+export interface DecryptionFailureInput {
+  messageId: string;
+  chatJid: string;
+  senderJid: string;
+  errorMessage: string;
+  rawKey: { remoteJid: string; id: string; fromMe: boolean };
+  timestamp: number;
+}
+
+export function storeDecryptionFailure(db: Database, input: DecryptionFailureInput): void {
+  const conversationKey = toConversationKey(input.chatJid);
+  db.raw.prepare(`
+    INSERT INTO decryption_failures (message_id, chat_jid, conversation_key, sender_jid, error_message, raw_key)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(message_id) DO UPDATE SET
+      seen_count = seen_count + 1,
+      last_seen_at = datetime('now'),
+      error_message = excluded.error_message
+  `).run(
+    input.messageId, input.chatJid, conversationKey, input.senderJid,
+    input.errorMessage, JSON.stringify(input.rawKey),
+  );
+}
+
+export function resolveDecryptionFailure(db: Database, messageId: string): void {
+  db.raw.prepare(`
+    UPDATE decryption_failures SET resolved = 1, resolved_at = datetime('now')
+    WHERE message_id = ? AND resolved = 0
+  `).run(messageId);
+}
+
+export interface DecryptionFailureRow {
+  id: number;
+  messageId: string;
+  chatJid: string;
+  senderJid: string;
+  errorMessage: string;
+  rawKey: string;
+  seenCount: number;
+  createdAt: string;
+}
+
+export function getUnresolvedDecryptionFailures(db: Database, limit = 100): DecryptionFailureRow[] {
+  return db.raw.prepare(`
+    SELECT id, message_id AS messageId, chat_jid AS chatJid, sender_jid AS senderJid,
+           error_message AS errorMessage, raw_key AS rawKey, seen_count AS seenCount,
+           created_at AS createdAt
+    FROM decryption_failures WHERE resolved = 0 ORDER BY created_at DESC LIMIT ?
+  `).all(limit) as unknown as DecryptionFailureRow[];
+}
