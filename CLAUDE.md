@@ -27,8 +27,9 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 
 ## Instance Model
 
-Three independent processes via systemd template unit (`whatsoup@<name>.service`):
-- `personal` — Q's full-access agent (tier: global)
+Four independent processes via systemd template unit (`whatsoup@<name>.service`):
+- `personal` — user's phone, passive MCP-only (tier: global, no auto-response)
+- `q` — Q's full-access autonomous agent (tier: global)
 - `loops` — sandboxed per-chat agent for friends (tier: chat-scoped per workspace)
 - `besbot` — chat API bot, no MCP, no agent
 
