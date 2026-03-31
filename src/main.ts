@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
@@ -177,6 +178,12 @@ if (instanceType === 'agent') {
     model: instanceConfig?.model,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
   });
+} else if (instanceType === 'passive') {
+  runtime = new PassiveRuntime(db, connectionManager, {
+    name: config.botName,
+    paths: instanceConfig?.paths as any,
+    socketPath: instanceConfig?.socketPath as string | undefined,
+  });
 } else {
   // chat (default): create chat-specific providers
   const anthropic = createAnthropicProvider();
@@ -202,6 +209,7 @@ connectionManager.onMessage = createIngestHandler(
   () => connectionManager.botJid ?? '',
   () => connectionManager.botLid,
   durability,
+  instanceType,  // pass instance type for passive short-circuit
 );
 
 connectionManager.on('chatCleared', (jid: string) => {
