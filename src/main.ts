@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
-import { Database } from './core/database.ts';
+import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages } from './core/messages.ts';
 import { execFileSync } from 'node:child_process';
@@ -443,6 +443,20 @@ connectionManager.on('labelsAssociation', (data) => {
   } catch (err) {
     log.error({ err }, 'labelsAssociation: failed to persist label association');
   }
+});
+
+connectionManager.on('decryptionFailure', (data) => {
+  try {
+    storeDecryptionFailure(db, data);
+  } catch (err) {
+    log.error({ err, messageId: data.messageId }, 'failed to store decryption failure');
+  }
+  log.warn({
+    messageId: data.messageId,
+    sender: data.senderJid,
+    chatJid: data.chatJid,
+    error: data.errorMessage,
+  }, 'decryption failure — stub stored for potential resend');
 });
 
 // 7. Health server — delegates enrichment stats to runtime health snapshot
