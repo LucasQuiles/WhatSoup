@@ -145,8 +145,9 @@ function makeIngest(
   botJid = BOT_JID,
   botLid: string | null = BOT_LID,
   durability?: DurabilityEngine,
+  instanceType?: string,
 ) {
-  return createIngestHandler(db, messenger, runtime, () => botJid, () => botLid, durability);
+  return createIngestHandler(db, messenger, runtime, () => botJid, () => botLid, durability, instanceType);
 }
 
 /** Run the ingest handler and wait for the async fire-and-forget to complete. */
@@ -728,6 +729,105 @@ describe('Inbound journaling: durabilityEngine.journalInbound', () => {
     const msg = makeIncomingMessage();
 
     await expect(runIngest(handler, msg)).resolves.toBeUndefined();
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+  });
+});
+
+// ===========================================================================
+// REQ-010: Passive instance short-circuit
+// ===========================================================================
+
+describe('REQ-010: passive instance short-circuit', () => {
+  it('passive: message is stored in DB', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, undefined, 'passive');
+    const msg = makeIncomingMessage({ senderJid: '19995550020@s.whatsapp.net' });
+
+    await runIngest(handler, msg);
+
+    const rows = getMessagesBySender(db, '19995550020@s.whatsapp.net');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].messageId).toBe(msg.messageId);
+  });
+
+  it('passive: runtime.handleMessage is NEVER called', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, undefined, 'passive');
+
+    await runIngest(handler, makeIncomingMessage());
+
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  it('passive + durability: journalInbound and markInboundSkipped called with correct args', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(55);
+    const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability, 'passive');
+    const msg = makeIncomingMessage();
+
+    await runIngest(handler, msg);
+
+    expect(journalSpy).toHaveBeenCalledOnce();
+    expect(journalSpy).toHaveBeenCalledWith(
+      msg.messageId,
+      expect.any(String),   // conversationKey
+      msg.chatJid,
+      'passive',
+    );
+    expect(skipSpy).toHaveBeenCalledWith(55, 'passive_instance');
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  it('passive: inbound event has processing_status complete with terminal_reason passive_instance', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability, 'passive');
+    const msg = makeIncomingMessage();
+
+    await runIngest(handler, msg);
+
+    // Verify the inbound_event row has the correct status and terminal_reason
+    const row = db.raw.prepare(
+      `SELECT processing_status, terminal_reason FROM inbound_events WHERE message_id = ?`,
+    ).get(msg.messageId) as { processing_status: string; terminal_reason: string } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row?.processing_status).toBe('complete');
+    expect(row?.terminal_reason).toBe('passive_instance');
+  });
+
+  it('passive without durability: no crash, runtime still not called', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, undefined, 'passive');
+
+    await expect(runIngest(handler, makeIncomingMessage())).resolves.toBeUndefined();
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  it('non-passive instance: runtime is still dispatched (regression)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, undefined, 'active');
+
+    await runIngest(handler, makeIncomingMessage());
+
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
   });
 });

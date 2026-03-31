@@ -24,6 +24,7 @@ const log = createChildLogger('ingest');
  * Steps (in order):
  *   1. Store the message (always, even if later rejected)
  *   1b. Echo correlation — if isFromMe, call durabilityEngine.matchEcho and return
+ *   1c. Passive short-circuit — journal as complete, return (no runtime dispatch)
  *   2. Check admin commands — consumed here, not forwarded to runtime
  *   3. Apply access policy (shouldRespond)
  *   4. Send approval request for unknown senders
@@ -37,6 +38,7 @@ export function createIngestHandler(
   getBotJid: () => string,
   getBotLid: () => string | null,
   durability?: DurabilityEngine,
+  instanceType?: string,
 ): (msg: IncomingMessage) => void {
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
@@ -73,6 +75,15 @@ export function createIngestHandler(
       if (msg.isFromMe) {
         if (durability) {
           durability.matchEcho(msg.messageId);
+        }
+        return;
+      }
+
+      // 1c. Passive short-circuit — store message, journal as complete, no dispatch
+      if (instanceType === 'passive') {
+        if (durability) {
+          const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'passive');
+          durability.markInboundSkipped(seq, 'passive_instance');
         }
         return;
       }
