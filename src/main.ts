@@ -127,19 +127,27 @@ durability.preConnectRecovery();
   const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
   const instanceName = instanceConfig?.name as string | undefined;
   if (instanceName) {
-    // Check if we have zero messages (first run)
     const msgCount = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM messages').get() as { cnt: number }).cnt;
     if (msgCount === 0) {
-      // Look for legacy DB at the old XDG path
       const xdgData = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share');
-      const legacyDbPath = join(xdgData, 'whatsapp-instances', instanceName, 'bot.db');
-      if (existsSync(legacyDbPath)) {
-        log.info({ legacyDbPath }, 'warm-start: importing from legacy DB');
-        try {
-          db.importFromLegacyDb(legacyDbPath);
-          log.info({ legacyDbPath }, 'warm-start: import complete');
-        } catch (err) {
-          log.warn({ err, legacyDbPath }, 'warm-start: import failed (continuing)');
+      const xdgConfig = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
+      // Check legacy locations in order of likelihood
+      const legacyPaths = [
+        join(xdgData, 'whatsapp-instances', instanceName, 'bot.db'),
+        join(xdgConfig, 'whatsapp-instances', instanceName, 'bot.db'),
+        join(xdgData, 'whatsoup', instanceName, 'bot.db'),
+        join(xdgData, 'whatsapp-bot', 'bot.db'),
+      ];
+      for (const legacyDbPath of legacyPaths) {
+        if (existsSync(legacyDbPath)) {
+          log.info({ legacyDbPath }, 'warm-start: importing from legacy DB');
+          try {
+            db.importFromLegacyDb(legacyDbPath);
+            log.info({ legacyDbPath }, 'warm-start: import complete');
+          } catch (err) {
+            log.warn({ err, legacyDbPath }, 'warm-start: import failed (continuing)');
+          }
+          break;
         }
       }
     }
