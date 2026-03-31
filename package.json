@@ -9,6 +9,8 @@
     "start:instance": "node --experimental-strip-types src/bootstrap.ts",
     "auth": "node --experimental-strip-types src/transport/auth.ts",
     "auth:instance": "node --experimental-strip-types src/bootstrap-auth.ts",
+    "strip-types-compat": "bash scripts/strip-types-compat.sh",
+    "pretest": "npm run strip-types-compat",
     "typecheck": "tsc --noEmit",
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
