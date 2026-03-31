@@ -32,6 +32,19 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
     const toolInput = input.tool_input ?? {};
     const allowedPaths = policy.allowedPaths ?? [];
 
+    function deny(reason) {
+      const log = JSON.stringify({
+        event: 'sandbox_deny',
+        tool: toolName,
+        reason,
+        cwd: process.cwd(),
+        policyPath: '$POLICY_FILE',
+      });
+      process.stderr.write(log + '\n');
+      console.log(JSON.stringify({ decision: 'block', reason }));
+      process.exit(0);
+    }
+
     // Helper: check if a path is within allowed roots
     function isPathAllowed(p) {
       if (!p || allowedPaths.length === 0) return true;
@@ -51,8 +64,9 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
         process.exit(0);
       }
       if (allowed.length === 0) {
-        // Explicit empty array = deny all MCP tools
-        console.log(JSON.stringify({ decision: 'block', reason: 'MCP tool ' + toolName + ' blocked — allowedMcpTools is empty (deny-all)' }));
+        // Empty array = no restriction (same as absent). Normalized contract:
+        // undefined/absent/[] = allow all, non-empty array = allowlist.
+        console.log(JSON.stringify({ decision: 'allow' }));
         process.exit(0);
       }
       const parts = toolName.split('__');
@@ -60,7 +74,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
       if (allowed.includes(mcpTool) || allowed.includes(toolName)) {
         console.log(JSON.stringify({ decision: 'allow' }));
       } else {
-        console.log(JSON.stringify({ decision: 'block', reason: 'MCP tool ' + toolName + ' not in allowedMcpTools' }));
+        deny('MCP tool ' + toolName + ' not in allowedMcpTools');
       }
       process.exit(0);
     }
@@ -68,8 +82,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
     // Bash: blocked if disabled, path-restricted if enabled with pathRestricted
     if (toolName === 'Bash') {
       if (!policy.bash?.enabled) {
-        console.log(JSON.stringify({ decision: 'block', reason: 'Bash is disabled by sandbox policy' }));
-        process.exit(0);
+        deny('Bash is disabled by sandbox policy');
       }
       if (policy.bash?.pathRestricted && allowedPaths.length > 0) {
         const cmd = toolInput.command ?? '';
@@ -92,8 +105,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
         ];
         const blocked = blockedStrings.some((s) => cmd.includes(s));
         if (blocked) {
-          console.log(JSON.stringify({ decision: 'block', reason: 'Bash command references paths or patterns outside the sandbox' }));
-          process.exit(0);
+          deny('Bash command references paths or patterns outside the sandbox');
         }
         // Also check for absolute paths that aren't within allowedPaths
         const absPathMatches = cmd.match(/\\/[a-zA-Z0-9_\\-\\.\\/]+/g) || [];
@@ -108,8 +120,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
             const systemBinPrefixes = ['/usr/bin/', '/usr/local/bin/', '/bin/', '/usr/sbin/', '/sbin/', '/usr/lib/', '/dev/null', '/dev/stdout', '/dev/stderr'];
             const isBin = systemBinPrefixes.some((bp) => absP.startsWith(bp) || absP === bp.slice(0, -1));
             if (!isBin) {
-              console.log(JSON.stringify({ decision: 'block', reason: 'Bash command references path ' + absP + ' outside allowed directories' }));
-              process.exit(0);
+              deny('Bash command references path ' + absP + ' outside allowed directories');
             }
           }
         }
@@ -122,8 +133,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
     // Core tool allowlist: empty = allow all tools
     const allowedTools = policy.allowedTools ?? [];
     if (allowedTools.length > 0 && !allowedTools.includes(toolName)) {
-      console.log(JSON.stringify({ decision: 'block', reason: 'Tool ' + toolName + ' not in allowedTools' }));
-      process.exit(0);
+      deny('Tool ' + toolName + ' not in allowedTools');
     }
 
     // Path validation for file-touching tools
@@ -131,8 +141,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
     if (fileTools.includes(toolName)) {
       const pathField = toolInput.file_path ?? toolInput.path ?? '';
       if (pathField && !isPathAllowed(pathField)) {
-        console.log(JSON.stringify({ decision: 'block', reason: 'Path ' + resolve(pathField) + ' is outside allowed directories' }));
-        process.exit(0);
+        deny('Path ' + resolve(pathField) + ' is outside allowed directories');
       }
     }
 
