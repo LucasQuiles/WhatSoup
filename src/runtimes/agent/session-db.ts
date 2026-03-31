@@ -60,6 +60,16 @@ export function createSession(
   return Number(result.lastInsertRowid);
 }
 
+// NOTE: getActiveSession and getResumableSessionForChat are intentionally separate.
+// They are NOT the same query with different filters:
+//   - getActiveSession: no workspace filter; status IN ('active','suspended'); returns
+//     the current runtime's running session (for startup/continuity checks).
+//   - getResumableSessionForChat: filters by workspace_key; status IN ('suspended','orphaned');
+//     returns a specific chat's handoff session (for per-chat resume flows).
+// Different status sets, different filter dimensions, and different return shapes
+// (getActiveSession includes message_count/last_message_at; getResumableSessionForChat
+// does not). Merging them would obscure the two distinct call-sites' intent.
+
 /**
  * Return the single active session, or null if none exists.
  */
