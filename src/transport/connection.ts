@@ -89,6 +89,14 @@ export interface TransportEvents {
   newsletterSettingsUpdate: (data: unknown) => void;
   labelsEdit: (labels: Array<{ id: string; name: string; color?: number; predefinedId?: string }>) => void;
   labelsAssociation: (data: { labelId: string; type: string; chatJid?: string; messageId?: string; operation?: 'add' | 'remove' }) => void;
+  decryptionFailure: (data: {
+    messageId: string;
+    chatJid: string;
+    senderJid: string;
+    errorMessage: string;
+    rawKey: { remoteJid: string; id: string; fromMe: boolean };
+    timestamp: number;
+  }) => void;
 }
 
 // Typed event emitter augmentation
@@ -814,6 +822,24 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages as WAMessage[]) {
+      // Detect CIPHERTEXT stubs — decryption failed
+      if ((msg as any).messageStubType === 2 && !msg.message) {
+        const senderJid = msg.key.participant ?? msg.key.remoteJid ?? '';
+        this.emit('decryptionFailure', {
+          messageId: msg.key.id!,
+          chatJid: msg.key.remoteJid!,
+          senderJid,
+          errorMessage: (msg as any).messageStubParameters?.[0] ?? 'unknown decryption error',
+          rawKey: {
+            remoteJid: msg.key.remoteJid!,
+            id: msg.key.id!,
+            fromMe: msg.key.fromMe ?? false,
+          },
+          timestamp: msg.messageTimestamp != null ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000),
+        });
+        continue;
+      }
+
       const parsed = parseIncomingMessage(msg);
       if (parsed) {
         // Build contacts directory from every incoming sender for @mention resolution
