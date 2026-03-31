@@ -164,6 +164,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     register = vi.fn();
     listTools = vi.fn(() => []);
     call = vi.fn();
+    getChatScopedToolNames = vi.fn(() => []);
   },
 }));
 

@@ -1158,6 +1158,7 @@ export class AgentRuntime implements Runtime {
       const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
       const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
       const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
+      const chatScopedToolNames = this.registry.getChatScopedToolNames();
       const socketPath = provisionWorkspace({
         workspacePath,
         instanceCwd: this.cwd ?? homedir(),
@@ -1165,6 +1166,7 @@ export class AgentRuntime implements Runtime {
         hookPath,
         mcpServerPath,
         sendMediaServerPath,
+        chatScopedToolNames,
       });
 
       // Start chat-scoped WhatSoup socket server + media bridge for this workspace if not already running

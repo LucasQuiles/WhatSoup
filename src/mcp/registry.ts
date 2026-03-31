@@ -137,6 +137,15 @@ export class ToolRegistry {
     this.durability = engine;
   }
 
+  /** Return names of all tools declared with scope: 'chat'. */
+  getChatScopedToolNames(): string[] {
+    const names: string[] = [];
+    for (const tool of this.tools.values()) {
+      if (tool.scope === 'chat') names.push(tool.name);
+    }
+    return names;
+  }
+
   /** Register a tool. Throws if a tool with the same name is already registered. */
   register(tool: ToolDeclaration): void {
     if (this.tools.has(tool.name)) {

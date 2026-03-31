@@ -55,6 +55,20 @@ export interface ProvisionOptions {
   hookPath: string;              // absolute path to agent-sandbox.sh
   mcpServerPath: string;         // absolute path to whatsoup-proxy.ts
   sendMediaServerPath?: string;  // absolute path to send-media-server.ts (optional — enables media bridge)
+  chatScopedToolNames?: string[];  // chat-scoped tool names from registry (used to auto-generate allowedMcpTools)
+}
+
+/**
+ * Build the allowedMcpTools array from chat-scoped tool names.
+ * Each name is prefixed with `mcp__whatsoup__`.
+ * If includeSendMedia is true, `mcp__send-media__send_media` is appended.
+ */
+export function buildMcpAllowlist(chatScopedToolNames: string[], includeSendMedia: boolean): string[] {
+  const list = chatScopedToolNames.map(name => `mcp__whatsoup__${name}`);
+  if (includeSendMedia) {
+    list.push('mcp__send-media__send_media');
+  }
+  return list;
 }
 
 /**
@@ -92,10 +106,15 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
   mkdirSync(claudeDir, { recursive: true });
 
   // 2. Write sandbox-policy.json and settings.json via shared helper
+  const mcpAllowlist = opts.chatScopedToolNames
+    ? buildMcpAllowlist(opts.chatScopedToolNames, !!opts.sendMediaServerPath)
+    : undefined;
+
   const sandboxPolicy = {
     allowedPaths: [workspacePath],
     allowedTools: sandbox.allowedTools,
-    ...(sandbox.allowedMcpTools !== undefined ? { allowedMcpTools: sandbox.allowedMcpTools } : {}),
+    ...(sandbox.allowedMcpTools !== undefined ? { allowedMcpTools: sandbox.allowedMcpTools }
+      : mcpAllowlist ? { allowedMcpTools: mcpAllowlist } : {}),
     bash: sandbox.bash,
   };
   writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath);
