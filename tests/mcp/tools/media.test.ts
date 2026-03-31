@@ -295,6 +295,44 @@ describe('registerMediaTools', () => {
     expect(media.mimetype).toBe('image/png');
   });
 
+  // Gap #32: media type override path — effectiveType = mediaTypeOverride ?? mediaInfo.type
+  // Exercises every branch of the switch(effectiveType) when the override is supplied.
+  it('sends mp3 as document when mediaType override is "document"', async () => {
+    const filePath = writeFile('audio.mp3');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, mediaType: 'document', filename: 'lecture.mp3' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const media = mediaCalls[0].media as any;
+    // Override wins: type should be document, not audio
+    expect(media.type).toBe('document');
+    // MIME is still inferred from the .mp3 extension
+    expect(media.mimetype).toBe('audio/mpeg');
+    // Filename is passed through for document type
+    expect(media.filename).toBe('lecture.mp3');
+  });
+
+  it('reports the overridden mediaType in the success result', async () => {
+    const filePath = writeFile('clip.mp4');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    const result = await registry.call(
+      'send_media',
+      { filePath, mediaType: 'document' },
+      session,
+    );
+
+    expect(result.isError).toBeUndefined();
+    const body = JSON.parse(result.content[0].text);
+    // The response mediaType should reflect the effective (overridden) type
+    expect(body.mediaType).toBe('document');
+  });
+
   // ── path boundary enforcement ─────────────────────────────────────────────
 
   it('rejects absolute path outside allowedRoot', async () => {

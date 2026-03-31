@@ -7,6 +7,7 @@ import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
+import type { ToolDeclaration } from '../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
 // Minimal ConnectionManager mock — mirrors what tool-registration.test.ts uses
@@ -49,6 +50,41 @@ describe('registerAllTools', () => {
     const names = tools.map((t) => t.name);
     const uniqueNames = new Set(names);
     expect(uniqueNames.size).toBe(names.length);
+
+    db.raw.close();
+  });
+
+  // Gap #4: every tool has an explicit scope and replayPolicy (no relying on defaults)
+  it('every registered tool has an explicit scope and replayPolicy', () => {
+    const db = new Database(':memory:');
+    db.open();
+
+    // Capture all ToolDeclarations as they are registered
+    const captured: ToolDeclaration[] = [];
+    const registry = new ToolRegistry();
+    const origRegister = registry.register.bind(registry);
+    registry.register = (tool: ToolDeclaration) => {
+      captured.push(tool);
+      origRegister(tool);
+    };
+
+    const connection = makeConnection();
+    registerAllTools(registry, connection, db);
+
+    expect(captured.length).toBeGreaterThan(0);
+
+    const missing: string[] = [];
+    for (const tool of captured) {
+      const hasScope = 'scope' in tool && tool.scope !== undefined;
+      const hasReplayPolicy = 'replayPolicy' in tool && tool.replayPolicy !== undefined;
+      if (!hasScope || !hasReplayPolicy) {
+        missing.push(
+          `${tool.name}: scope=${hasScope ? tool.scope : 'MISSING'}, replayPolicy=${hasReplayPolicy ? tool.replayPolicy : 'MISSING'}`,
+        );
+      }
+    }
+
+    expect(missing).toEqual([]);
 
     db.raw.close();
   });

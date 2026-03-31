@@ -149,6 +149,29 @@ describe('registerMessagingTools', () => {
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toMatch(/not connected/);
     });
+
+    // Gap #13: viewOnce flag passes through to the Baileys sendRaw call
+    it('passes viewOnce flag through to sendRaw when set to true', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const result = await registry.call(
+        'send_message',
+        { text: 'secret message', viewOnce: true },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      const call = JSON.parse(calls[0]);
+      expect(call.content.viewOnce).toBe(true);
+    });
+
+    it('does not include viewOnce in sendRaw content when not set', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      await registry.call('send_message', { text: 'normal message' }, session);
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content).not.toHaveProperty('viewOnce');
+    });
   });
 
   // ── reply_message ─────────────────────────────────────────────────────────

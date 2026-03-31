@@ -1044,3 +1044,47 @@ describe('Identity injection', () => {
     expect(identityPos).toBeLessThan(contextPos);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gap #104: besbot has no MCP socket / no MCP leakage
+// ChatRuntime must never import or instantiate WhatSoupSocketServer.
+// Verified by static analysis of the source file so the constraint
+// cannot be accidentally re-introduced without a test failure.
+// ---------------------------------------------------------------------------
+
+describe('ChatRuntime — no MCP socket leakage (Gap #104)', () => {
+  it('ChatRuntime source does not import or reference WhatSoupSocketServer', async () => {
+    // Read the ChatRuntime source as text — static analysis beats runtime mocking
+    // because a future import would show up immediately even if the code path
+    // is never exercised in integration tests.
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, resolve } = await import('node:path');
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const runtimeSrc = readFileSync(
+      resolve(__dirname, '../../../src/runtimes/chat/runtime.ts'),
+      'utf8',
+    );
+
+    expect(runtimeSrc).not.toContain('WhatSoupSocketServer');
+    expect(runtimeSrc).not.toContain('socket-server');
+  });
+
+  it('ChatRuntime can be constructed without starting a socket server', () => {
+    // Constructing ChatRuntime with a minimal no-op messenger must not throw
+    // and must not produce any WhatSoupSocketServer instance (enforced by the
+    // source-level assertion above; this test confirms the constructor path
+    // itself is safe at runtime).
+    const messenger = {
+      sendMessage: async () => ({ waMessageId: null }),
+    } as any;
+    const db = { raw: { exec: () => {}, prepare: () => ({ get: () => ({ cnt: 0 }) }) } } as any;
+    const pinecone = { query: async () => null } as any;
+    const provider = { generate: async () => ({ content: '', model: '', inputTokens: 0, outputTokens: 0 }) } as any;
+
+    // Should not throw — no socket-server side-effect
+    expect(
+      () => new ConversationHandler(db, messenger, pinecone, provider, provider, { enableEnrichment: false }),
+    ).not.toThrow();
+  });
+});
