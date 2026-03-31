@@ -29,21 +29,9 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import type { SessionContext, ToolDeclaration } from '../../mcp/types.ts';
+import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
-import { registerMessagingTools } from '../../mcp/tools/messaging.ts';
-import { registerMediaTools } from '../../mcp/tools/media.ts';
-import { registerChatManagementTools } from '../../mcp/tools/chat-management.ts';
-import { registerChatOperationTools } from '../../mcp/tools/chat-operations.ts';
-import { registerSearchTools } from '../../mcp/tools/search.ts';
-import { registerGroupTools } from '../../mcp/tools/groups.ts';
-import { registerCommunityTools } from '../../mcp/tools/community.ts';
-import { registerNewsletterTools } from '../../mcp/tools/newsletter.ts';
-import { registerBusinessTools } from '../../mcp/tools/business.ts';
-import { registerAdvancedTools } from '../../mcp/tools/advanced.ts';
-import { registerCallTools } from '../../mcp/tools/calls.ts';
-import { registerPresenceTools } from '../../mcp/tools/presence.ts';
-import { registerProfileTools } from '../../mcp/tools/profile.ts';
+import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 
 const log = createChildLogger('agent-runtime');
@@ -232,38 +220,7 @@ export class AgentRuntime implements Runtime {
   }
 
   private registerAllTools(): void {
-    const connection = this.messenger as ConnectionManager;
-    const getSock = () => connection.getSocket();
-    const register = (tool: ToolDeclaration) => {
-      try {
-        this.registry.register(tool);
-      } catch (err) {
-        log.error({ err, tool: tool.name }, 'failed to register tool');
-      }
-    };
-
-    // Messaging & media (take ToolRegistry + deps directly)
-    try { registerMessagingTools(this.registry, { connection, db: this.db.raw }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
-    try { registerMediaTools(this.registry, { connection }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
-
-    // DB-dependent tools
-    try { registerChatManagementTools(this.db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }
-    try { registerChatOperationTools(this.db, getSock, register); } catch (err) { log.error({ err }, 'registerChatOperationTools failed'); }
-    try { registerSearchTools(this.db, register); } catch (err) { log.error({ err }, 'registerSearchTools failed'); }
-
-    // Socket-only tools
-    try { registerGroupTools(getSock, register); } catch (err) { log.error({ err }, 'registerGroupTools failed'); }
-    try { registerCommunityTools(getSock, register); } catch (err) { log.error({ err }, 'registerCommunityTools failed'); }
-    try { registerNewsletterTools(getSock, register); } catch (err) { log.error({ err }, 'registerNewsletterTools failed'); }
-    try { registerBusinessTools(getSock, register); } catch (err) { log.error({ err }, 'registerBusinessTools failed'); }
-    try { registerAdvancedTools(getSock, register, this.db); } catch (err) { log.error({ err }, 'registerAdvancedTools failed'); }
-    try { registerCallTools(getSock, register); } catch (err) { log.error({ err }, 'registerCallTools failed'); }
-    try { registerProfileTools(getSock, this.db, register); } catch (err) { log.error({ err }, 'registerProfileTools failed'); }
-
-    // Presence needs the shared presenceCache from ConnectionManager
-    try { registerPresenceTools(getSock, connection.presenceCache, register); } catch (err) { log.error({ err }, 'registerPresenceTools failed'); }
-
-    log.info({ toolCount: this.registry.listTools({ tier: 'global' }).length }, 'all tools registered');
+    registerAllTools(this.registry, this.messenger as ConnectionManager, this.db);
   }
 
   setDurability(engine: DurabilityEngine): void {
