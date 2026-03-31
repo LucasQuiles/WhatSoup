@@ -49,6 +49,7 @@ export interface StoredMessage {
   timestamp: number; // unix epoch seconds
   quotedMessageId: string | null;
   enrichmentProcessedAt: string | null;
+  enrichmentRetries: number;
   createdAt: string;
 }
 
@@ -83,6 +84,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     timestamp: row.timestamp as number,
     quotedMessageId: (row.quoted_message_id as string | null) ?? null,
     enrichmentProcessedAt: (row.enrichment_processed_at as string | null) ?? null,
+    enrichmentRetries: (row.enrichment_retries as number) ?? 0,
     createdAt: row.created_at as string,
   };
 }
@@ -172,6 +174,7 @@ export function getUnprocessedMessages(db: Database, limit: number): StoredMessa
   const rows = db.raw.prepare(`
     SELECT * FROM messages
     WHERE enrichment_processed_at IS NULL
+      AND is_from_me = 0
     ORDER BY timestamp ASC, pk ASC
     LIMIT @limit
   `).all({ limit }) as Record<string, unknown>[];
@@ -224,6 +227,43 @@ export function markMessagesWithError(db: Database, pks: number[], error: string
      SET enrichment_processed_at = datetime('now'), enrichment_error = ?
      WHERE pk IN (${placeholders})`
   ).run(error, ...pks);
+}
+
+/**
+ * Increment enrichment_retries for a batch of messages (by primary key).
+ * Called on each failed enrichment cycle to persist the retry count across restarts.
+ */
+export function incrementEnrichmentRetries(db: Database, pks: number[]): void {
+  if (pks.length === 0) return;
+  const placeholders = pks.map(() => '?').join(', ');
+  db.raw.prepare(
+    `UPDATE messages SET enrichment_retries = enrichment_retries + 1 WHERE pk IN (${placeholders})`
+  ).run(...pks);
+}
+
+/**
+ * Reset enrichment errors so messages can be re-enriched.
+ * Clears enrichment_processed_at, enrichment_error, and enrichment_retries.
+ * If pks is provided, only resets those messages; otherwise resets all failed.
+ * Returns the number of rows reset.
+ */
+export function resetEnrichmentErrors(db: Database, pks?: number[]): number {
+  if (pks && pks.length === 0) return 0;
+  if (pks) {
+    const placeholders = pks.map(() => '?').join(', ');
+    const result = db.raw.prepare(
+      `UPDATE messages
+       SET enrichment_processed_at = NULL, enrichment_error = NULL, enrichment_retries = 0
+       WHERE pk IN (${placeholders}) AND enrichment_error IS NOT NULL`
+    ).run(...pks);
+    return result.changes as number;
+  }
+  const result = db.raw.prepare(
+    `UPDATE messages
+     SET enrichment_processed_at = NULL, enrichment_error = NULL, enrichment_retries = 0
+     WHERE enrichment_error IS NOT NULL`
+  ).run();
+  return result.changes as number;
 }
 
 /**

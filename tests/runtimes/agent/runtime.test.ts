@@ -904,6 +904,7 @@ describe('AgentRuntime', () => {
         timestamp: 1_700_000_000,
         quotedMessageId: null,
         enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
         createdAt: new Date().toISOString(),
       },
     ]);
@@ -1469,5 +1470,140 @@ describe('AgentRuntime', () => {
     expect(mockSocketServerInstance.updateDeliveryJid).toHaveBeenCalled();
     const jidArgs = mockSocketServerInstance.updateDeliveryJid.mock.calls.map((c: unknown[]) => c[0]);
     expect(jidArgs).toContain('18459780919@lid');
+  });
+
+  // ─── Per-chat shared state race regression tests ─────────────────────────────
+  // Before fix: ensureSessionAndQueue mutated this.session/this.queue shared fields,
+  // so /new and /status from chat A could target chat B's session if B messaged last.
+
+  it('per_chat /status reads from correct chat session, not last-processed shared field', async () => {
+    const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    // Create distinct sessions per workspace key so we can tell them apart
+    const sessionsByKey = new Map<string, ReturnType<typeof vi.fn>>();
+    (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      function (opts: { chatJid: string; onEvent: (event: AgentEvent) => void }) {
+        const key = opts.chatJid.replace('@s.whatsapp.net', '');
+        const perChatSession = {
+          spawnSession: vi.fn(async () => {}),
+          sendTurn: vi.fn(async () => {}),
+          handleNew: vi.fn(async () => {}),
+          getStatus: vi.fn(() => ({
+            active: true,
+            pid: parseInt(key) || 999,
+            sessionId: `session-${key}`,
+            startedAt: new Date().toISOString(),
+            messageCount: 1,
+            lastMessageAt: new Date().toISOString(),
+          })),
+          shutdown: vi.fn(async () => {}),
+          clearTurnWatchdog: vi.fn(() => {}),
+          tickWatchdog: vi.fn(() => {}),
+        };
+        sessionsByKey.set(key, perChatSession);
+        return perChatSession;
+      },
+    );
+
+    // Each chat maps to its own workspace key
+    mockChatJidToWorkspace.mockImplementation((_cwd: string, chatJid: string) => {
+      const key = chatJid.replace('@s.whatsapp.net', '');
+      return { kind: 'dm' as const, workspaceKey: key, workspacePath: `/tmp/${key}` };
+    });
+    mockGetResumableSessionForChat.mockReturnValue(null);
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    // Chat A sends a message → creates session for chat A
+    await sendAndDrain(runtime, makeMsg({ chatJid: '111@s.whatsapp.net', content: 'hello from A' }));
+    // Chat B sends a message → creates session for chat B
+    // (OLD BUG: this would set this.session to B's session)
+    await sendAndDrain(runtime, makeMsg({ chatJid: '222@s.whatsapp.net', content: 'hello from B' }));
+
+    // Clear getStatus call tracking on both sessions
+    const sessionA = sessionsByKey.get('111');
+    const sessionB = sessionsByKey.get('222');
+    expect(sessionA).toBeDefined();
+    expect(sessionB).toBeDefined();
+    sessionA!.getStatus.mockClear();
+    sessionB!.getStatus.mockClear();
+
+    // Chat A asks for /status — should query A's session, not B's
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: '111@s.whatsapp.net',
+      senderJid: '111@s.whatsapp.net',
+      content: '/status',
+    }));
+
+    // getStatus should have been called on A's session, not B's
+    expect(sessionA!.getStatus).toHaveBeenCalled();
+    expect(sessionB!.getStatus).not.toHaveBeenCalled();
+  });
+
+  it('per_chat /new resets correct chat session, not last-processed shared field', async () => {
+    const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+
+    // Track which session gets handleNew called
+    const handleNewCalls: string[] = [];
+    (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      function (opts: { chatJid: string; onEvent: (event: AgentEvent) => void }) {
+        const key = opts.chatJid.replace('@s.whatsapp.net', '');
+        return {
+          spawnSession: vi.fn(async () => {}),
+          sendTurn: vi.fn(async () => {}),
+          handleNew: vi.fn(async () => { handleNewCalls.push(key); }),
+          getStatus: vi.fn(() => ({
+            active: true, pid: parseInt(key) || 999, sessionId: `session-${key}`,
+            startedAt: new Date().toISOString(), messageCount: 1, lastMessageAt: new Date().toISOString(),
+          })),
+          shutdown: vi.fn(async () => {}),
+          clearTurnWatchdog: vi.fn(() => {}),
+          tickWatchdog: vi.fn(() => {}),
+        };
+      },
+    );
+
+    mockChatJidToWorkspace.mockImplementation((_cwd: string, chatJid: string) => {
+      const key = chatJid.replace('@s.whatsapp.net', '');
+      return { kind: 'dm' as const, workspaceKey: key, workspacePath: `/tmp/${key}` };
+    });
+    mockGetResumableSessionForChat.mockReturnValue(null);
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    // Chat A and B both establish sessions
+    await sendAndDrain(runtime, makeMsg({ chatJid: '111@s.whatsapp.net', content: 'hello from A' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '222@s.whatsapp.net', content: 'hello from B' }));
+
+    // Chat A sends /new — should reset A's session, not B's
+    handleNewCalls.length = 0;
+    sentMessages.length = 0;
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: '111@s.whatsapp.net',
+      senderJid: '18459780919@s.whatsapp.net',  // admin phone (required for /new)
+      content: '/new',
+    }));
+
+    // handleNew should have been called on A's session (key '111'), not B's ('222')
+    expect(handleNewCalls).toContain('111');
+    expect(handleNewCalls).not.toContain('222');
   });
 });

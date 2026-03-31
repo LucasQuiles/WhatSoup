@@ -1,7 +1,7 @@
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { Database } from '../../../core/database.ts';
-import { getUnprocessedMessages, markMessagesProcessed, markMessagesWithError } from '../../../core/messages.ts';
+import { getUnprocessedMessages, markMessagesProcessed, markMessagesWithError, incrementEnrichmentRetries } from '../../../core/messages.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
@@ -18,7 +18,6 @@ export class EnrichmentPoller {
   private extractionProvider: LLMProvider;
   private validationProvider: LLMProvider;
   private stopped = false;
-  private retryCounters = new Map<number, number>();
   public lastRunAt: string | null = null;
 
   constructor(
@@ -129,18 +128,25 @@ export class EnrichmentPoller {
         for (const msg of chatMessages) successPks.push(msg.pk);
       } catch (err) {
         log.error({ err, chatJid }, 'enrichment: segment processing failed');
+        const retryPks: number[] = [];
         for (const msg of chatMessages) {
-          const current = (this.retryCounters.get(msg.pk) ?? 0) + 1;
-          if (current >= config.enrichmentMaxRetries) {
+          // enrichmentRetries is the count BEFORE this failure (read from DB)
+          const nextRetry = msg.enrichmentRetries + 1;
+          if (nextRetry >= config.enrichmentMaxRetries) {
             log.warn(
-              { pk: msg.pk, chatJid, retries: current },
-              'enrichment: message permanently dropped — max_retries_exceeded; DB-persisted retry counts are P2 scope',
+              { pk: msg.pk, chatJid, retries: nextRetry },
+              'enrichment: message permanently failed — max_retries_exceeded',
             );
             failedPks.push(msg.pk);
-            this.retryCounters.delete(msg.pk);
           } else {
-            this.retryCounters.set(msg.pk, current);
+            retryPks.push(msg.pk);
           }
+        }
+        // Persist incremented retry counts for messages that will be retried
+        try {
+          incrementEnrichmentRetries(this.db, retryPks);
+        } catch (dbErr) {
+          log.error({ err: dbErr }, 'enrichment: failed to persist retry counters');
         }
       }
     }

@@ -180,9 +180,24 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
     this.log.info({ chatJid }, 'Sending message');
 
+    // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
+    // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
+    let cleaned = text;
+    const ownBare = this.botJid?.split('@')[0];
+    const ownLidBare = this.botLid?.split('@')[0];
+    if (ownBare) {
+      cleaned = cleaned.replace(new RegExp(`@${ownBare}\\b`, 'g'), ownBare);
+    }
+    if (ownLidBare && ownLidBare !== ownBare) {
+      cleaned = cleaned.replace(new RegExp(`@${ownLidBare}\\b`, 'g'), ownLidBare);
+    }
+    if (cleaned !== text) {
+      this.log.warn('stripped self-mention from outbound message');
+    }
+
     // Resolve @name and @number patterns → rewritten text + Baileys mentions array
     const { text: formatted, jids: mentions, hasMentions } = formatMentions(
-      text,
+      cleaned,
       this.contactsDir.contacts,
     );
 

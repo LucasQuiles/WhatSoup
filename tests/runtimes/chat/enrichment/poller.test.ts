@@ -35,6 +35,7 @@ vi.mock('../../../../src/core/messages.ts', () => ({
   getUnprocessedMessages: vi.fn(),
   markMessagesProcessed: vi.fn(),
   markMessagesWithError: vi.fn(),
+  incrementEnrichmentRetries: vi.fn(),
 }));
 
 // Mock extractor, validator, upserter so we control their output
@@ -58,6 +59,7 @@ import {
   getUnprocessedMessages,
   markMessagesProcessed,
   markMessagesWithError,
+  incrementEnrichmentRetries,
 } from '../../../../src/core/messages.ts';
 import { extractFacts } from '../../../../src/runtimes/chat/enrichment/extractor.ts';
 import { validateFacts } from '../../../../src/runtimes/chat/enrichment/validator.ts';
@@ -91,6 +93,7 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
     timestamp: Math.floor(Date.now() / 1000),
     quotedMessageId: null,
     enrichmentProcessedAt: null,
+    enrichmentRetries: 0,
     createdAt: new Date().toISOString(),
     ...overrides,
   };
@@ -147,6 +150,7 @@ describe('EnrichmentPoller', () => {
     vi.mocked(getUnprocessedMessages).mockReturnValue([]);
     vi.mocked(markMessagesProcessed).mockReturnValue(undefined);
     vi.mocked(markMessagesWithError).mockReturnValue(undefined);
+    vi.mocked(incrementEnrichmentRetries).mockReturnValue(undefined);
     vi.mocked(extractFacts).mockResolvedValue([]);
     vi.mocked(validateFacts).mockResolvedValue([]);
     vi.mocked(upsertFacts).mockResolvedValue({ upserted: 0, deduplicated: 0, superseded: 0 });
@@ -309,16 +313,19 @@ describe('EnrichmentPoller', () => {
   });
 
   it('does NOT mark failed segment PKs as processed (marks them with error after max retries)', async () => {
-    const msgs = [makeStoredMsg({ pk: 99 })];
-    vi.mocked(getUnprocessedMessages).mockReturnValue(msgs);
     vi.mocked(extractFacts).mockRejectedValue(new Error('Extraction exploded'));
+
+    // Simulate DB-persisted retry counts increasing across cycles
+    vi.mocked(getUnprocessedMessages)
+      .mockReturnValueOnce([makeStoredMsg({ pk: 99, enrichmentRetries: 0 })])  // cycle 1
+      .mockReturnValueOnce([makeStoredMsg({ pk: 99, enrichmentRetries: 1 })])  // cycle 2 (DB incremented)
+      .mockReturnValueOnce([makeStoredMsg({ pk: 99, enrichmentRetries: 2 })]);  // cycle 3 → 2+1=3 ≥ max
 
     const { poller } = makePoller();
 
-    // Run 3 times (enrichmentMaxRetries = 3); on 3rd failure it should mark with error
-    await triggerOneCycle(poller); // retry count = 1
-    await triggerOneCycle(poller); // retry count = 2
-    await triggerOneCycle(poller); // retry count = 3 → fail permanently
+    await triggerOneCycle(poller); // retries=0 → increment to 1
+    await triggerOneCycle(poller); // retries=1 → increment to 2
+    await triggerOneCycle(poller); // retries=2 → 3 ≥ max → fail permanently
 
     // After 3 failures, pk=99 should be in the error list
     const errorCalls = vi.mocked(markMessagesWithError).mock.calls;
@@ -329,6 +336,11 @@ describe('EnrichmentPoller', () => {
     const processedCalls = vi.mocked(markMessagesProcessed).mock.calls;
     const processedPks = processedCalls.flatMap((c) => c[1] as number[]);
     expect(processedPks).not.toContain(99);
+
+    // incrementEnrichmentRetries should have been called for the first 2 cycles (not the 3rd)
+    const incrementCalls = vi.mocked(incrementEnrichmentRetries).mock.calls;
+    const incrementedPks = incrementCalls.flatMap((c) => c[1] as number[]);
+    expect(incrementedPks.filter(pk => pk === 99)).toHaveLength(2);
   });
 
   it('does NOT crash on individual segment failure — other segments continue', async () => {
@@ -374,26 +386,51 @@ describe('EnrichmentPoller', () => {
   });
 
   it('marks with error only after max retries (3), not before', async () => {
-    const msg = makeStoredMsg({ pk: 55 });
-    vi.mocked(getUnprocessedMessages).mockReturnValue([msg]);
     vi.mocked(extractFacts).mockRejectedValue(new Error('always fails'));
 
     const { poller } = makePoller();
 
-    // Cycle 1: retry count = 1, no error mark yet
+    // Cycle 1: enrichmentRetries=0, fail → increment to 1, no error mark yet
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 55, enrichmentRetries: 0 })]);
     await triggerOneCycle(poller);
     let errorPksAfter1 = vi.mocked(markMessagesWithError).mock.calls.flatMap((c) => c[1] as number[]);
     expect(errorPksAfter1).not.toContain(55);
 
-    // Cycle 2: retry count = 2, still no error mark
+    // Cycle 2: enrichmentRetries=1 (DB-persisted), fail → increment to 2, still no error
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 55, enrichmentRetries: 1 })]);
     await triggerOneCycle(poller);
     const errorPksAfter2 = vi.mocked(markMessagesWithError).mock.calls.flatMap((c) => c[1] as number[]);
     expect(errorPksAfter2).not.toContain(55);
 
-    // Cycle 3: retry count hits 3 → mark with error
+    // Cycle 3: enrichmentRetries=2 (DB-persisted), fail → 2+1=3 ≥ max → mark with error
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 55, enrichmentRetries: 2 })]);
     await triggerOneCycle(poller);
     const errorPksAfter3 = vi.mocked(markMessagesWithError).mock.calls.flatMap((c) => c[1] as number[]);
     expect(errorPksAfter3).toContain(55);
+  });
+
+  it('retry counters survive poller restart (DB-persisted, not in-memory)', async () => {
+    vi.mocked(extractFacts).mockRejectedValue(new Error('always fails'));
+
+    // First poller instance: runs 2 cycles, incrementing retries to 2
+    const { poller: poller1 } = makePoller();
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 77, enrichmentRetries: 0 })]);
+    await triggerOneCycle(poller1);
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 77, enrichmentRetries: 1 })]);
+    await triggerOneCycle(poller1);
+
+    // No permanent error yet — only 2 retries
+    let errorPks = vi.mocked(markMessagesWithError).mock.calls.flatMap((c) => c[1] as number[]);
+    expect(errorPks).not.toContain(77);
+
+    // Simulate restart: new poller instance, DB state preserved (retries=2)
+    const { poller: poller2 } = makePoller();
+    vi.mocked(getUnprocessedMessages).mockReturnValue([makeStoredMsg({ pk: 77, enrichmentRetries: 2 })]);
+    await triggerOneCycle(poller2);
+
+    // Now it should hit max retries (2+1=3) even though poller2 never saw cycles 1-2
+    errorPks = vi.mocked(markMessagesWithError).mock.calls.flatMap((c) => c[1] as number[]);
+    expect(errorPks).toContain(77);
   });
 
   it('lastRunAt is only updated when messages were fetched (not on empty batch)', async () => {

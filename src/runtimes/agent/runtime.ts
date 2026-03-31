@@ -44,6 +44,7 @@ import { registerAdvancedTools } from '../../mcp/tools/advanced.ts';
 import { registerCallTools } from '../../mcp/tools/calls.ts';
 import { registerPresenceTools } from '../../mcp/tools/presence.ts';
 import { registerProfileTools } from '../../mcp/tools/profile.ts';
+import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -179,7 +180,7 @@ export class AgentRuntime implements Runtime {
   // When sandboxPerChat=true, maps are keyed by workspaceKey; when false, keyed by raw chatJid.
   private chatSessions: Map<string, SessionManager> = new Map();
   private chatQueues: Map<string, OutboundQueue> = new Map();
-  private workspaceResources: Map<string, { socketPath: string; workspacePath: string; socketServer: WhatSoupSocketServer | null }> = new Map();
+  private workspaceResources: Map<string, { socketPath: string; workspacePath: string; socketServer: WhatSoupSocketServer | null; mediaBridge: MediaBridge | null }> = new Map();
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
 
@@ -244,7 +245,7 @@ export class AgentRuntime implements Runtime {
     try { registerCommunityTools(getSock, register); } catch (err) { log.error({ err }, 'registerCommunityTools failed'); }
     try { registerNewsletterTools(getSock, register); } catch (err) { log.error({ err }, 'registerNewsletterTools failed'); }
     try { registerBusinessTools(getSock, register); } catch (err) { log.error({ err }, 'registerBusinessTools failed'); }
-    try { registerAdvancedTools(getSock, register); } catch (err) { log.error({ err }, 'registerAdvancedTools failed'); }
+    try { registerAdvancedTools(getSock, register, this.db); } catch (err) { log.error({ err }, 'registerAdvancedTools failed'); }
     try { registerCallTools(getSock, register); } catch (err) { log.error({ err }, 'registerCallTools failed'); }
     try { registerProfileTools(getSock, this.db, register); } catch (err) { log.error({ err }, 'registerProfileTools failed'); }
 
@@ -363,8 +364,11 @@ export class AgentRuntime implements Runtime {
       }
     }
 
-    // Attempt to resume a prior active session (skipped when sandboxPerChat — resumption is lazy per chat)
-    const prior = this.sandboxPerChat ? null : getActiveSession(this.db);
+    // Attempt to resume a prior active session.
+    // Skipped for per_chat mode (all variants) — resumption is lazy on first message per chat.
+    // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
+    // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
+    const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat') ? null : getActiveSession(this.db);
     if (prior?.session_id && prior?.chat_jid) {
       // Capture narrowed values before closures — TypeScript does not propagate
       // if-guard narrowing into lambdas, so prior.chat_jid inside the closure
@@ -440,8 +444,17 @@ export class AgentRuntime implements Runtime {
             // @check CHK-067 // @traces REQ-012.AC-06
             return;
           }
-          // Abort the old queue — clears timers and typing heartbeat before discarding
-          this.getActiveQueue()?.abortTurn();
+          // Capture session ref before branches may delete it from the map.
+          // In per_chat mode, this.session is NOT reliable (shared field race),
+          // so we look up the correct session from the per-chat maps.
+          const sessionForNew = this.sessionScope === 'per_chat'
+            ? (this.sandboxPerChat
+                ? this.chatSessions.get(chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey)
+                : this.chatSessions.get(chatJid))
+            : this.session;
+          // Abort the old queue — clears timers and typing heartbeat before discarding.
+          // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
+          this.getQueueForChat(chatJid)?.abortTurn();
           // Create a fresh queue before spawning so stale output from the old session
           // can never leak into the new session's delivery channel.
           if (this.sandboxPerChat && this.sessionScope === 'per_chat') {
@@ -466,7 +479,13 @@ export class AgentRuntime implements Runtime {
             if (this.durability) q4.setDurability(this.durability);
             this.queue = q4;
           }
-          await this.session!.handleNew();
+          // NOTE: sessionForNew was captured before the map delete above. handleNew()
+          // signals the old session to reset. Any async events from the dying session
+          // arrive with the old workspaceKey — handleEventPerChat tolerates missing
+          // queue entries (returns early). The next message triggers ensureSessionAndQueue
+          // which creates a fresh session+queue in the map. This is a narrow window
+          // inherited from the original design, not a regression from the race fix.
+          await sessionForNew?.handleNew();
           // Reset turn flag — stale value from the old session must not suppress the
           // _(no response)_ fallback if the first new-session turn has no visible text.
           this.turnHadVisibleOutput = false;
@@ -474,9 +493,15 @@ export class AgentRuntime implements Runtime {
           break;
 
         case 'status': {
-          const status = this.session!.getStatus();
+          // Look up session from per-chat maps (not the shared field) to avoid race.
+          const sessionForStatus = this.sessionScope === 'per_chat'
+            ? (this.sandboxPerChat
+                ? this.chatSessions.get(chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey)
+                : this.chatSessions.get(chatJid))
+            : this.session;
+          const status = sessionForStatus?.getStatus();
           let text: string;
-          if (status.active) {
+          if (status?.active) {
             const sessionShort = status.sessionId
               ? status.sessionId.slice(0, 8) + '...'
               : 'pending';
@@ -791,9 +816,10 @@ export class AgentRuntime implements Runtime {
       this.globalSocketServer = null;
     }
 
-    // Stop workspace-scoped socket servers (sandboxPerChat)
+    // Stop workspace-scoped socket servers and media bridges (sandboxPerChat)
     for (const [, res] of this.workspaceResources) {
       if (res.socketServer) res.socketServer.stop();
+      if (res.mediaBridge) res.mediaBridge();  // MediaBridge handle is a cleanup function
     }
     this.workspaceResources.clear();
 
@@ -809,8 +835,9 @@ export class AgentRuntime implements Runtime {
    */
   private getActiveQueue(): OutboundQueue | null {
     if (this.sessionScope === 'per_chat') {
-      // In per_chat mode this.queue is always kept in sync by ensureSessionAndQueue
-      return this.queue;
+      // per_chat mode: this.queue is NOT set (shared field removed to fix race).
+      // Callers in per_chat mode should use getQueueForChat(chatJid) instead.
+      return null;
     }
     if (this.shared) {
       const jid = this.currentTurnChatJid ?? this.activeChatJid;
@@ -892,16 +919,20 @@ export class AgentRuntime implements Runtime {
       // Provision workspace (deterministic rewrite of control files)
       const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
       const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
+      const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
       const socketPath = provisionWorkspace({
         workspacePath,
         instanceCwd: this.cwd ?? homedir(),
         sandbox: this.sandbox!,
         hookPath,
         mcpServerPath,
+        sendMediaServerPath,
       });
 
-      // Start chat-scoped WhatSoup socket server for this workspace if not already running
+      // Start chat-scoped WhatSoup socket server + media bridge for this workspace if not already running
       if (!this.workspaceResources.has(workspaceKey)) {
+        let socketServer: WhatSoupSocketServer | null = null;
+        let mediaBridge: MediaBridge | null = null;
         try {
           const chatSession: SessionContext = {
             tier: 'chat-scoped',
@@ -909,14 +940,25 @@ export class AgentRuntime implements Runtime {
             deliveryJid: chatJid,
             allowedRoot: workspacePath,
           };
-          const socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
+          socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
           socketServer.start();
           log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
-          this.workspaceResources.set(workspaceKey, { socketPath, workspacePath, socketServer });
         } catch (err) {
           log.warn({ err, socketPath }, 'failed to start WhatSoup socket server for workspace');
-          this.workspaceResources.set(workspaceKey, { socketPath, workspacePath, socketServer: null });
         }
+
+        // Start media bridge — allows Claude Code subprocess to send media via Unix socket.
+        // The bridge socket lives at .claude/media-bridge.sock alongside whatsoup.sock.
+        const mediaBridgeSocketPath = join(workspacePath, '.claude', 'media-bridge.sock');
+        try {
+          mediaBridge = startMediaBridge(mediaBridgeSocketPath, this.messenger, workspacePath);
+          setMediaBridgeChat(mediaBridge, chatJid);
+          log.info({ mediaBridgeSocketPath, workspaceKey }, 'media bridge started');
+        } catch (err) {
+          log.warn({ err, mediaBridgeSocketPath }, 'failed to start media bridge for workspace');
+        }
+
+        this.workspaceResources.set(workspaceKey, { socketPath, workspacePath, socketServer, mediaBridge });
       }
 
       // Check for resumable session
@@ -932,7 +974,7 @@ export class AgentRuntime implements Runtime {
           this.chatSessions.delete(workspaceKey);
           this.chatQueues.get(workspaceKey)?.abortTurn();
           this.chatQueues.delete(workspaceKey);
-          this.handleCrashNotify(msg);
+          this.handleCrashNotify(msg, chatJid);
         },
       });
       this.chatSessions.set(workspaceKey, session);
@@ -949,15 +991,17 @@ export class AgentRuntime implements Runtime {
     // Update delivery JID on existing queue (handles JID variant changes)
     this.chatQueues.get(workspaceKey)?.updateDeliveryJid(chatJid);
 
-    // Update delivery JID on the chat-scoped socket server's session context
+    // Update delivery JID on the chat-scoped socket server and media bridge
     const res = this.workspaceResources.get(workspaceKey);
     if (res?.socketServer) {
       res.socketServer.updateDeliveryJid(chatJid);
     }
+    if (res?.mediaBridge) {
+      setMediaBridgeChat(res.mediaBridge, chatJid);
+    }
 
-    this.session = this.chatSessions.get(workspaceKey)!;
-    this.queue = this.chatQueues.get(workspaceKey)!;
-    this.activeChatJid = chatJid;
+    // sandboxPerChat: do NOT set this.session/this.queue shared fields.
+    // All per_chat code paths look up from chatSessions/chatQueues maps directly.
   }
 
   /**
@@ -978,7 +1022,7 @@ export class AgentRuntime implements Runtime {
             this.chatSessions.delete(chatJid);
             this.chatQueues.get(chatJid)?.abortTurn();
             this.chatQueues.delete(chatJid);
-            this.handleCrashNotify(msg);
+            this.handleCrashNotify(msg, chatJid);
           },
         });
         this.chatSessions.set(chatJid, session);
@@ -986,10 +1030,8 @@ export class AgentRuntime implements Runtime {
         if (this.durability) perChatQ.setDurability(this.durability);
         this.chatQueues.set(chatJid, perChatQ);
       }
-      // Also set the single-session reference for /status /new compatibility
-      this.session = this.chatSessions.get(chatJid)!;
-      this.queue = this.chatQueues.get(chatJid)!;
-      this.activeChatJid = chatJid;
+      // per_chat mode: do NOT set this.session/this.queue shared fields.
+      // /status, /new, and crash handlers look up from chatSessions/chatQueues maps directly.
       return;
     }
 
@@ -1050,14 +1092,20 @@ export class AgentRuntime implements Runtime {
    * any partial turn output that was already enqueued before the crash.
    * Falls back to a direct send if the queue is gone.
    */
-  private handleCrashNotify(msg: string): void {
-    if (this.queue) {
-      this.queue.enqueueText(msg);
-      this.queue.flush().catch((err) => log.error({ err }, 'flush after crash failed'));
-    } else if (this.activeChatJid) {
-      this.messenger
-        .sendMessage(this.activeChatJid, msg)
-        .catch((err) => log.error({ err }, 'crash notice fallback send failed'));
+  private handleCrashNotify(msg: string, chatJid?: string): void {
+    // In per_chat mode, chatJid MUST be passed — this.queue is not set.
+    // In single/shared mode, chatJid is optional (falls back to shared fields).
+    const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
+    if (queue) {
+      queue.enqueueText(msg);
+      queue.flush().catch((err) => log.error({ err }, 'flush after crash failed'));
+    } else {
+      const target = chatJid ?? this.activeChatJid;
+      if (target) {
+        this.messenger
+          .sendMessage(target, msg)
+          .catch((err) => log.error({ err }, 'crash notice fallback send failed'));
+      }
     }
   }
 

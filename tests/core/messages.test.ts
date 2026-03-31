@@ -149,13 +149,15 @@ describe('messages', () => {
 
   // --- negative / edge-case tests ---
 
-  it('getUnprocessedMessages includes both inbound and bot messages', () => {
+  it('getUnprocessedMessages excludes bot messages (is_from_me=1)', () => {
     storeMessage(db, makeMsg({ isFromMe: false, content: 'inbound' }));
     storeMessage(db, makeMsg({ isFromMe: true, content: 'bot reply' }));
 
     const results = getUnprocessedMessages(db, 100);
     expect(results.map((m) => m.content)).toContain('inbound');
-    expect(results.map((m) => m.content)).toContain('bot reply');
+    // Bot messages are excluded from enrichment to avoid extracting false facts
+    // and wasting tokens (N-3: enrichment bot-message filter)
+    expect(results.map((m) => m.content)).not.toContain('bot reply');
   });
 
   it('markMessagesProcessed with empty array is a no-op without error', () => {

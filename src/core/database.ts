@@ -309,6 +309,13 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   }],
   [6, (db: DatabaseSync) => { db.exec(MIGRATION_6); }],
   [7, (db: DatabaseSync) => { db.exec(MIGRATION_7); }],
+  [8, (db: DatabaseSync) => {
+    // Persist enrichment retry counters across restarts (was in-memory only).
+    const cols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'enrichment_retries')) {
+      db.exec('ALTER TABLE messages ADD COLUMN enrichment_retries INTEGER DEFAULT 0');
+    }
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

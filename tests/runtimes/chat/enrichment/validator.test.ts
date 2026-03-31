@@ -52,6 +52,7 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
     timestamp: Math.floor(Date.now() / 1000),
     quotedMessageId: null,
     enrichmentProcessedAt: null,
+    enrichmentRetries: 0,
     createdAt: new Date().toISOString(),
     ...overrides,
   };

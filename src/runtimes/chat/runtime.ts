@@ -52,6 +52,16 @@ export function ensureChatSchema(db: Database): void {
   db.raw.exec(CHAT_DDL);
 }
 
+export interface ChatRuntimeOptions {
+  enableEnrichment?: boolean;
+  /** Getter returning the bot's own JID (e.g. '15551234567@s.whatsapp.net'). */
+  getBotJid?: () => string;
+  /** Getter returning the bot's own LID (e.g. '123456@lid'), or null. */
+  getBotLid?: () => string | null;
+  /** Display name used in the [IDENTITY] block. */
+  botName?: string;
+}
+
 export class ChatRuntime implements Runtime {
   private rateLimitNotified = new Set<string>();
   private db: Database;
@@ -62,6 +72,9 @@ export class ChatRuntime implements Runtime {
   private chatQueue: ChatQueue;
   private enrichmentPoller: EnrichmentPoller | null;
   private durability: DurabilityEngine | undefined;
+  private getBotJid: () => string;
+  private getBotLid: () => string | null;
+  private botName: string;
 
   constructor(
     db: Database,
@@ -69,7 +82,7 @@ export class ChatRuntime implements Runtime {
     pinecone: PineconeMemory,
     primaryProvider: LLMProvider,
     fallbackProvider: LLMProvider,
-    options?: { enableEnrichment?: boolean },
+    options?: ChatRuntimeOptions,
   ) {
     this.db = db;
     this.messenger = messenger;
@@ -77,6 +90,9 @@ export class ChatRuntime implements Runtime {
     this.primaryProvider = primaryProvider;
     this.fallbackProvider = fallbackProvider;
     this.chatQueue = new ChatQueue(3);
+    this.getBotJid = options?.getBotJid ?? (() => '');
+    this.getBotLid = options?.getBotLid ?? (() => null);
+    this.botName = options?.botName ?? config.botName;
     this.enrichmentPoller = (options?.enableEnrichment ?? true)
       ? new EnrichmentPoller(db, pinecone, primaryProvider, primaryProvider)
       : null;
@@ -173,10 +189,24 @@ export class ChatRuntime implements Runtime {
     const conversationWindow = loadConversationWindow(this.db, msg.chatJid);
     const contextDurationMs = Date.now() - contextStart;
 
-    // 4. Build system prompt and apply token budget trimming
-    const systemPrompt = contextBlock
-      ? `${config.systemPrompt}\n\n${contextBlock}`
-      : config.systemPrompt;
+    // 4. Build system prompt with identity injection + memory context + token budget trimming
+    // Identity injection (Layer 1 of bot self-awareness defense):
+    // Tells the LLM its own JID/LID/name so it avoids self-tagging and identity bleed.
+    const botJid = this.getBotJid();
+    const botLid = this.getBotLid();
+    const identityBlock = [
+      '[IDENTITY]',
+      `You are ${this.botName}.`,
+      botJid ? `Your WhatsApp JID is ${botJid}.` : null,
+      botLid ? `Your WhatsApp LID is ${botLid}.` : null,
+      'NEVER @mention yourself. NEVER adopt another bot\'s persona or respond to tool-use narration.',
+      'If you do not have information about something, say so naturally — do not speculate.',
+      '[/IDENTITY]',
+    ].filter(Boolean).join('\n');
+
+    const systemPrompt = [config.systemPrompt, identityBlock, contextBlock]
+      .filter(Boolean)
+      .join('\n\n');
 
     const window: ChatMessage[] = [...conversationWindow];
 

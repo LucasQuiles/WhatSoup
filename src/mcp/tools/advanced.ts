@@ -1,9 +1,12 @@
 // src/mcp/tools/advanced.ts
 // Wave 7: Advanced / Misc tools — call links, pairing, interactive messages, protocol.
+// Also includes admin enrichment tools (P0-3).
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { Database } from '../../core/database.ts';
+import { resetEnrichmentErrors } from '../../core/messages.ts';
 
 // ---------------------------------------------------------------------------
 // create_call_link
@@ -370,12 +373,43 @@ function makeRelayMessage(getSock: () => WhatsAppSocket | null): ToolDeclaration
 }
 
 // ---------------------------------------------------------------------------
+// reset_enrichment_errors (admin tool)
+// ---------------------------------------------------------------------------
+
+const ResetEnrichmentErrorsSchema = z.object({
+  pks: z
+    .array(z.number())
+    .optional()
+    .describe('Optional array of message primary keys to reset. If omitted, resets ALL failed messages.'),
+});
+
+function makeResetEnrichmentErrors(db: Database): ToolDeclaration {
+  return {
+    name: 'reset_enrichment_errors',
+    description:
+      'Reset enrichment errors so failed messages can be re-enriched. ' +
+      'Clears enrichment_processed_at, enrichment_error, and enrichment_retries. ' +
+      'Pass specific PKs to reset individual messages, or omit to reset all failed messages (global).',
+    schema: ResetEnrichmentErrorsSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'unsafe',
+    handler: async (params) => {
+      const { pks } = ResetEnrichmentErrorsSchema.parse(params);
+      const count = resetEnrichmentErrors(db, pks);
+      return { reset: count, message: `${count} message(s) reset for re-enrichment` };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
 export function registerAdvancedTools(
   getSock: () => WhatsAppSocket | null,
   register: (tool: ToolDeclaration) => void,
+  db?: Database,
 ): void {
   // User-facing tools (global)
   register(makeCreateCallLink(getSock));
@@ -395,4 +429,9 @@ export function registerAdvancedTools(
   register(makeResyncAppState(getSock));
   register(makeRelayMessage(getSock));
   // Note: fetch_message_history already exists in chat-operations.ts (Wave 2). Skipped here.
+
+  // Admin tools (require DB)
+  if (db) {
+    register(makeResetEnrichmentErrors(db));
+  }
 }

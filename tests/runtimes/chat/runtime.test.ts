@@ -927,3 +927,120 @@ describe('Runtime interface', () => {
     await expect(Promise.resolve()).resolves.toBeUndefined();
   });
 });
+
+// ===========================================================================
+// Identity injection
+// ===========================================================================
+
+describe('Identity injection', () => {
+  /**
+   * Build a handler with identity options and return the system prompt
+   * that would be passed to the primary provider on the next message.
+   */
+  async function getSystemPromptWithOptions(
+    options: import('../../../src/runtimes/chat/runtime.ts').ChatRuntimeOptions,
+  ): Promise<string> {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const pinecone = makePinecone();
+    const primary = makePrimaryProvider();
+    const fallback = makeFallbackProvider();
+    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, options);
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    return request.systemPrompt;
+  }
+
+  it('[IDENTITY] block is present in system prompt when getBotJid is provided', async () => {
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => null,
+      botName: 'TestBot',
+    });
+    expect(systemPrompt).toContain('[IDENTITY]');
+    expect(systemPrompt).toContain('[/IDENTITY]');
+  });
+
+  it('[IDENTITY] block contains the bot name', async () => {
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => null,
+      botName: 'BesBot',
+    });
+    expect(systemPrompt).toContain('You are BesBot.');
+  });
+
+  it('[IDENTITY] block contains the bot JID', async () => {
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => null,
+      botName: 'TestBot',
+    });
+    expect(systemPrompt).toContain('15551234567@s.whatsapp.net');
+  });
+
+  it('[IDENTITY] block contains the bot LID when provided', async () => {
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => '98765@lid',
+      botName: 'TestBot',
+    });
+    expect(systemPrompt).toContain('98765@lid');
+  });
+
+  it('[IDENTITY] block omits LID line when getBotLid returns null', async () => {
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => null,
+      botName: 'TestBot',
+    });
+    // LID line only appears when botLid is truthy
+    expect(systemPrompt).not.toContain('Your WhatsApp LID');
+  });
+
+  it('[IDENTITY] block includes NEVER self-mention instruction', async () => {
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => null,
+      botName: 'TestBot',
+    });
+    expect(systemPrompt).toContain('NEVER @mention yourself');
+  });
+
+  it('[IDENTITY] block is still present when getBotJid returns empty string', async () => {
+    // Empty string is falsy — JID line should be omitted but block still renders
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '',
+      getBotLid: () => null,
+      botName: 'TestBot',
+    });
+    expect(systemPrompt).toContain('[IDENTITY]');
+    expect(systemPrompt).toContain('You are TestBot.');
+    // JID line must not appear when empty
+    expect(systemPrompt).not.toContain('Your WhatsApp JID is .');
+  });
+
+  it('identity block appears before any context block in system prompt', async () => {
+    mockLoadContext.mockResolvedValue('Background:\n- some fact');
+    const systemPrompt = await getSystemPromptWithOptions({
+      enableEnrichment: false,
+      getBotJid: () => '15551234567@s.whatsapp.net',
+      getBotLid: () => null,
+      botName: 'TestBot',
+    });
+    const identityPos = systemPrompt.indexOf('[IDENTITY]');
+    const contextPos = systemPrompt.indexOf('Background:');
+    expect(identityPos).toBeGreaterThanOrEqual(0);
+    expect(contextPos).toBeGreaterThanOrEqual(0);
+    expect(identityPos).toBeLessThan(contextPos);
+  });
+});

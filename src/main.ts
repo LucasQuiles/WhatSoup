@@ -183,7 +183,12 @@ if (instanceType === 'agent') {
   const pinecone = new PineconeMemory();
   // Disable enrichment for instances using external Pinecone indexes (e.g., besbot)
   const enableEnrichment = config.pineconeIndex === DEFAULT_PINECONE_INDEX;
-  runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, { enableEnrichment });
+  runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
+    enableEnrichment,
+    getBotJid: () => connectionManager.botJid ?? '',
+    getBotLid: () => connectionManager.botLid,
+    botName: config.botName,
+  });
 }
 
 // 6. Wire durability to runtime and message handler

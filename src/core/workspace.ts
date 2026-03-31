@@ -53,6 +53,7 @@ export interface ProvisionOptions {
   sandbox: SandboxConfig;        // instance-level config to inherit non-path fields from
   hookPath: string;              // absolute path to agent-sandbox.sh
   mcpServerPath: string;         // absolute path to whatsoup-proxy.ts
+  sendMediaServerPath?: string;  // absolute path to send-media-server.ts (optional — enables media bridge)
 }
 
 /**
@@ -83,7 +84,7 @@ export function writeSandboxArtifacts(
  * Deterministic — always overwrites existing files.
  */
 export function provisionWorkspace(opts: ProvisionOptions): string {
-  const { workspacePath, instanceCwd, sandbox, hookPath, mcpServerPath } = opts;
+  const { workspacePath, instanceCwd, sandbox, hookPath, mcpServerPath, sendMediaServerPath } = opts;
 
   // 1. Ensure .claude/ directory exists
   const claudeDir = join(workspacePath, '.claude');
@@ -101,19 +102,25 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
   // 3. Compute socket path (whatsoup.sock)
   const socketPath = join(claudeDir, 'whatsoup.sock');
 
-  // 4. Write .mcp.json — whatsoup-proxy entry with WHATSOUP_SOCKET env var
-  const mcpConfig = {
-    mcpServers: {
-      'whatsoup': {
-        command: 'node',
-        args: ['--experimental-strip-types', mcpServerPath],
-        env: { WHATSOUP_SOCKET: socketPath },
-      },
+  // 4. Write .mcp.json — whatsoup-proxy + optional send-media entry
+  const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
+  const mcpServers: Record<string, unknown> = {
+    'whatsoup': {
+      command: 'node',
+      args: ['--experimental-strip-types', mcpServerPath],
+      env: { WHATSOUP_SOCKET: socketPath },
     },
   };
+  if (sendMediaServerPath) {
+    mcpServers['send-media'] = {
+      command: 'node',
+      args: ['--experimental-strip-types', sendMediaServerPath],
+      env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
+    };
+  }
   writeFileSync(
     join(workspacePath, '.mcp.json'),
-    JSON.stringify(mcpConfig, null, 2),
+    JSON.stringify({ mcpServers }, null, 2),
   );
 
   // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)

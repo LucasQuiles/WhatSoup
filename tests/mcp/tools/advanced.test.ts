@@ -1,8 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerAdvancedTools } from '../../../src/mcp/tools/advanced.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
+import { Database } from '../../../src/core/database.ts';
+import { storeMessage, type StoreMessageInput } from '../../../src/core/messages.ts';
+import { randomBytes } from 'node:crypto';
 
 function globalSession(): SessionContext {
   return { tier: 'global' };
@@ -626,5 +629,159 @@ describe('advanced tools', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/not connected/);
     });
+  });
+});
+
+// ===========================================================================
+// reset_enrichment_errors — tool-level tests with real SQLite
+// ===========================================================================
+
+describe('reset_enrichment_errors', () => {
+  let db: Database;
+  let registry: ToolRegistry;
+
+  function makeMsg(overrides: Partial<StoreMessageInput> = {}): StoreMessageInput {
+    return {
+      chatJid: 'group1@g.us',
+      conversationKey: 'group1_at_g.us',
+      senderJid: 'alice@s.whatsapp.net',
+      senderName: 'Alice',
+      messageId: `msg-${randomBytes(4).toString('hex')}`,
+      content: 'hello',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1_700_000_000,
+      ...overrides,
+    };
+  }
+
+  function setEnrichmentError(pk: number): void {
+    db.raw
+      .prepare(
+        `UPDATE messages
+         SET enrichment_error = 'failed', enrichment_processed_at = datetime('now'), enrichment_retries = 2
+         WHERE pk = ?`,
+      )
+      .run(pk);
+  }
+
+  function getEnrichmentError(pk: number): string | null {
+    const row = db.raw
+      .prepare('SELECT enrichment_error FROM messages WHERE pk = ?')
+      .get(pk) as { enrichment_error: string | null } | undefined;
+    return row?.enrichment_error ?? null;
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    // pass null sock — tool doesn't need it
+    registerAdvancedTools(() => null, (tool) => registry.register(tool), db);
+  });
+
+  afterAll(() => {
+    // nothing persistent to clean up (in-memory)
+  });
+
+  it('reset_enrichment_errors is registered and visible in global session', () => {
+    const tools = registry.listTools(globalSession());
+    expect(tools.find((t) => t.name === 'reset_enrichment_errors')).toBeDefined();
+  });
+
+  it('reset_enrichment_errors is NOT visible in chat-scoped session', () => {
+    const tools = registry.listTools(chatSession('111'));
+    expect(tools.find((t) => t.name === 'reset_enrichment_errors')).toBeUndefined();
+  });
+
+  it('is NOT registered when db is omitted from registerAdvancedTools', () => {
+    const regNoDB = new ToolRegistry();
+    registerAdvancedTools(() => null, (tool) => regNoDB.register(tool));
+    const tools = regNoDB.listTools(globalSession());
+    expect(tools.find((t) => t.name === 'reset_enrichment_errors')).toBeUndefined();
+  });
+
+  it('resets all messages with enrichment errors when pks omitted', async () => {
+    storeMessage(db, makeMsg());
+    storeMessage(db, makeMsg());
+    const pks = db.raw
+      .prepare('SELECT pk FROM messages ORDER BY pk')
+      .all() as { pk: number }[];
+
+    for (const { pk } of pks) setEnrichmentError(pk);
+
+    const result = await registry.call('reset_enrichment_errors', {}, globalSession());
+    expect(result.isError).toBeUndefined();
+
+    const data = JSON.parse(result.content[0].text) as { reset: number };
+    expect(data.reset).toBe(2);
+
+    for (const { pk } of pks) {
+      expect(getEnrichmentError(pk)).toBeNull();
+    }
+  });
+
+  it('resets only specific pks when pks array is supplied', async () => {
+    storeMessage(db, makeMsg());
+    storeMessage(db, makeMsg());
+    const pks = db.raw
+      .prepare('SELECT pk FROM messages ORDER BY pk')
+      .all() as { pk: number }[];
+
+    for (const { pk } of pks) setEnrichmentError(pk);
+
+    const targetPk = pks[0].pk;
+    const otherPk = pks[1].pk;
+
+    const result = await registry.call(
+      'reset_enrichment_errors',
+      { pks: [targetPk] },
+      globalSession(),
+    );
+    expect(result.isError).toBeUndefined();
+
+    const data = JSON.parse(result.content[0].text) as { reset: number };
+    expect(data.reset).toBe(1);
+
+    expect(getEnrichmentError(targetPk)).toBeNull();
+    // The other message should still have its error
+    expect(getEnrichmentError(otherPk)).toBe('failed');
+  });
+
+  it('returns reset:0 when pks array is empty', async () => {
+    storeMessage(db, makeMsg());
+    const result = await registry.call(
+      'reset_enrichment_errors',
+      { pks: [] },
+      globalSession(),
+    );
+    expect(result.isError).toBeUndefined();
+    const data = JSON.parse(result.content[0].text) as { reset: number };
+    expect(data.reset).toBe(0);
+  });
+
+  it('returns reset:0 when no messages have errors', async () => {
+    storeMessage(db, makeMsg());
+    const result = await registry.call('reset_enrichment_errors', {}, globalSession());
+    const data = JSON.parse(result.content[0].text) as { reset: number };
+    expect(data.reset).toBe(0);
+  });
+
+  it('result message describes the count of reset messages', async () => {
+    storeMessage(db, makeMsg());
+    const [{ pk }] = db.raw
+      .prepare('SELECT pk FROM messages ORDER BY pk')
+      .all() as { pk: number }[];
+    setEnrichmentError(pk);
+
+    const result = await registry.call('reset_enrichment_errors', {}, globalSession());
+    const data = JSON.parse(result.content[0].text) as { message: string };
+    expect(data.message).toMatch(/1 message/);
+  });
+
+  it('is rejected when called from chat-scoped session', async () => {
+    const result = await registry.call('reset_enrichment_errors', {}, chatSession('111'));
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/not available in a chat-scoped session/);
   });
 });
