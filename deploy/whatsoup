@@ -17,7 +17,7 @@ export PATH="/home/q/.local/bin:/home/q/.nvm/versions/node/v24.13.0/bin:$PATH"
 
 # Detect instance type from instance.json (whatsoup-instances namespace)
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
-INSTANCE_JSON="$XDG_CONFIG/whatsoup-instances/$INSTANCE/instance.json"
+INSTANCE_JSON="$XDG_CONFIG/whatsoup/instances/$INSTANCE/config.json"
 INSTANCE_TYPE="chat"
 if [ -f "$INSTANCE_JSON" ]; then
   INSTANCE_TYPE="$($NODE -e "process.stdout.write(JSON.parse(require('fs').readFileSync('$INSTANCE_JSON','utf8')).type ?? 'chat')")"
