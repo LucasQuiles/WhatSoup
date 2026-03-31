@@ -80,7 +80,7 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
   // Name match
   if (raw['name'] !== name) {
     throw new Error(
-      `Instance name mismatch: expected "${name}" but instance.json has "${String(raw['name'])}"`,
+      `Instance name mismatch: expected "${name}" but config.json has "${String(raw['name'])}"`,
     );
   }
 
@@ -182,17 +182,20 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
 
 // ---------------------------------------------------------------------------
 // Path resolution
-//
-// Config + auth read from whatsapp-instances/ (shared with old bot — same instance.json,
-// same QR pairing). DB, logs, state use whatsoup/ namespace (fresh schema, no migration).
 // ---------------------------------------------------------------------------
 
 function resolvePaths(name: string): InstancePaths {
-  const configRoot = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsapp-instances', name);
-  const dataRoot = path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', name);
-  const stateRoot = path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', name);
+  const configRoot = path.join(
+    xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances', name,
+  );
+  const dataRoot = path.join(
+    xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'instances', name,
+  );
+  const stateRoot = path.join(
+    xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name,
+  );
 
-  const authDir = path.join(configRoot, 'auth_info');
+  const authDir = path.join(configRoot, 'auth');
 
   return {
     configRoot,
@@ -201,7 +204,7 @@ function resolvePaths(name: string): InstancePaths {
     authDir,
     dbPath: path.join(dataRoot, 'bot.db'),
     logDir: path.join(dataRoot, 'logs'),
-    lockPath: path.join(stateRoot, 'bot.lock'),
+    lockPath: path.join(stateRoot, 'whatsoup.lock'),
     mediaDir: path.join(dataRoot, 'media', 'tmp'),
   };
 }
@@ -215,7 +218,9 @@ export function loadInstance(name: string): void {
     throw new Error('Instance name is required');
   }
 
-  const instanceFile = path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsapp-instances', name, 'instance.json');
+  const instanceFile = path.join(
+    xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances', name, 'config.json',
+  );
 
   // 2. Read file (throws ENOENT if missing)
   let raw: string;
@@ -232,7 +237,7 @@ export function loadInstance(name: string): void {
     parsed = JSON.parse(raw) as Record<string, unknown>;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to parse instance.json for "${name}": ${message}`);
+    throw new Error(`Failed to parse config.json for "${name}": ${message}`);
   }
 
   // 4. Validate

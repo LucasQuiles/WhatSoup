@@ -11,13 +11,11 @@ import { loadInstance } from '../src/instance-loader.ts';
 let tmpDir: string;
 let savedEnv: Record<string, string | undefined>;
 
-// Config + auth read from whatsapp-instances/ (shared). DB/state use whatsoup/ namespace.
-// Auth dir uses "whatsapp-instances" (shared auth state — no QR re-pairing needed).
 function writeInstance(baseDir: string, name: string, content: unknown): void {
-  const instanceDir = path.join(baseDir, 'whatsapp-instances', name);
+  const instanceDir = path.join(baseDir, 'whatsoup', 'instances', name);
   fs.mkdirSync(instanceDir, { recursive: true });
   const json = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-  fs.writeFileSync(path.join(instanceDir, 'instance.json'), json, 'utf8');
+  fs.writeFileSync(path.join(instanceDir, 'config.json'), json, 'utf8');
 }
 
 const minimalChat = {
@@ -90,26 +88,23 @@ describe('loadInstance — happy path: chat', () => {
     expect(config.adminPhones).toEqual(['15551234567']);
     expect(config.accessMode).toBe('allowlist');
 
-    // Path resolution — uses whatsapp-instances namespace
+    // Path resolution — canonical whatsoup/instances/ namespace
     expect(config.paths).toBeDefined();
     const p = config.paths;
-    const configRoot = path.join(tmpDir, 'config', 'whatsapp-instances', 'test-chat');
-    const dataRoot = path.join(tmpDir, 'data', 'whatsoup', 'test-chat');
-    const stateRoot = path.join(tmpDir, 'state', 'whatsoup', 'test-chat');
+    const configRoot = path.join(tmpDir, 'config', 'whatsoup', 'instances', 'test-chat');
+    const dataRoot = path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-chat');
+    const stateRoot = path.join(tmpDir, 'state', 'whatsoup', 'instances', 'test-chat');
 
     expect(p.configRoot).toBe(configRoot);
-    // authDir uses whatsapp-instances (shared auth, no re-pairing)
-    expect(p.authDir).toBe(
-      path.join(tmpDir, 'config', 'whatsapp-instances', 'test-chat', 'auth_info'),
-    );
+    expect(p.authDir).toBe(path.join(configRoot, 'auth'));
     expect(p.dbPath).toBe(path.join(dataRoot, 'bot.db'));
     expect(p.logDir).toBe(path.join(dataRoot, 'logs'));
-    expect(p.lockPath).toBe(path.join(stateRoot, 'bot.lock'));
+    expect(p.lockPath).toBe(path.join(stateRoot, 'whatsoup.lock'));
     expect(p.mediaDir).toBe(path.join(dataRoot, 'media', 'tmp'));
 
     // Cross-root checks: data/state must not bleed into config
-    expect(p.dataRoot).toContain('/data/whatsoup/');
-    expect(p.stateRoot).toContain('/state/whatsoup/');
+    expect(p.dataRoot).toContain('/data/whatsoup/instances/');
+    expect(p.stateRoot).toContain('/state/whatsoup/instances/');
     expect(p.dataRoot).not.toContain('/config/');
     expect(p.stateRoot).not.toContain('/config/');
   });
@@ -194,8 +189,8 @@ describe('loadInstance — different instances have different paths', () => {
 // Error cases
 // ---------------------------------------------------------------------------
 
-describe('loadInstance — error: missing instance.json', () => {
-  it('throws when instance.json does not exist', () => {
+describe('loadInstance — error: missing config.json', () => {
+  it('throws when config.json does not exist', () => {
     // Do not write anything
     expect(() => loadInstance('nonexistent')).toThrow();
   });
@@ -208,10 +203,10 @@ describe('loadInstance — error: empty name', () => {
 });
 
 describe('loadInstance — error: invalid JSON', () => {
-  it('throws when instance.json contains invalid JSON', () => {
-    const instanceDir = path.join(tmpDir, 'config', 'whatsapp-instances', 'bad-json');
+  it('throws when config.json contains invalid JSON', () => {
+    const instanceDir = path.join(tmpDir, 'config', 'whatsoup', 'instances', 'bad-json');
     fs.mkdirSync(instanceDir, { recursive: true });
-    fs.writeFileSync(path.join(instanceDir, 'instance.json'), '{ not valid json', 'utf8');
+    fs.writeFileSync(path.join(instanceDir, 'config.json'), '{ not valid json', 'utf8');
 
     expect(() => loadInstance('bad-json')).toThrow();
   });
@@ -474,10 +469,10 @@ describe('passive instance type', () => {
 });
 
 // ---------------------------------------------------------------------------
-// loops instance.json loads and validates correctly
+// loops instance config loads and validates correctly
 // ---------------------------------------------------------------------------
 
-describe('loadInstance — loops instance.json', () => {
+describe('loadInstance — loops instance config', () => {
   it('loads the loops instance.json from repo and validates correctly', () => {
     // Read the actual loops instance.json from repo
     const repoRoot = path.resolve(import.meta.dirname, '..');
@@ -504,11 +499,41 @@ describe('loadInstance — loops instance.json', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Canonical namespace paths
+// ---------------------------------------------------------------------------
+
+describe('canonical namespace paths', () => {
+  it('resolves config under whatsoup/instances/<name>/', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', minimalChat);
+    loadInstance('test-chat');
+
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.paths.configRoot).toContain('whatsoup/instances/test-chat');
+  });
+
+  it('resolves auth under configRoot/auth/', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', minimalChat);
+    loadInstance('test-chat');
+
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.paths.authDir).toBe(path.join(config.paths.configRoot, 'auth'));
+  });
+
+  it('resolves lock as whatsoup.lock', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', minimalChat);
+    loadInstance('test-chat');
+
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.paths.lockPath).toMatch(/whatsoup\.lock$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // XDG fallback when XDG_CONFIG_HOME not set
 // ---------------------------------------------------------------------------
 
 describe('loadInstance — XDG fallback', () => {
-  it('falls back to ~/.config/whatsapp-instances when XDG_CONFIG_HOME is not set', () => {
+  it('falls back to ~/.config/whatsoup/instances when XDG_CONFIG_HOME is not set', () => {
     const fakeHome = path.join(tmpDir, 'fake-home');
     fs.mkdirSync(fakeHome, { recursive: true });
     process.env.HOME = fakeHome;
@@ -520,7 +545,7 @@ describe('loadInstance — XDG fallback', () => {
     const fallbackData = path.join(fakeHome, '.local', 'share');
     const fallbackState = path.join(fakeHome, '.local', 'state');
 
-    // Write the instance under the fake fallback path (whatsapp-instances namespace)
+    // Write the instance under the fake fallback path (canonical whatsoup/instances namespace)
     writeInstance(fallbackConfig, 'xdg-fallback-instance', {
       ...minimalChat,
       name: 'xdg-fallback-instance',
@@ -530,17 +555,16 @@ describe('loadInstance — XDG fallback', () => {
 
     const config = JSON.parse(process.env.INSTANCE_CONFIG!);
     expect(config.paths.configRoot).toBe(
-      path.join(fallbackConfig, 'whatsapp-instances', 'xdg-fallback-instance'),
+      path.join(fallbackConfig, 'whatsoup', 'instances', 'xdg-fallback-instance'),
     );
-    // authDir uses whatsapp-instances (shared auth)
     expect(config.paths.authDir).toBe(
-      path.join(fallbackConfig, 'whatsapp-instances', 'xdg-fallback-instance', 'auth_info'),
+      path.join(fallbackConfig, 'whatsoup', 'instances', 'xdg-fallback-instance', 'auth'),
     );
     expect(config.paths.dbPath).toBe(
-      path.join(fallbackData, 'whatsoup', 'xdg-fallback-instance', 'bot.db'),
+      path.join(fallbackData, 'whatsoup', 'instances', 'xdg-fallback-instance', 'bot.db'),
     );
     expect(config.paths.lockPath).toBe(
-      path.join(fallbackState, 'whatsoup', 'xdg-fallback-instance', 'bot.lock'),
+      path.join(fallbackState, 'whatsoup', 'instances', 'xdg-fallback-instance', 'whatsoup.lock'),
     );
   });
 });
