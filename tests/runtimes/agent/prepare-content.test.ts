@@ -1,6 +1,6 @@
 // tests/runtimes/agent/prepare-content.test.ts
 // Unit tests for the prepareContentForAgent function in the agent runtime.
-// Media pipeline (processMedia) is mocked to isolate the agent-specific logic.
+// Media is downloaded and saved to disk; the agent receives file paths.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IncomingMessage } from '../../../src/core/types.ts';
@@ -16,16 +16,33 @@ vi.mock('../../../src/logger.ts', () => ({
   }),
 }));
 
-// Mock the processMedia import used inside prepareContentForAgent
-const mockProcessMedia = vi.fn();
-
-vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({
-  processMedia: mockProcessMedia,
-}));
-
 // Mock Baileys — downloadMediaMessage is imported dynamically inside the download fn
 vi.mock('@whiskeysockets/baileys', () => ({
-  downloadMediaMessage: vi.fn(async () => Buffer.from('audio-bytes')),
+  downloadMediaMessage: vi.fn(async () => Buffer.from('media-bytes')),
+}));
+
+// Mock media-download module: writeTempFile returns a predictable path
+const mockDownloadMedia = vi.fn();
+const mockWriteTempFile = vi.fn();
+
+vi.mock('../../../src/core/media-download.ts', () => ({
+  downloadMedia: mockDownloadMedia,
+  writeTempFile: mockWriteTempFile,
+  cleanupTempFile: vi.fn(),
+}));
+
+// Mock Whisper transcription
+const mockTranscribeAudio = vi.fn();
+
+vi.mock('../../../src/runtimes/chat/providers/whisper.ts', () => ({
+  transcribeAudio: mockTranscribeAudio,
+}));
+
+// Mock document text extraction
+const mockExtractDocumentText = vi.fn();
+
+vi.mock('../../../src/runtimes/chat/media/documents.ts', () => ({
+  extractDocumentText: mockExtractDocumentText,
 }));
 
 // Mock all the heavyweight agent-runtime dependencies so we can import just
@@ -150,11 +167,18 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
+const FAKE_PATH = '/tmp/whatsoup/media/tmp/abcdef12.jpg';
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('prepareContentForAgent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: successful download returning a buffer
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('media-bytes'), mimeType: 'image/jpeg' });
+    mockWriteTempFile.mockReturnValue(FAKE_PATH);
+    mockTranscribeAudio.mockResolvedValue('Hello world transcription.');
+    mockExtractDocumentText.mockResolvedValue('Extracted document text.');
   });
 
   // ── text passthrough ──────────────────────────────────────────────────────
@@ -163,136 +187,173 @@ describe('prepareContentForAgent', () => {
     const msg = makeMsg({ contentType: 'text', content: 'hello world' });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('hello world');
-    expect(mockProcessMedia).not.toHaveBeenCalled();
+    expect(mockDownloadMedia).not.toHaveBeenCalled();
   });
 
   it('returns empty string for text messages with null content', async () => {
     const msg = makeMsg({ contentType: 'text', content: null });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('');
-    expect(mockProcessMedia).not.toHaveBeenCalled();
+    expect(mockDownloadMedia).not.toHaveBeenCalled();
   });
 
-  // ── audio / transcription ─────────────────────────────────────────────────
+  // ── images: file path in brackets ─────────────────────────────────────────
 
-  it('returns transcription text for audio messages', async () => {
-    mockProcessMedia.mockResolvedValue({ content: 'This is a transcription.', images: [] });
-    const msg = makeMsg({ contentType: 'audio', content: null });
+  it('returns file path for image without caption', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/img.jpg');
+    const msg = makeMsg({ contentType: 'image', content: null });
     const result = await prepareContentForAgent(msg);
-    expect(result).toBe('This is a transcription.');
-    expect(mockProcessMedia).toHaveBeenCalledOnce();
+    expect(result).toBe('[Image: /tmp/img.jpg]');
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'jpg');
   });
 
-  it('returns fallback label when audio transcription produces empty string', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '', images: [] });
+  it('includes caption alongside image file path when caption is present', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/img.jpg');
+    const msg = makeMsg({ contentType: 'image', content: 'Check this out' });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[Image: /tmp/img.jpg]\nCheck this out');
+  });
+
+  // ── sticker ────────────────────────────────────────────────────────────────
+
+  it('returns sticker file path for sticker messages', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/sticker.webp');
+    const msg = makeMsg({ contentType: 'sticker', content: null });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[Sticker: /tmp/sticker.webp]');
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'webp');
+  });
+
+  // ── audio: transcription + file path ──────────────────────────────────────
+
+  it('returns transcription and file path for audio messages', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/voice.ogg');
     const msg = makeMsg({ contentType: 'audio', content: null });
     const result = await prepareContentForAgent(msg);
-    expect(result).toBe('[audio message received]');
+    expect(result).toBe('[Voice note transcription]: Hello world transcription.\n[Audio file: /tmp/voice.ogg]');
+    expect(mockTranscribeAudio).toHaveBeenCalledOnce();
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'ogg');
   });
 
   it('includes download function when rawMessage is present', async () => {
-    mockProcessMedia.mockResolvedValue({ content: 'transcribed', images: [] });
     const msg = makeMsg({ contentType: 'audio', rawMessage: { some: 'raw' } });
     await prepareContentForAgent(msg);
-    const [, downloadFn] = mockProcessMedia.mock.calls[0];
+    const [downloadFn] = mockDownloadMedia.mock.calls[0];
     expect(downloadFn).toBeTypeOf('function');
   });
 
-  it('passes null download function when rawMessage is absent', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '[audio — couldn\'t download]', images: [] });
+  it('returns fallback when rawMessage is absent (no downloadFn for audio)', async () => {
     const msg = makeMsg({ contentType: 'audio', rawMessage: undefined });
-    await prepareContentForAgent(msg);
-    const [, downloadFn] = mockProcessMedia.mock.calls[0];
-    expect(downloadFn).toBeNull();
-  });
-
-  // ── document extraction ───────────────────────────────────────────────────
-
-  it('returns extracted text for document messages', async () => {
-    mockProcessMedia.mockResolvedValue({ content: 'Document text content here.', images: [] });
-    const msg = makeMsg({ contentType: 'document', content: 'report.pdf' });
     const result = await prepareContentForAgent(msg);
-    expect(result).toBe('Document text content here.');
+    // No typeInfo match because downloadFn is null → falls through to default path
+    expect(result).toContain('audio');
+    expect(mockDownloadMedia).not.toHaveBeenCalled();
   });
 
-  // ── images: visual label replaces buffer ──────────────────────────────────
+  // ── video ──────────────────────────────────────────────────────────────────
 
-  it('returns image label (no caption) for image without caption', async () => {
-    mockProcessMedia.mockResolvedValue({
-      content: '',
-      images: [{ mimeType: 'image/jpeg', base64: 'abc123' }],
-    });
-    const msg = makeMsg({ contentType: 'image', content: null });
-    const result = await prepareContentForAgent(msg);
-    expect(result).toBe('[Image received — visual not available in text mode]');
-  });
-
-  it('includes caption text alongside image label when caption is present', async () => {
-    mockProcessMedia.mockResolvedValue({
-      content: 'Check this out',
-      images: [{ mimeType: 'image/jpeg', base64: 'abc123' }],
-    });
-    const msg = makeMsg({ contentType: 'image', content: 'Check this out' });
-    const result = await prepareContentForAgent(msg);
-    expect(result).toBe('Check this out\n[Image received — visual not available in text mode]');
-  });
-
-  it('returns sticker label for sticker messages', async () => {
-    mockProcessMedia.mockResolvedValue({
-      content: '',
-      images: [{ mimeType: 'image/webp', base64: 'stk' }],
-    });
-    const msg = makeMsg({ contentType: 'sticker', content: null });
-    const result = await prepareContentForAgent(msg);
-    expect(result).toBe('[Sticker received — visual not available in text mode]');
-  });
-
-  it('returns video label for video messages', async () => {
-    mockProcessMedia.mockResolvedValue({
-      content: '[Video frames at: 0s, 5s]',
-      images: [{ mimeType: 'image/jpeg', base64: 'frm' }],
-    });
+  it('returns video file path for video without caption', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('vid-bytes'), mimeType: 'video/mp4' });
+    mockWriteTempFile.mockReturnValue('/tmp/video.mp4');
     const msg = makeMsg({ contentType: 'video', content: null });
     const result = await prepareContentForAgent(msg);
-    expect(result).toBe('[Video frames at: 0s, 5s]\n[Video received — frames not available in text mode]');
+    expect(result).toBe('[Video: /tmp/video.mp4]');
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'mp4');
   });
 
-  // ── location / contact / poll ─────────────────────────────────────────────
+  it('includes caption alongside video file path when caption is present', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('vid-bytes'), mimeType: 'video/mp4' });
+    mockWriteTempFile.mockReturnValue('/tmp/video.mp4');
+    const msg = makeMsg({ contentType: 'video', content: 'Watch this' });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[Video: /tmp/video.mp4]\nWatch this');
+  });
 
-  it('returns location text from processMedia for location messages', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '[Location: 40.7128,-74.0060]', images: [] });
+  // ── document: file path + extracted text ──────────────────────────────────
+
+  it('returns document file path and extracted text', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('pdf-bytes'), mimeType: 'application/pdf' });
+    mockWriteTempFile.mockReturnValue('/tmp/report.pdf');
+    const msg = makeMsg({ contentType: 'document', content: 'report.pdf' });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[Document: /tmp/report.pdf]\nExtracted document text.');
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'pdf');
+    expect(mockExtractDocumentText).toHaveBeenCalledOnce();
+  });
+
+  it('preserves original extension from document filename', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('xlsx-bytes'), mimeType: 'application/vnd.ms-excel' });
+    mockWriteTempFile.mockReturnValue('/tmp/data.xlsx');
+    const msg = makeMsg({ contentType: 'document', content: 'data.xlsx' });
+    await prepareContentForAgent(msg);
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'xlsx');
+  });
+
+  it('falls back to bin extension for document with no filename', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('bin-bytes'), mimeType: 'application/octet-stream' });
+    mockWriteTempFile.mockReturnValue('/tmp/file.bin');
+    const msg = makeMsg({ contentType: 'document', content: null });
+    await prepareContentForAgent(msg);
+    expect(mockWriteTempFile).toHaveBeenCalledWith(expect.any(Buffer), 'bin');
+  });
+
+  // ── location / contact / poll — no file ───────────────────────────────────
+
+  it('returns location text without downloading any file', async () => {
     const msg = makeMsg({ contentType: 'location', content: '40.7128,-74.0060' });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('[Location: 40.7128,-74.0060]');
+    expect(mockDownloadMedia).not.toHaveBeenCalled();
   });
 
-  it('returns contact text from processMedia for contact messages', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '[Contact: Alice]', images: [] });
+  it('returns fallback for location with null content', async () => {
+    const msg = makeMsg({ contentType: 'location', content: null });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[Location shared]');
+  });
+
+  it('returns contact text without downloading any file', async () => {
     const msg = makeMsg({ contentType: 'contact', content: 'Alice' });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('[Contact: Alice]');
+    expect(mockDownloadMedia).not.toHaveBeenCalled();
   });
 
-  it('returns poll text from processMedia for poll messages', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '[Poll: Best pizza?]', images: [] });
+  it('returns poll text without downloading any file', async () => {
     const msg = makeMsg({ contentType: 'poll', content: 'Best pizza?' });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('[Poll: Best pizza?]');
+    expect(mockDownloadMedia).not.toHaveBeenCalled();
+  });
+
+  // ── download failure ───────────────────────────────────────────────────────
+
+  it('returns download-failed label when media download fails for image', async () => {
+    mockDownloadMedia.mockResolvedValue(null);
+    const msg = makeMsg({ contentType: 'image', content: null });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[image — download failed]');
+    expect(mockWriteTempFile).not.toHaveBeenCalled();
+  });
+
+  it('appends caption to download-failed label when caption present', async () => {
+    mockDownloadMedia.mockResolvedValue(null);
+    const msg = makeMsg({ contentType: 'image', content: 'nice pic' });
+    const result = await prepareContentForAgent(msg);
+    expect(result).toBe('[image — download failed]\nnice pic');
   });
 
   // ── unknown / fallback ────────────────────────────────────────────────────
 
-  it('returns fallback label for unknown content type when processMedia returns empty', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '', images: [] });
-    const msg = makeMsg({ contentType: 'unknown', content: null });
+  it('returns fallback label for unknown content type with no rawMessage', async () => {
+    const msg = makeMsg({ contentType: 'unknown', content: null, rawMessage: undefined });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('[unknown message received]');
   });
 
-  it('returns processMedia content for unknown type when it has content', async () => {
-    mockProcessMedia.mockResolvedValue({ content: '[unsupported message type]', images: [] });
-    const msg = makeMsg({ contentType: 'unknown', content: null });
+  it('returns content for unknown type when content is present', async () => {
+    const msg = makeMsg({ contentType: 'unknown', content: 'some content', rawMessage: undefined });
     const result = await prepareContentForAgent(msg);
-    expect(result).toBe('[unsupported message type]');
+    expect(result).toBe('some content');
   });
 });

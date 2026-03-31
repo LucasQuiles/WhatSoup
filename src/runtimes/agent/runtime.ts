@@ -39,21 +39,22 @@ const log = createChildLogger('agent-runtime');
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
  *
- * The agent runtime sends turns to Claude Code via stream-json, which only supports
- * text — no vision blocks. So images/video frames are described in text; audio is
- * transcribed via Whisper. All other media types fall back to a descriptive label.
+ * Media files (images, audio, video, documents, stickers) are saved to disk so the
+ * agent can use its Read tool to view them. The agent receives the file path in brackets.
+ * Audio is also transcribed via Whisper so the agent gets the text without having to
+ * open the file. Non-downloadable types (location, contact, poll) return descriptive text.
  *
  * Requires OPENAI_API_KEY in the environment for audio transcription (Whisper).
  */
 export async function prepareContentForAgent(msg: IncomingMessage): Promise<string> {
   const { contentType, content } = msg;
 
-  // Text messages: use as-is (URL expansion is chat-only; keep agent lean)
+  // Text messages: use as-is
   if (contentType === 'text') {
     return content ?? '';
   }
 
-  // Build download function from rawMessage (same pattern as chat runtime)
+  // Build download function from rawMessage
   const downloadFn = msg.rawMessage
     ? async () => {
         const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
@@ -61,24 +62,63 @@ export async function prepareContentForAgent(msg: IncomingMessage): Promise<stri
       }
     : null;
 
-  // Use the existing media pipeline
-  const { processMedia } = await import('../chat/media/processor.ts');
-  const processed = await processMedia(msg, downloadFn);
+  const { downloadMedia, writeTempFile } = await import('../../core/media-download.ts');
 
-  // For images/stickers/video: we have image buffers but can't send vision blocks.
-  // Return the text portion (caption / timestamp summary); note that visuals exist.
-  if (processed.images.length > 0) {
-    const caption = processed.content ? processed.content.trim() : '';
-    const visualLabel = contentType === 'sticker'
-      ? '[Sticker received — visual not available in text mode]'
-      : contentType === 'video'
-        ? '[Video received — frames not available in text mode]'
-        : '[Image received — visual not available in text mode]';
-    return caption ? `${caption}\n${visualLabel}` : visualLabel;
+  // Map content type to mime and extension
+  const mimeMap: Record<string, { mime: string; ext: string }> = {
+    image: { mime: 'image/jpeg', ext: 'jpg' },
+    sticker: { mime: 'image/webp', ext: 'webp' },
+    audio: { mime: 'audio/ogg', ext: 'ogg' },
+    video: { mime: 'video/mp4', ext: 'mp4' },
+    document: { mime: 'application/octet-stream', ext: 'bin' },
+  };
+
+  const typeInfo = mimeMap[contentType];
+
+  // For non-downloadable types, return descriptive text
+  if (!typeInfo || !downloadFn) {
+    if (contentType === 'location') return content ? `[Location: ${content}]` : '[Location shared]';
+    if (contentType === 'contact') return content ? `[Contact: ${content}]` : '[Contact shared]';
+    if (contentType === 'poll') return content ? `[Poll: ${content}]` : '[Poll]';
+    return content || `[${contentType} message received]`;
   }
 
-  // Audio, documents, location, contact, poll, unknown: use the processed text directly
-  return processed.content || `[${contentType} message received]`;
+  // Download the file
+  const result = await downloadMedia(downloadFn, typeInfo.mime);
+  if (!result) {
+    return `[${contentType} — download failed]${content ? '\n' + content : ''}`;
+  }
+
+  // For documents, try to preserve the original extension from the filename
+  let ext = typeInfo.ext;
+  if (contentType === 'document' && content) {
+    const dotIdx = content.lastIndexOf('.');
+    if (dotIdx > 0) ext = content.substring(dotIdx + 1).toLowerCase();
+  }
+
+  // Save to disk — do NOT clean up immediately; agent needs time to read the file
+  const filePath = writeTempFile(result.buffer, ext);
+
+  switch (contentType) {
+    case 'audio': {
+      const { transcribeAudio } = await import('../chat/providers/whisper.ts');
+      const transcript = await transcribeAudio(result.buffer, result.mimeType);
+      return `[Voice note transcription]: ${transcript}\n[Audio file: ${filePath}]`;
+    }
+    case 'image':
+      return content ? `[Image: ${filePath}]\n${content}` : `[Image: ${filePath}]`;
+    case 'sticker':
+      return `[Sticker: ${filePath}]`;
+    case 'video':
+      return content ? `[Video: ${filePath}]\n${content}` : `[Video: ${filePath}]`;
+    case 'document': {
+      const { extractDocumentText } = await import('../chat/media/documents.ts');
+      const text = await extractDocumentText(result.buffer, result.mimeType, content ?? 'document');
+      return `[Document: ${filePath}]\n${text}`;
+    }
+    default:
+      return content || `[${contentType}: ${filePath}]`;
+  }
 }
 
 export interface SandboxPolicy {
