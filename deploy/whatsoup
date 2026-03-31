@@ -44,8 +44,9 @@ if [ "$INSTANCE_TYPE" = "chat" ]; then
 
   export ANTHROPIC_API_KEY OPENAI_API_KEY PINECONE_API_KEY
 else
-  # Agent instances use Claude Code's native auth — do NOT export ANTHROPIC_API_KEY
-  # to avoid overriding the subscription-based billing
+  # Agent and passive instances: no API keys needed.
+  # Agents use Claude Code's native auth; passive instances don't call any LLM APIs.
+  # Do NOT export ANTHROPIC_API_KEY — it would override subscription-based billing.
   unset ANTHROPIC_API_KEY 2>/dev/null || true
 fi
 
