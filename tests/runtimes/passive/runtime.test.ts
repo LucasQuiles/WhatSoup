@@ -1,6 +1,22 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { PassiveRuntime } from '../../../src/runtimes/passive/runtime.ts';
+import { Database } from '../../../src/core/database.ts';
+import { PresenceCache } from '../../../src/transport/presence-cache.ts';
+import type { ConnectionManager } from '../../../src/transport/connection.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
+
+function makeConnection(): ConnectionManager {
+  return {
+    contactsDir: { contacts: new Map() },
+    presenceCache: new PresenceCache(),
+    getSocket: () => null,
+    sendRaw: async () => ({ waMessageId: null }),
+    sendMedia: async () => ({ waMessageId: null }),
+  } as unknown as ConnectionManager;
+}
 
 describe('PassiveRuntime', () => {
   // Create mock objects matching the interfaces PassiveRuntime needs
@@ -63,5 +79,38 @@ describe('PassiveRuntime', () => {
 
     await runtime.handleMessage({ messageId: 'test', inboundSeq: undefined } as any);
     expect(mockDurability.completeInbound).not.toHaveBeenCalled();
+  });
+
+  describe('start() and shutdown()', () => {
+    let tmpDir: string;
+    let db: Database;
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'whatsoup-passive-'));
+      db = new Database(':memory:');
+      db.open();
+    });
+
+    afterEach(() => {
+      db.raw.close();
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('registers tools and creates socket server on start', async () => {
+      const connection = makeConnection();
+      const config = { name: 'test-passive', paths: { stateRoot: tmpDir } };
+      const runtime = new PassiveRuntime(db, connection, config);
+
+      await runtime.start();
+
+      // Socket file should exist after start
+      const { existsSync } = await import('node:fs');
+      const socketPath = join(tmpDir, 'whatsoup.sock');
+      expect(existsSync(socketPath)).toBe(true);
+
+      await runtime.shutdown();
+      // Socket cleaned up after shutdown
+      expect(existsSync(socketPath)).toBe(false);
+    });
   });
 });

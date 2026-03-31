@@ -286,15 +286,13 @@ migrate_q() {
     fi
 
     # Copy any remaining files (excluding instance.json and auth_info/)
-    if ! $DRY_RUN; then
-      while IFS= read -r -d '' f; do
-        local rel="${f#$legacy_config_dir/}"
-        # Skip items we've already handled
-        [[ "$rel" == "instance.json" ]] && continue
-        [[ "$rel" == auth_info* ]] && continue
-        copy_file "$f" "$dest_config_dir/$rel"
-      done < <(find "$legacy_config_dir" -maxdepth 1 -type f -print0)
-    fi
+    while IFS= read -r -d '' f; do
+      local rel="${f#$legacy_config_dir/}"
+      # Skip items we've already handled
+      [[ "$rel" == "instance.json" ]] && continue
+      [[ "$rel" == auth_info* ]] && continue
+      copy_file "$f" "$dest_config_dir/$rel"
+    done < <(find "$legacy_config_dir" -maxdepth 1 -type f -print0)
   else
     warn "Legacy config directory not found: $legacy_config_dir"
   fi
@@ -350,14 +348,12 @@ migrate_loops() {
     fi
 
     # Copy remaining top-level files
-    if ! $DRY_RUN; then
-      while IFS= read -r -d '' f; do
-        local rel="${f#$legacy_config_dir/}"
-        [[ "$rel" == "instance.json" ]] && continue
-        [[ "$rel" == auth_info* ]] && continue
-        copy_file "$f" "$dest_config_dir/$rel"
-      done < <(find "$legacy_config_dir" -maxdepth 1 -type f -print0)
-    fi
+    while IFS= read -r -d '' f; do
+      local rel="${f#$legacy_config_dir/}"
+      [[ "$rel" == "instance.json" ]] && continue
+      [[ "$rel" == auth_info* ]] && continue
+      copy_file "$f" "$dest_config_dir/$rel"
+    done < <(find "$legacy_config_dir" -maxdepth 1 -type f -print0)
   else
     warn "Legacy config directory not found: $legacy_config_dir"
   fi
@@ -403,14 +399,12 @@ migrate_besbot() {
     fi
 
     # Copy remaining top-level files
-    if ! $DRY_RUN; then
-      while IFS= read -r -d '' f; do
-        local rel="${f#$legacy_config_dir/}"
-        [[ "$rel" == "instance.json" ]] && continue
-        [[ "$rel" == auth_info* ]] && continue
-        copy_file "$f" "$dest_config_dir/$rel"
-      done < <(find "$legacy_config_dir" -maxdepth 1 -type f -print0)
-    fi
+    while IFS= read -r -d '' f; do
+      local rel="${f#$legacy_config_dir/}"
+      [[ "$rel" == "instance.json" ]] && continue
+      [[ "$rel" == auth_info* ]] && continue
+      copy_file "$f" "$dest_config_dir/$rel"
+    done < <(find "$legacy_config_dir" -maxdepth 1 -type f -print0)
   else
     warn "Legacy config directory not found: $legacy_config_dir"
   fi
