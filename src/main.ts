@@ -131,13 +131,18 @@ durability.preConnectRecovery();
     if (msgCount === 0) {
       const xdgData = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share');
       const xdgConfig = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
-      // Check legacy locations in order of likelihood
-      const legacyPaths = [
-        join(xdgData, 'whatsapp-instances', instanceName, 'bot.db'),
-        join(xdgConfig, 'whatsapp-instances', instanceName, 'bot.db'),
-        join(xdgData, 'whatsoup', instanceName, 'bot.db'),
-        join(xdgData, 'whatsapp-bot', 'bot.db'),
-      ];
+      // Check legacy locations in order of likelihood.
+      // The 'q' instance was renamed from 'personal', so also check the old name.
+      const legacyNames = instanceName === 'q' ? [instanceName, 'personal'] : [instanceName];
+      const legacyPaths: string[] = [];
+      for (const name of legacyNames) {
+        legacyPaths.push(
+          join(xdgData, 'whatsapp-instances', name, 'bot.db'),
+          join(xdgConfig, 'whatsapp-instances', name, 'bot.db'),
+          join(xdgData, 'whatsoup', name, 'bot.db'),
+        );
+      }
+      legacyPaths.push(join(xdgData, 'whatsapp-bot', 'bot.db'));
       for (const legacyDbPath of legacyPaths) {
         if (existsSync(legacyDbPath)) {
           log.info({ legacyDbPath }, 'warm-start: importing from legacy DB');
