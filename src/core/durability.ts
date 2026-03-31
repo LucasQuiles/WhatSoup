@@ -80,7 +80,10 @@ export interface OutboundOpParams {
 }
 
 export class DurabilityEngine {
-  constructor(private db: Database) {}
+  private db: Database;
+  constructor(db: Database) {
+    this.db = db;
+  }
 
   // ── Inbound events ──
   journalInbound(messageId: string, conversationKey: string, chatJid: string, routedTo: string): number {
