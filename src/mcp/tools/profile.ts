@@ -6,6 +6,7 @@ import type { ToolDeclaration } from '../types.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
+import { validateBase64Image } from '../../core/base64.ts';
 
 const log = createChildLogger('profile');
 
@@ -166,19 +167,8 @@ function makeUpdateProfilePicture(getSock: () => WhatsAppSocket | null): ToolDec
         throw new Error('WhatsApp is not connected');
       }
 
-      // Validate base64 format before decoding — Buffer.from silently drops
-      // invalid characters and returns a non-empty buffer for garbage input.
-      const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
-      if (!base64Regex.test(content)) {
-        throw new Error('Invalid base64 content: contains non-base64 characters');
-      }
-      let buffer: Buffer;
-      try {
-        buffer = Buffer.from(content, 'base64');
-        if (buffer.length === 0) throw new Error('Empty buffer');
-      } catch {
-        throw new Error('Invalid base64 content');
-      }
+      const cleanContent = validateBase64Image(content);
+      const buffer = Buffer.from(cleanContent, 'base64');
       await (sock as any).updateProfilePicture(jid, buffer);
       return { success: true, jid };
     },

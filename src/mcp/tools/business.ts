@@ -4,6 +4,7 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
+import { validateBase64Image } from '../../core/base64.ts';
 
 // ---------------------------------------------------------------------------
 // get_business_profile
@@ -81,19 +82,8 @@ function makeUpdateCoverPhoto(getSock: () => WhatsAppSocket | null): ToolDeclara
       const { photo } = UpdateCoverPhotoSchema.parse(params);
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
-      // Validate base64 format before decoding — Buffer.from silently drops
-      // invalid characters and returns a non-empty buffer for garbage input.
-      const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
-      if (!base64Regex.test(photo)) {
-        throw new Error('Invalid base64 content: contains non-base64 characters');
-      }
-      let buffer: Buffer;
-      try {
-        buffer = Buffer.from(photo, 'base64');
-        if (buffer.length === 0) throw new Error('Empty buffer');
-      } catch {
-        throw new Error('Invalid base64 content');
-      }
+      const cleanPhoto = validateBase64Image(photo);
+      const buffer = Buffer.from(cleanPhoto, 'base64');
       await (sock as any).updateCoverPhoto(buffer);
       return { success: true };
     },
