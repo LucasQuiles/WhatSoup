@@ -67,9 +67,10 @@ function countMessagesToday(dbReader: FleetDbReader, inst: DiscoveredInstance): 
 
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
-  const startMs = startOfDay.getTime();
+  // Messages table stores timestamps as Unix SECONDS, not milliseconds
+  const startSec = Math.floor(startOfDay.getTime() / 1000);
   const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    const row = db.prepare('SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= ?').get(startMs) as { cnt: number };
+    const row = db.prepare('SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= ?').get(startSec) as { cnt: number };
     return row.cnt;
   });
   const count = result.ok ? result.data : 0;

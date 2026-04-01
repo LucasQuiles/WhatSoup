@@ -31,7 +31,7 @@ interface FeedEvent {
 }
 
 /** Keywords that make a log line "interesting" for the activity feed. */
-const INTERESTING_RE = /session|reply|inbound|message|queue|enrichment/i;
+const INTERESTING_RE = /session|reply|inbound|message|queue|enrichment|connect|health|access|credential|restart|pipeline|send|receive|store|sync|process|start|stop|listen/i;
 
 /** Pino numeric level → warn/error threshold. */
 const WARN_LEVEL = 40;

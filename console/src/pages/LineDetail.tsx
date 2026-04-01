@@ -247,14 +247,26 @@ const CONFIG_PATH_KEYS = new Set(['cwd', 'instructionsPath', 'socketPath', 'conf
 function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: 'string' | 'number' | 'boolean' | 'path' }[] {
   return Object.entries(rawConfig)
     .filter(([k]) => !CONFIG_EXCLUDE_KEYS.has(k))
-    .map(([key, value]) => ({
-      key,
-      value: typeof value === 'object' ? JSON.stringify(value) : String(value),
-      type: typeof value === 'boolean' ? 'boolean' as const
-        : typeof value === 'number' ? 'number' as const
-        : CONFIG_PATH_KEYS.has(key) ? 'path' as const
-        : 'string' as const,
-    }))
+    .map(([key, value]) => {
+      let displayValue: string;
+      if (typeof value === 'object' && value !== null) {
+        displayValue = JSON.stringify(value);
+      } else {
+        displayValue = String(value);
+      }
+      // Truncate long string values (e.g., systemPrompt)
+      if (displayValue.length > 80) {
+        displayValue = displayValue.slice(0, 77) + '...';
+      }
+      return {
+        key,
+        value: displayValue,
+        type: typeof value === 'boolean' ? 'boolean' as const
+          : typeof value === 'number' ? 'number' as const
+          : CONFIG_PATH_KEYS.has(key) ? 'path' as const
+          : 'string' as const,
+      };
+    })
 }
 
 const TYPE_COLOR: Record<string, string> = {
