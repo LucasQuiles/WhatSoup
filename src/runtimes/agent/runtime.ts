@@ -305,45 +305,57 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
  * Rewrite common technical error messages into casual, user-friendly language.
  * Returns null if no rewrite matches (use the original).
  */
-function humanizeError(toolName: string, text: string): string | null {
+function humanizeError(_toolName: string, text: string): string | null {
   const lower = text.toLowerCase();
 
   // File too large to read
-  if (lower.includes('exceeds maximum allowed tokens') || lower.includes('content too large')) {
-    return `_${toolName} — that file was a bit too long, reading just the parts I need instead_`;
-  }
+  if (lower.includes('exceeds maximum allowed tokens') || lower.includes('content too large'))
+    return '_that file was a bit long, reading just the parts I need_';
   // File not found
-  if (lower.includes('no such file') || lower.includes('file not found') || lower.includes('enoent')) {
-    return `_${toolName} — file not found, looking for the right path_`;
-  }
+  if (lower.includes('no such file') || lower.includes('file not found') || lower.includes('enoent'))
+    return '_file not found, looking for the right path_';
   // Command not found
-  if (lower.includes('command not found') || lower.includes('enoent') && toolName === 'Bash') {
-    return `_${toolName} — command not found, trying another approach_`;
-  }
+  if (lower.includes('command not found'))
+    return '_command not found, trying another approach_';
   // Timeout
-  if (lower.includes('timed out') || lower.includes('timeout')) {
-    return `_${toolName} — that took too long, retrying_`;
-  }
+  if (lower.includes('timed out') || lower.includes('timeout'))
+    return '_that took too long, retrying_';
   // Network / connection errors
-  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed')) {
-    return `_${toolName} — connection failed, will retry_`;
-  }
+  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed'))
+    return '_connection failed, will retry_';
   // No matches found (grep/glob)
-  if (lower.includes('no matches found') || lower.includes('no files found')) {
-    return `_${toolName} — no results, refining search_`;
-  }
+  if (lower.includes('no matches found') || lower.includes('no files found'))
+    return '_no results, refining search_';
   // Git conflicts
-  if (lower.includes('merge conflict') || lower.includes('conflict')) {
-    return `_${toolName} — merge conflict, resolving_`;
-  }
+  if (lower.includes('merge conflict'))
+    return '_merge conflict detected, resolving_';
   // Rate limit / overloaded
-  if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429')) {
-    return `_${toolName} — rate limited, waiting a moment_`;
-  }
-  // Syntax/parse errors from bash
-  if (lower.includes('syntax error') && toolName === 'Bash') {
-    return `_${toolName} — syntax error, fixing command_`;
-  }
+  if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429'))
+    return '_rate limited, waiting a moment_';
+  // Syntax/parse errors
+  if (lower.includes('syntax error'))
+    return '_syntax error, fixing_';
+  // Disk / storage
+  if (lower.includes('enospc') || lower.includes('no space left'))
+    return '_disk full, freeing space_';
+  // Process / memory
+  if (lower.includes('enomem') || lower.includes('out of memory') || lower.includes('killed'))
+    return '_out of memory, scaling down_';
+  // Invalid JSON / parse
+  if (lower.includes('unexpected token') || lower.includes('json parse') || lower.includes('invalid json'))
+    return '_got malformed data, retrying_';
+  // String replacement not found (Edit tool)
+  if (lower.includes('not found in file') || lower.includes('old_string'))
+    return '_text not found in file, re-reading to get the right context_';
+  // Git push / pull errors
+  if (lower.includes('rejected') && lower.includes('push'))
+    return '_push rejected, pulling latest changes first_';
+  // Max context / token budget
+  if (lower.includes('context window') || lower.includes('max_tokens') || lower.includes('context length'))
+    return '_hitting context limits, compacting_';
+  // Exit code (generic — keep it brief)
+  if (/^exit code \d+$/i.test(text.trim()))
+    return `_exited with error, continuing_`;
 
   return null;
 }
@@ -633,8 +645,54 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    // per_chat (non-sandboxed): proactively resume sessions that were active when we shut down.
+    // This allows agents to pick up mid-conversation instead of waiting for the user to send a message.
+    // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability) {
+      const activeCheckpoints = this.durability.getAllActiveCheckpoints();
+      for (const cp of activeCheckpoints) {
+        const full = this.durability.getSessionCheckpoint(cp.conversation_key);
+        if (!full?.session_id) continue;
+
+        // Derive chatJid from conversation_key — for DMs, append @lid; for groups, use as-is
+        const chatJid = cp.conversation_key.includes('_at_')
+          ? cp.conversation_key.replace('_at_', '@')
+          : `${cp.conversation_key}@lid`;
+
+        if (this.chatSessions.has(chatJid)) continue; // already created by sweep or prior iteration
+
+        log.info({ conversationKey: cp.conversation_key, sessionId: full.session_id, chatJid }, 'proactive per_chat resume on startup');
+
+        // Create session + queue (same as ensureSessionAndQueueSync but with resume)
+        const session = this.createSessionManager({
+          chatJid,
+          cwd: this.cwd,
+          onEvent: (event) => this.handleEventPerChat(chatJid, event),
+          onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
+          notifyUser: (msg) => {
+            const s = this.chatSessions.get(chatJid);
+            if (s && !s.getStatus().active) {
+              this.chatSessions.delete(chatJid);
+              this.chatQueues.get(chatJid)?.abortTurn();
+              this.chatQueues.delete(chatJid);
+            }
+            this.handleCrashNotify(msg, chatJid);
+          },
+        });
+        this.chatSessions.set(chatJid, session);
+        const perChatQ = new OutboundQueue(this.messenger, chatJid);
+        if (this.durability) perChatQ.setDurability(this.durability);
+        this.chatQueues.set(chatJid, perChatQ);
+
+        // Attempt resume — fire and forget, errors are handled by onResumeFailed/onCrash
+        session.spawnSession(full.session_id).catch((err) => {
+          log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
+        });
+      }
+    }
+
     // Attempt to resume a prior active session.
-    // Skipped for per_chat mode (all variants) — resumption is lazy on first message per chat.
+    // Skipped for per_chat mode (all variants) — per_chat resume is handled above (proactive) or lazily.
     // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
     // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
     const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat') ? null : getActiveSession(this.db);

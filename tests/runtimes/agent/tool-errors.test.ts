@@ -31,9 +31,10 @@ describe('classifyToolError', () => {
 
   // ── Detail formatting ──
 
-  it('formats known tool with reason', () => {
+  it('humanizes exit code errors for known tools', () => {
     const result = classifyToolError('Bash', 'Exit code 1');
-    expect(result.detail).toBe('Bash — exit code 1');
+    expect(result.detail).toMatch(/^_.*_$/); // italicized
+    expect(result.detail).toContain('exited');
   });
 
   it('formats unknown tool with just reason', () => {
@@ -66,9 +67,9 @@ describe('classifyToolError', () => {
     expect(result.category).toBe('cancelled');
   });
 
-  it('lowercases "Exit code N"', () => {
+  it('humanizes all exit code patterns', () => {
     const result = classifyToolError('Bash', 'Exit code 127');
-    expect(result.detail).toBe('Bash — exit code 127');
+    expect(result.detail).toMatch(/^_.*_$/);
   });
 
   it('truncates long error content to 100 chars', () => {
@@ -84,16 +85,18 @@ describe('classifyToolError', () => {
 
   // ── Human-friendly rewrites ──
 
-  it('humanizes file-too-large errors', () => {
+  it('humanizes file-too-large errors without tool name prefix', () => {
     const result = classifyToolError('Read', 'File content (17906 tokens) exceeds maximum allowed tokens (10000). Use offset and limit parameters to read specific ranges.');
     expect(result.category).toBe('error');
-    expect(result.detail).toContain('too long');
     expect(result.detail).toMatch(/^_.*_$/); // wrapped in italics
+    expect(result.detail).not.toContain('Read');
+    expect(result.detail).toContain('long');
   });
 
   it('humanizes file-not-found errors', () => {
     const result = classifyToolError('Read', 'ENOENT: no such file or directory, open \'/tmp/missing.txt\'');
     expect(result.detail).toContain('file not found');
+    expect(result.detail).not.toContain('Read');
   });
 
   it('humanizes timeout errors', () => {
@@ -109,6 +112,22 @@ describe('classifyToolError', () => {
   it('humanizes rate limit errors', () => {
     const result = classifyToolError('Bash', 'Error: 429 rate limit exceeded');
     expect(result.detail).toContain('rate limited');
+  });
+
+  it('humanizes Edit old_string-not-found errors', () => {
+    const result = classifyToolError('Edit', 'String "old_string" not found in file.');
+    expect(result.detail).toContain('re-reading');
+  });
+
+  it('humanizes exit code errors', () => {
+    const result = classifyToolError('Bash', 'Exit code 1');
+    expect(result.detail).toMatch(/^_.*_$/);
+    expect(result.detail).toContain('exited');
+  });
+
+  it('humanizes out-of-memory errors', () => {
+    const result = classifyToolError('Bash', 'Out of memory: JavaScript heap');
+    expect(result.detail).toContain('out of memory');
   });
 
   it('falls through to technical detail for unknown patterns', () => {
