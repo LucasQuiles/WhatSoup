@@ -71,15 +71,18 @@ export function handleGetFeed(
 
       const rawTs = obj.time ?? obj.timestamp;
       const time = typeof rawTs === 'number'
-        ? new Date(rawTs).toISOString()
+        ? new Date(rawTs > 1e12 ? rawTs : rawTs * 1000).toISOString()  // handle both ms and seconds
         : typeof rawTs === 'string'
           ? rawTs
           : new Date().toISOString();
 
+      // Include component/module for context
+      const component = (obj.component ?? obj.name ?? obj.module ?? '') as string;
+      const prefix = component ? `[${component}]` : '';
       events.push({
         time,
         mode: inst.type,
-        text: `${inst.name}: ${msg}`,
+        text: `${inst.name}: ${prefix} ${msg}`.replace(/\s+/g, ' ').trim(),
         ...(isWarnOrAbove ? { isError: true } : {}),
       });
     }
