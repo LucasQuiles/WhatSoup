@@ -904,7 +904,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         <div ref={bottomRef} />
       </div>
 
-      {/* Jump to newest */}
+      {/* Jump to newest — mirrors "Load older messages" style */}
       {showJumpToBottom && (
         <div
           className="absolute flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
@@ -912,12 +912,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             left: '50%',
             transform: 'translateX(-50%)',
             bottom: '72px',
-            padding: 'var(--sp-2) var(--sp-5)',
+            padding: 'var(--sp-3) 0 var(--sp-4)',
             gap: 'var(--sp-2)',
-            background: 'var(--color-d4)',
-            border: '1px solid var(--b2)',
-            borderRadius: 'var(--radius-md)',
-            boxShadow: 'var(--shadow-md)',
             zIndex: 10,
           }}
           onClick={jumpToBottom}
