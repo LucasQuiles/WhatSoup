@@ -10,10 +10,21 @@ set -euo pipefail
 INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 
 # Pinned Node path (DES-007: don't rely on PATH in user units)
-NODE=/home/q/.nvm/versions/node/v24.13.0/bin/node
+# Resolve through symlinks so REPO_ROOT points to the actual repo
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_NODE="$HOME/.nvm/versions/node/v24.13.0/bin/node"
+NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
+if [ ! -x "$NODE" ]; then
+  NODE="$(command -v node || true)"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "FATAL: node not found. Set WHATSOUP_NODE or install node." >&2
+  exit 1
+fi
 
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)
-export PATH="/home/q/.local/bin:/home/q/.nvm/versions/node/v24.13.0/bin:$PATH"
+export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"
 
 # Detect instance type from instance.json (whatsoup-instances namespace)
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -63,4 +74,4 @@ fi
 exec "$NODE" \
   --disable-warning=ExperimentalWarning \
   --experimental-strip-types \
-  /home/q/LAB/WhatSoup/src/bootstrap.ts "$INSTANCE"
+  "$REPO_ROOT/src/bootstrap.ts" "$INSTANCE"
