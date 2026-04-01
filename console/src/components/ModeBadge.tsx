@@ -34,16 +34,16 @@ const ModeBadge: FC<ModeBadgeProps> = ({ mode }) => {
     <span
       className={`inline-flex items-center gap-1.5 font-mono font-medium ${textClass}`}
       style={{
-        fontSize: "0.65rem",
+        fontSize: "var(--font-size-label)",
         letterSpacing: "0.03em",
-        padding: "2px 10px 2px 8px",
-        borderRadius: "3px",
+        padding: "3px 10px 3px 8px",
+        borderRadius: "var(--radius-sm)",
         backgroundColor: washVar,
       }}
     >
       <span
         className={`inline-block rounded-full flex-shrink-0 ${dotClass}`}
-        style={{ width: "5px", height: "5px" }}
+        style={{ width: "var(--dot-badge)", height: "var(--dot-badge)" }}
       />
       {label}
     </span>

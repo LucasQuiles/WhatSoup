@@ -7,9 +7,9 @@ interface HeartbeatStripProps {
 }
 
 const beatConfig: Record<Beat, { colorClass: string; height: string; opacity: number }> = {
-  up:   { colorClass: "bg-s-ok",   height: "20px", opacity: 0.55 },
+  up:   { colorClass: "bg-s-ok",   height: "14px", opacity: 0.55 },
   down: { colorClass: "bg-s-crit", height: "20px", opacity: 0.85 },
-  slow: { colorClass: "bg-s-warn", height: "12px", opacity: 0.6 },
+  slow: { colorClass: "bg-s-warn", height: "10px", opacity: 0.6 },
 };
 
 const STRIP_LENGTH = 20;

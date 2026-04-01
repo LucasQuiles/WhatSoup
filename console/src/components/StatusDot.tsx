@@ -20,9 +20,9 @@ const colorMap: Record<Status, string> = {
 };
 
 const glowMap: Record<Status, string> = {
-  online: "0 0 12px var(--m-pas-glow, rgba(45,212,168,0.25))",
-  degraded: "0 0 12px rgba(246,173,85,0.25)",
-  unreachable: "0 0 12px rgba(252,129,129,0.25)",
+  online: "0 0 12px var(--s-ok-glow)",
+  degraded: "0 0 12px var(--s-warn-glow)",
+  unreachable: "0 0 12px var(--s-crit-glow)",
 };
 
 const StatusDot: FC<StatusDotProps> = ({ status, size = "md" }) => {
@@ -45,7 +45,7 @@ const StatusDot: FC<StatusDotProps> = ({ status, size = "md" }) => {
           className="absolute rounded-full animate-breathe-ring"
           style={{
             inset: "-3px",
-            border: "1px solid var(--m-pas-soft)",
+            border: "1px solid var(--s-ok-soft)",
           }}
         />
       )}

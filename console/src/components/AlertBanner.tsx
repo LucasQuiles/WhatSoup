@@ -18,30 +18,34 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
     <div
       className="flex items-center gap-3 flex-shrink-0"
       style={{
-        padding: "8px 16px",
+        padding: "var(--sp-2) var(--sp-4)",
         backgroundColor: "var(--s-crit-wash)",
-        border: "1px solid rgba(252,129,129,0.1)",
-        borderRadius: "6px",
-        fontSize: "0.78rem",
+        border: "1px solid var(--s-crit-border)",
+        borderRadius: 'var(--radius-md)',
+        fontSize: "var(--font-size-data)",
       }}
     >
       {/* Count badge */}
-      <span className="inline-flex items-center gap-1.5 bg-s-crit/20 text-s-crit font-mono text-xs font-medium px-2.5 py-0.5 rounded">
+      <span
+        className="inline-flex items-center gap-1.5 text-s-crit font-mono font-medium px-2.5 py-0.5 rounded"
+        style={{ fontSize: 'var(--font-size-sm)', backgroundColor: "var(--s-crit-soft)" }}
+      >
         <AlertTriangle size={12} strokeWidth={2} />
         {alerts.length} alert{alerts.length !== 1 && "s"}
       </span>
 
       {/* Alert chips */}
       <div className="flex items-center gap-2 overflow-x-auto">
-        {alerts.map((alert, i) => (
+        {alerts.map((alert) => (
           <button
-            key={i}
+            key={alert.line}
             type="button"
             onClick={() => onAlertClick?.(alert)}
-            className="inline-flex items-center gap-1 text-s-crit font-mono text-xs
-                       bg-s-crit/10 hover:bg-s-crit/20 transition-colors duration-200
-                       rounded cursor-pointer whitespace-nowrap"
-            style={{ padding: "4px 12px" }}
+            className="inline-flex items-center gap-1 text-s-crit font-mono
+                       c-hover
+                       rounded cursor-pointer whitespace-nowrap
+                       hover:bg-[var(--s-crit-soft)]"
+            style={{ fontSize: 'var(--font-size-sm)', padding: "var(--sp-1) var(--sp-3)", backgroundColor: "var(--s-crit-wash)" }}
           >
             <span className="text-t4">{alert.line}</span>
             <span className="mx-1 text-t5">—</span>

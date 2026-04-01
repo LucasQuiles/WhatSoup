@@ -1,5 +1,6 @@
-import { type FC, useState } from "react";
-import { Pause, Play } from "lucide-react";
+import { type FC, useState, useMemo } from "react";
+import { Pause, Play, AlertTriangle } from "lucide-react";
+import { formatTime } from "../lib/format-time";
 
 type Mode = "passive" | "chat" | "agent";
 
@@ -14,86 +15,164 @@ interface ActivityFeedProps {
   events: FeedEvent[];
 }
 
+const modeFilters: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
+
 const modeDotColor: Record<Mode, string> = {
   passive: "bg-m-pas",
   chat: "bg-m-cht",
   agent: "bg-m-agt",
 };
 
+const modeTextColor: Record<string, string> = {
+  all: "text-t2",
+  passive: "text-m-pas",
+  chat: "text-m-cht",
+  agent: "text-m-agt",
+};
+
 const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [paused, setPaused] = useState(false);
+  const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+
+  const filtered = useMemo(() => {
+    let result = events;
+    if (modeFilter !== "all") result = result.filter((e) => e.mode === modeFilter);
+    if (errorsOnly) result = result.filter((e) => e.isError);
+    return result;
+  }, [events, modeFilter, errorsOnly]);
+
+  const errorCount = useMemo(() => events.filter((e) => e.isError).length, [events]);
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
-      <div
-        className="flex items-center justify-between px-4 py-3 flex-shrink-0"
-        style={{ borderBottom: "1px solid var(--b1)" }}
-      >
-        <span
-          className="font-mono uppercase text-t4 font-medium"
-          style={{ fontSize: "0.65rem", letterSpacing: "0.08em" }}
+      {/* Header — 2 rows matching table's toolbar + column header rows */}
+      <div className="flex flex-col flex-shrink-0 bg-d3">
+        {/* Row 1: Title + pause — matches table toolbar height */}
+        <div
+          className="flex items-center justify-between c-toolbar"
+          style={{ borderBottom: "1px solid var(--b1)", minHeight: "var(--toolbar-h)" }}
         >
-          Live Activity
-        </span>
-        <button
-          type="button"
-          onClick={() => setPaused((p) => !p)}
-          className="flex items-center gap-1 text-t5 hover:text-t3 font-mono transition-colors duration-200 cursor-pointer"
-          style={{ fontSize: "0.65rem" }}
+          <span className="c-heading">Live Activity</span>
+          <button
+            type="button"
+            onClick={() => setPaused((p) => !p)}
+            className="flex items-center font-mono text-t5 hover:text-t3 c-hover cursor-pointer"
+            style={{ fontSize: "var(--font-size-xs)", gap: "var(--sp-1)" }}
+          >
+            {paused ? <Play size={11} /> : <Pause size={11} />}
+            {paused ? "resume" : "pause"}
+          </button>
+        </div>
+
+        {/* Row 2: Filter pills — matches table column header row (c-cell + --b2 border) */}
+        <div
+          className="flex items-center justify-between c-cell"
+          style={{ borderBottom: "1px solid var(--b2)" }}
         >
-          {paused ? <Play size={12} /> : <Pause size={12} />}
-          {paused ? "resume" : "pause"}
-        </button>
+          <div className="flex items-center" style={{ gap: "var(--sp-1)" }}>
+            {modeFilters.map((m) => {
+              const isActive = modeFilter === m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setModeFilter(m)}
+                  className={`font-mono cursor-pointer c-hover inline-flex items-center ${
+                    isActive ? modeTextColor[m] + " bg-d4" : "text-t4 hover:text-t2 hover:bg-d3"
+                  }`}
+                  style={{
+                    fontSize: "var(--font-size-label)",
+                    letterSpacing: "0.02em",
+                    padding: "3px var(--sp-2)",
+                    borderRadius: "var(--radius-sm)",
+                    border: isActive
+                      ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
+                      : "1px solid var(--b1)",
+                  }}
+                >
+                  {m === "all" ? "All" : m}
+                </button>
+              );
+            })}
+          </div>
+
+          {errorCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setErrorsOnly((p) => !p)}
+              className={`inline-flex items-center font-mono cursor-pointer c-hover ${
+                errorsOnly ? "text-s-crit bg-d4" : "text-t4 hover:text-t2 hover:bg-d3"
+              }`}
+              style={{
+                fontSize: "var(--font-size-label)",
+                gap: "var(--sp-1)",
+                padding: "3px var(--sp-2)",
+                borderRadius: "var(--radius-sm)",
+                border: errorsOnly ? "1px solid var(--color-s-crit)" : "1px solid var(--b1)",
+              }}
+            >
+              <AlertTriangle size={10} strokeWidth={2} />
+              <span>{errorCount}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Feed items */}
-      <div className="flex-1 overflow-y-auto">
-        {events.map((event, i) => {
+      <div className="flex-1 overflow-y-auto scrollbar-hide">
+        {filtered.map((event, i) => {
           const isErr = event.isError;
           return (
             <div
-              key={i}
+              key={`${event.time}-${event.mode}-${i}`}
               className={`
-                flex items-start transition-colors duration-150
-                ${isErr ? "" : "hover:bg-d4"}
+                flex items-baseline ${isErr ? "" : "c-row-hover"}
               `}
               style={{
-                gap: "10px",
-                padding: "6px 0",
+                gap: "var(--sp-2)",
+                padding: "10px var(--sp-3)",
                 borderBottom: "1px solid var(--b1)",
-                fontSize: "0.72rem",
                 ...(isErr
-                  ? { backgroundColor: "rgba(252,129,129,0.08)" }
+                  ? { backgroundColor: "var(--s-crit-wash)" }
                   : {}),
               }}
             >
               {/* Time */}
               <span
                 className={`font-mono flex-shrink-0 ${isErr ? "text-s-crit" : "text-t5"}`}
-                style={{ fontSize: "0.6rem", lineHeight: "1.4", minWidth: "36px" }}
+                style={{ fontSize: "var(--font-size-xs)", minWidth: "40px" }}
               >
-                {event.time}
+                {formatTime(event.time)}
               </span>
 
               {/* Mode dot */}
               <span
-                className={`inline-block rounded-full flex-shrink-0 mt-[5px] ${
+                className={`inline-block rounded-full flex-shrink-0 ${
                   isErr ? "bg-s-crit" : modeDotColor[event.mode]
                 }`}
-                style={{ width: "6px", height: "6px" }}
+                style={{ width: "var(--dot-feed)", height: "var(--dot-feed)", alignSelf: "center", marginTop: "-1px" }}
               />
 
               {/* Text */}
               <span
-                className={`font-mono leading-snug ${isErr ? "text-s-crit" : "text-t3"}`}
-                style={{ fontSize: "0.72rem" }}
+                className={`font-mono ${isErr ? "text-s-crit" : "text-t3"}`}
+                style={{ fontSize: "var(--font-size-sm)", lineHeight: "1.5" }}
               >
                 {event.text}
               </span>
             </div>
           );
         })}
+
+        {filtered.length === 0 && (
+          <div
+            className="text-center text-t5 font-mono"
+            style={{ padding: "var(--sp-8) var(--sp-4)", fontSize: "var(--font-size-sm)" }}
+          >
+            {errorsOnly ? "No errors" : "No activity"}
+          </div>
+        )}
       </div>
     </div>
   );

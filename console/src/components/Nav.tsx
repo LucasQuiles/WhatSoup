@@ -18,18 +18,17 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
     <nav
       className="bg-d1 flex items-center justify-between flex-shrink-0"
       style={{
-        height: "52px",
-        padding: "0 20px",
-        border: "1px solid var(--b1)",
-        borderRadius: "10px",
-        gap: "24px",
+        height: "var(--nav-h)",
+        padding: "0 var(--sp-5)",
+        borderBottom: "1px solid var(--b1)",
+        gap: "var(--sp-6)",
       }}
     >
       {/* Left cluster: logo + nav items */}
-      <div className="flex items-center" style={{ gap: "24px" }}>
+      <div className="flex items-center" style={{ gap: "var(--sp-6)" }}>
         <span
-          className="font-mono font-semibold select-none"
-          style={{ fontSize: "0.85rem" }}
+          className="font-sans select-none"
+          style={{ fontSize: "var(--font-size-xl)", fontWeight: 900, letterSpacing: "var(--tracking-tighter)" }}
         >
           <span className="text-t2">What</span>
           <span className="text-s-ok">Soup</span>
@@ -39,13 +38,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
           to="/"
           end
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans transition-colors duration-200 relative ${
+            `flex items-center gap-1.5 font-sans c-nav-link relative ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "6px 12px", fontSize: "0.78rem", fontWeight: 500, borderRadius: "4px" }}
+          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", fontWeight: 500, borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -71,13 +70,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
         <NavLink
           to="/inbox"
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans transition-colors duration-200 relative ${
+            `flex items-center gap-1.5 font-sans c-nav-link relative ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "6px 12px", fontSize: "0.78rem", fontWeight: 500, borderRadius: "4px" }}
+          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", fontWeight: 500, borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -87,11 +86,11 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
                 <span
                   className="font-mono font-semibold"
                   style={{
-                    fontSize: "0.55rem",
+                    fontSize: "var(--font-size-xs)",
                     background: "var(--color-s-warn)",
                     color: "var(--color-d0)",
                     padding: "1px 5px",
-                    borderRadius: "6px",
+                    borderRadius: 'var(--radius-md)',
                     minWidth: "16px",
                     textAlign: "center",
                     marginLeft: "2px",
@@ -120,13 +119,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
         <NavLink
           to="/ops"
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans transition-colors duration-200 relative ${
+            `flex items-center gap-1.5 font-sans c-nav-link relative ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "6px 12px", fontSize: "0.78rem", fontWeight: 500, borderRadius: "4px" }}
+          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", fontWeight: 500, borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -151,7 +150,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
       </div>
 
       {/* Right cluster: system status */}
-      <div className="flex items-center gap-2 font-mono" style={{ fontSize: "0.6rem" }}>
+      <div className="flex items-center gap-2 font-mono" style={{ fontSize: "var(--font-size-xs)" }}>
         {alertCount === 0 ? (
           <>
             <CheckCircle2 size={14} strokeWidth={1.75} className="text-s-ok" />

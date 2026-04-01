@@ -24,13 +24,35 @@
   --color-s-warn: #f6ad55;
   --color-s-crit: #fc8181;
 
+  /* ═══ Type scale — matches design system spec exactly ═══ */
+  --font-size-xs: 0.6rem;       /* 9.6px  — minimum readable, timestamps */
+  --font-size-label: 0.65rem;   /* 10.4px — labels, column headers, badges */
+  --font-size-sm: 0.7rem;       /* 11.2px — section labels, secondary */
+  --font-size-data: 0.78rem;    /* 12.5px — data values, table cells */
+  --font-size-heading: 0.82rem; /* 13.1px — section headings */
+  --font-size-body: 0.85rem;    /* 13.6px — body text, names, UI chrome */
+  --font-size-lg: 1rem;         /* 16px   — large headings */
+  --font-size-xl: 1.4rem;       /* 22.4px — page titles, summary values */
+  --font-size-2xl: 1.7rem;      /* 27.2px — KPI values */
+
+  /* ═══ Letter spacing ═══ */
+  --tracking-tighter: -0.06em; /* logo, display text */
+  --tracking-tight: -0.04em;  /* KPI values, page titles */
+  --tracking-label: 0.06em;   /* labels */
+  --tracking-caps: 0.12em;    /* column headers, uppercase labels */
+
+  /* ═══ Border radius ═══ */
+  --radius-sm: 4px;   /* badges, pills, inputs, pipeline nodes */
+  --radius-md: 6px;   /* buttons, alert banners */
+  --radius-lg: 10px;  /* cards, panels, table containers */
+
   --font-sans: 'Outfit', system-ui, -apple-system, sans-serif;
   --font-mono: 'IBM Plex Mono', 'SF Mono', 'Cascadia Code', monospace;
 }
 
 :root {
-  --b1: rgba(255,255,255, 0.06);
-  --b2: rgba(255,255,255, 0.10);
+  --b1: rgba(255,255,255, 0.05);
+  --b2: rgba(255,255,255, 0.09);
   --b3: rgba(255,255,255, 0.16);
   --b4: rgba(255,255,255, 0.24);
   /* Card elevation — subtle depth for dark containers */
@@ -41,9 +63,66 @@
   --m-cht-wash: rgba(56,189,248, 0.06);
   --m-agt-soft: rgba(167,139,250, 0.19);
   --m-agt-wash: rgba(167,139,250, 0.06);
+  /* Status semantics — separate from mode colors */
+  --s-ok-glow: rgba(45,212,168, 0.25);
+  --s-ok-soft: rgba(45,212,168, 0.19);
+  --s-ok-wash: rgba(45,212,168, 0.06);
+  --s-warn-glow: rgba(246,173,85, 0.25);
   --s-warn-wash: rgba(246,173,85, 0.07);
+  --s-crit-glow: rgba(252,129,129, 0.25);
   --s-crit-wash: rgba(252,129,129, 0.07);
   --s-crit-soft: rgba(252,129,129, 0.19);
+  --overlay: rgba(5,7,9, 0.75);
+  /* ═══ Easing ═══ */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Semantic tier — spec completeness */
+  --s-warn-soft: rgba(246,173,85, 0.19);
+  --s-crit-border: rgba(252,129,129, 0.1);
+  /* ═══ Elevation shadows ═══ */
+  --shadow-inset: inset 0 -2px 8px rgba(0,0,0,0.15);
+  --shadow-md: 0 8px 24px rgba(0,0,0,0.4);
+  --shadow-lg: 0 16px 48px rgba(0,0,0,0.5);
+  /* ═══ Layout constants ═══ */
+  --toolbar-h: 50px;         /* toolbar row min-height (nav is 52px) */
+  --nav-h: 52px;             /* top nav bar height */
+  /* ═══ Element sizes — from design spec §2 ═══ */
+  --dot-table: 8px;          /* status dot in tables */
+  --dot-feed: 6px;           /* status dot in feeds */
+  --dot-badge: 5px;          /* mode badge dot */
+  --dot-header: 10px;        /* status dot in line header */
+  --avatar-sm: 32px;         /* access list, small contexts */
+  --avatar-md: 36px;         /* chat list items */
+  --avatar-lg: 64px;         /* contact detail panel */
+  --icon-empty: 40px;        /* empty state icon */
+  --sparkline-h: 32px;       /* KPI sparkline height */
+  --badge-unread: 20px;      /* chat unread count badge */
+  /* ═══ Panel widths ═══ */
+  --panel-chat-list: 288px;  /* inbox left panel */
+  --panel-contact: 256px;    /* inbox right panel */
+  --panel-actions: 260px;    /* line detail actions panel */
+  --panel-history: 288px;    /* line detail history chat list */
+  /* ═══ Log column widths ═══ */
+  --log-col-time: 90px;      /* timestamp column */
+  --log-col-level: 56px;     /* level badge column */
+  --log-col-source: 100px;   /* source module column */
+  /* ═══ Text constraints ═══ */
+  --chat-name-max: 140px;    /* chat list name truncation */
+  --empty-max-w: 320px;      /* empty state description max */
+  /* ═══ Off-grid half-steps ═══ */
+  --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */
+  --sp-2h: 10px;             /* 2.5 × 4px — table cell vertical, toolbar padding */
+  --msg-pad-h: 14px;         /* message bubble horizontal padding */
+  /* ═══ Spacing — 4px grid from design spec ═══ */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-7:  28px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -72,10 +151,15 @@ body::before {
   flex-direction: column;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* Thin scrollbar — visible on panels when needed */
+::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--b2); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--b2); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--b3); }
+
+/* Hidden scrollbar — for page-level scroll containment */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
 /* Status dot expanding ring animation */
 @keyframes breathe-ring {
@@ -110,48 +194,110 @@ body::before {
   border-radius: 4px;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   Typography roles — composite utilities from design system spec.
+   Use these instead of combining font-mono + text-t5 + inline fontSize.
+   One class = one semantic role.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Column header: mono 500 label 0.12em uppercase --t5 */
+@utility c-col-header {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--font-size-label);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-t5);
+}
+
+/* Label: mono 500 label 0.06em --t4 */
+@utility c-label {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--font-size-label);
+  letter-spacing: var(--tracking-label);
+  color: var(--color-t4);
+}
+
+/* Section label: mono 500 sm 0.12em uppercase --t4 */
+@utility c-section-label {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-t4);
+}
+
+/* Data value: mono 400 data --t2 */
+@utility c-data {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: var(--font-size-data);
+  color: var(--color-t2);
+}
+
+/* Section heading: sans 600 heading --t1 */
+@utility c-heading {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--font-size-heading);
+  color: var(--color-t1);
+}
+
+/* Body text: sans 400 body --t2 */
+@utility c-body {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: var(--font-size-body);
+  color: var(--color-t2);
+}
+
+/* KPI value: mono 600 2xl tight (color set per-card) */
+@utility c-kpi-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: var(--font-size-2xl);
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.1;
+}
+
+/* ═══ Component padding patterns ═══
+   Using plain CSS classes — @utility doesn't reliably generate padding in TW v4.
+   All values reference spacing tokens from the 4px grid.
+*/
+.c-cell    { padding: var(--sp-2h) var(--sp-4); }     /* 10px 16px — table cells per spec */
+.c-toolbar { padding: var(--sp-2h) var(--sp-4); }    /* 10px 16px — toolbar areas per spec */
+.c-kpi-pad { padding: var(--sp-4) var(--sp-5); }    /* 16px 20px — KPI cards per spec */
+
 /* ═══ Button variants — c-btn from design system ═══ */
-@utility c-btn {
+.c-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   padding: 7px 14px;
-  border-radius: 6px;
-  font-size: 0.82rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-data);
   font-weight: 500;
   border: 1px solid var(--b2);
   background: var(--color-d4);
   color: var(--color-t2);
   cursor: pointer;
-  transition: all 0.15s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: all 0.15s var(--ease);
 }
-@utility c-btn-primary {
-  background: var(--color-m-cht);
-  border-color: var(--color-m-cht);
-  color: var(--color-d0);
-}
-@utility c-btn-danger {
-  background: transparent;
-  border-color: rgba(252, 129, 129, 0.3);
-  color: var(--color-s-crit);
-}
-@utility c-btn-success {
-  background: transparent;
-  border-color: rgba(45, 212, 168, 0.3);
-  color: var(--color-s-ok);
-}
-@utility c-btn-ghost {
-  background: transparent;
-  border-color: transparent;
-  color: var(--color-t3);
-}
-@utility c-btn-sm {
-  padding: 4px 10px;
-  font-size: 0.75rem;
-}
+.c-btn:hover         { background: var(--color-d5); border-color: var(--b3); }
+.c-btn-primary       { background: var(--color-m-cht); border-color: var(--color-m-cht); color: var(--color-d0); }
+.c-btn-primary:hover { opacity: 0.88; }
+.c-btn-danger        { background: transparent; border-color: rgba(252, 129, 129, 0.3); color: var(--color-s-crit); }
+.c-btn-danger:hover  { background: var(--s-crit-wash); }
+.c-btn-success       { background: transparent; border-color: rgba(45, 212, 168, 0.3); color: var(--color-s-ok); }
+.c-btn-success:hover { background: var(--s-ok-wash); }
+.c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
+.c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
+.c-btn-sm      { padding: var(--sp-1) 10px; font-size: var(--font-size-data); }
 
 /* ═══ Toggle switch — c-toggle from design system ═══ */
-@utility c-toggle {
+.c-toggle {
   position: relative;
   display: inline-block;
   width: 36px;
@@ -159,15 +305,65 @@ body::before {
   cursor: pointer;
 }
 
-/* Focus ring — design system: --m-cht with 2px box-shadow at wash opacity */
+/* ═══ Interaction states — from design spec §1.9 ═══ */
+
+/* Focus ring: --m-cht with 2px box-shadow at wash opacity, 0.2s */
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 a:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.06), 0 0 0 3px rgba(56, 189, 248, 0.19);
+  box-shadow: 0 0 0 2px var(--m-cht-wash), 0 0 0 3px var(--m-cht-soft);
   border-color: var(--color-m-cht) !important;
-  transition: border-color 0.2s cubic-bezier(0.22, 1, 0.36, 1),
-              box-shadow 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+/* Hover transition base: 0.15s background + border-color */
+.c-hover {
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+/* Chat list item hover */
+.c-chat-item {
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.c-chat-item:hover { background: var(--color-d3); }
+.c-chat-item.active { background: var(--color-d4); }
+
+/* Message bubble subtle hover */
+.c-msg-bubble {
+  transition: filter 0.15s var(--ease);
+}
+.c-msg-bubble:hover { filter: brightness(1.1); }
+
+/* KPI card hover: 0.25s all, includes translateY lift */
+.c-kpi-hover {
+  transition: all 0.25s var(--ease);
+}
+.c-kpi-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-inset), 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* Nav link hover */
+.c-nav-link {
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+/* Dropdown item hover */
+.c-dropdown-item {
+  transition: background 0.12s var(--ease);
+}
+.c-dropdown-item:hover { background: var(--color-d4); }
+
+/* Row hover — tables and lists */
+.c-row-hover {
+  transition: background 0.12s var(--ease);
+}
+.c-row-hover:hover { background: var(--color-d4); }
+
+/* Input focus transition */
+input, textarea {
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }

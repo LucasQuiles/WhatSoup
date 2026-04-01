@@ -1,13 +1,11 @@
 import { useState } from 'react'
 import { useLines, useChats, useMessages } from '../hooks/use-fleet'
+import { formatChatTime, formatTime } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import EmptyState from '../components/EmptyState'
-import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp } from 'lucide-react'
-
-function getInitials(name: string): string {
-  return name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
-}
+import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Shield } from 'lucide-react'
+import { getInitials } from '../lib/text-utils'
 
 export default function Inbox() {
   const { data: lines } = useLines()
@@ -23,124 +21,126 @@ export default function Inbox() {
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
 
   return (
-    <div className="flex-1 flex" style={{ height: 'calc(100vh - 52px)', padding: '12px', gap: '8px' }}>
+    <div className="flex-1 flex min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
+
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
         className="flex-shrink-0 flex flex-col"
         style={{
-          width: '288px',
+          width: 'var(--panel-chat-list)',
           background: 'var(--color-d1)',
           border: '1px solid var(--b1)',
-          borderRadius: '10px',
+          borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
       >
-        {/* Line picker */}
+        {/* Line picker — toolbar pattern */}
         <div className="relative">
           <button
             onClick={() => setLinePickerOpen(!linePickerOpen)}
-            className="w-full flex items-center justify-between px-4 py-3 font-sans text-sm text-t1 hover:bg-d3 transition-colors cursor-pointer"
-            style={{ borderBottom: '1px solid var(--b1)' }}
+            className="w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover"
+            style={{ fontSize: 'var(--font-size-body)', borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
           >
-            <div className="flex items-center gap-2">
+            <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
               {currentLine && <StatusDot status={currentLine.status} size="sm" />}
               <span className="font-medium">{activeLine || 'Select a line'}</span>
               {currentLine && <ModeBadge mode={currentLine.mode} />}
             </div>
-            <ChevronDown size={14} className="text-t4" />
+            <ChevronDown size={14} className={`text-t4 transition-transform duration-200 ${linePickerOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {linePickerOpen && (
             <div
-              className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto"
-              style={{ background: 'var(--color-d6)', border: '1px solid var(--b2)', borderTop: 'none' }}
+              className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide"
+              style={{ background: 'var(--color-d6)', border: '1px solid var(--b2)', borderTop: 'none', borderRadius: '0 0 var(--radius-md) var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
             >
               {lines?.map(line => (
                 <button
                   key={line.name}
                   onClick={() => { setSelectedLine(line.name); setLinePickerOpen(false); setSelectedChat(null) }}
-                  className={`w-full flex items-center gap-2 px-4 py-2 text-sm text-left hover:bg-d4 transition-colors cursor-pointer ${
+                  className={`w-full flex items-center text-left cursor-pointer c-dropdown-item ${
                     line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
                   }`}
+                  style={{ padding: 'var(--sp-2) var(--sp-4)', gap: 'var(--sp-2)', fontSize: 'var(--font-size-body)' }}
                 >
                   <StatusDot status={line.status} size="sm" />
-                  <span>{line.name}</span>
-                  <span className="text-t5 font-mono text-xs ml-auto">{line.phone}</span>
+                  <span className="flex-1">{line.name}</span>
+                  <ModeBadge mode={line.mode} />
+                  <span className="c-label ml-auto">{line.phone}</span>
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        {/* Chat list — c-chat-list pattern */}
-        <div className="flex-1 overflow-auto">
+        {/* Chat list */}
+        <div className="flex-1 overflow-auto scrollbar-hide">
           {chats?.map(chat => {
             const isSelected = selectedChat === chat.conversationKey
             return (
               <div
                 key={chat.conversationKey}
                 onClick={() => setSelectedChat(chat.conversationKey)}
-                className={`flex gap-3 cursor-pointer transition-colors ${
-                  isSelected ? 'bg-d4' : 'hover:bg-d3'
+                className={`flex cursor-pointer c-chat-item ${
+                  isSelected ? 'active' : ''
                 }`}
                 style={{
-                  padding: '12px 16px',
+                  padding: 'var(--sp-3) var(--sp-4)',
+                  gap: 'var(--sp-3)',
                   borderBottom: '1px solid var(--b1)',
-                  ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: '14px' } : {}),
+                  ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : {}),
                 }}
               >
-                {/* Avatar — 36px */}
+                {/* Avatar */}
                 <div
                   className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
-                  style={{ width: '36px', height: '36px', background: 'var(--color-d5)', fontSize: '0.72rem' }}
+                  style={{ width: 'var(--avatar-md)', height: 'var(--avatar-md)', background: 'var(--color-d5)', fontSize: 'var(--font-size-sm)' }}
                 >
                   {getInitials(chat.name)}
                 </div>
 
                 {/* Body */}
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-0.5">
-                    <span className="text-t1 font-medium truncate" style={{ fontSize: '0.85rem', maxWidth: '140px' }}>
+                  <div className="flex items-center justify-between" style={{ marginBottom: '2px' }}>
+                    <span className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--chat-name-max)' }}>
                       {chat.name}
                     </span>
-                  </div>
-                  <div className="text-t4 truncate" style={{ fontSize: '0.78rem' }}>
-                    {chat.lastMessagePreview}
-                  </div>
-                </div>
-
-                {/* Right — time + badge */}
-                <div className="flex flex-col items-end gap-1 flex-shrink-0 self-center">
-                  <span className="font-mono text-t4" style={{ fontSize: '0.65rem' }}>
-                    {chat.lastMessageAt}
-                  </span>
-                  {chat.unreadCount > 0 && (
-                    <span
-                      className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full"
-                      style={{ fontSize: '0.6rem', width: '20px', height: '20px' }}
-                    >
-                      {chat.unreadCount}
+                    <span className="c-label flex-shrink-0" style={{ marginLeft: 'var(--sp-2)' }}>
+                      {formatChatTime(chat.lastMessageAt)}
                     </span>
-                  )}
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="text-t4 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
+                      {chat.lastMessagePreview}
+                    </div>
+                    {chat.unreadCount > 0 && (
+                      <span
+                        className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0"
+                        style={{ fontSize: 'var(--font-size-xs)', width: 'var(--badge-unread)', height: 'var(--badge-unread)', marginLeft: 'var(--sp-2)' }}
+                      >
+                        {chat.unreadCount}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             )
           })}
           {(!chats || chats.length === 0) && (
-            <div className="p-8 text-center text-t4 text-sm">
-              No chats found
+            <div style={{ padding: 'var(--sp-8) var(--sp-4)' }} className="text-center text-t4">
+              <span style={{ fontSize: 'var(--font-size-body)' }}>No chats found</span>
             </div>
           )}
         </div>
       </div>
 
-      {/* ═══ Center: Messages — c-msg pattern ═══ */}
+      {/* ═══ Center: Messages ═══ */}
       <div
-        className="flex-1 flex flex-col"
+        className="flex-1 flex flex-col min-h-0"
         style={{
           background: 'var(--color-d0)',
           border: '1px solid var(--b1)',
-          borderRadius: '10px',
+          borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
       >
@@ -148,60 +148,68 @@ export default function Inbox() {
           <>
             {/* Chat header */}
             <div
-              className="flex items-center gap-3 px-4 py-3"
-              style={{ borderBottom: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+              className="flex items-center bg-d3 c-toolbar"
+              style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
             >
-              {currentChat.isGroup
-                ? <Users size={18} className="text-t3" />
-                : <User size={18} className="text-t3" />
-              }
-              <div>
-                <div className="text-t1 text-sm font-medium">{currentChat.name}</div>
-                <div className="text-t5 font-mono" style={{ fontSize: '0.68rem' }}>
-                  {activeLine} / {currentChat.isGroup ? 'group' : 'direct'}
+              <div
+                className="rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', background: 'var(--color-d5)' }}
+              >
+                {currentChat.isGroup
+                  ? <Users size={15} className="text-t3" />
+                  : <User size={15} className="text-t3" />
+                }
+              </div>
+              <div className="flex-1">
+                <div className="text-t1 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>{currentChat.name}</div>
+                <div className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-label)' }}>
+                  {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
               </div>
+              <span className="c-label">{currentChat.unreadCount > 0 ? `${currentChat.unreadCount} unread` : 'read'}</span>
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-auto p-4 flex flex-col gap-1">
+            <div className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
               {messages && messages.length > 0 && (
-                <div className="flex items-center justify-center gap-2 py-3 text-t4 cursor-pointer hover:text-t2 transition-colors">
-                  <ChevronsUp size={16} strokeWidth={1.75} />
-                  <span style={{ fontSize: '0.82rem' }}>Load older messages</span>
+                <div className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5" style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)' }}>
+                  <ChevronsUp size={14} strokeWidth={1.75} />
+                  <span style={{ fontSize: 'var(--font-size-sm)' }}>Load older messages</span>
                 </div>
               )}
-              {messages?.map(msg => (
-                <div
-                  key={msg.pk}
-                  className={`flex flex-col max-w-[60%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
-                >
-                  {!msg.fromMe && (
-                    <span className="font-mono text-t4 px-1 mb-0.5" style={{ fontSize: '0.65rem' }}>
-                      {msg.senderName}
-                    </span>
-                  )}
+              <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+                {messages?.map(msg => (
                   <div
-                    style={{
-                      padding: '10px 14px',
-                      borderRadius: '12px',
-                      fontSize: '0.85rem',
-                      lineHeight: 1.5,
-                      ...(msg.fromMe
-                        ? { background: 'rgba(56,189,248,0.15)', borderBottomRightRadius: '4px' }
-                        : { background: 'var(--color-d4)', borderBottomLeftRadius: '4px' }),
-                    }}
+                    key={msg.pk}
+                    className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
                   >
-                    <div className="text-t1 leading-relaxed">{msg.content}</div>
+                    {!msg.fromMe && (
+                      <span className="c-label" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)' }}>
+                        {msg.senderName}
+                      </span>
+                    )}
+                    <div
+                      style={{
+                        padding: 'var(--sp-2h) var(--msg-pad-h)',
+                        borderRadius: 'var(--radius-lg)',
+                        fontSize: 'var(--font-size-body)',
+                        lineHeight: 1.6,
+                        ...(msg.fromMe
+                          ? { background: 'var(--m-cht-soft)', borderBottomRightRadius: 'var(--radius-sm)' }
+                          : { background: 'var(--color-d3)', borderBottomLeftRadius: 'var(--radius-sm)' }),
+                      }}
+                    >
+                      <div className="text-t1">{msg.content}</div>
+                    </div>
+                    <span
+                      className={`font-mono text-t5 ${msg.fromMe ? 'text-right' : ''}`}
+                      style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)' }}
+                    >
+                      {formatTime(msg.timestamp)}
+                    </span>
                   </div>
-                  <span
-                    className={`font-mono text-t5 mt-0.5 px-1 ${msg.fromMe ? 'text-right' : ''}`}
-                    style={{ fontSize: '0.62rem' }}
-                  >
-                    {msg.timestamp}
-                  </span>
-                </div>
-              ))}
+                ))}
+              </div>
               {(!messages || messages.length === 0) && (
                 <div className="flex-1 flex items-center justify-center">
                   <EmptyState
@@ -213,21 +221,28 @@ export default function Inbox() {
               )}
             </div>
 
-            {/* Input */}
+            {/* Input bar */}
             <div
-              className="flex gap-2 p-3"
-              style={{ borderTop: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+              className="flex flex-shrink-0"
+              style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
             >
               <input
-                className="flex-1 rounded-md px-3 py-2 text-sm text-t2 font-sans placeholder-t5 outline-none"
-                style={{ background: 'var(--color-d2)', border: '1px solid var(--b2)' }}
+                className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
+                style={{
+                  fontSize: 'var(--font-size-body)',
+                  padding: 'var(--sp-2h) var(--sp-4)',
+                  background: 'var(--color-d1)',
+                  border: '1px solid var(--b2)',
+                  borderRadius: 'var(--radius-md)',
+                  transition: 'border-color 0.2s var(--ease)',
+                }}
                 placeholder="Type a message..."
               />
               <button
-                className="flex items-center gap-2 px-4 py-2 rounded-md font-sans font-medium cursor-pointer transition-opacity hover:opacity-90"
-                style={{ fontSize: '0.82rem', background: 'var(--color-m-cht)', color: 'var(--color-d0)' }}
+                className="c-btn c-btn-primary flex-shrink-0"
+                style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
               >
-                <Send size={14} strokeWidth={2} />
+                <Send size={15} strokeWidth={2} />
                 Send
               </button>
             </div>
@@ -245,74 +260,95 @@ export default function Inbox() {
 
       {/* ═══ Right: Contact details ═══ */}
       <div
-        className="flex-shrink-0 p-4 space-y-4"
+        className="flex-shrink-0 flex flex-col"
         style={{
-          width: '256px',
+          width: 'var(--panel-contact)',
           background: 'var(--color-d1)',
           border: '1px solid var(--b1)',
-          borderRadius: '10px',
+          borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
       >
         {currentChat ? (
           <>
-            <div className="text-center py-4">
+            {/* Contact header */}
+            <div
+              className="flex items-center bg-d3 c-toolbar"
+              style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
+            >
               <div
-                className="rounded-full flex items-center justify-center mx-auto mb-3"
-                style={{ width: '64px', height: '64px', background: 'var(--color-d4)' }}
+                className="rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', background: 'var(--color-d5)' }}
               >
                 {currentChat.isGroup
-                  ? <Users size={24} className="text-t4" />
-                  : <User size={24} className="text-t4" />
+                  ? <Users size={14} className="text-t4" />
+                  : <User size={14} className="text-t4" />
                 }
               </div>
-              <div className="text-t1 font-medium">{currentChat.name}</div>
-              <div className="text-t4 font-mono mt-1" style={{ fontSize: '0.68rem' }}>
-                {currentChat.conversationKey.slice(0, 15)}...
+              <div className="flex-1 min-w-0">
+                <div className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)' }}>{currentChat.name}</div>
+                <div className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>
 
-            <div className="space-y-2">
-              <div className="font-mono text-t5" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-                Details
+            {/* Details body */}
+            <div className="flex-1 overflow-auto scrollbar-hide" style={{ padding: 'var(--sp-4)' }}>
+              {/* Info card */}
+              <div style={{ marginBottom: 'var(--sp-4)' }}>
+                <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Details</div>
+                <div
+                  style={{
+                    background: 'var(--color-d2)',
+                    border: '1px solid var(--b1)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: 'var(--sp-3) var(--sp-4)',
+                  }}
+                >
+                  {[
+                    { label: 'Line', value: activeLine },
+                    { label: 'Type', value: currentChat.isGroup ? 'Group' : 'Direct' },
+                    { label: 'Unread', value: String(currentChat.unreadCount) },
+                    { label: 'Mode', value: currentLine?.mode ?? '—' },
+                  ].map((item, i, arr) => (
+                    <div
+                      key={item.label}
+                      className="flex justify-between"
+                      style={{
+                        padding: 'var(--sp-2) 0',
+                        ...(i < arr.length - 1 ? { borderBottom: '1px solid var(--b1)' } : {}),
+                      }}
+                    >
+                      <span className="c-label">{item.label}</span>
+                      <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{item.value}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="rounded-md p-3 text-sm" style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)' }}>
-                <div className="flex justify-between mb-2">
-                  <span className="text-t4">Line</span>
-                  <span className="text-t2 font-mono text-xs">{activeLine}</span>
-                </div>
-                <div className="flex justify-between mb-2">
-                  <span className="text-t4">Type</span>
-                  <span className="text-t2 font-mono text-xs">{currentChat.isGroup ? 'Group' : 'Direct'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-t4">Unread</span>
-                  <span className="text-t2 font-mono text-xs">{currentChat.unreadCount}</span>
-                </div>
-              </div>
-            </div>
 
-            <div className="space-y-2">
-              <div className="font-mono text-t5" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-                Actions
+              {/* Quick actions */}
+              <div>
+                <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Actions</div>
+                <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+                  <button className="c-btn c-btn-success w-full justify-center">
+                    <UserCheck size={14} strokeWidth={1.75} /> Allow Contact
+                  </button>
+                  <button className="c-btn c-btn-danger w-full justify-center">
+                    <Ban size={14} strokeWidth={1.75} /> Block Contact
+                  </button>
+                  <div style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
+                    <button className="c-btn c-btn-ghost w-full justify-center">
+                      <Shield size={14} strokeWidth={1.75} /> View Access List
+                    </button>
+                  </div>
+                </div>
               </div>
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-s-ok hover:bg-d3 cursor-pointer transition-colors"
-                style={{ border: '1px solid var(--b1)' }}
-              >
-                <UserCheck size={14} strokeWidth={1.75} /> Allow Contact
-              </button>
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-s-crit hover:bg-d3 cursor-pointer transition-colors"
-                style={{ border: '1px solid var(--b1)' }}
-              >
-                <Ban size={14} strokeWidth={1.75} /> Block Contact
-              </button>
             </div>
           </>
         ) : (
-          <div className="text-center py-12 text-t4 text-sm">
-            Select a conversation to see details
+          <div className="flex-1 flex items-center justify-center" style={{ padding: 'var(--sp-4)' }}>
+            <div className="text-center text-t5" style={{ fontSize: 'var(--font-size-sm)' }}>
+              Select a conversation to see details
+            </div>
           </div>
         )}
       </div>

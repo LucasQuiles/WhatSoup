@@ -1,23 +1,7 @@
-import { createContext, useContext, useState, useCallback, type FC, type ReactNode } from 'react'
+import { useState, useCallback, type FC, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import Toast from '../components/Toast'
-
-type ToastVariant = 'success' | 'error' | 'info'
-
-interface ToastItem {
-  id: number
-  variant: ToastVariant
-  message: string
-}
-
-interface ToastContextValue {
-  toast: (variant: ToastVariant, message: string) => void
-  success: (message: string) => void
-  error: (message: string) => void
-  info: (message: string) => void
-}
-
-const ToastContext = createContext<ToastContextValue | null>(null)
+import { ToastContext, type ToastVariant, type ToastItem, type ToastContextValue } from './toast-context'
 
 let nextId = 0
 
@@ -47,7 +31,7 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
       {/* Toast stack — fixed bottom-right */}
       <div
         className="fixed z-50 flex flex-col gap-2"
-        style={{ bottom: '20px', right: '20px', pointerEvents: 'none' }}
+        style={{ bottom: 'var(--sp-5)', right: 'var(--sp-5)', pointerEvents: 'none' }}
       >
         <AnimatePresence>
           {toasts.map(t => (
@@ -72,8 +56,3 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
   )
 }
 
-export function useToast(): ToastContextValue {
-  const ctx = useContext(ToastContext)
-  if (!ctx) throw new Error('useToast must be used within a ToastProvider')
-  return ctx
-}

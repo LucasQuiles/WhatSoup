@@ -17,9 +17,9 @@ const icons: Record<ToastVariant, typeof CheckCircle2> = {
 }
 
 const borderColor: Record<ToastVariant, string> = {
-  success: 'rgba(45,212,168,0.2)',
-  error: 'rgba(252,129,129,0.2)',
-  info: 'rgba(56,189,248,0.2)',
+  success: 'var(--s-ok-soft)',
+  error: 'var(--s-crit-soft)',
+  info: 'var(--m-cht-soft)',
 }
 
 const iconColor: Record<ToastVariant, string> = {
@@ -40,13 +40,13 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
     <div
       className="flex items-center gap-2.5"
       style={{
-        padding: '10px 16px',
-        borderRadius: '8px',
-        fontSize: '0.85rem',
+        padding: '10px var(--sp-4)',
+        borderRadius: 'var(--radius-md)',
+        fontSize: 'var(--font-size-body)',
         fontWeight: 500,
         border: `1px solid ${borderColor[variant]}`,
         background: 'var(--color-d3)',
-        boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+        boxShadow: 'var(--shadow-md)',
         maxWidth: '360px',
       }}
     >
@@ -54,7 +54,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
       <span className="flex-1 text-t2">{message}</span>
       <button
         onClick={onClose}
-        className="text-t5 hover:text-t3 cursor-pointer transition-colors"
+        className="text-t5 hover:text-t3 cursor-pointer c-hover"
       >
         <X size={14} strokeWidth={1.75} />
       </button>

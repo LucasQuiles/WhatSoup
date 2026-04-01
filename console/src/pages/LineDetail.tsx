@@ -2,18 +2,21 @@ import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
-import { useToast } from '../hooks/use-toast'
+import { formatRelative, formatTime, formatChatTime } from '../lib/format-time'
+import { getInitials } from '../lib/text-utils'
+import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
+import { useToast } from '../hooks/toast-context'
 import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import EmptyState from '../components/EmptyState'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
 import {
-  ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
+  ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield, Send,
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
   User, Users, UserPlus, UserX,
-  RotateCw, MessageSquareOff, Bot, ChevronsUp,
+  RotateCw, MessageSquareOff, Bot, ChevronsUp, Power,
 } from 'lucide-react'
-import type { Mode, ChatItem, AccessEntry, LogEntry } from '../mock-data'
+import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../mock-data'
 
 const TABS = [
   { id: 'summary', label: 'Summary', icon: Info },
@@ -35,9 +38,9 @@ function PipelineNode({ label, value, color, active }: { label: string; value?: 
       <span
         className="font-mono font-medium"
         style={{
-          padding: '5px 12px',
-          borderRadius: '4px',
-          fontSize: '0.65rem',
+          padding: '5px var(--sp-3)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: 'var(--font-size-label)',
           background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
           color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
           border: active ? `1px solid var(--m-${modeKey}-soft)` : '1px solid transparent',
@@ -46,7 +49,7 @@ function PipelineNode({ label, value, color, active }: { label: string; value?: 
         {label}
       </span>
       {value && (
-        <span className="font-mono text-t4" style={{ fontSize: '0.6rem' }}>
+        <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
           {value}
         </span>
       )}
@@ -55,7 +58,7 @@ function PipelineNode({ label, value, color, active }: { label: string; value?: 
 }
 
 function PipelineArrow() {
-  return <span className="text-t5 font-mono flex-shrink-0" style={{ fontSize: '0.7rem' }}>→</span>
+  return <span className="text-t5 font-mono flex-shrink-0" style={{ fontSize: 'var(--font-size-sm)' }}>→</span>
 }
 
 /* ═══ Main Component ═══ */
@@ -91,15 +94,15 @@ export default function LineDetail() {
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
 
   return (
-    <div className="flex-1 flex flex-col">
-      {/* ═══ Line Header — matches c-line-header from design system ═══ */}
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
+      {/* ═══ Line Header ═══ */}
       <div
-        className="flex items-center gap-4 px-10 py-4"
-        style={{ borderBottom: '1px solid var(--b1)', background: 'var(--color-d2)' }}
+        className="flex items-center gap-4 c-toolbar flex-shrink-0"
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', borderRadius: 'var(--radius-lg)' }}
       >
         <button
           onClick={() => navigate('/')}
-          className="text-t4 hover:text-t1 transition-colors cursor-pointer"
+          className="text-t4 hover:text-t1 c-hover cursor-pointer"
         >
           <ArrowLeft size={18} strokeWidth={1.75} />
         </button>
@@ -111,31 +114,31 @@ export default function LineDetail() {
             line.status === 'degraded' ? 'bg-s-warn' : 'bg-s-crit'
           }`}
           style={{
-            width: '10px',
-            height: '10px',
+            width: 'var(--dot-header)',
+            height: 'var(--dot-header)',
             boxShadow: line.status === 'online'
-              ? '0 0 8px rgba(45,212,168,0.3)'
+              ? '0 0 12px var(--s-ok-glow)'
               : line.status === 'degraded'
-              ? '0 0 8px rgba(246,173,85,0.3)'
-              : '0 0 8px rgba(252,129,129,0.3)',
+              ? '0 0 12px var(--s-warn-glow)'
+              : '0 0 12px var(--s-crit-glow)',
           }}
         />
 
         {/* Identity */}
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <h1 className="text-t1 font-extrabold font-sans" style={{ fontSize: '1.4rem', letterSpacing: '-0.04em' }}>
+            <h1 className="text-t1 font-extrabold font-sans" style={{ fontSize: 'var(--font-size-xl)', letterSpacing: 'var(--tracking-tight)' }}>
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
           </div>
-          <div className="font-mono text-t3" style={{ fontSize: '0.78rem' }}>
+          <div className="font-mono text-t3" style={{ fontSize: 'var(--font-size-data)' }}>
             {line.phone}
           </div>
         </div>
 
         {/* Meta — mono, muted */}
-        <div className="flex gap-4 font-mono text-t4" style={{ fontSize: '0.72rem' }}>
+        <div className="flex gap-4 font-mono text-t4" style={{ fontSize: 'var(--font-size-sm)' }}>
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
           <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
@@ -145,17 +148,21 @@ export default function LineDetail() {
         <HeartbeatStrip beats={line.heartbeat} />
         <button
           onClick={() => toast.info(`Restarting ${line.name}...`)}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-t3 hover:text-t1 hover:bg-d5 cursor-pointer transition-colors"
-          style={{ fontSize: '0.65rem', border: '1px solid var(--b2)' }}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-t3 hover:text-t1 hover:bg-d5 cursor-pointer c-hover"
+          style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
         >
           <RotateCw size={11} strokeWidth={1.75} /> Restart
         </button>
       </div>
 
-      {/* ═══ Tab bar ═══ */}
+      {/* ═══ Tab bar + content container ═══ */}
       <div
-        className="flex gap-0 px-10"
-        style={{ borderBottom: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+        className="flex-1 flex flex-col min-h-0"
+        style={{ background: 'var(--color-d1)', border: '1px solid var(--b1)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}
+      >
+      <div
+        className="flex gap-0 flex-shrink-0"
+        style={{ padding: '0 var(--sp-4)', borderBottom: '1px solid var(--b1)', background: 'var(--color-d2)' }}
       >
         {TABS.map(tab => {
           const Icon = tab.icon
@@ -165,20 +172,20 @@ export default function LineDetail() {
             <button
               key={tab.id}
               onClick={() => !isDeferred && setActiveTab(tab.id)}
-              className={`flex items-center gap-2 font-sans transition-colors relative ${
+              className={`flex items-center gap-2 font-sans c-hover relative ${
                 isDeferred
                   ? 'text-t5 cursor-default'
                   : isActive
                   ? 'text-t1 cursor-pointer'
                   : 'text-t4 hover:text-t3 cursor-pointer'
               }`}
-              style={{ padding: '10px 16px', fontSize: '0.78rem', fontWeight: 500 }}
+              style={{ padding: '10px var(--sp-4)', fontSize: 'var(--font-size-data)', fontWeight: 500 }}
               title={isDeferred ? 'Coming in Phase 2' : undefined}
             >
               <Icon size={15} strokeWidth={1.75} />
               {tab.label}
               {isDeferred && (
-                <span className="font-mono text-t5" style={{ fontSize: '0.55rem', marginLeft: '-4px' }}>
+                <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)', marginLeft: '-4px' }}>
                   P2
                 </span>
               )}
@@ -194,7 +201,7 @@ export default function LineDetail() {
       </div>
 
       {/* ═══ Tab content ═══ */}
-      <div className="flex-1 overflow-auto" style={{ padding: '24px 40px 48px' }}>
+      <div className="flex-1 overflow-auto scrollbar-hide" style={{ padding: 'var(--sp-5)' }}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -220,53 +227,222 @@ export default function LineDetail() {
           </motion.div>
         </AnimatePresence>
       </div>
+      </div>
     </div>
   )
 }
 
-/* ═══ Summary Tab ═══ */
-function SummaryTab({ line }: { line: any }) {
+/* ═══ Static config data — hoisted to module scope for stable references ═══ */
+const CHAT_CONFIG = [
+  { key: 'model', value: 'claude-sonnet-4-20250514', type: 'string' as const },
+  { key: 'systemPrompt', value: 'You are a helpful support...', type: 'string' as const },
+  { key: 'maxTokens', value: '4096', type: 'number' as const },
+  { key: 'tokenBudget', value: '100000', type: 'number' as const },
+  { key: 'rateLimitPerHour', value: '30', type: 'number' as const },
+  { key: 'pineconeIndex', value: 'bes-knowledge-base', type: 'string' as const },
+  { key: 'ragEnabled', value: 'true', type: 'boolean' as const },
+]
+const AGENT_CONFIG = [
+  { key: 'sessionScope', value: 'per_chat', type: 'string' as const },
+  { key: 'cwd', value: '~/LAB/agent-workspace', type: 'path' as const },
+  { key: 'instructionsPath', value: 'CLAUDE.md', type: 'path' as const },
+  { key: 'sandbox', value: 'true', type: 'boolean' as const },
+  { key: 'sandboxPerChat', value: 'true', type: 'boolean' as const },
+  { key: 'mcpServers', value: '3', type: 'number' as const },
+  { key: 'perUserDirs', value: 'true', type: 'boolean' as const },
+]
+const TYPE_COLOR: Record<string, string> = {
+  string: 'var(--color-m-pas)', number: 'var(--color-s-warn)',
+  boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
+}
+
+/* ═══ Summary Tab — KPI strip + pipeline strip + config/actions columns ═══ */
+function SummaryTab({ line }: { line: LineInstance }) {
+  const toast = useToast()
+  const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
     { label: 'UPTIME', value: line.uptime ?? '—', color: 'text-t1' },
     { label: 'MESSAGES', value: (line.messagesToday ?? 0).toLocaleString(), color: 'text-t1' },
     { label: 'MODE', value: line.mode, color: line.mode === 'passive' ? 'text-m-pas' : line.mode === 'chat' ? 'text-m-cht' : 'text-m-agt' },
-    { label: 'ACCESS MODE', value: line.accessMode ?? '—', color: 'text-t2' },
-    { label: 'LAST ACTIVE', value: line.lastActive ?? '—', color: 'text-t3' },
+    { label: 'ACCESS', value: line.accessMode ?? '—', color: 'text-t2' },
+    { label: 'ACTIVE', value: line.lastActive ? formatRelative(line.lastActive) : '—', color: 'text-t3' },
   ]
 
+  const pipelineNodes = line.mode === 'passive'
+    ? [{ label: 'Inbound', active: true }, { label: 'Store', active: true }, { label: 'Done', active: false }]
+    : line.mode === 'chat'
+    ? [{ label: 'Inbound', active: true }, { label: 'Access', active: true }, { label: 'Queue', active: (line.queueDepth ?? 0) > 0 }, { label: 'Enrich', active: false }, { label: 'API', active: true }, { label: 'Outbound', active: false }]
+    : [{ label: 'Inbound', active: true }, { label: 'Router', active: true }, { label: 'SDK Loop', active: (line.activeSessions ?? 0) > 0 }, { label: 'Tools', active: (line.activeSessions ?? 0) > 0 }, { label: 'Outbound', active: false }]
+
+  const config = line.mode === 'chat' ? CHAT_CONFIG : line.mode === 'agent' ? AGENT_CONFIG : null
+
   return (
-    <div className="grid grid-cols-3 gap-4">
-      {cards.map((card, i) => (
+    <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+      {/* Row 1: KPI cards — 6-wide single row */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(6, 1fr)',
+          gap: 'var(--sp-2)',
+          background: 'var(--color-d1)',
+          border: '1px solid var(--b1)',
+          borderRadius: 'var(--radius-lg)',
+          padding: 'var(--sp-2)',
+        }}
+      >
+        {cards.map((card, i) => (
+          <motion.div
+            key={card.label}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: i * 0.04, ease: [0.22, 1, 0.36, 1] }}
+            style={{
+              padding: 'var(--sp-3) var(--sp-4)',
+              background: 'var(--color-d2)',
+              border: '1px solid var(--b1)',
+              borderRadius: 'var(--radius-md)',
+            }}
+          >
+            <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>
+              {card.label}
+            </div>
+            <div className={`font-mono font-semibold ${card.color}`} style={{ fontSize: 'var(--font-size-lg)', letterSpacing: 'var(--tracking-tight)' }}>
+              {card.value}
+            </div>
+          </motion.div>
+        ))}
+      </div>
+
+      {/* Row 2: Pipeline — full-width strip */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
+        className="flex items-center justify-between"
+        style={{
+          background: 'var(--color-d2)',
+          border: '1px solid var(--b1)',
+          borderRadius: 'var(--radius-lg)',
+          padding: 'var(--sp-4) var(--sp-5)',
+        }}
+      >
+        <div className="c-col-header text-t4 flex-shrink-0" style={{ marginRight: 'var(--sp-5)' }}>
+          Pipeline
+        </div>
+        <div className="flex items-center flex-1 justify-center flex-wrap" style={{ gap: 'var(--sp-2)' }}>
+          {pipelineNodes.map((node, i) => (
+            <span key={node.label} className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+              {i > 0 && <PipelineArrow />}
+              <PipelineNode label={node.label} color={modeColor} active={node.active} />
+            </span>
+          ))}
+        </div>
+      </motion.div>
+
+      {/* Row 3: Config + Actions side-by-side */}
+      <div className="flex" style={{ gap: 'var(--sp-3)' }}>
+        {/* Configuration panel */}
         <motion.div
-          key={card.label}
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, delay: i * 0.05, ease: [0.22, 1, 0.36, 1] }}
-          className="rounded-lg"
+          transition={{ duration: 0.4, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
+          className="flex-1"
           style={{
-            padding: '20px 24px',
             background: 'var(--color-d2)',
-            border: '1px solid var(--b2)',
-            boxShadow: 'var(--card-shadow)',
+            border: '1px solid var(--b1)',
+            borderRadius: 'var(--radius-lg)',
+            overflow: 'hidden',
           }}
         >
-          <div className="font-mono text-t4 mb-3" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-            {card.label}
+          <div className="flex items-center justify-between c-toolbar bg-d3" style={{ borderBottom: '1px solid var(--b1)' }}>
+            <span className="c-col-header text-t4">{line.mode} Configuration</span>
+            {config && (
+              <button
+                onClick={() => toast.info('Edit mode coming in Phase 2')}
+                className="c-btn c-btn-ghost"
+                style={{ padding: '3px var(--sp-2)', fontSize: 'var(--font-size-xs)' }}
+              >
+                Edit
+              </button>
+            )}
           </div>
-          <div className={`font-mono font-semibold ${card.color}`} style={{ fontSize: '1.4rem', letterSpacing: '-0.03em' }}>
-            {card.value}
+          {config ? (
+            <div style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
+              {config.map((entry, i) => (
+                <div key={entry.key} className="flex items-center justify-between" style={{ padding: '6px 0', ...(i < config.length - 1 ? { borderBottom: '1px solid var(--b1)' } : {}) }}>
+                  <span className="c-label">{entry.key}</span>
+                  <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-t4" style={{ padding: 'var(--sp-5)', fontSize: 'var(--font-size-sm)' }}>
+              Passive mode — no configuration required.
+            </div>
+          )}
+        </motion.div>
+
+        {/* Actions / Controls panel */}
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
+          style={{
+            width: 'var(--panel-actions)',
+            flexShrink: 0,
+            background: 'var(--color-d2)',
+            border: '1px solid var(--b1)',
+            borderRadius: 'var(--radius-lg)',
+            overflow: 'hidden',
+          }}
+        >
+          <div className="c-toolbar bg-d3" style={{ borderBottom: '1px solid var(--b1)' }}>
+            <span className="c-col-header text-t4">Actions</span>
+          </div>
+          <div className="flex flex-col" style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-2)' }}>
+            <button
+              onClick={() => toast.info(`Restarting ${line.name}...`)}
+              className="c-btn w-full justify-center"
+              style={{ fontSize: 'var(--font-size-label)' }}
+            >
+              <RotateCw size={13} strokeWidth={1.75} /> Restart Instance
+            </button>
+            {line.mode !== 'passive' && (
+              <button
+                onClick={() => toast.info('Config editor coming in Phase 2')}
+                className="c-btn w-full justify-center"
+                style={{ fontSize: 'var(--font-size-label)' }}
+              >
+                <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
+              </button>
+            )}
+            <button
+              onClick={() => toast.info('Mode switching coming in Phase 2')}
+              className="c-btn w-full justify-center"
+              style={{ fontSize: 'var(--font-size-label)' }}
+            >
+              <GitBranch size={13} strokeWidth={1.75} /> Change Mode
+            </button>
+            <div style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
+              <button
+                onClick={() => toast.error(`Stopping ${line.name}...`)}
+                className="c-btn c-btn-danger w-full justify-center"
+                style={{ fontSize: 'var(--font-size-label)' }}
+              >
+                <Power size={13} strokeWidth={1.75} /> Stop Instance
+              </button>
+            </div>
           </div>
         </motion.div>
-      ))}
+      </div>
     </div>
   )
 }
 
 /* ═══ Config Block — c-config from components.html ═══ */
 function ConfigValue({ value, type }: { value: string; type: 'string' | 'number' | 'boolean' | 'path' }) {
-  const colorMap = { string: 'var(--color-m-pas)', number: 'var(--color-s-warn)', boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)' }
-  return <span style={{ color: colorMap[type] }}>{value}</span>
+  return <span style={{ color: TYPE_COLOR[type] }}>{value}</span>
 }
 
 /* ═══ Mode Tab ═══ */
@@ -274,8 +450,8 @@ function ModeTab({ mode }: { mode: Mode }) {
   if (mode === 'passive') {
     return (
       <div
-        className="rounded-[10px]"
-        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+        style={{ borderRadius: 'var(--radius-lg)' }}
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
       >
         <EmptyState
           icon={<Bot size={40} strokeWidth={1.25} />}
@@ -308,10 +484,10 @@ function ModeTab({ mode }: { mode: Mode }) {
 
   return (
     <div
-      className="rounded-[10px]"
-      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+      style={{ borderRadius: 'var(--radius-lg)' }}
+      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
     >
-      <div className="font-mono text-t5 mb-5" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+      <div className="c-col-header mb-5">
         {mode} Configuration
       </div>
       {/* c-config block — syntax-highlighted JSON-like display */}
@@ -320,9 +496,9 @@ function ModeTab({ mode }: { mode: Mode }) {
         style={{
           background: 'var(--color-d1)',
           border: '1px solid var(--b1)',
-          borderRadius: '8px',
-          padding: '14px 16px',
-          fontSize: '0.78rem',
+          borderRadius: 'var(--radius-md)',
+          padding: '14px var(--sp-4)',
+          fontSize: 'var(--font-size-data)',
           color: 'var(--color-t2)',
           lineHeight: 1.7,
         }}
@@ -344,12 +520,12 @@ function ModeTab({ mode }: { mode: Mode }) {
 }
 
 /* ═══ Pipeline Tab ═══ */
-function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: any; modeColor: string }) {
+function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance; modeColor: string }) {
   if (mode === 'passive') {
     return (
       <div
-        className="rounded-[10px]"
-        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+        style={{ borderRadius: 'var(--radius-lg)' }}
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12">
           <PipelineNode label="Inbound" color={modeColor} active />
@@ -365,8 +541,8 @@ function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: any; modeCol
     const queueDepth = line.health?.runtime?.chat?.queueDepth ?? 0
     return (
       <div
-        className="rounded-[10px]"
-        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+        style={{ borderRadius: 'var(--radius-lg)' }}
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
           <PipelineNode label="Inbound" color={modeColor} active />
@@ -387,8 +563,8 @@ function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: any; modeCol
   const sessions = line.health?.runtime?.agent?.activeSessions ?? 0
   return (
     <div
-      className="rounded-[10px]"
-      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+      style={{ borderRadius: 'var(--radius-lg)' }}
+      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
     >
       <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
         <PipelineNode label="Inbound" color={modeColor} active />
@@ -421,18 +597,18 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
   }
 
   const statusBadge: Record<string, { bg: string; color: string; label: string }> = {
-    allowed: { bg: 'rgba(45,212,168,0.1)', color: 'var(--color-s-ok)', label: 'allowed' },
-    blocked: { bg: 'rgba(252,129,129,0.1)', color: 'var(--color-s-crit)', label: 'blocked' },
-    pending: { bg: 'rgba(246,173,85,0.1)', color: 'var(--color-s-warn)', label: 'pending' },
-    seen:    { bg: 'rgba(246,173,85,0.1)', color: 'var(--color-s-warn)', label: 'seen' },
+    allowed: { bg: 'var(--s-ok-wash)', color: 'var(--color-s-ok)', label: 'allowed' },
+    blocked: { bg: 'var(--s-crit-wash)', color: 'var(--color-s-crit)', label: 'blocked' },
+    pending: { bg: 'var(--s-warn-wash)', color: 'var(--color-s-warn)', label: 'pending' },
+    seen:    { bg: 'var(--s-warn-wash)', color: 'var(--color-s-warn)', label: 'seen' },
   }
 
   const renderItem = (entry: AccessEntry, showActions: 'pending' | 'allowed' | 'blocked') => (
     <div
       key={entry.subjectId}
-      className="flex items-center gap-3 hover:bg-d3 transition-colors"
+      className="flex items-center gap-3 hover:bg-d3 c-hover"
       style={{
-        padding: '10px 16px',
+        padding: '10px var(--sp-4)',
         borderBottom: '1px solid var(--b1)',
         ...(showActions === 'pending' ? { background: 'var(--s-warn-wash)' } : {}),
         ...(showActions === 'blocked' ? { opacity: 0.6 } : {}),
@@ -441,17 +617,17 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       {/* Avatar — 32px circle with icon (c-access-avatar) */}
       <div
         className="rounded-full flex items-center justify-center flex-shrink-0"
-        style={{ width: '32px', height: '32px', background: 'var(--color-d5)' }}
+        style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', background: 'var(--color-d5)' }}
       >
         {statusIcon(entry.status, entry.subjectType)}
       </div>
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="font-sans font-medium text-t2" style={{ fontSize: '0.85rem' }}>
+        <div className="font-sans font-medium text-t2" style={{ fontSize: 'var(--font-size-body)' }}>
           {entry.subjectName}
         </div>
-        <div className="font-mono text-t4" style={{ fontSize: '0.72rem' }}>
+        <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-sm)' }}>
           {entry.subjectId}
         </div>
       </div>
@@ -460,9 +636,9 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       <span
         className="font-mono font-medium flex-shrink-0"
         style={{
-          fontSize: '0.7rem',
-          padding: '2px 8px',
-          borderRadius: '3px',
+          fontSize: 'var(--font-size-sm)',
+          padding: '2px var(--sp-2)',
+          borderRadius: 'var(--radius-sm)',
           background: statusBadge[entry.status]?.bg,
           color: statusBadge[entry.status]?.color,
         }}
@@ -475,15 +651,15 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
         <div className="flex gap-1.5">
           <button
             onClick={() => toast.success(`Allowed ${entry.subjectName}`)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer transition-colors"
-            style={{ fontSize: '0.65rem', border: '1px solid var(--b2)' }}
+            className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
+            style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
           >
             <UserCheck size={11} strokeWidth={1.75} /> Allow
           </button>
           <button
             onClick={() => toast.error(`Blocked ${entry.subjectName}`)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer transition-colors"
-            style={{ fontSize: '0.65rem', border: '1px solid var(--b2)' }}
+            className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
+            style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
           >
             <Ban size={11} strokeWidth={1.75} /> Block
           </button>
@@ -492,8 +668,8 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       {showActions === 'allowed' && (
         <button
           onClick={() => toast.error(`Blocked ${entry.subjectName}`)}
-          className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer transition-colors"
-          style={{ fontSize: '0.65rem', border: '1px solid var(--b2)' }}
+          className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
+          style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
         >
           <Ban size={11} strokeWidth={1.75} />
         </button>
@@ -501,8 +677,8 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       {showActions === 'blocked' && (
         <button
           onClick={() => toast.success(`Allowed ${entry.subjectName}`)}
-          className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer transition-colors"
-          style={{ fontSize: '0.65rem', border: '1px solid var(--b2)' }}
+          className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
+          style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
         >
           <UserCheck size={11} strokeWidth={1.75} />
         </button>
@@ -516,8 +692,8 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       {pending.length > 0 && (
         <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--b1)' }}>
           <div
-            className="font-mono text-t4 font-medium"
-            style={{ fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '8px 14px', borderBottom: '1px solid var(--b1)', background: 'var(--color-d3)' }}
+            className="c-col-header text-t4"
+            style={{ padding: '8px 14px', borderBottom: '1px solid var(--b1)', background: 'var(--color-d3)' }}
           >
             Pending ({pending.length})
           </div>
@@ -529,8 +705,8 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--b1)' }}>
           <div
-            className="font-mono text-t4 font-medium"
-            style={{ fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '8px 14px', borderBottom: '1px solid var(--b1)', background: 'var(--color-d3)' }}
+            className="c-col-header text-t4"
+            style={{ padding: '8px 14px', borderBottom: '1px solid var(--b1)', background: 'var(--color-d3)' }}
           >
             Allowed ({allowed.length})
           </div>
@@ -538,13 +714,13 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
         </div>
         <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--b1)' }}>
           <div
-            className="font-mono text-t4 font-medium"
-            style={{ fontSize: '0.65rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '8px 14px', borderBottom: '1px solid var(--b1)', background: 'var(--color-d3)' }}
+            className="c-col-header text-t4"
+            style={{ padding: '8px 14px', borderBottom: '1px solid var(--b1)', background: 'var(--color-d3)' }}
           >
             Blocked ({blocked.length})
           </div>
           {blocked.length === 0 ? (
-            <div className="text-t5 text-center py-6 font-mono" style={{ fontSize: '0.75rem' }}>
+            <div className="text-t5 text-center py-6 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
               No blocked contacts
             </div>
           ) : (
@@ -557,144 +733,159 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
 }
 
 /* ═══ History Tab — matches chat component patterns ═══ */
-function getInitials(name: string): string {
-  return name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
-}
 
 function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
-  chats: ChatItem[]; messages: any[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode
+  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode
 }) {
-  const outgoingBg = mode === 'agent' ? 'rgba(167,139,250,0.15)' : 'rgba(56,189,248,0.15)'
+  const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
     <div
-      className="flex gap-0 rounded-lg overflow-hidden"
-      style={{ border: '1px solid var(--b1)', height: 'calc(100vh - 240px)' }}
+      className="flex overflow-hidden"
+      style={{ border: '1px solid var(--b1)', borderRadius: 'var(--radius-lg)', height: '100%' }}
     >
-      {/* Chat list — c-chat-list pattern */}
+      {/* Chat list */}
       <div
-        className="flex-shrink-0 overflow-auto"
-        style={{ width: '288px', borderRight: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+        className="flex-shrink-0 flex flex-col"
+        style={{ width: 'var(--panel-history)', borderRight: '1px solid var(--b1)', background: 'var(--color-d1)' }}
       >
-        {chats.map(chat => {
-          const isSelected = selectedChat === chat.conversationKey
-          return (
-            <div
-              key={chat.conversationKey}
-              onClick={() => onSelectChat(chat.conversationKey)}
-              className={`flex gap-3 cursor-pointer transition-colors ${isSelected ? 'bg-d4' : 'hover:bg-d3'}`}
-              style={{
-                padding: '12px 16px',
-                borderBottom: '1px solid var(--b1)',
-                ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: '14px' } : {}),
-              }}
-            >
-              {/* Avatar — 36px circle */}
+        {/* Chat list header */}
+        <div
+          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
+          style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+        >
+          <span className="c-heading">Conversations</span>
+          <span className="c-label">{chats.length} chats</span>
+        </div>
+
+        <div className="flex-1 overflow-auto scrollbar-hide">
+          {chats.map(chat => {
+            const isSelected = selectedChat === chat.conversationKey
+            return (
               <div
-                className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
-                style={{ width: '36px', height: '36px', background: 'var(--color-d5)', fontSize: '0.72rem' }}
+                key={chat.conversationKey}
+                onClick={() => onSelectChat(chat.conversationKey)}
+                className={`flex cursor-pointer c-chat-item ${isSelected ? 'active' : ''}`}
+                style={{
+                  padding: 'var(--sp-3) var(--sp-4)',
+                  gap: 'var(--sp-3)',
+                  borderBottom: '1px solid var(--b1)',
+                  ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : {}),
+                }}
               >
-                {getInitials(chat.name)}
-              </div>
-
-              {/* Body */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-0.5">
-                  <span className="text-t1 font-medium truncate" style={{ fontSize: '0.85rem' }}>
-                    {chat.name}
-                  </span>
+                <div
+                  className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
+                  style={{ width: 'var(--avatar-md)', height: 'var(--avatar-md)', background: 'var(--color-d5)', fontSize: 'var(--font-size-sm)' }}
+                >
+                  {getInitials(chat.name)}
                 </div>
-                <div className="text-t3 truncate" style={{ fontSize: '0.78rem' }}>
-                  {chat.lastMessagePreview}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between" style={{ marginBottom: '2px' }}>
+                    <span className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--chat-name-max)' }}>
+                      {chat.name}
+                    </span>
+                    <span className="c-label flex-shrink-0" style={{ marginLeft: 'var(--sp-2)' }}>
+                      {formatChatTime(chat.lastMessageAt)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="text-t4 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
+                      {chat.lastMessagePreview}
+                    </div>
+                    {chat.unreadCount > 0 && (
+                      <span
+                        className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0"
+                        style={{ fontSize: 'var(--font-size-xs)', width: 'var(--badge-unread)', height: 'var(--badge-unread)', marginLeft: 'var(--sp-2)' }}
+                      >
+                        {chat.unreadCount}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
-
-              {/* Right — time + badge */}
-              <div className="flex flex-col items-end gap-1 flex-shrink-0 self-center">
-                <span className="font-mono text-t4" style={{ fontSize: '0.65rem' }}>
-                  {chat.lastMessageAt}
-                </span>
-                {chat.unreadCount > 0 && (
-                  <span
-                    className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full"
-                    style={{ fontSize: '0.6rem', width: '20px', height: '20px' }}
-                  >
-                    {chat.unreadCount}
-                  </span>
-                )}
-              </div>
-            </div>
-          )
-        })}
+            )
+          })}
+        </div>
       </div>
 
-      {/* Messages — c-msg pattern */}
-      <div className="flex-1 flex flex-col" style={{ background: 'var(--color-d0)' }}>
+      {/* Messages */}
+      <div className="flex-1 flex flex-col min-h-0" style={{ background: 'var(--color-d0)' }}>
         {selectedChat ? (
           <>
-            <div className="flex-1 overflow-auto p-4 flex flex-col gap-1">
+            <div className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
               {messages.length > 0 && (
-                <div className="flex items-center justify-center gap-2 py-3 text-t4 cursor-pointer hover:text-t2 transition-colors">
-                  <ChevronsUp size={16} strokeWidth={1.75} />
-                  <span style={{ fontSize: '0.82rem' }}>Load older messages</span>
+                <div className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5" style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)' }}>
+                  <ChevronsUp size={14} strokeWidth={1.75} />
+                  <span style={{ fontSize: 'var(--font-size-sm)' }}>Load older messages</span>
                 </div>
               )}
-              {messages.map(msg => (
-                <div
-                  key={msg.pk}
-                  className={`flex flex-col max-w-[75%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
-                >
-                  {!msg.fromMe && (
-                    <span className="font-mono text-t4 px-1 mb-0.5" style={{ fontSize: '0.65rem' }}>
-                      {msg.senderName}
-                    </span>
-                  )}
+              <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+                {messages.map(msg => (
                   <div
-                    style={{
-                      padding: '10px 14px',
-                      borderRadius: '12px',
-                      fontSize: '0.85rem',
-                      lineHeight: 1.5,
-                      ...(msg.fromMe
-                        ? { background: outgoingBg, borderBottomRightRadius: '4px' }
-                        : { background: 'var(--color-d4)', borderBottomLeftRadius: '4px' }),
-                    }}
+                    key={msg.pk}
+                    className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
                   >
-                    <div className="text-t1">{msg.content}</div>
+                    {!msg.fromMe && (
+                      <span className="c-label" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)' }}>
+                        {msg.senderName}
+                      </span>
+                    )}
+                    <div
+                      style={{
+                        padding: 'var(--sp-2h) var(--msg-pad-h)',
+                        borderRadius: 'var(--radius-lg)',
+                        fontSize: 'var(--font-size-body)',
+                        lineHeight: 1.6,
+                        ...(msg.fromMe
+                          ? { background: outgoingBg, borderBottomRightRadius: 'var(--radius-sm)' }
+                          : { background: 'var(--color-d3)', borderBottomLeftRadius: 'var(--radius-sm)' }),
+                      }}
+                    >
+                      <div className="text-t1">{msg.content}</div>
+                    </div>
+                    <span
+                      className={`font-mono text-t5 ${msg.fromMe ? 'text-right' : ''}`}
+                      style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)' }}
+                    >
+                      {formatTime(msg.timestamp)}
+                    </span>
                   </div>
-                  <span
-                    className={`font-mono text-t5 mt-0.5 px-1 ${msg.fromMe ? 'text-right' : ''}`}
-                    style={{ fontSize: '0.62rem' }}
-                  >
-                    {msg.timestamp}
-                  </span>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
 
-            {/* Input area */}
+            {/* Input bar — matches Inbox pattern */}
             <div
-              className="flex gap-2 p-3"
-              style={{ borderTop: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+              className="flex flex-shrink-0"
+              style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
             >
               <input
-                className="flex-1 rounded-md px-3 py-2 text-sm text-t2 font-sans placeholder-t5 outline-none"
-                style={{ background: 'var(--color-d2)', border: '1px solid var(--b2)' }}
+                className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
+                style={{
+                  fontSize: 'var(--font-size-body)',
+                  padding: 'var(--sp-2h) var(--sp-4)',
+                  background: 'var(--color-d1)',
+                  border: '1px solid var(--b2)',
+                  borderRadius: 'var(--radius-md)',
+                }}
                 placeholder="Type a reply..."
               />
               <button
-                className="flex items-center gap-1.5 px-4 py-2 rounded-md font-sans font-medium cursor-pointer transition-opacity hover:opacity-90"
-                style={{ fontSize: '0.82rem', background: 'var(--color-m-cht)', color: 'var(--color-d0)' }}
+                className="c-btn c-btn-primary flex-shrink-0"
+                style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
               >
+                <Send size={15} strokeWidth={2} />
                 Send
               </button>
             </div>
           </>
         ) : (
-          <EmptyState
-            icon={<MessageSquareOff size={40} strokeWidth={1.25} />}
-            title="No messages yet"
-            description="Select a conversation from the list to view messages."
-          />
+          <div className="flex-1 flex items-center justify-center">
+            <EmptyState
+              icon={<MessageSquareOff size={40} strokeWidth={1.25} />}
+              title="No messages yet"
+              description="Select a conversation from the list to view messages."
+            />
+          </div>
         )}
       </div>
     </div>
@@ -704,75 +895,71 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
 /* ═══ Logs Tab — matches c-log-line pattern ═══ */
 function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: string; onFilterChange: (f: string) => void }) {
   const levels = ['all', 'info', 'warn', 'error', 'debug']
-  const levelColor: Record<string, string> = {
-    info: 'text-t3',
-    warn: 'text-s-warn',
-    error: 'text-s-crit',
-    debug: 'text-t5',
-  }
-  const levelBg: Record<string, string> = {
-    info: 'var(--color-d5)',
-    warn: 'var(--s-warn-wash)',
-    error: 'var(--s-crit-soft)',
-    debug: 'var(--color-d4)',
-  }
-  const lineBg: Record<string, string | undefined> = {
-    info: undefined,
-    warn: 'var(--s-warn-wash)',
-    error: 'var(--s-crit-wash)',
-    debug: undefined,
-  }
+  // Imported from lib/log-theme — no local duplicates
 
   const filtered = filter === 'all' ? logs : logs.filter(l => l.level === filter)
 
   return (
     <div
-      className="rounded-[10px]"
-      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+      className="overflow-hidden"
+      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: '1px solid var(--b1)' }}
     >
-      {/* Level filter pills */}
-      <div className="flex gap-1 mb-3">
-        {levels.map(l => (
-          <button
-            key={l}
-            onClick={() => onFilterChange(l)}
-            className={`px-2.5 py-1 rounded font-mono cursor-pointer transition-colors ${
-              filter === l ? 'text-t1 bg-d5' : 'text-t4 hover:text-t3'
-            }`}
-            style={{
-              fontSize: '0.65rem',
-              border: `1px solid ${filter === l ? 'var(--b3)' : 'var(--b1)'}`,
-            }}
-          >
-            {l}
-          </button>
-        ))}
+      {/* Toolbar with level filter pills — matches established pattern */}
+      <div
+        className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
+        style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+      >
+        <span className="c-heading">Logs</span>
+        <div className="flex" style={{ gap: 'var(--sp-1)' }}>
+          {levels.map(l => {
+            const isActive = filter === l
+            const pillColor = l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'
+            return (
+              <button
+                key={l}
+                onClick={() => onFilterChange(l)}
+                className={`font-mono cursor-pointer c-hover inline-flex items-center ${
+                  isActive ? `${pillColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
+                }`}
+                style={{
+                  fontSize: 'var(--font-size-label)',
+                  letterSpacing: '0.02em',
+                  padding: '3px var(--sp-2)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: isActive ? '1px solid var(--b3)' : '1px solid var(--b1)',
+                }}
+              >
+                {l}
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {/* Log viewer — c-log-line pattern */}
       <div
         className="rounded-lg overflow-hidden font-mono"
-        style={{ border: '1px solid var(--b1)', background: 'var(--color-d1)', fontSize: '0.78rem' }}
+        style={{ border: '1px solid var(--b1)', background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
       >
         {filtered.map((log, i) => (
           <div
-            key={i}
-            className="flex gap-0 hover:bg-d3 transition-colors"
+            key={`${log.timestamp}-${log.source}-${i}`}
+            className="flex gap-0 hover:bg-d3 c-hover"
             style={{
               borderBottom: '1px solid var(--b1)',
-              background: lineBg[log.level],
+              background: levelLineBg[log.level],
               lineHeight: 1.7,
             }}
           >
             {/* Timestamp */}
-            <div className="px-3 py-1 text-t5 flex-shrink-0" style={{ width: '80px', minWidth: '80px' }}>
-              {log.timestamp.split('T')[1]?.replace('Z', '').slice(0, 8) || log.timestamp}
+            <div className="px-3 py-1 text-t5 flex-shrink-0" style={{ width: 'var(--log-col-time)', minWidth: 'var(--log-col-time)' }}>
+              {formatTime(log.timestamp)}
             </div>
             {/* Level badge */}
-            <div className="px-2 py-1 flex-shrink-0 text-center" style={{ width: '50px', minWidth: '50px' }}>
+            <div className="px-2 py-1 flex-shrink-0 text-center" style={{ width: 'var(--log-col-level)', minWidth: 'var(--log-col-level)' }}>
               <span
                 className={`inline-block px-1.5 py-0.5 rounded font-medium ${levelColor[log.level]}`}
-                style={{ fontSize: '0.7rem', background: levelBg[log.level] }}
+                style={{ fontSize: 'var(--font-size-sm)', background: levelBg[log.level] }}
               >
                 {log.level}
               </span>
@@ -780,7 +967,7 @@ function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: s
             {/* Source */}
             <div
               className="px-2 py-1 text-t5 truncate flex-shrink-0"
-              style={{ width: '100px', minWidth: '100px' }}
+              style={{ width: 'var(--log-col-source)', minWidth: 'var(--log-col-source)' }}
             >
               {log.source}
             </div>

@@ -1,4 +1,4 @@
-import { type FC, useState, useMemo, Fragment } from "react";
+import { type FC, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search } from "lucide-react";
 import { motion } from "framer-motion";
@@ -10,7 +10,7 @@ import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import StatusDot from "../components/StatusDot";
 import ModeBadge from "../components/ModeBadge";
-import HeartbeatStrip from "../components/HeartbeatStrip";
+import { formatRelative } from "../lib/format-time";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -25,7 +25,7 @@ const modeTextClass: Record<Mode, string> = {
 };
 
 function pipelineText(line: LineInstance): string {
-  if (line.mode === "passive") return line.unread ? `${line.unread} unread` : "—";
+  if (line.mode === "passive") return "—";
   if (line.mode === "chat") {
     const parts: string[] = [];
     if (line.queueDepth) parts.push(`queued: ${line.queueDepth}`);
@@ -55,7 +55,6 @@ const SoupKitchen: FC = () => {
   const [activeKpi, setActiveKpi] = useState<KpiFilter>(null);
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [search, setSearch] = useState("");
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
 
@@ -121,35 +120,12 @@ const SoupKitchen: FC = () => {
     return result;
   }, [lines, activeKpi, modeFilter, search]);
 
-  const grouped = useMemo(() => {
-    const groups: { name: string; lines: typeof filtered }[] = [];
-    const seen = new Set<string>();
-    for (const line of filtered) {
-      const g = line.group || 'Other';
-      if (!seen.has(g)) {
-        seen.add(g);
-        groups.push({ name: g, lines: [] });
-      }
-      groups.find(gr => gr.name === g)!.lines.push(line);
-    }
-    return groups;
-  }, [filtered]);
-
-  function toggleGroup(groupName: string) {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(groupName)) next.delete(groupName);
-      else next.add(groupName);
-      return next;
-    });
-  }
-
   function toggleKpi(key: KpiFilter) {
     setActiveKpi((prev) => (prev === key ? null : key));
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0" style={{ padding: "16px", gap: "12px" }}>
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden" style={{ padding: "var(--sp-4)", gap: "var(--sp-3)" }}>
       {/* KPI Strip — Grafana-style stat cards with sparklines */}
       <motion.div
         initial={{ opacity: 0, y: -8 }}
@@ -158,11 +134,12 @@ const SoupKitchen: FC = () => {
         className="flex-shrink-0"
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(6, 1fr)",
-          gap: "1px",
-          background: "var(--b1)",
-          borderRadius: "10px",
-          overflow: "hidden",
+          gridTemplateColumns: "repeat(5, 1fr)",
+          gap: "var(--sp-2)",
+          background: "var(--color-d1)",
+          border: "1px solid var(--b1)",
+          borderRadius: "var(--radius-lg)",
+          padding: "var(--sp-2)",
         }}
       >
         <KpiCard
@@ -203,13 +180,6 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "messages"}
           sparkData={[0.8, 0.65, 0.7, 0.45, 0.55, 0.35, 0.5, 0.25, 0.4, 0.15, 0.25]}
         />
-        <KpiCard
-          value={kpis.avgResponseMs}
-          suffix="ms"
-          label="Avg Response"
-          color="text-t2"
-          sparkData={[0.5, 0.55, 0.45, 0.5, 0.38, 0.55, 0.45, 0.5, 0.38, 0.45, 0.5]}
-        />
       </motion.div>
 
       {/* Alert Banner */}
@@ -221,7 +191,7 @@ const SoupKitchen: FC = () => {
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5, delay: 0.1, ease }}
         className="flex flex-1 min-h-0"
-        style={{ gap: "12px" }}
+        style={{ gap: "var(--sp-3)" }}
       >
         {/* Connection Table */}
         <div
@@ -230,25 +200,24 @@ const SoupKitchen: FC = () => {
             flex: 3,
             background: "var(--color-d2)",
             border: "1px solid var(--b1)",
-            borderRadius: "10px",
+            borderRadius: 'var(--radius-lg)',
             overflow: "hidden",
           }}
         >
           {/* Toolbar */}
           <div
-            className="flex items-center justify-between px-6 py-3 flex-shrink-0 bg-d3"
+            className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
             style={{ borderBottom: "1px solid var(--b1)" }}
           >
             <div className="flex items-center gap-4">
               <h2
-                className="font-sans font-semibold text-t1"
-                style={{ fontSize: "0.82rem" }}
+                className="c-heading"
               >
                 Connections
               </h2>
 
               {/* Mode filter pills */}
-              <div className="flex gap-1">
+              <div className="flex" style={{ gap: "var(--sp-1h)" }}>
                 {modeFilterOptions.map((m) => {
                   const isActive = modeFilter === m;
                   const colorClass =
@@ -262,55 +231,64 @@ const SoupKitchen: FC = () => {
                       onClick={() => setModeFilter(m)}
                       className={`
                         font-mono cursor-pointer transition-all duration-200
-                        rounded bg-transparent
+                        inline-flex items-center
                         ${
                           isActive
                             ? `${colorClass} bg-d4`
-                            : "text-t5 hover:text-t3 hover:bg-d3"
+                            : "text-t4 hover:text-t2 hover:bg-d3"
                         }
                       `}
                       style={{
-                        fontSize: "0.6rem",
+                        fontSize: "var(--font-size-label)",
                         letterSpacing: "0.02em",
-                        padding: "3px 10px",
-                        borderRadius: "4px",
+                        padding: "5px var(--sp-3)",
+                        borderRadius: "var(--radius-sm)",
+                        gap: "var(--sp-1h)",
                         border: isActive
                           ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
-                          : "1px solid var(--b2)",
+                          : "1px solid var(--b1)",
                       }}
                     >
                       {m === "all" ? "All" : m}
-                      <span className="ml-1 text-t5">{modeCounts[m]}</span>
+                      <span
+                        className="text-t5"
+                        style={{ fontSize: "var(--font-size-xs)", opacity: 0.7 }}
+                      >
+                        {modeCounts[m]}
+                      </span>
                     </button>
                   );
                 })}
               </div>
             </div>
 
-            {/* Search */}
-            <div className="relative">
+            {/* Search — fills remaining toolbar width */}
+            <div className="relative flex-1" style={{ marginLeft: "var(--sp-4)" }}>
               <Search
-                size={14}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t5"
+                size={13}
+                strokeWidth={1.75}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t5 pointer-events-none"
               />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search lines..."
-                className="bg-d1 text-t2 font-mono rounded pl-8 pr-3 py-1.5 outline-none
-                           placeholder:text-t5 focus:ring-1 focus:ring-m-cht/30"
+                className="w-full bg-d1 text-t2 font-mono outline-none
+                           placeholder:text-t5 focus:border-m-cht/40"
                 style={{
-                  fontSize: "0.75rem",
-                  border: "1px solid var(--b1)",
-                  width: "200px",
+                  fontSize: "var(--font-size-label)",
+                  padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) 28px",
+                  border: "1px solid var(--b2)",
+                  borderRadius: "var(--radius-sm)",
+                  transition: "border-color 0.2s ease",
                 }}
               />
             </div>
           </div>
 
           {/* Table */}
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto scrollbar-hide">
             <table className="w-full" style={{ borderCollapse: "collapse" }}>
               <thead>
                 <tr
@@ -321,19 +299,14 @@ const SoupKitchen: FC = () => {
                     { label: "", w: "36px" },
                     { label: "Line", w: undefined },
                     { label: "Mode", w: "100px" },
-                    { label: "Health", w: "100px" },
                     { label: "Pipeline", w: undefined },
                     { label: "Unread", w: "72px" },
-                    { label: "Last Active", w: "100px" },
+                    { label: "Active", w: "80px" },
                   ].map((h) => (
                     <th
                       key={h.label || "status"}
-                      className="text-left font-mono text-t5 font-medium"
+                      className="text-left c-col-header c-cell"
                       style={{
-                        fontSize: "0.55rem",
-                        letterSpacing: "0.1em",
-                        textTransform: "uppercase",
-                        padding: "7px 16px",
                         width: h.w,
                       }}
                     >
@@ -343,119 +316,92 @@ const SoupKitchen: FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {grouped.map((group) => {
-                  const isCollapsed = collapsedGroups.has(group.name);
+                {filtered.map((line) => {
+                  const isError = line.status === "unreachable";
+                  const isDegraded = line.status === "degraded";
                   return (
-                    <Fragment key={group.name}>
-                      <tr
-                        className="bg-d3 cursor-pointer hover:bg-d4"
-                        style={{ borderBottom: '1px solid var(--b1)' }}
-                        onClick={() => toggleGroup(group.name)}
-                      >
-                        <td
-                          colSpan={7}
-                          className="font-mono text-t4 font-semibold"
-                          style={{ fontSize: '0.55rem', padding: '6px 16px', letterSpacing: '0.1em', textTransform: 'uppercase' }}
-                        >
-                          <span className="text-t5 mr-2">{isCollapsed ? '▶' : '▼'}</span>
-                          {group.name} ({group.lines.length} lines)
-                        </td>
-                      </tr>
-                      {!isCollapsed && group.lines.map((line) => {
-                        const isError = line.status === "unreachable";
-                        return (
-                          <tr
-                            key={line.name}
-                            onClick={() => navigate(`/lines/${line.name}`)}
-                            className="cursor-pointer transition-colors duration-150 hover:bg-d4"
-                            style={{
-                              borderBottom: "1px solid var(--b1)",
-                              ...(isError
-                                ? { backgroundColor: "var(--s-crit-wash)" }
-                                : {}),
-                            }}
+                    <tr
+                      key={line.name}
+                      onClick={() => navigate(`/lines/${line.name}`)}
+                      className="cursor-pointer c-row-hover"
+                      style={{
+                        borderBottom: "1px solid var(--b1)",
+                        ...(isError
+                          ? { backgroundColor: "var(--s-crit-wash)" }
+                          : isDegraded
+                          ? { backgroundColor: "var(--s-warn-wash)" }
+                          : {}),
+                      }}
+                    >
+                      {/* Status */}
+                      <td className="c-cell">
+                        <StatusDot status={line.status} size="md" />
+                      </td>
+
+                      {/* Line name + phone */}
+                      <td className="c-cell">
+                        <div className="flex flex-col">
+                          <span
+                            className="font-sans font-medium text-t1"
+                            style={{ fontSize: 'var(--font-size-body)' }}
                           >
-                            {/* Status */}
-                            <td style={{ padding: "10px 16px" }}>
-                              <StatusDot status={line.status} size="md" />
-                            </td>
+                            {line.name}
+                          </span>
+                          <span
+                            className="c-label"
+                          >
+                            {line.phone}
+                          </span>
+                        </div>
+                      </td>
 
-                            {/* Line name + phone */}
-                            <td style={{ padding: "10px 16px" }}>
-                              <div className="flex flex-col">
-                                <span
-                                  className="font-sans font-medium text-t1"
-                                  style={{ fontSize: "0.82rem" }}
-                                >
-                                  {line.name}
-                                </span>
-                                <span
-                                  className="font-mono text-t5"
-                                  style={{ fontSize: "0.7rem" }}
-                                >
-                                  {line.phone}
-                                </span>
-                              </div>
-                            </td>
+                      {/* Mode */}
+                      <td className="c-cell">
+                        <ModeBadge mode={line.mode} />
+                      </td>
 
-                            {/* Mode */}
-                            <td style={{ padding: "10px 16px" }}>
-                              <ModeBadge mode={line.mode} />
-                            </td>
+                      {/* Pipeline */}
+                      <td className="c-cell">
+                        <span
+                          className={`c-data ${pipelineColor(line)}`}
+                        >
+                          {pipelineText(line)}
+                        </span>
+                      </td>
 
-                            {/* Health */}
-                            <td style={{ padding: "10px 16px" }}>
-                              <HeartbeatStrip beats={line.heartbeat ?? []} />
-                            </td>
+                      {/* Unread */}
+                      <td className="c-cell">
+                        {(line.unread ?? 0) > 0 ? (
+                          <span
+                            className="c-data text-s-warn font-medium"
+                          >
+                            {line.unread}
+                          </span>
+                        ) : (
+                          <span className="c-data text-t5">
+                            —
+                          </span>
+                        )}
+                      </td>
 
-                            {/* Pipeline */}
-                            <td style={{ padding: "10px 16px" }}>
-                              <span
-                                className={`font-mono ${pipelineColor(line)}`}
-                                style={{ fontSize: "0.75rem" }}
-                              >
-                                {pipelineText(line)}
-                              </span>
-                            </td>
-
-                            {/* Unread */}
-                            <td style={{ padding: "10px 16px" }}>
-                              {(line.unread ?? 0) > 0 ? (
-                                <span
-                                  className="font-mono text-s-warn font-medium"
-                                  style={{ fontSize: "0.8rem" }}
-                                >
-                                  {line.unread}
-                                </span>
-                              ) : (
-                                <span className="font-mono text-t5" style={{ fontSize: "0.8rem" }}>
-                                  —
-                                </span>
-                              )}
-                            </td>
-
-                            {/* Last Active */}
-                            <td style={{ padding: "10px 16px" }}>
-                              <span
-                                className={`font-mono ${isError ? "text-s-crit" : "text-t4"}`}
-                                style={{ fontSize: "0.75rem" }}
-                              >
-                                {line.lastActive ?? "—"}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </Fragment>
+                      {/* Last Active */}
+                      <td className="c-cell">
+                        <span
+                          className={`c-data ${isError ? "text-s-crit" : "text-t4"}`}
+                        >
+                          {line.lastActive ? formatRelative(line.lastActive) : "—"}
+                        </span>
+                      </td>
+                    </tr>
                   );
                 })}
 
                 {filtered.length === 0 && (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={6}
                       className="text-center text-t5 font-mono py-12"
-                      style={{ fontSize: "0.8rem" }}
+                      style={{ fontSize: 'var(--font-size-data)' }}
                     >
                       No connections match the current filters
                     </td>
@@ -470,11 +416,11 @@ const SoupKitchen: FC = () => {
         <div
           className="flex flex-col min-h-0"
           style={{
-            flex: 1.2,
-            minWidth: "280px",
+            flex: 1,
+            minWidth: "240px",
             background: "var(--color-d1)",
             border: "1px solid var(--b1)",
-            borderRadius: "10px",
+            borderRadius: 'var(--radius-lg)',
             overflow: "hidden",
           }}
         >

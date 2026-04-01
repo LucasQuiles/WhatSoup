@@ -1,5 +1,6 @@
 import { type FC, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
+import { staggerChildVariants } from '../lib/motion'
 
 interface MotionSectionProps {
   children: ReactNode
@@ -54,15 +55,6 @@ export const StaggerContainer: FC<{
     {children}
   </motion.div>
 )
-
-export const staggerChildVariants = {
-  hidden: { opacity: 0, y: 12 },
-  visible: {
-    opacity: 1,
-    y: 0,
-    transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const },
-  },
-} as const
 
 /**
  * Stagger child — auto-animated by StaggerContainer parent.

@@ -12,9 +12,9 @@ export default function App() {
   const unreadCount = lines?.reduce((sum, l) => sum + (l.unread ?? 0), 0) ?? 0
 
   return (
-    <div className="flex flex-col min-h-screen bg-d0">
+    <div className="flex flex-col h-screen bg-d0 overflow-hidden">
       <Nav alertCount={alertCount} unreadCount={unreadCount} />
-      <main className="flex-1 flex flex-col">
+      <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <Routes>
           <Route path="/" element={<SoupKitchen />} />
           <Route path="/lines/:name" element={<LineDetail />} />
