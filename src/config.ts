@@ -181,6 +181,10 @@ export const config = {
   // Health
   healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),
 
+  // GUI
+  gui: (instance?.gui as boolean | undefined) ?? false,
+  guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', 9099),
+
   // API
   apiTimeoutMs: 30_000,
   apiRetryDelayMs: 2_000,

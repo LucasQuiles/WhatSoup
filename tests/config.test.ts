@@ -22,6 +22,7 @@ beforeEach(() => {
     WHATSOUP_CONFIG_DIR: process.env.WHATSOUP_CONFIG_DIR,
     WHATSOUP_DATA_DIR: process.env.WHATSOUP_DATA_DIR,
     WHATSOUP_STATE_DIR: process.env.WHATSOUP_STATE_DIR,
+    WHATSOUP_GUI_PORT: process.env.WHATSOUP_GUI_PORT,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME,
@@ -43,6 +44,7 @@ beforeEach(() => {
   delete process.env.FALLBACK_MODEL;
   delete process.env.PINECONE_INDEX;
   delete process.env.LOG_LEVEL;
+  delete process.env.WHATSOUP_GUI_PORT;
 
   vi.resetModules();
 });
@@ -78,6 +80,8 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.systemPrompt).toContain('You are Loops');
     expect(config.rateLimitPerHour).toBe(45);
     expect(config.healthPort).toBe(9090);
+    expect(config.gui).toBe(false);
+    expect(config.guiPort).toBe(9099);
     expect(config.tokenBudget).toBe(100_000);
     expect(config.pineconeIndex).toBe('whatsapp-bot');
     expect(config.logLevel).toBe('info');
@@ -542,5 +546,57 @@ describe('config — entity-search fields', () => {
     const { config } = await import('../src/config.ts');
     expect(config.pineconeTopK).toBe(30);
     expect(config.pineconeRerankTopN).toBe(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 8: GUI config fields
+// ---------------------------------------------------------------------------
+
+describe('config — gui fields', () => {
+  it('gui defaults to false without INSTANCE_CONFIG', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.gui).toBe(false);
+  });
+
+  it('guiPort defaults to 9099 without INSTANCE_CONFIG', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.guiPort).toBe(9099);
+  });
+
+  it('gui: true is accepted from instance config', async () => {
+    const instanceConfig = {
+      name: 'gui-bot',
+      type: 'chat',
+      systemPrompt: 'GUI bot.',
+      adminPhones: ['15550000001'],
+      accessMode: 'allowlist',
+      gui: true,
+      guiPort: 8080,
+      paths: {
+        configRoot: path.join(tmpDir, 'inst-config'),
+        dataRoot: path.join(tmpDir, 'inst-data'),
+        stateRoot: path.join(tmpDir, 'inst-state'),
+        authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+        dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+        logDir: path.join(tmpDir, 'inst-data', 'logs'),
+        lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+        mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+      },
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+    const { config } = await import('../src/config.ts');
+    expect(config.gui).toBe(true);
+    expect(config.guiPort).toBe(8080);
+  });
+
+  it('guiPort falls back to WHATSOUP_GUI_PORT env var', async () => {
+    process.env.WHATSOUP_GUI_PORT = '7777';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.guiPort).toBe(7777);
+    delete process.env.WHATSOUP_GUI_PORT;
   });
 });

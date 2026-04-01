@@ -112,6 +112,8 @@ export interface IOutboundQueue {
   getLastOpId(): number | undefined;
   /** Mark the last outbound op created by this queue as terminal. */
   markLastTerminal(): void;
+  /** Propagate durability engine after late initialization. */
+  setDurability(engine: DurabilityEngine): void;
 }
 
 export class OutboundQueue implements IOutboundQueue {

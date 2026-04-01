@@ -160,6 +160,20 @@ describe('loadInstance — optional fields preserved', () => {
     expect(config.rateLimitPerHour).toBe(45);
     expect(config.healthPort).toBe(9090);
   });
+
+  it('preserves gui and guiPort fields', () => {
+    const guiChat = {
+      ...minimalChat,
+      gui: true,
+      guiPort: 8080,
+    };
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', guiChat);
+    loadInstance('test-chat');
+
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.gui).toBe(true);
+    expect(config.guiPort).toBe(8080);
+  });
 });
 
 // ---------------------------------------------------------------------------

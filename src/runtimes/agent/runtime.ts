@@ -469,6 +469,15 @@ export class AgentRuntime implements Runtime {
       log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
     }
 
+    // sandboxPerChat: expose a global MCP socket at stateRoot so the fleet can discover this agent
+    if (this.sandboxPerChat && config.stateRoot) {
+      const globalSocketPath = join(config.stateRoot, 'whatsoup.sock');
+      const globalSession: SessionContext = { tier: 'global' };
+      this.globalSocketServer = new WhatSoupSocketServer(globalSocketPath, this.registry, globalSession);
+      this.globalSocketServer.start();
+      log.info({ socketPath: globalSocketPath }, 'sandboxPerChat global socket server started at stateRoot');
+    }
+
     // sandboxPerChat: backfill workspace keys for legacy rows and sweep orphaned sessions
     if (this.sandboxPerChat) {
       backfillWorkspaceKeys(this.db, this.cwd ?? homedir());

@@ -460,12 +460,16 @@ connectionManager.on('decryptionFailure', (data) => {
 });
 
 // 7. Health server — delegates enrichment stats to runtime health snapshot
+const socketPath = (instanceConfig?.socketPath as string | undefined) ?? null;
+
 const healthServer = startHealthServer({
   db,
   connectionManager,
   startedAt,
   durability,
   runtime,
+  socketPath,
+  instanceType,
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
@@ -480,6 +484,26 @@ const healthServer = startHealthServer({
     return { lastRun, unprocessed, runtimeDegraded };
   },
 });
+
+// 7b. Fleet server — conditional on gui: true
+let fleetServer: ReturnType<Awaited<typeof import('./fleet/index.ts')>['createFleetServer']> | null = null;
+if (config.gui) {
+  const { createFleetServer, loadOrCreateFleetToken } = await import('./fleet/index.ts');
+  const fleetToken = await loadOrCreateFleetToken();
+  fleetServer = createFleetServer({
+    db: db.raw,
+    selfName: config.botName,
+    fleetToken,
+    getSelfHealth: () => {
+      try {
+        // Return the same data the health endpoint would
+        return { status: 'ok', uptime: Math.floor((Date.now() - startedAt) / 1000) };
+      } catch { return { status: 'unknown' }; }
+    },
+  });
+  fleetServer.start(config.guiPort);
+  log.info({ port: config.guiPort }, 'fleet server listening');
+}
 
 // 8. ffmpeg check
 try { execFileSync('which', ['ffmpeg']); } catch { log.warn('ffmpeg not found — video processing will fail'); }
@@ -582,6 +606,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(startupCleanupTimeout);
     clearInterval(retentionInterval);
     clearInterval(echoTimeoutInterval);
+    if (fleetServer) fleetServer.stop();
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally

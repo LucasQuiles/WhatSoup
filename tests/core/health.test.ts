@@ -187,6 +187,43 @@ describe('GET /health', () => {
     const { status } = await httpReq(port, '/unknown', 'GET');
     expect(status).toBe(404);
   });
+
+  it('includes instance block with expected fields', async () => {
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.instance).toBeDefined();
+    expect(json.instance.name).toBe('WhatSoup');
+    expect(json.instance.mode).toBe('chat');
+    expect(json.instance.accessMode).toBe('allowlist');
+    expect(json.instance).toHaveProperty('socketPath');
+  });
+
+  it('returns instance.socketPath as null when not provided', async () => {
+    const { body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(json.instance.socketPath).toBeNull();
+  });
+
+  it('returns instance.socketPath when provided in deps', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, { socketPath: '/run/whatsoup/test.sock' });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(json.instance.socketPath).toBe('/run/whatsoup/test.sock');
+    db2.close();
+  });
+
+  it('returns sqlite.schema_version as a number >= 0', async () => {
+    const { body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(typeof json.sqlite.schema_version).toBe('number');
+    expect(json.sqlite.schema_version).toBeGreaterThanOrEqual(0);
+  });
 });
 
 describe('POST /send — Authorization header check', () => {

@@ -1324,6 +1324,74 @@ describe('AgentRuntime', () => {
     expect(mockSweepOrphanedSessions).toHaveBeenCalledWith(db);
   });
 
+  it('sandboxPerChat: global socket server created at stateRoot when stateRoot is set', async () => {
+    const { WhatSoupSocketServer: MockSocketServer } = await import('../../../src/mcp/socket-server.ts');
+    const { config: mockConfig } = await import('../../../src/config.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // Temporarily set stateRoot on the mocked config
+    const originalStateRoot = (mockConfig as Record<string, unknown>).stateRoot;
+    (mockConfig as Record<string, unknown>).stateRoot = '/tmp/test-state-root';
+
+    try {
+      (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+      const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+      const runtime = new AgentRuntime(db, messenger, 'test', {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+        sandbox,
+        cwd: tmpdir(),
+      });
+      await runtime.start();
+
+      // WhatSoupSocketServer should have been constructed with the stateRoot-based path
+      const calls = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls;
+      const globalCall = calls.find((args: unknown[]) => {
+        const socketPath = args[0] as string;
+        return socketPath === '/tmp/test-state-root/whatsoup.sock';
+      });
+      expect(globalCall).toBeDefined();
+      const sessionCtx = globalCall![2] as { tier: string };
+      expect(sessionCtx.tier).toBe('global');
+
+      // Verify start() was called on the socket server
+      expect(mockSocketServerInstance.start).toHaveBeenCalled();
+
+      // Verify shutdown cleans up the global socket
+      await runtime.shutdown();
+      expect(mockSocketServerInstance.stop).toHaveBeenCalled();
+    } finally {
+      (mockConfig as Record<string, unknown>).stateRoot = originalStateRoot;
+    }
+  });
+
+  it('sandboxPerChat: no global socket server when stateRoot is not set', async () => {
+    const { WhatSoupSocketServer: MockSocketServer } = await import('../../../src/mcp/socket-server.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    // With stateRoot undefined, no global socket should be created
+    const calls = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const globalCall = calls.find((args: unknown[]) => {
+      const ctx = args[2] as { tier: string };
+      return ctx?.tier === 'global';
+    });
+    expect(globalCall).toBeUndefined();
+  });
+
   it('sandboxPerChat: orphaned sessions are marked during start()', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

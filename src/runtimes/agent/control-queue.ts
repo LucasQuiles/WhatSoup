@@ -71,6 +71,11 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op
   }
 
+  /** No-op — control sessions have no durability engine to propagate. */
+  setDurability(_engine: DurabilityEngine): void {
+    // intentional no-op
+  }
+
   // ─── Control-only methods ────────────────────────────────────────────────
 
   /**

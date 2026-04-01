@@ -59,6 +59,8 @@ interface InstanceConfig {
   tokenBudget?: number;
   rateLimitPerHour?: number;
   healthPort?: number;
+  gui?: boolean;
+  guiPort?: number;
   agentOptions?: AgentOptions;
   // Resolved paths (added by loader)
   paths: InstancePaths;
