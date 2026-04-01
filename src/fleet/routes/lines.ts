@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import * as fs from 'node:fs';
 import { jsonResponse } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
@@ -138,6 +139,12 @@ export async function handleGetLine(
   // Start with the enriched shape the console expects, then add detail fields
   const enriched = enrichInstance(instance, poll);
 
+  let instanceConfig: Record<string, unknown> = {};
+  try {
+    const raw = fs.readFileSync(instance.configPath, 'utf-8');
+    instanceConfig = JSON.parse(raw);
+  } catch { /* config unreadable */ }
+
   jsonResponse(res, 200, {
     ...enriched,
     // Additional detail-only fields
@@ -149,5 +156,6 @@ export async function handleGetLine(
     gui: instance.gui,
     guiPort: instance.guiPort,
     dbStats: dbStats.ok ? dbStats.data : null,
+    config: instanceConfig,
   });
 }

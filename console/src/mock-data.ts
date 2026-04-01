@@ -47,6 +47,7 @@ export interface LineInstance {
   lastSessionStatus?: string | null;
   messagesToday?: number;
   group?: string;
+  config?: Record<string, unknown>;
 }
 
 export interface ChatItem {

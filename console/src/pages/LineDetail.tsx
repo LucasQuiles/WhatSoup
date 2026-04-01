@@ -214,7 +214,7 @@ export default function LineDetail() {
             className="flex-1 min-h-0 flex flex-col overflow-hidden"
           >
             {activeTab === 'summary' && <SummaryTab line={line} />}
-            {activeTab === 'mode' && <ModeTab mode={line.mode} />}
+            {activeTab === 'mode' && <ModeTab mode={line.mode} line={line} />}
             {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
             {activeTab === 'access' && <AccessTab access={access || []} lineName={name || ''} />}
             {activeTab === 'history' && (
@@ -235,25 +235,22 @@ export default function LineDetail() {
   )
 }
 
-/* ═══ Static config data — hoisted to module scope for stable references ═══ */
-const CHAT_CONFIG = [
-  { key: 'model', value: 'claude-sonnet-4-20250514', type: 'string' as const },
-  { key: 'systemPrompt', value: 'You are a helpful support...', type: 'string' as const },
-  { key: 'maxTokens', value: '4096', type: 'number' as const },
-  { key: 'tokenBudget', value: '100000', type: 'number' as const },
-  { key: 'rateLimitPerHour', value: '30', type: 'number' as const },
-  { key: 'pineconeIndex', value: 'bes-knowledge-base', type: 'string' as const },
-  { key: 'ragEnabled', value: 'true', type: 'boolean' as const },
-]
-const AGENT_CONFIG = [
-  { key: 'sessionScope', value: 'per_chat', type: 'string' as const },
-  { key: 'cwd', value: '~/LAB/agent-workspace', type: 'path' as const },
-  { key: 'instructionsPath', value: 'CLAUDE.md', type: 'path' as const },
-  { key: 'sandbox', value: 'true', type: 'boolean' as const },
-  { key: 'sandboxPerChat', value: 'true', type: 'boolean' as const },
-  { key: 'mcpServers', value: '3', type: 'number' as const },
-  { key: 'perUserDirs', value: 'true', type: 'boolean' as const },
-]
+/* ═══ Config helpers — build entries dynamically from real instance config ═══ */
+const CONFIG_EXCLUDE_KEYS = new Set(['name', 'type', 'adminPhones', 'paths', 'healthPort'])
+
+function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: 'string' | 'number' | 'boolean' | 'path' }[] {
+  return Object.entries(rawConfig)
+    .filter(([k]) => !CONFIG_EXCLUDE_KEYS.has(k))
+    .map(([key, value]) => ({
+      key,
+      value: typeof value === 'object' ? JSON.stringify(value) : String(value),
+      type: typeof value === 'boolean' ? 'boolean' as const
+        : typeof value === 'number' ? 'number' as const
+        : String(value).startsWith('/') || String(value).startsWith('~') ? 'path' as const
+        : 'string' as const,
+    }))
+}
+
 const TYPE_COLOR: Record<string, string> = {
   string: 'var(--color-m-pas)', number: 'var(--color-s-warn)',
   boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
@@ -279,7 +276,8 @@ function SummaryTab({ line }: { line: LineInstance }) {
     ? [{ label: 'Inbound', active: true }, { label: 'Access', active: true }, { label: 'Queue', active: (line.queueDepth ?? 0) > 0 }, { label: 'Enrich', active: false }, { label: 'API', active: true }, { label: 'Outbound', active: false }]
     : [{ label: 'Inbound', active: true }, { label: 'Router', active: true }, { label: 'SDK Loop', active: (line.activeSessions ?? 0) > 0 }, { label: 'Tools', active: (line.activeSessions ?? 0) > 0 }, { label: 'Outbound', active: false }]
 
-  const config = line.mode === 'chat' ? CHAT_CONFIG : line.mode === 'agent' ? AGENT_CONFIG : null
+  const rawConfig = line.config ?? {}
+  const config = line.mode !== 'passive' ? buildConfigEntries(rawConfig) : null
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
@@ -500,7 +498,7 @@ function ConfigValue({ value, type }: { value: string; type: 'string' | 'number'
 }
 
 /* ═══ Mode Tab ═══ */
-function ModeTab({ mode }: { mode: Mode }) {
+function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
   if (mode === 'passive') {
     return (
       <div
@@ -516,25 +514,8 @@ function ModeTab({ mode }: { mode: Mode }) {
     )
   }
 
-  const chatConfig: { key: string; value: string; type: 'string' | 'number' | 'boolean' | 'path' }[] = [
-    { key: 'model', value: '"claude-sonnet-4-20250514"', type: 'string' },
-    { key: 'systemPrompt', value: '"You are a helpful support assistant for BES..."', type: 'string' },
-    { key: 'maxTokens', value: '4096', type: 'number' },
-    { key: 'tokenBudget', value: '100000', type: 'number' },
-    { key: 'rateLimitPerHour', value: '30', type: 'number' },
-    { key: 'pineconeIndex', value: '"bes-knowledge-base"', type: 'string' },
-    { key: 'ragEnabled', value: 'true', type: 'boolean' },
-  ]
-  const agentConfig: typeof chatConfig = [
-    { key: 'sessionScope', value: '"per_chat"', type: 'string' },
-    { key: 'cwd', value: '"~/LAB/agent-workspace"', type: 'path' },
-    { key: 'instructionsPath', value: '"CLAUDE.md"', type: 'path' },
-    { key: 'sandbox', value: 'true', type: 'boolean' },
-    { key: 'sandboxPerChat', value: 'true', type: 'boolean' },
-    { key: 'mcpServers', value: '3', type: 'number' },
-    { key: 'perUserDirs', value: 'true', type: 'boolean' },
-  ]
-  const config = mode === 'chat' ? chatConfig : agentConfig
+  const rawConfig = line.config ?? {}
+  const config = buildConfigEntries(rawConfig)
 
   return (
     <div
