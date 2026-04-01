@@ -801,3 +801,40 @@ Key log patterns to monitor:
 # Fatal errors
 '"level":60'  # level 60 = fatal in pino
 ```
+
+---
+
+## Repair Reference
+
+### Log locations
+- journalctl: `journalctl --user -u whatsoup@<instance> -n 50 --no-pager`
+- File logs: `~/.local/share/whatsoup/instances/<name>/logs/`
+
+### Common error patterns
+- **Session crash (exit code 1):** Usually from unhandled rejection or strip-types parse error. Check stderr in journal.
+- **Decryption failure:** Signal session key desync. Check `decryption_failures` table. Usually self-resolves via Baileys retry.
+- **Connection exhaustion:** Baileys reconnect loop. Check connection component logs.
+
+### Service management
+```
+systemctl --user {start,stop,restart,status} whatsoup@<name>
+```
+
+### Test commands
+```
+cd ~/LAB/WhatSoup && npm test
+```
+
+### Health checks
+```
+curl -s localhost:<port>/health | python3 -m json.tool
+```
+Instance ports: personal=9090, loops=9091, q=9092, besbot=9093
+
+### DB locations
+`~/.local/share/whatsoup/instances/<name>/bot.db`
+
+### Heal system
+- `heal_reports` table: circuit breaker state per error class
+- `control_messages` table: audit trail of all control traffic
+- `pending_heal_reports` table: Q's temporary dedupe state for Type 3
