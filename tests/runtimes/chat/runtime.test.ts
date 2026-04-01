@@ -1056,7 +1056,7 @@ describe('Identity injection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Gap #104: besbot has no MCP socket / no MCP leakage
+// Gap #104: chatbot has no MCP socket / no MCP leakage
 // ChatRuntime must never import or instantiate WhatSoupSocketServer.
 // Verified by static analysis of the source file so the constraint
 // cannot be accidentally re-introduced without a test failure.

@@ -69,7 +69,7 @@ describe('formatMentions (no contacts)', () => {
 describe('formatMentions (with contacts)', () => {
   function buildContacts(): ContactsDirectory {
     const dir = new ContactsDirectory();
-    dir.observe('18459780919@s.whatsapp.net', 'Q');
+    dir.observe('15550100001@s.whatsapp.net', 'Q');
     dir.observe('18455943112@s.whatsapp.net', 'Loops');
     dir.observe('15551234567@s.whatsapp.net', 'Jason Bradshaw');
     return dir;
@@ -78,10 +78,10 @@ describe('formatMentions (with contacts)', () => {
   it('rewrites @name to @number using contacts map', () => {
     const dir = buildContacts();
     const result = formatMentions('Hey @Q check this', dir.contacts);
-    expect(result.text).toBe('Hey @18459780919 check this');
-    expect(result.jids).toContain('18459780919@s.whatsapp.net');
+    expect(result.text).toBe('Hey @15550100001 check this');
+    expect(result.jids).toContain('15550100001@s.whatsapp.net');
     // @lid NOT emitted
-    expect(result.jids).not.toContain('18459780919@lid');
+    expect(result.jids).not.toContain('15550100001@lid');
     expect(result.hasMentions).toBe(true);
   });
 
@@ -108,7 +108,7 @@ describe('formatMentions (with contacts)', () => {
   it('handles mix of @number and @name in same message', () => {
     const dir = buildContacts();
     const result2 = formatMentions('@Q and @18455943112 should both see this', dir.contacts);
-    expect(result2.text).toBe('@18459780919 and @18455943112 should both see this');
+    expect(result2.text).toBe('@15550100001 and @18455943112 should both see this');
     expect(result2.jids).toHaveLength(2); // 2 phones * 1 suffix each
   });
 
@@ -121,8 +121,8 @@ describe('formatMentions (with contacts)', () => {
 
   it('deduplicates when @name and @number refer to same phone', () => {
     const dir = buildContacts();
-    const result = formatMentions('@Q and @18459780919 same person', dir.contacts);
-    expect(result.text).toBe('@18459780919 and @18459780919 same person');
+    const result = formatMentions('@Q and @15550100001 same person', dir.contacts);
+    expect(result.text).toBe('@15550100001 and @15550100001 same person');
     expect(result.jids).toHaveLength(1); // one set only
   });
 });

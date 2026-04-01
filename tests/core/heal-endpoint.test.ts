@@ -14,7 +14,7 @@ import { request } from 'node:http';
 
 vi.mock('../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',

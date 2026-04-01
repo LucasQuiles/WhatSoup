@@ -24,7 +24,7 @@ vi.mock('@whiskeysockets/baileys', async (importOriginal) => {
 // Mock config + logger so we never touch the filesystem
 vi.mock('../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     authDir: '/tmp/wa-test-auth',
     dbPath: ':memory:',
     mediaDir: '/tmp',

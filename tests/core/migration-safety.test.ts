@@ -160,9 +160,9 @@ function insertTestMessage(
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      '18459780919@s.whatsapp.net',
-      '18459780919',
-      '18459780919@s.whatsapp.net',
+      '15550100001@s.whatsapp.net',
+      '15550100001',
+      '15550100001@s.whatsapp.net',
       content,
       messageId,
       Date.now() + idx,
@@ -307,9 +307,9 @@ describe('Test 2 — ALTER TABLE ADD COLUMN preserves 100 pre-existing messages'
       );
       for (let i = 1; i <= 100; i++) {
         insert.run(
-          '18459780919@s.whatsapp.net',
-          '18459780919',
-          '18459780919@s.whatsapp.net',
+          '15550100001@s.whatsapp.net',
+          '15550100001',
+          '15550100001@s.whatsapp.net',
           `message content ${i}`,
           `batch-msg-${i}`,
           1700000000 + i,
@@ -558,9 +558,9 @@ describe('Test 6 — FTS triggers survive migration 5 ALTER TABLE', () => {
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .run(
-          '18459780919@s.whatsapp.net',
-          '18459780919',
-          '18459780919@s.whatsapp.net',
+          '15550100001@s.whatsapp.net',
+          '15550100001',
+          '15550100001@s.whatsapp.net',
           'fts-probe-unique-term-xyzalt',
           'fts-pre-msg-1',
           1700000001,
@@ -625,7 +625,7 @@ describe('Test 7 — FK behaviour: reactions/receipts do not cascade-delete', ()
     expect(() => {
       db.raw
         .prepare('INSERT INTO reactions (message_id, conversation_key, sender_jid, reaction) VALUES (?,?,?,?)')
-        .run('fk-msg-1', '18459780919', 'alice@s.whatsapp.net', '\u{1F44D}');
+        .run('fk-msg-1', '15550100001', 'alice@s.whatsapp.net', '\u{1F44D}');
     }).not.toThrow();
 
     const rxn = db.raw
@@ -638,7 +638,7 @@ describe('Test 7 — FK behaviour: reactions/receipts do not cascade-delete', ()
     insertTestMessage(db.raw, { content: 'cascade-test', idx: 2, messageId: 'fk-msg-2' });
     db.raw
       .prepare('INSERT INTO reactions (message_id, conversation_key, sender_jid, reaction) VALUES (?,?,?,?)')
-      .run('fk-msg-2', '18459780919', 'alice@s.whatsapp.net', '\u{2764}\u{FE0F}');
+      .run('fk-msg-2', '15550100001', 'alice@s.whatsapp.net', '\u{2764}\u{FE0F}');
 
     db.raw.prepare('DELETE FROM messages WHERE message_id = ?').run('fk-msg-2');
 

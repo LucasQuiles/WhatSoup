@@ -442,6 +442,75 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('unexpected exit clears armed watchdog timers and pending tools', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+    sm.trackToolStart('tool-after-crash');
+
+    expect((sm as unknown as { watchdogSoft: unknown }).watchdogSoft).not.toBeNull();
+    expect((sm as unknown as { watchdogWarn: unknown }).watchdogWarn).not.toBeNull();
+    expect((sm as unknown as { watchdogHard: unknown }).watchdogHard).not.toBeNull();
+    expect(sm.hasPendingTools).toBe(true);
+
+    mockChild._exitCb?.(1, null);
+
+    expect((sm as unknown as { watchdogSoft: unknown }).watchdogSoft).toBeNull();
+    expect((sm as unknown as { watchdogWarn: unknown }).watchdogWarn).toBeNull();
+    expect((sm as unknown as { watchdogHard: unknown }).watchdogHard).toBeNull();
+    expect(sm.hasPendingTools).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it('shutdown clears watchdog timers even when child is already null', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+    sm.trackToolStart('tool-after-null-child');
+
+    (sm as unknown as { active: boolean }).active = false;
+    (sm as unknown as { child: MockChild | null }).child = null;
+
+    await sm.shutdown();
+
+    expect((sm as unknown as { watchdogSoft: unknown }).watchdogSoft).toBeNull();
+    expect((sm as unknown as { watchdogWarn: unknown }).watchdogWarn).toBeNull();
+    expect((sm as unknown as { watchdogHard: unknown }).watchdogHard).toBeNull();
+    expect(sm.hasPendingTools).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it('leaked watchdog handlers do nothing once the session is inactive', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('test message');
+
+    (sm as unknown as { active: boolean }).active = false;
+
+    (sm as unknown as { handleWatchdogSoft: () => void }).handleWatchdogSoft();
+    (sm as unknown as { handleWatchdogWarn: () => void }).handleWatchdogWarn();
+    (sm as unknown as { handleWatchdogHard: () => void }).handleWatchdogHard();
+
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalled();
+  });
+
   it('tickWatchdog resets all tiers — agent activity prevents kill', async () => {
     vi.useFakeTimers();
 

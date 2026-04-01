@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest';
 // ---------------------------------------------------------------------------
 vi.mock('../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth',
     mediaDir: '/tmp',
@@ -64,17 +64,17 @@ function makeIncomingMsg(overrides: Partial<IncomingMessage> = {}): IncomingMess
 
 describe('isAdminMessage — positive', () => {
   it('returns true when senderJid matches adminPhones and message is a DM', () => {
-    const msg = makeIncomingMsg({ senderJid: '18459780919@s.whatsapp.net', isGroup: false });
+    const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: false });
     expect(isAdminMessage(msg)).toBe(true);
   });
 
   it('returns true for LID-format admin phone', async () => {
     // The mock config uses a Set — add a LID number for this test
     const { config } = await import('../../src/config.ts');
-    config.adminPhones.add('16566225768547');
-    const msg = makeIncomingMsg({ senderJid: '16566225768547@lid', isGroup: false });
+    config.adminPhones.add('15550100002');
+    const msg = makeIncomingMsg({ senderJid: '15550100002@lid', isGroup: false });
     expect(isAdminMessage(msg)).toBe(true);
-    config.adminPhones.delete('16566225768547');
+    config.adminPhones.delete('15550100002');
   });
 });
 
@@ -85,7 +85,7 @@ describe('isAdminMessage — negative', () => {
   });
 
   it('returns false when admin phone sends from a group', () => {
-    const msg = makeIncomingMsg({ senderJid: '18459780919@s.whatsapp.net', isGroup: true });
+    const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: true });
     expect(isAdminMessage(msg)).toBe(false);
   });
 
@@ -181,6 +181,6 @@ describe('Non-admin cannot trigger admin commands', () => {
   });
 
   it('isAdminMessage rejects group messages from admin', () => {
-    expect(isAdminMessage(makeIncomingMsg({ senderJid: '18459780919@s.whatsapp.net', isGroup: true }))).toBe(false);
+    expect(isAdminMessage(makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: true }))).toBe(false);
   });
 });

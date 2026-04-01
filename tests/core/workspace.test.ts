@@ -10,10 +10,10 @@ const CWD = '/instances/test-bot';
 
 describe('chatJidToWorkspace', () => {
   it('DM @s.whatsapp.net: kind=dm, key=phone, path ends with users/<phone>', () => {
-    const result = chatJidToWorkspace(CWD, '18459780919@s.whatsapp.net');
+    const result = chatJidToWorkspace(CWD, '15550100001@s.whatsapp.net');
     expect(result.kind).toBe('dm');
-    expect(result.workspaceKey).toBe('18459780919');
-    expect(result.workspacePath.endsWith('users/18459780919')).toBe(true);
+    expect(result.workspaceKey).toBe('15550100001');
+    expect(result.workspacePath.endsWith('users/15550100001')).toBe(true);
   });
 
   it('DM @lid with :device qualifier: kind=dm, key strips device, path ends with users/<lid>', () => {
@@ -38,8 +38,8 @@ describe('chatJidToWorkspace', () => {
   });
 
   it('uses path.join to produce absolute paths from instanceCwd', () => {
-    const result = chatJidToWorkspace(CWD, '18459780919@s.whatsapp.net');
-    expect(result.workspacePath).toBe(join(CWD, 'users', '18459780919'));
+    const result = chatJidToWorkspace(CWD, '15550100001@s.whatsapp.net');
+    expect(result.workspacePath).toBe(join(CWD, 'users', '15550100001'));
   });
 });
 

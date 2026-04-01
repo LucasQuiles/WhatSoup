@@ -4,13 +4,12 @@ import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
-import { getPendingCount } from './access-list.ts';
+import { getPendingCount, upsertAccess, type SubjectType } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
 import type { Runtime } from '../runtimes/types.ts';
-import { readBody, jsonResponse, checkBearerAuth } from '../lib/http.ts';
 
 const log = createChildLogger('health');
 
@@ -21,8 +20,12 @@ export interface HealthDeps {
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
   runtime?: Runtime;
-  socketPath?: string | null;
-  instanceType?: string;
+  // Phase 1: instance identity for control-plane fleet discovery
+  instanceName: string;
+  instanceType: string;  // 'chat' | 'agent' | 'passive'
+  accessMode: string;
+  /** Callback for POST /access — allow triggers queued-message replay. */
+  handleAccessDecision?: (subjectType: string, subjectId: string, action: 'allow' | 'block') => Promise<void>;
 }
 
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
@@ -40,67 +43,91 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
 
-/** Fail-closed auth: rejects when no token is configured or when the Bearer token doesn't match. */
-function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
-  const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-  if (!expectedToken || !checkBearerAuth(req, expectedToken)) {
-    jsonResponse(res, 401, { error: 'Unauthorized' });
-    return false;
-  }
-  return true;
-}
-
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
+      // Shared-secret Authorization header check
+      const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+      const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
+      if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
 
-      readBody(req)
-        .then((raw) => {
-          try {
-            const { chatJid, text } = JSON.parse(raw) as { chatJid?: string; text?: string };
-            if (!chatJid || !text) {
-              jsonResponse(res, 400, { ok: false, error: 'chatJid and text are required' });
-              return;
-            }
-            sendTracked(deps.connectionManager, chatJid, text, deps.durability, { replayPolicy: 'unsafe' })
-              .then(() => jsonResponse(res, 200, { ok: true }))
-              .catch((err) => {
-                log.error({ err, chatJid }, 'POST /send failed');
-                jsonResponse(res, 500, { ok: false, error: (err as Error).message });
-              });
-          } catch {
-            jsonResponse(res, 400, { ok: false, error: 'invalid JSON' });
+      const MAX_BODY_BYTES = 64 * 1024; // 64 KB
+      let body = '';
+      let byteCount = 0;
+      let destroyed = false;
+      req.on('data', (chunk) => {
+        if (destroyed) return;
+        byteCount += Buffer.byteLength(chunk);
+        if (byteCount > MAX_BODY_BYTES) {
+          destroyed = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'request body too large' }));
+          req.destroy();
+          return;
+        }
+        body += chunk;
+      });
+      req.on('end', () => {
+        if (destroyed) return;
+        try {
+          const { chatJid, text } = JSON.parse(body) as { chatJid?: string; text?: string };
+          if (!chatJid || !text) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'chatJid and text are required' }));
+            return;
           }
-        })
-        .catch((err) => {
-          const status = (err as any).statusCode ?? 500;
-          jsonResponse(res, status, { ok: false, error: (err as Error).message });
-        });
+          sendTracked(deps.connectionManager, chatJid, text, deps.durability, { replayPolicy: 'unsafe' })
+            .then(() => {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true }));
+            })
+            .catch((err) => {
+              log.error({ err, chatJid }, 'POST /send failed');
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+            });
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+        }
+      });
       return;
     }
 
     // ── POST /heal — inject a Type 3 service-crash repair report ──
     if (req.url === '/heal' && req.method === 'POST') {
       (async () => {
+        const jsonHeaders = { 'Content-Type': 'application/json' };
+
+        // Auth check — same pattern as /send
+        const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
         const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-        if (!expectedToken || !checkBearerAuth(req, expectedToken)) {
-          jsonResponse(res, 401, { error: 'unauthorized' });
+        if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+          res.writeHead(401, jsonHeaders);
+          res.end(JSON.stringify({ error: 'unauthorized' }));
           return;
         }
 
-        const rawBody = await readBody(req);
+        // Parse body
+        let rawBody = '';
+        for await (const chunk of req) rawBody += chunk;
         let data: Record<string, unknown>;
         try {
           data = JSON.parse(rawBody) as Record<string, unknown>;
         } catch {
-          jsonResponse(res, 400, { error: 'invalid JSON' });
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'invalid JSON' }));
           return;
         }
 
         if (!data['type']) {
-          jsonResponse(res, 400, { error: 'missing type field' });
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'missing type field' }));
           return;
         }
 
@@ -116,7 +143,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           .get(errorClass) as { report_id: string } | undefined;
 
         if (existing) {
-          jsonResponse(res, 409, { error: 'duplicate', existingReportId: existing.report_id });
+          res.writeHead(409, jsonHeaders);
+          res.end(JSON.stringify({ error: 'duplicate', existingReportId: existing.report_id }));
           return;
         }
 
@@ -135,13 +163,120 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           }
         }
 
-        jsonResponse(res, 202, { reportId, errorClass });
+        res.writeHead(202, jsonHeaders);
+        res.end(JSON.stringify({ reportId, errorClass }));
       })().catch((err) => {
         log.error({ err }, 'POST /heal: unhandled error');
         try {
-          jsonResponse(res, 500, { error: 'internal error' });
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internal error' }));
         } catch { /* response already started */ }
       });
+      return;
+    }
+
+    // ── POST /access — allow or block a contact/group ──
+    if (req.url === '/access' && req.method === 'POST') {
+      (async () => {
+        const jsonHeaders = { 'Content-Type': 'application/json' };
+
+        // Auth — same pattern as /send and /heal
+        const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+        const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
+        if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+          res.writeHead(401, jsonHeaders);
+          res.end(JSON.stringify({ error: 'unauthorized' }));
+          return;
+        }
+
+        // Parse body (with size limit matching /send)
+        const MAX_BODY_BYTES = 64 * 1024;
+        let rawBody = '';
+        let byteCount = 0;
+        let destroyed = false;
+        await new Promise<void>((resolve) => {
+          req.on('data', (chunk: Buffer) => {
+            if (destroyed) return;
+            byteCount += chunk.byteLength;
+            if (byteCount > MAX_BODY_BYTES) {
+              destroyed = true;
+              res.writeHead(413, jsonHeaders);
+              res.end(JSON.stringify({ error: 'request body too large' }));
+              req.destroy();
+              resolve();
+              return;
+            }
+            rawBody += chunk;
+          });
+          req.once('end', resolve);
+        });
+        if (destroyed) return;
+
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(rawBody) as Record<string, unknown>;
+        } catch {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'invalid JSON' }));
+          return;
+        }
+
+        const subjectType = data['subjectType'] as string | undefined;
+        const subjectId = data['subjectId'] as string | undefined;
+        const action = data['action'] as string | undefined;
+
+        if (!subjectType || !subjectId || !action) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'subjectType, subjectId, and action are required' }));
+          return;
+        }
+        if (subjectType !== 'phone' && subjectType !== 'group') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'subjectType must be "phone" or "group"' }));
+          return;
+        }
+        if (action !== 'allow' && action !== 'block') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'action must be "allow" or "block"' }));
+          return;
+        }
+
+        const status = action === 'allow' ? 'allowed' as const : 'blocked' as const;
+        const result = upsertAccess(deps.db, subjectType, subjectId, status);
+
+        // Invoke runtime callback (allow triggers queued-message replay)
+        if (deps.handleAccessDecision) {
+          try {
+            await deps.handleAccessDecision(subjectType, subjectId, action);
+          } catch (err) {
+            log.error({ err, subjectId, action }, '/access: handleAccessDecision callback failed');
+          }
+        }
+
+        res.writeHead(200, jsonHeaders);
+        res.end(JSON.stringify({ ok: true, action, subjectType, subjectId, result: result.action }));
+      })().catch((err) => {
+        log.error({ err }, 'POST /access: unhandled error');
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internal error' }));
+        } catch { /* response already started */ }
+      });
+      return;
+    }
+
+    // ── GET /typing — return JIDs currently composing from presence cache ──
+    if (req.url === '/typing' && req.method === 'GET') {
+      const cache = deps.connectionManager.presenceCache;
+      const composing: { jid: string; since: number }[] = [];
+      // presenceCache.entries is private — expose via a method
+      for (const [jid, result] of cache.getAll()) {
+        if (result.status === 'composing') {
+          composing.push({ jid, since: result.updatedAt });
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ composing }));
       return;
     }
 
@@ -183,14 +318,33 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count pending access-list entries',
       );
 
-      const responseBody = {
+      // Mode-specific runtime block for control-plane
+      let runtimeBlock: Record<string, unknown> = {};
+      if (deps.runtime) {
+        const snap = deps.runtime.getHealthSnapshot();
+        if (deps.instanceType === 'passive') {
+          runtimeBlock = { passive: snap.details };
+        } else if (deps.instanceType === 'chat') {
+          const details = snap.details as Record<string, unknown>;
+          const queue = details.queue as { activeChats?: number; queuedChats?: number } | undefined;
+          runtimeBlock = {
+            chat: {
+              queueDepth: (queue?.activeChats ?? 0) + (queue?.queuedChats ?? 0),
+              enrichmentUnprocessed: enrichmentStats.unprocessed,
+            },
+          };
+        } else if (deps.instanceType === 'agent') {
+          runtimeBlock = { agent: snap.details };
+        }
+      }
+
+      const body = JSON.stringify({
         status,
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         instance: {
-          name: config.botName,
-          mode: deps.instanceType ?? 'chat',
-          accessMode: config.accessMode,
-          socketPath: deps.socketPath ?? null,
+          name: deps.instanceName,
+          mode: deps.instanceType,
+          accessMode: deps.accessMode,
         },
         whatsapp: {
           connected: isConnected,
@@ -199,14 +353,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         sqlite: {
           messages_total: messagesTotal,
           unprocessed: enrichmentStats.unprocessed,
-          schema_version: safeDbQuery(
-            () => {
-              const row = deps.db.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number } | undefined;
-              return row?.v ?? 0;
-            },
-            0,
-            'failed to get schema version',
-          ),
         },
         access_control: {
           pending_count: pendingCount,
@@ -221,13 +367,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           fallback: config.models.fallback,
         },
         durability: deps.durability?.getHealthStats() ?? null,
-      };
+        runtime: runtimeBlock,
+      });
 
       // 'degraded' returns 200: enrichment staleness is a warning, not a
       // service outage. Callers check the JSON body for "status":"degraded".
       // Only 'unhealthy' (WhatsApp disconnected) warrants a 503.
       const httpStatus = status === 'unhealthy' ? 503 : 200;
-      jsonResponse(res, httpStatus, responseBody);
+      res.writeHead(httpStatus, { 'Content-Type': 'application/json' });
+      res.end(body);
     } catch (err) {
       log.error({ err }, 'health check failed');
       res.writeHead(500);

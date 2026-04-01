@@ -264,6 +264,13 @@ export class DurabilityEngine {
     ).all() as unknown as ActiveSessionCheckpointRow[];
   }
 
+  /** Return checkpoints that are active or suspended — candidates for proactive resume on startup. */
+  getResumableCheckpoints(): ActiveSessionCheckpointRow[] {
+    return this.db.raw.prepare(
+      `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status IN ('active', 'suspended') AND session_id IS NOT NULL`,
+    ).all() as unknown as ActiveSessionCheckpointRow[];
+  }
+
   markSessionOrphaned(conversationKey: string): void {
     this.db.raw.prepare(
       `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,

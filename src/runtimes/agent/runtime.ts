@@ -19,6 +19,7 @@ import {
   getResumableSessionForChat,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
+import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
@@ -48,6 +49,14 @@ const log = createChildLogger('agent-runtime');
 
 /** Tracks workspace media directories already created — avoids redundant mkdirSync calls. */
 const createdMediaDirs = new Set<string>();
+
+/** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
+const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Max consecutive crashes before auto-respawn gives up and waits for user action. */
+const AUTO_RESPAWN_MAX_CRASHES = 3;
+/** Delay (ms) before attempting auto-respawn after a crash. */
+const AUTO_RESPAWN_DELAY_MS = 2_000;
 
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
@@ -261,8 +270,29 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
       return { category: 'skill', detail: `\`${trunc(str('skill') || 'skill')}\`` };
     case 'TodoWrite':
       return { category: 'planning', detail: 'Updating todos' };
+    case 'TaskCreate':
+      return { category: 'planning', detail: trunc(str('subject') || 'Creating task') };
+    case 'TaskUpdate':
+      return { category: 'planning', detail: `Updating task ${str('taskId')}` };
+    case 'TaskList':
+    case 'TaskGet':
+      return { category: 'planning', detail: 'Checking tasks' };
     case 'ToolSearch':
       return { category: 'skill', detail: `\`${trunc(str('query') || 'tools')}\`` };
+    case 'LS':
+      return { category: 'reading', detail: `\`${shortPath(str('path') || '.')}\`` };
+    case 'NotebookEdit':
+    case 'NotebookRead':
+      return { category: 'modifying', detail: `\`${shortPath(str('notebook'))}\`` };
+    case 'LSP':
+      return { category: 'searching', detail: trunc(str('command') || 'language server') };
+    case 'EnterPlanMode':
+    case 'ExitPlanMode':
+      return { category: 'planning', detail: toolName === 'EnterPlanMode' ? 'Planning' : 'Executing plan' };
+    case 'SendMessage':
+      return { category: 'agent', detail: trunc(`→ ${str('to')}`) };
+    case 'AskUserQuestion':
+      return { category: 'other', detail: 'Asking a question' };
     default: {
       // MCP tools: "mcp__<server>__<tool-name>" → human-readable monospace tool name
       if (toolName.startsWith('mcp__')) {
@@ -274,6 +304,115 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
       return { category: 'other', detail: `\`${trunc(toolName)}\`` };
     }
   }
+}
+
+/**
+ * Rewrite common technical error messages into casual, user-friendly language.
+ * Returns null if no rewrite matches (use the original).
+ */
+function humanizeError(_toolName: string, text: string): string | null {
+  const lower = text.toLowerCase();
+
+  // File too large to read
+  if (lower.includes('exceeds maximum allowed tokens') || lower.includes('content too large'))
+    return '_that file was a bit long, reading just the parts I need_';
+  // File not found
+  if (lower.includes('no such file') || lower.includes('file not found') || lower.includes('enoent'))
+    return '_file not found, looking for the right path_';
+  // Command not found
+  if (lower.includes('command not found'))
+    return '_command not found, trying another approach_';
+  // Timeout
+  if (lower.includes('timed out') || lower.includes('timeout'))
+    return '_that took too long, retrying_';
+  // Network / connection errors
+  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed'))
+    return '_connection failed, will retry_';
+  // No matches found (grep/glob)
+  if (lower.includes('no matches found') || lower.includes('no files found'))
+    return '_no results, refining search_';
+  // Git conflicts
+  if (lower.includes('merge conflict'))
+    return '_merge conflict detected, resolving_';
+  // Rate limit / overloaded
+  if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429'))
+    return '_rate limited, waiting a moment_';
+  // Syntax/parse errors
+  if (lower.includes('syntax error'))
+    return '_syntax error, fixing_';
+  // Disk / storage
+  if (lower.includes('enospc') || lower.includes('no space left'))
+    return '_disk full, freeing space_';
+  // Process / memory
+  if (lower.includes('enomem') || lower.includes('out of memory') || lower.includes('killed'))
+    return '_out of memory, scaling down_';
+  // Invalid JSON / parse
+  if (lower.includes('unexpected token') || lower.includes('json parse') || lower.includes('invalid json'))
+    return '_got malformed data, retrying_';
+  // String replacement not found (Edit tool)
+  if (lower.includes('not found in file') || lower.includes('old_string'))
+    return '_text not found in file, re-reading to get the right context_';
+  // Git push / pull errors
+  if (lower.includes('rejected') && lower.includes('push'))
+    return '_push rejected, pulling latest changes first_';
+  // Max context / token budget
+  if (lower.includes('context window') || lower.includes('max_tokens') || lower.includes('context length'))
+    return '_hitting context limits, compacting_';
+  // Exit code (generic — keep it brief)
+  if (/^exit code \d+$/i.test(text.trim()))
+    return `_exited with error, continuing_`;
+
+  return null;
+}
+
+/**
+ * Classify a tool_result error as either a blocked tool (permission/hook denial),
+ * cancelled, or a genuine execution error. Returns an appropriate ToolUpdate with
+ * user-friendly messaging.
+ */
+export function classifyToolError(toolName: string, content: string): ToolUpdate {
+  // Strip internal XML-like tags from Claude error content
+  const cleaned = content
+    .replace(/<\/?tool_use_error>/g, '')
+    .replace(/<\/?error>/g, '')
+    .trim();
+
+  const lower = cleaned.toLowerCase();
+
+  const isCancelled =
+    lower.startsWith('cancelled') ||
+    lower.includes('tool call cancelled') ||
+    lower.includes('was cancelled');
+
+  const isBlocked =
+    lower.includes('not allowed') ||
+    lower.includes('permission denied') ||
+    lower.includes('blocked by') ||
+    lower.includes('hook blocked') ||
+    lower.includes('denied by') ||
+    lower.includes('not permitted') ||
+    lower.includes('is not in the allow') ||
+    lower.includes('disallowed');
+
+  const category = isCancelled ? 'cancelled' : isBlocked ? 'blocked' : 'error';
+
+  // Try human-friendly rewrite first (only for errors, not blocked/cancelled)
+  if (category === 'error' && toolName !== 'unknown') {
+    const humanized = humanizeError(toolName, cleaned);
+    if (humanized) return { category, detail: humanized };
+  }
+
+  // Fallback: technical detail
+  const firstLine = cleaned.split('\n')[0] ?? cleaned;
+  const simplified = firstLine
+    .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
+    .replace(/^Exit code (\d+)$/, 'exit code $1');
+  const reason = simplified.length > 100 ? simplified.slice(0, 99) + '…' : simplified;
+
+  const humanName = toolName === 'unknown' ? '' : toolName;
+  const detail = humanName ? `${humanName} — ${reason}` : reason;
+
+  return { category, detail };
 }
 
 export class AgentRuntime implements Runtime {
@@ -314,6 +453,9 @@ export class AgentRuntime implements Runtime {
   private recentCrashCount = 0;
   private lastCrashAt: string | null = null;
 
+  /** Maps toolId → toolName for the current turn, so tool_result errors can reference the tool. */
+  private activeToolNames = new Map<string, string>();
+
   private recordCrash(): void {
     this.recentCrashCount++;
     this.lastCrashAt = new Date().toISOString();
@@ -345,6 +487,7 @@ export class AgentRuntime implements Runtime {
   // ─── Control session (self-healing repair) ────────────────────────────────
   private activeControlReportId: string | null = null;
   private controlSession: SessionManager | null = null;
+  private controlSessionTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
     this.db = db;
@@ -469,26 +612,104 @@ export class AgentRuntime implements Runtime {
       log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
     }
 
-    // sandboxPerChat: expose a global MCP socket at stateRoot so the fleet can discover this agent
-    if (this.sandboxPerChat && config.stateRoot) {
-      const globalSocketPath = join(config.stateRoot, 'whatsoup.sock');
-      const globalSession: SessionContext = { tier: 'global' };
-      this.globalSocketServer = new WhatSoupSocketServer(globalSocketPath, this.registry, globalSession);
-      this.globalSocketServer.start();
-      log.info({ socketPath: globalSocketPath }, 'sandboxPerChat global socket server started at stateRoot');
-    }
-
-    // sandboxPerChat: backfill workspace keys for legacy rows and sweep orphaned sessions
+    // sandboxPerChat: backfill workspace keys for legacy rows
     if (this.sandboxPerChat) {
       backfillWorkspaceKeys(this.db, this.cwd ?? homedir());
-      const activeSessions = sweepOrphanedSessions(this.db);
-      for (const { id, claude_pid } of activeSessions) {
-        try { process.kill(claude_pid, 0); } catch { markOrphaned(this.db, id); }
+    }
+
+    // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
+    // Cross-references agent_sessions with session_checkpoints to safely identify which
+    // processes to keep and which to reap. Only kills PIDs verified as owned children.
+    if (this.sessionScope === 'per_chat' || this.sandboxPerChat) {
+      const classified = classifyActiveSessions(this.db, this.durability!);
+      for (const session of classified) {
+        switch (session.classification) {
+          case 'stale_dead':
+            markOrphaned(this.db, session.id);
+            break;
+          case 'stale_live':
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'reaping stale session');
+            try { process.kill(session.claudePid, 'SIGTERM'); } catch { /* already gone */ }
+            markOrphaned(this.db, session.id);
+            break;
+          case 'ambiguous':
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'ambiguous session — not touching');
+            break;
+          // authoritative_live: leave alone
+        }
+      }
+    }
+
+    // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
+    // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
+    // of waiting for the user to send a message after a service restart.
+    // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability) {
+      const resumableCheckpoints = this.durability.getResumableCheckpoints();
+      for (const cp of resumableCheckpoints) {
+        const full = this.durability.getSessionCheckpoint(cp.conversation_key);
+        if (!full?.session_id) continue;
+
+        // Derive chatJid from conversation_key — for DMs, append @lid; for groups, use as-is
+        const chatJid = cp.conversation_key.includes('_at_')
+          ? cp.conversation_key.replace('_at_', '@')
+          : `${cp.conversation_key}@lid`;
+
+        if (this.chatSessions.has(chatJid)) continue; // already created by sweep or prior iteration
+
+        log.info({ conversationKey: cp.conversation_key, sessionId: full.session_id, chatJid }, 'proactive per_chat resume on startup');
+
+        // Create session + queue (same as ensureSessionAndQueueSync but with resume)
+        const session = this.createSessionManager({
+          chatJid,
+          cwd: this.cwd,
+          onEvent: (event) => this.handleEventPerChat(chatJid, event),
+          onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
+          notifyUser: (msg) => {
+            const s = this.chatSessions.get(chatJid);
+            if (s && !s.getStatus().active) {
+              this.chatSessions.delete(chatJid);
+              this.chatQueues.get(chatJid)?.abortTurn();
+              this.chatQueues.delete(chatJid);
+            }
+            this.handleCrashNotify(msg, chatJid);
+          },
+        });
+        this.chatSessions.set(chatJid, session);
+        const perChatQ = new OutboundQueue(this.messenger, chatJid);
+        if (this.durability) perChatQ.setDurability(this.durability);
+        this.chatQueues.set(chatJid, perChatQ);
+
+        // Attempt resume, then send a continuation turn so the agent picks up
+        // where it left off without requiring the user to send "proceed".
+        session.spawnSession(full.session_id).then(async () => {
+          // Small delay to let the init event propagate (confirms resume succeeded)
+          await new Promise(r => setTimeout(r, 1_000));
+          if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
+          try {
+            await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
+            log.info({ chatJid }, 'sent continuation turn after proactive resume');
+          } catch (err) {
+            log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
+          }
+        }).catch((err) => {
+          log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
+        });
       }
     }
 
     // Attempt to resume a prior active session.
-    // Skipped for per_chat mode (all variants) — resumption is lazy on first message per chat.
+    // Skipped for per_chat mode (all variants) — per_chat resume is handled above (proactive) or lazily.
     // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
     // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
     const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat') ? null : getActiveSession(this.db);
@@ -616,6 +837,12 @@ export class AgentRuntime implements Runtime {
               "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
             ).run(parsed.reportId);
           } catch { /* best-effort */ }
+
+          // Clear hard timeout (normal completion path)
+          if (this.controlSessionTimeout) {
+            clearTimeout(this.controlSessionTimeout);
+            this.controlSessionTimeout = null;
+          }
 
           // Clear single-flight slot
           this.clearControlReport();
@@ -897,6 +1124,10 @@ export class AgentRuntime implements Runtime {
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
+      // Shut down old session first to prevent zombie processes.
+      // Without this, spawnSession() overwrites this.child, orphaning the old
+      // process and its DB row. Mirrors handleNew() pattern.
+      await session.shutdown();
       await session.spawnSession();
       // Successful spawn after a crash — decay the crash counter
       if (this.recentCrashCount > 0) this.recentCrashCount--;
@@ -1027,6 +1258,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
+        this.activeToolNames.set(event.toolId, event.toolName);
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
 
@@ -1042,14 +1274,17 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         if (event.isError) {
+          const toolName = this.activeToolNames.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
-          log.warn({ toolId: event.toolId, error: errorPreview }, 'tool error reported by agent');
-          queue.enqueueToolUpdate({ category: 'error', detail: 'Tool Error' });
+          log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
+          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
         }
+        this.activeToolNames.delete(event.toolId);
         break;
 
       case 'result':
         session?.clearTurnWatchdog();
+        this.activeToolNames.clear();
         if (event.text) {
           queue.enqueueText(event.text);
         }
@@ -1161,6 +1396,10 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
         onCrash: (_info) => {
           log.warn('control session crashed');
+          if (this.controlSessionTimeout) {
+            clearTimeout(this.controlSessionTimeout);
+            this.controlSessionTimeout = null;
+          }
           this.activeControlReportId = null;
         },
         notifyUser: () => {},
@@ -1183,8 +1422,56 @@ export class AgentRuntime implements Runtime {
 
     try {
       await this.controlSession.sendTurn(turn);
+      // Start hard timeout — if the control session doesn't resolve within 15 minutes,
+      // force-escalate and shut it down to prevent resource exhaustion.
+      this.controlSessionTimeout = setTimeout(() => {
+        log.warn({ reportId }, 'control session timed out after 15 minutes — force-escalating');
+
+        // Send HEAL_ESCALATE to Loops so its heal state is updated
+        const controlQueue = this.getControlQueue();
+        const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
+        if (controlQueue && loopsPhone) {
+          const loopsJid = `${loopsPhone}@s.whatsapp.net`;
+          controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
+            reportId,
+            errorClass: 'timeout',
+            diagnosis: 'Repair session timed out after 15 minutes without resolution',
+          }, this.durability ?? undefined).catch(err =>
+            log.error({ err, reportId }, 'failed to send HEAL_ESCALATE on timeout'));
+        }
+
+        // DM admin
+        const adminPhone = [...config.adminPhones][0];
+        if (adminPhone) {
+          const adminJid = `${adminPhone}@s.whatsapp.net`;
+          sendTracked(this.messenger, adminJid,
+            `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
+            this.durability ?? undefined, { replayPolicy: 'safe' })
+            .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
+        }
+
+        if (this.controlSession) {
+          void this.controlSession.shutdown().catch(() => {});
+        }
+        this.clearControlReport();
+
+        // Dequeue next report if any
+        const next = dequeueNextReport(this.db);
+        if (next) {
+          const context = next.context ? JSON.parse(next.context) : {};
+          void this.handleControlTurn(next.report_id, JSON.stringify({
+            ...context,
+            reportId: next.report_id,
+            errorClass: next.error_class,
+          }));
+        }
+      }, CONTROL_SESSION_TIMEOUT_MS);
     } catch (err) {
       log.error({ err, reportId }, 'failed to send repair turn to control session');
+      if (this.controlSessionTimeout) {
+        clearTimeout(this.controlSessionTimeout);
+        this.controlSessionTimeout = null;
+      }
       this.activeControlReportId = null;
     }
   }
@@ -1409,9 +1696,15 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
         onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
         notifyUser: (msg) => {
-          this.chatSessions.delete(workspaceKey);
-          this.chatQueues.get(workspaceKey)?.abortTurn();
-          this.chatQueues.delete(workspaceKey);
+          // Only remove session from map if it's actually dead (crash/exit).
+          // Watchdog warnings fire on ACTIVE sessions — removing those breaks
+          // event routing and causes cascading false-idle notifications.
+          const s = this.chatSessions.get(workspaceKey);
+          if (s && !s.getStatus().active) {
+            this.chatSessions.delete(workspaceKey);
+            this.chatQueues.get(workspaceKey)?.abortTurn();
+            this.chatQueues.delete(workspaceKey);
+          }
           this.handleCrashNotify(msg, chatJid);
         },
         onResumeFailed: () => this.handleResumeFailed(chatJid),
@@ -1462,10 +1755,15 @@ export class AgentRuntime implements Runtime {
           onEvent: (event) => this.handleEventPerChat(chatJid, event),
           onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
           notifyUser: (msg) => {
-            // Remove crashed session so next message spawns a fresh one
-            this.chatSessions.delete(chatJid);
-            this.chatQueues.get(chatJid)?.abortTurn();
-            this.chatQueues.delete(chatJid);
+            // Only remove session from map if it's actually dead (crash/exit).
+            // Watchdog warnings fire on ACTIVE sessions — removing those breaks
+            // event routing and causes cascading false-idle notifications.
+            const s = this.chatSessions.get(chatJid);
+            if (s && !s.getStatus().active) {
+              this.chatSessions.delete(chatJid);
+              this.chatQueues.get(chatJid)?.abortTurn();
+              this.chatQueues.delete(chatJid);
+            }
             this.handleCrashNotify(msg, chatJid);
           },
         });
@@ -1553,6 +1851,37 @@ export class AgentRuntime implements Runtime {
         }, this.activeControlReportId);
       } catch (err) {
         log.warn({ err }, 'failed to emit heal report for session crash');
+      }
+    }
+
+    // Auto-respawn: if we haven't hit the crash limit, try to resume the session
+    // after a short delay. This lets the agent continue mid-conversation without
+    // requiring the user to send a new message.
+    if (this.recentCrashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
+      const session = this.chatSessions.get(mapKey);
+      if (session) {
+        const sessionId = info.sessionId;
+        const dbRowId = info.dbRowId;
+        log.info({ mapKey, sessionId, attempt: this.recentCrashCount }, 'scheduling auto-respawn');
+        setTimeout(() => {
+          // Verify the session is still in the map and still inactive
+          const current = this.chatSessions.get(mapKey);
+          if (!current || current !== session || current.getStatus().active) return;
+
+          log.info({ mapKey, sessionId }, 'auto-respawn: attempting resume');
+          session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
+            await new Promise(r => setTimeout(r, 1_000));
+            if (!session.getStatus().active) return;
+            try {
+              await session.sendTurn('[System: session resumed after crash — continue where you left off]');
+              log.info({ mapKey }, 'sent continuation turn after auto-respawn');
+            } catch (err) {
+              log.warn({ err, mapKey }, 'failed to send continuation turn after auto-respawn');
+            }
+          }).catch((err) => {
+            log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
+          });
+        }, AUTO_RESPAWN_DELAY_MS);
       }
     }
   }
@@ -1712,6 +2041,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
+        this.activeToolNames.set(event.toolId, event.toolName);
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
 
@@ -1733,18 +2063,22 @@ export class AgentRuntime implements Runtime {
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
         if (event.isError) {
+          const toolName = this.activeToolNames.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
+            toolName,
             error: errorPreview,
           }, 'tool error reported by agent');
-          queue.enqueueToolUpdate({ category: 'error', detail: 'Tool Error' });
+          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
         }
+        this.activeToolNames.delete(event.toolId);
         break;
 
       case 'result':
         this.session?.clearTurnWatchdog();
+        this.activeToolNames.clear();
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
           queue.enqueueText(event.text);

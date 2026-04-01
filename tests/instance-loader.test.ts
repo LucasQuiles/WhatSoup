@@ -258,7 +258,7 @@ describe('loadInstance — agent with multiple admin phones (JID + LID)', () => 
     writeInstance(path.join(tmpDir, 'config'), 'multi-admin', {
       name: 'multi-admin',
       type: 'agent',
-      adminPhones: ['18459780919', '16566225768547'],
+      adminPhones: ['15550100001', '15550100002'],
       accessMode: 'self_only',
     });
     loadInstance('multi-admin');

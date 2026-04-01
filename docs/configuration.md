@@ -44,7 +44,7 @@ All four can be overridden per-instance via `instance.json` `models` object.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `instance.json` `adminPhones` takes over in multi-instance mode. Example: `18459780919,16566225768547`. |
+| `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `instance.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 
 ### Storage Paths (single-instance / legacy mode only)
 
@@ -216,25 +216,25 @@ The loader creates all directories on startup with mode `0700`.
 
 ## Worked Examples
 
-### Agent — per-chat, sandboxed (`loops`)
+### Agent — per-chat, sandboxed (`sandbox-agent`)
 
 A sandboxed agent available to an allowlist of friends. Each chat gets its own Claude Code
-workspace under `~/LAB/Loops`. Bash is permitted but path-restricted.
+workspace under `~/workspace/sandbox-agent`. Bash is permitted but path-restricted.
 
 ```json
 {
-  "name": "loops",
+  "name": "sandbox-agent",
   "type": "agent",
   "accessMode": "allowlist",
-  "adminPhones": ["18459780919"],
+  "adminPhones": ["15555550100"],
   "healthPort": 9091,
   "agentOptions": {
-    "cwd": "~/LAB/Loops",
+    "cwd": "~/workspace/sandbox-agent",
     "instructionsPath": "CLAUDE.md",
     "sessionScope": "per_chat",
     "sandboxPerChat": true,
     "sandbox": {
-      "allowedPaths": ["~/LAB/Loops"],
+      "allowedPaths": ["~/workspace/sandbox-agent"],
       "allowedTools": [],
       "bash": { "enabled": true, "pathRestricted": true }
     },
@@ -245,16 +245,16 @@ workspace under `~/LAB/Loops`. Bash is permitted but path-restricted.
 }
 ```
 
-### Agent — per-chat, open (`personal`)
+### Agent — per-chat, open (`operator-agent`)
 
-A full-access agent on the owner's personal phone. No sandbox. Two admin phones. Each chat
+A full-access agent on an operator-managed line. No sandbox. Two admin phones. Each chat
 gets its own session scoped to `~`.
 
 ```json
 {
-  "name": "personal",
+  "name": "operator-agent",
   "type": "agent",
-  "adminPhones": ["18459780919", "16566225768547"],
+  "adminPhones": ["15555550100", "15555550101"],
   "accessMode": "allowlist",
   "healthPort": 9092,
   "agentOptions": {
@@ -264,7 +264,7 @@ gets its own session scoped to `~`.
 }
 ```
 
-### Chat — entity search with Pinecone reranking (`besbot`)
+### Chat — entity search with Pinecone reranking (`chat-bot`)
 
 A direct LLM API bot backed by an external Pinecone index. Uses `entity` search mode with
 client-side reranking. Accepts DMs from anyone. Custom models reduce cost; `systemPrompt` is
@@ -272,15 +272,15 @@ required.
 
 ```json
 {
-  "name": "besbot",
+  "name": "chat-bot",
   "type": "chat",
-  "systemPrompt": "You are BES Bot, a helpful co-worker...",
+  "systemPrompt": "You are Chat Bot, a helpful assistant for your team...",
   "models": {
     "conversation": "claude-sonnet-4-6",
     "extraction": "claude-haiku-4-5-20251001",
     "validation": "claude-haiku-4-5-20251001"
   },
-  "pineconeIndex": "oneplatform-search",
+  "pineconeIndex": "team-search",
   "pineconeSearchMode": "entity",
   "pineconeRerank": true,
   "pineconeTopK": 20,
@@ -288,7 +288,7 @@ required.
   "maxTokens": 500,
   "tokenBudget": 50000,
   "rateLimitPerHour": 60,
-  "adminPhones": ["18459780919", "16566225768547"],
+  "adminPhones": ["15555550100", "15555550101"],
   "accessMode": "open_dm",
   "healthPort": 9093
 }
@@ -304,7 +304,7 @@ bot persona.
 {
   "name": "passive-example",
   "type": "passive",
-  "adminPhones": ["18459780919"],
+  "adminPhones": ["15555550100"],
   "accessMode": "self_only",
   "healthPort": 9094
 }

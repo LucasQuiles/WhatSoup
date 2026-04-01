@@ -6,6 +6,7 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
+import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -19,7 +20,9 @@ export type ToolCategory =
   | 'planning'
   | 'skill'
   | 'other'
-  | 'error';
+  | 'error'
+  | 'blocked'
+  | 'cancelled';
 
 export interface ToolUpdate {
   category: ToolCategory;
@@ -37,6 +40,8 @@ export const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: st
   skill:     { label: 'Skill',     emoji: '🧠' },
   other:     { label: 'Using',     emoji: '🛠️' },
   error:     { label: 'Error',     emoji: '⚠️' },
+  blocked:   { label: 'Blocked',  emoji: '🚫' },
+  cancelled: { label: 'Cancelled', emoji: '⏭️' },
 };
 
 const MAX_MESSAGE_LENGTH = 4000;
@@ -50,15 +55,17 @@ export const TYPING_REFRESH_MS = 8_000;
 export const SEND_TIMEOUT_MS = 15_000;
 
 /**
- * Convert markdown task-list syntax to WhatsApp-friendly checkbox characters.
- *   - [ ] task  →  ▫︎ task   (unchecked)
- *   - [x] task  →  ▪︎ task   (checked)
+ * Pre-process text for WhatsApp delivery:
+ * 1. Convert markdown task-list syntax to checkbox characters
+ * 2. Convert GitHub-flavored markdown to WhatsApp formatting
  */
 function preprocessText(text: string): string {
-  return text
+  let out = text
     .replace(/^- \[x\] /gim, '▪︎ ')
     .replace(/^- \[X\] /gim, '▪︎ ')
     .replace(/^- \[ \] /gim, '▫︎ ');
+  out = markdownToWhatsApp(out);
+  return out;
 }
 
 /** Split a string into chunks that fit within maxLen characters. */
@@ -182,7 +189,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string): void {
     if (!text || text.trim() === '') return;
-    const chunks = splitMessage(preprocessText(text));
+    const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
     }

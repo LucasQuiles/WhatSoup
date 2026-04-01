@@ -15,9 +15,11 @@ import { PineconeMemory } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
+import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
+import { getMessagesBySender } from './core/messages.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
@@ -203,7 +205,7 @@ if (instanceType === 'agent') {
   const anthropic = createAnthropicProvider();
   const openai = createOpenAIProvider();
   const pinecone = new PineconeMemory();
-  // Disable enrichment for instances using external Pinecone indexes (e.g., besbot)
+  // Disable enrichment for instances using external Pinecone indexes (e.g., chatbot)
   const enableEnrichment = config.pineconeIndex === DEFAULT_PINECONE_INDEX;
   runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
     enableEnrichment,
@@ -460,16 +462,44 @@ connectionManager.on('decryptionFailure', (data) => {
 });
 
 // 7. Health server — delegates enrichment stats to runtime health snapshot
-const socketPath = (instanceConfig?.socketPath as string | undefined) ?? null;
-
 const healthServer = startHealthServer({
   db,
   connectionManager,
   startedAt,
   durability,
   runtime,
-  socketPath,
-  instanceType,
+  instanceName: config.botName,
+  instanceType: instanceType,
+  accessMode: config.accessMode,
+  handleAccessDecision: async (subjectType, subjectId, action) => {
+    if (action === 'allow' && subjectType === 'phone') {
+      // Replay queued messages — mirrors admin.ts allow path
+      log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
+      const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
+      for (const senderJid of jidFormats) {
+        const stored = getMessagesBySender(db, senderJid);
+        for (const msg of stored) {
+          await runtime.handleMessage({
+            messageId: msg.messageId,
+            chatJid: msg.chatJid,
+            senderJid: msg.senderJid,
+            senderName: msg.senderName,
+            content: msg.content,
+            contentType: msg.contentType,
+            isFromMe: false,
+            isGroup: false,
+            mentionedJids: [],
+            timestamp: msg.timestamp,
+            quotedMessageId: msg.quotedMessageId,
+            isResponseWorthy: true,
+          });
+        }
+      }
+    } else if (action === 'allow' && subjectType === 'group') {
+      log.info({ subjectType, subjectId }, 'access: group allowed via POST /access');
+    }
+    // Block requires no additional action beyond the DB update
+  },
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
@@ -484,26 +514,6 @@ const healthServer = startHealthServer({
     return { lastRun, unprocessed, runtimeDegraded };
   },
 });
-
-// 7b. Fleet server — conditional on gui: true
-let fleetServer: ReturnType<Awaited<typeof import('./fleet/index.ts')>['createFleetServer']> | null = null;
-if (config.gui) {
-  const { createFleetServer, loadOrCreateFleetToken } = await import('./fleet/index.ts');
-  const fleetToken = await loadOrCreateFleetToken();
-  fleetServer = createFleetServer({
-    db: db.raw,
-    selfName: config.botName,
-    fleetToken,
-    getSelfHealth: () => {
-      try {
-        // Return the same data the health endpoint would
-        return { status: 'ok', uptime: Math.floor((Date.now() - startedAt) / 1000) };
-      } catch { return { status: 'unknown' }; }
-    },
-  });
-  fleetServer.start(config.guiPort);
-  log.info({ port: config.guiPort }, 'fleet server listening');
-}
 
 // 8. ffmpeg check
 try { execFileSync('which', ['ffmpeg']); } catch { log.warn('ffmpeg not found — video processing will fail'); }
@@ -533,7 +543,21 @@ const echoTimeoutInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'echo timeout sweep failed'); }
 }, 10_000);
 
-// 12. Seed contacts directory from message history (so @name mentions work after restart)
+// 12. Degradation signal check — detect persistent decryption failures (Type 2)
+// Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
+// Q itself has controlPeers but no 'q' entry — running the timer on Q would accumulate
+// local heal_reports rows and consume valve/single-flight state for no operational benefit.
+const degradationInterval = config.controlPeers.has('q') ? setInterval(() => {
+  try {
+    // runtime.currentControlReportId only exists on AgentRuntime
+    const controlReportId = 'currentControlReportId' in runtime
+      ? (runtime as any).currentControlReportId as string | null
+      : null;
+    checkDegradationSignals(db, connectionManager, durability, controlReportId);
+  } catch (err) { log.error({ err }, 'degradation signal check failed'); }
+}, 60_000) : null;
+
+// 13. Seed contacts directory from message history (so @name mentions work after restart)
 {
   const rows = db.raw.prepare(
     `SELECT DISTINCT sender_jid, sender_name FROM messages
@@ -549,7 +573,7 @@ const echoTimeoutInterval = setInterval(() => {
   }
 }
 
-// 12. Connect and start
+// 14. Connect and start
 async function start(): Promise<void> {
   // runtime.start() starts enrichment poller internally
   await runtime.start();
@@ -568,7 +592,9 @@ async function start(): Promise<void> {
 
   // Agent instances notify the user on startup (resume or fresh start).
   // Delay 3 s to allow the WA connection to fully stabilise before sending.
-  if (instanceType === 'agent' && runtime instanceof AgentRuntime) {
+  // In minimal toolUpdateMode, suppress startup notifications — non-technical users
+  // don't need to know about agent lifecycle events.
+  if (instanceType === 'agent' && runtime instanceof AgentRuntime && config.toolUpdateMode !== 'minimal') {
     const pending = runtime.popStartupMessage();
     const notifyTarget = pending
       ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
@@ -606,7 +632,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(startupCleanupTimeout);
     clearInterval(retentionInterval);
     clearInterval(echoTimeoutInterval);
-    if (fleetServer) fleetServer.stop();
+    if (degradationInterval) clearInterval(degradationInterval);
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally

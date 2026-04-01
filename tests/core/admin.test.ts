@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest';
 // ---------------------------------------------------------------------------
 vi.mock('../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth',
     mediaDir: '/tmp',
@@ -57,7 +57,7 @@ function makeMockMessenger() {
   };
 }
 
-const ADMIN_CHAT_JID = '18459780919@s.whatsapp.net';
+const ADMIN_CHAT_JID = '15550100001@s.whatsapp.net';
 
 // ---------------------------------------------------------------------------
 // handleAdminCommand — ALLOW (phone)

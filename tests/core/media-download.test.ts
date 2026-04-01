@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../src/config.ts', () => ({
   config: {
     mediaDir: '/tmp',
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     accessMode: 'allowlist',
     healthPort: 9090,
     models: {

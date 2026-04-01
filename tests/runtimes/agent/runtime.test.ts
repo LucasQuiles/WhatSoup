@@ -81,6 +81,10 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getResumableSessionForChat: mockGetResumableSessionForChat,
 }));
 
+vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
+  classifyActiveSessions: vi.fn(() => []),
+}));
+
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   // eslint-disable-next-line prefer-arrow-callback
   SessionManager: vi.fn().mockImplementation(function (
@@ -110,7 +114,7 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // keeping it empty here avoids that path (which requires heal.ts / durability mocks).
 vi.mock('../../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set<string>(['18459780919']),
+    adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
   },
 }));
@@ -583,7 +587,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await runtime.handleMessage(makeMsg({ content: 'hi' }));
 
-    capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Read', toolId: 't3', toolInput: { file_path: '/home/q/LAB/WhatSoup/src/main.ts', offset: 10, limit: 5 } });
+    capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Read', toolId: 't3', toolInput: { file_path: '/workspace/WhatSoup/src/main.ts', offset: 10, limit: 5 } });
 
     const call = (mockQueue.enqueueToolUpdate.mock.calls.at(-1) as [{ category: string; detail: string }])[0];
     expect(call.category).toBe('reading');
@@ -598,7 +602,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await runtime.handleMessage(makeMsg({ content: 'hi' }));
 
-    capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Glob', toolId: 't4', toolInput: { pattern: '**/*.ts', path: '/home/q/LAB/WhatSoup/src' } });
+    capturedOnEventRef.current!({ type: 'tool_use', toolName: 'Glob', toolId: 't4', toolInput: { pattern: '**/*.ts', path: '/workspace/WhatSoup/src' } });
 
     const call = (mockQueue.enqueueToolUpdate.mock.calls.at(-1) as [{ category: string; detail: string }])[0];
     expect(call.category).toBe('searching');
@@ -696,7 +700,9 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'tool_result', isError: true, toolId: 'test', content: 'error msg' });
 
-    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'Tool Error' });
+    // classifyToolError uses content to determine error vs blocked.
+    // toolName is 'unknown' here (no prior tool_use event), so detail is just the reason.
+    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
   });
 
   it('tool_result with isError=false does not enqueue anything', async () => {
@@ -999,15 +1005,15 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
     await runtime.start();
     await sendAndDrainShared(runtime, makeMsg({
-      chatJid: '18459780919@s.whatsapp.net',
-      senderJid: '18459780919@s.whatsapp.net',
+      chatJid: '15550100001@s.whatsapp.net',
+      senderJid: '15550100001@s.whatsapp.net',
       senderName: 'Jason',
       content: 'test message',
       isGroup: false,
     }));
 
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
-      expect.stringContaining('[DM from Jason (18459780919)]'),
+      expect.stringContaining('[DM from Jason (15550100001)]'),
     );
     expect(mockSession.sendTurn).toHaveBeenCalledWith(
       expect.stringContaining('test message'),
@@ -1026,7 +1032,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndDrainShared(runtime, makeMsg({
       chatJid: 'the-group@g.us',
-      senderJid: '18459780919@s.whatsapp.net',
+      senderJid: '15550100001@s.whatsapp.net',
       senderName: 'Jason',
       content: 'group message',
       isGroup: true,
@@ -1132,14 +1138,14 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
     await runtime.start();
     // Seed session first — use a non-turn message to ensure session is initialized
-    await sendAndDrainShared(runtime, makeMsg({ content: 'hello', senderJid: '18459780919@s.whatsapp.net' }));
+    await sendAndDrainShared(runtime, makeMsg({ content: 'hello', senderJid: '15550100001@s.whatsapp.net' }));
 
     mockQueue.enqueueText.mockClear();
     mockSession.handleNew.mockClear();
 
     await sendAndDrain(runtime, makeMsg({
       content: '/new',
-      senderJid: '18459780919@s.whatsapp.net', // in adminPhones
+      senderJid: '15550100001@s.whatsapp.net', // in adminPhones
     }));
 
     expect(mockSession.handleNew).toHaveBeenCalled();
@@ -1202,8 +1208,8 @@ describe('AgentRuntime', () => {
     // Both JID variants map to the same workspace key (phone number)
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
       kind: 'dm' as const,
-      workspaceKey: '18459780919',
-      workspacePath: '/tmp/18459780919',
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
     }));
     mockGetResumableSessionForChat.mockReturnValue(null);
 
@@ -1219,11 +1225,11 @@ describe('AgentRuntime', () => {
     const constructorCallsBefore = (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     // First message via @s.whatsapp.net
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'hello' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
     const afterFirst = (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     // Second message via @lid variant — same workspace key → should reuse existing session
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@lid', content: 'follow-up' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@lid', content: 'follow-up' }));
     const afterSecond = (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     expect(afterFirst - constructorCallsBefore).toBe(1);  // one session created
@@ -1237,8 +1243,8 @@ describe('AgentRuntime', () => {
 
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
       kind: 'dm' as const,
-      workspaceKey: '18459780919',
-      workspacePath: '/tmp/18459780919',
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
     }));
     mockGetResumableSessionForChat.mockReturnValue(null);
 
@@ -1252,12 +1258,12 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     // First message seeds the session + workspace resources
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'hello' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
     const socketServerCallsAfterFirst = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     // /new should NOT create a new socket server again (workspace resources survive)
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: '/new' }));
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'hello again' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: '/new' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello again' }));
     const socketServerCallsAfterNew = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
     expect(socketServerCallsAfterNew).toBe(socketServerCallsAfterFirst); // no new socket server started
@@ -1272,8 +1278,8 @@ describe('AgentRuntime', () => {
 
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
       kind: 'dm' as const,
-      workspaceKey: '18459780919',
-      workspacePath: '/tmp/18459780919',
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
     }));
     mockGetResumableSessionForChat.mockReturnValue(null);
 
@@ -1296,18 +1302,18 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     // First message with @s.whatsapp.net variant
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'msg1' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'msg1' }));
     // Second message with @lid variant
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@lid', content: 'msg2' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@lid', content: 'msg2' }));
 
     // updateDeliveryJid should have been called at least twice (once per message)
     expect(updateDeliveryJidCalls.length).toBeGreaterThanOrEqual(2);
     // The calls should include both JID variants
-    expect(updateDeliveryJidCalls).toContain('18459780919@s.whatsapp.net');
-    expect(updateDeliveryJidCalls).toContain('18459780919@lid');
+    expect(updateDeliveryJidCalls).toContain('15550100001@s.whatsapp.net');
+    expect(updateDeliveryJidCalls).toContain('15550100001@lid');
   });
 
-  it('sandboxPerChat: start() calls backfillWorkspaceKeys and sweepOrphanedSessions', async () => {
+  it('sandboxPerChat: start() calls backfillWorkspaceKeys and classifyActiveSessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -1321,84 +1327,22 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(mockBackfillWorkspaceKeys).toHaveBeenCalledWith(db, tmpdir());
-    expect(mockSweepOrphanedSessions).toHaveBeenCalledWith(db);
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    expect(classifyActiveSessions).toHaveBeenCalled();
   });
 
-  it('sandboxPerChat: global socket server created at stateRoot when stateRoot is set', async () => {
-    const { WhatSoupSocketServer: MockSocketServer } = await import('../../../src/mcp/socket-server.ts');
-    const { config: mockConfig } = await import('../../../src/config.ts');
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-
-    // Temporarily set stateRoot on the mocked config
-    const originalStateRoot = (mockConfig as Record<string, unknown>).stateRoot;
-    (mockConfig as Record<string, unknown>).stateRoot = '/tmp/test-state-root';
-
-    try {
-      (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
-
-      const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
-      const runtime = new AgentRuntime(db, messenger, 'test', {
-        sessionScope: 'per_chat',
-        sandboxPerChat: true,
-        sandbox,
-        cwd: tmpdir(),
-      });
-      await runtime.start();
-
-      // WhatSoupSocketServer should have been constructed with the stateRoot-based path
-      const calls = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls;
-      const globalCall = calls.find((args: unknown[]) => {
-        const socketPath = args[0] as string;
-        return socketPath === '/tmp/test-state-root/whatsoup.sock';
-      });
-      expect(globalCall).toBeDefined();
-      const sessionCtx = globalCall![2] as { tier: string };
-      expect(sessionCtx.tier).toBe('global');
-
-      // Verify start() was called on the socket server
-      expect(mockSocketServerInstance.start).toHaveBeenCalled();
-
-      // Verify shutdown cleans up the global socket
-      await runtime.shutdown();
-      expect(mockSocketServerInstance.stop).toHaveBeenCalled();
-    } finally {
-      (mockConfig as Record<string, unknown>).stateRoot = originalStateRoot;
-    }
-  });
-
-  it('sandboxPerChat: no global socket server when stateRoot is not set', async () => {
-    const { WhatSoupSocketServer: MockSocketServer } = await import('../../../src/mcp/socket-server.ts');
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-
-    (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
-
-    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
-    const runtime = new AgentRuntime(db, messenger, 'test', {
-      sessionScope: 'per_chat',
-      sandboxPerChat: true,
-      sandbox,
-      cwd: tmpdir(),
-    });
-    await runtime.start();
-
-    // With stateRoot undefined, no global socket should be created
-    const calls = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls;
-    const globalCall = calls.find((args: unknown[]) => {
-      const ctx = args[2] as { tier: string };
-      return ctx?.tier === 'global';
-    });
-    expect(globalCall).toBeUndefined();
-  });
-
-  it('sandboxPerChat: orphaned sessions are marked during start()', async () => {
+  it('sandboxPerChat: stale_dead sessions are marked orphaned during start()', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
 
-    // Simulate a session whose PID is dead (process.kill throws)
-    mockSweepOrphanedSessions.mockReturnValue([{ id: 42, claude_pid: 99999999 }]);
+    // Simulate classifier finding a stale_dead session
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 42, sessionId: 'ses-old', claudePid: 99999999,
+      chatJid: 'test@s.whatsapp.net', conversationKey: 'test',
+      status: 'active', classification: 'stale_dead', reason: 'PID dead',
+    }]);
 
     const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
     const runtime = new AgentRuntime(db, messenger, 'test', {
@@ -1448,15 +1392,15 @@ describe('AgentRuntime', () => {
 
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
       kind: 'dm' as const,
-      workspaceKey: '18459780919',
-      workspacePath: '/tmp/18459780919',
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
     }));
 
     // Resumable session exists for this workspace key
     mockGetResumableSessionForChat.mockReturnValue({
       id: 5,
       session_id: 'sess-resumed',
-      chat_jid: '18459780919@s.whatsapp.net',
+      chat_jid: '15550100001@s.whatsapp.net',
     });
 
     const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
@@ -1471,7 +1415,7 @@ describe('AgentRuntime', () => {
     expect(mockSession.spawnSession).not.toHaveBeenCalled();
 
     // First message triggers lazy resume
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'hello' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
 
     expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-resumed', 5);
   });
@@ -1483,8 +1427,8 @@ describe('AgentRuntime', () => {
 
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
       kind: 'dm' as const,
-      workspaceKey: '18459780919',
-      workspacePath: '/tmp/18459780919',
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
     }));
     mockGetResumableSessionForChat.mockReturnValue(null);
 
@@ -1498,7 +1442,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     // First message triggers workspace provisioning
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'hello' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
 
     // WhatSoupSocketServer should have been constructed with chat-scoped session context
     const calls = (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mock.calls;
@@ -1510,8 +1454,8 @@ describe('AgentRuntime', () => {
     expect(chatScopedCall).toBeDefined();
     const sessionCtx = chatScopedCall![2] as { tier: string; conversationKey: string; deliveryJid: string };
     expect(sessionCtx.tier).toBe('chat-scoped');
-    expect(sessionCtx.conversationKey).toBe('18459780919');
-    expect(sessionCtx.deliveryJid).toBe('18459780919@s.whatsapp.net');
+    expect(sessionCtx.conversationKey).toBe('15550100001');
+    expect(sessionCtx.deliveryJid).toBe('15550100001@s.whatsapp.net');
   });
 
   it('sandboxPerChat: updateDeliveryJid called on socket server when JID changes', async () => {
@@ -1520,8 +1464,8 @@ describe('AgentRuntime', () => {
 
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
       kind: 'dm' as const,
-      workspaceKey: '18459780919',
-      workspacePath: '/tmp/18459780919',
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
     }));
     mockGetResumableSessionForChat.mockReturnValue(null);
 
@@ -1536,14 +1480,14 @@ describe('AgentRuntime', () => {
     mockSocketServerInstance.updateDeliveryJid.mockClear();
 
     // First message via @s.whatsapp.net
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@s.whatsapp.net', content: 'hello' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
     // Second message via @lid variant
-    await sendAndDrain(runtime, makeMsg({ chatJid: '18459780919@lid', content: 'follow-up' }));
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@lid', content: 'follow-up' }));
 
     // updateDeliveryJid should have been called on the socket server for each subsequent message
     expect(mockSocketServerInstance.updateDeliveryJid).toHaveBeenCalled();
     const jidArgs = mockSocketServerInstance.updateDeliveryJid.mock.calls.map((c: unknown[]) => c[0]);
-    expect(jidArgs).toContain('18459780919@lid');
+    expect(jidArgs).toContain('15550100001@lid');
   });
 
   // ─── Per-chat shared state race regression tests ─────────────────────────────
@@ -1676,7 +1620,7 @@ describe('AgentRuntime', () => {
     sentMessages.length = 0;
     await sendAndDrain(runtime, makeMsg({
       chatJid: '111@s.whatsapp.net',
-      senderJid: '18459780919@s.whatsapp.net',  // admin phone (required for /new)
+      senderJid: '15550100001@s.whatsapp.net',  // admin phone (required for /new)
       content: '/new',
     }));
 

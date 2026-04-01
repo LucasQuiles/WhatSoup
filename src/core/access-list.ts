@@ -51,6 +51,28 @@ export function updateAccess(db: Database, subjectType: SubjectType, subjectId: 
   ).run(status, subjectType, subjectId);
 }
 
+/**
+ * Insert-or-update access entry. Used by POST /access for subjects
+ * that may or may not already exist in the access list.
+ */
+export function upsertAccess(
+  db: Database,
+  subjectType: SubjectType,
+  subjectId: string,
+  status: 'allowed' | 'blocked',
+): { action: 'inserted' | 'updated' } {
+  const existing = lookupAccess(db, subjectType, subjectId);
+  if (existing) {
+    updateAccess(db, subjectType, subjectId, status);
+    return { action: 'updated' };
+  }
+  db.raw.prepare(
+    `INSERT INTO access_list (subject_type, subject_id, status, decided_at)
+     VALUES (?, ?, ?, datetime('now'))`
+  ).run(subjectType, subjectId, status);
+  return { action: 'inserted' };
+}
+
 export function getPendingCount(db: Database): number {
   const row = db.raw.prepare(
     `SELECT COUNT(*) AS cnt FROM access_list WHERE status = 'pending'`

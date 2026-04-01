@@ -16,7 +16,7 @@ vi.mock('../../../../src/config.ts', () => ({
     pineconeIndex: 'test-index',
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
   },
 }));
