@@ -209,6 +209,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       const body = JSON.stringify({
         status,
+        instance: {
+          name: config.botName,
+          mode: config.instanceType,
+          accessMode: config.accessMode,
+        },
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         whatsapp: {
           connected: isConnected,

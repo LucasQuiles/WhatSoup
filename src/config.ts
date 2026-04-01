@@ -134,6 +134,7 @@ What you never do:
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
+  instanceType: ((instance?.type as string | undefined) ?? 'chat') as 'passive' | 'chat' | 'agent',
 
   // Paths
   configRoot,
