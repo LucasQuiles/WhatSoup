@@ -218,6 +218,39 @@ export function checkGlobalValve(db: Database): boolean {
   return count < GLOBAL_VALVE_LIMIT;
 }
 
+/**
+ * Check for classified degradation signals (Type 2).
+ *
+ * Currently checks for persistent decryption failures: if 5+ unresolved
+ * failures from the same sender arrive within 5 minutes, emit a 'degraded'
+ * heal report so Q can investigate.
+ *
+ * Intended to be called periodically (e.g. from a health-check interval).
+ * Safe to call frequently — emitHealReport handles single-flight deduplication.
+ */
+export function checkDegradationSignals(
+  db: Database,
+  messenger: Messenger,
+  durability: DurabilityEngine | null,
+  activeControlReportId: string | null,
+): void {
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const failures = db.raw.prepare(`
+    SELECT sender_jid, COUNT(*) as cnt
+    FROM decryption_failures
+    WHERE resolved = 0 AND created_at > ?
+    GROUP BY sender_jid
+    HAVING cnt >= 5
+  `).all(cutoff) as Array<{ sender_jid: string; cnt: number }>;
+
+  for (const { sender_jid, cnt } of failures) {
+    emitHealReport(db, messenger, durability, {
+      type: 'degraded',
+      stderr: `${cnt} unresolved decryption failures from ${sender_jid} in last 5 minutes`,
+    }, activeControlReportId);
+  }
+}
+
 function formatHealReport(payload: {
   type: string;
   chatJid?: string;
