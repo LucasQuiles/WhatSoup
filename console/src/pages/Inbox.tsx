@@ -15,6 +15,7 @@ export default function Inbox() {
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
   const [linePickerOpen, setLinePickerOpen] = useState(false)
   const [msgText, setMsgText] = useState('')
+  const [isSending, setIsSending] = useState(false)
   const queryClient = useQueryClient()
 
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
@@ -25,13 +26,16 @@ export default function Inbox() {
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
 
   const handleSend = async () => {
-    if (!msgText.trim() || !selectedChat) return
+    if (!msgText.trim() || !selectedChat || isSending) return
+    setIsSending(true)
     try {
       await api.sendMessage(activeLine, selectedChat, msgText.trim())
       setMsgText('')
       queryClient.invalidateQueries({ queryKey: ['messages', activeLine, selectedChat] })
     } catch (e) {
       console.error('Send failed:', e instanceof Error ? e.message : e)
+    } finally {
+      setIsSending(false)
     }
   }
 

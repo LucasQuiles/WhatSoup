@@ -56,8 +56,15 @@ function buildHeartbeat(poll: InstanceStatus | undefined): ('up' | 'down')[] {
   ] as ('up' | 'down')[];
 }
 
-/** Count messages since midnight today for an instance. */
+/** Cached daily message counts — refreshed every 60s, not every request. */
+const dailyCountCache = new Map<string, { count: number; cachedAt: number }>();
+const DAILY_CACHE_TTL = 60_000; // 60 seconds
+
 function countMessagesToday(dbReader: FleetDbReader, inst: DiscoveredInstance): number {
+  const now = Date.now();
+  const cached = dailyCountCache.get(inst.name);
+  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.count;
+
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const startMs = startOfDay.getTime();
@@ -65,7 +72,9 @@ function countMessagesToday(dbReader: FleetDbReader, inst: DiscoveredInstance): 
     const row = db.prepare('SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= ?').get(startMs) as { cnt: number };
     return row.cnt;
   });
-  return result.ok ? result.data : 0;
+  const count = result.ok ? result.data : 0;
+  dailyCountCache.set(inst.name, { count, cachedAt: now });
+  return count;
 }
 
 /** Build the enriched LineInstance object the console expects. */
@@ -158,14 +167,14 @@ export async function handleGetLine(
     instanceConfig = JSON.parse(raw);
   } catch { /* config unreadable */ }
 
+  // Also compute real messagesToday for detail view (same as list view)
+  const todayCount = countMessagesToday(deps.dbReader, instance);
+
   jsonResponse(res, 200, {
     ...enriched,
-    // Additional detail-only fields
+    messagesToday: todayCount,
+    // Additional detail-only fields (no filesystem paths — those are server internals)
     type: instance.type,
-    dbPath: instance.dbPath,
-    stateRoot: instance.stateRoot,
-    logDir: instance.logDir,
-    configPath: instance.configPath,
     gui: instance.gui,
     guiPort: instance.guiPort,
     dbStats: dbStats.ok ? dbStats.data : null,

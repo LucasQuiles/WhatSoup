@@ -6,7 +6,7 @@ import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import type { LogEntry } from '../mock-data'
 import {
-  Terminal, ChevronDown, RefreshCw, Power,
+  Terminal, ChevronDown, Power,
   AlertTriangle, CheckCircle2,
 } from 'lucide-react'
 
@@ -145,20 +145,7 @@ export default function Ops() {
                 {line.status !== 'online' && (
                   <div className="flex" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-3)', paddingTop: 'var(--sp-3)', borderTop: '1px solid var(--b1)' }}>
                     <button
-                      className="c-btn c-btn-ghost"
-                      style={{ padding: '5px var(--sp-3)', fontSize: 'var(--font-size-label)' }}
-                      onClick={e => {
-                        e.stopPropagation()
-                        toast.info(`Restarting ${line.name}...`)
-                        api.restart(line.name)
-                          .then(() => toast.success(`${line.name} restart requested`))
-                          .catch(err => toast.error(`Failed: ${err.message}`))
-                      }}
-                    >
-                      <RefreshCw size={12} strokeWidth={1.75} /> Reconnect
-                    </button>
-                    <button
-                      className="c-btn c-btn-danger"
+                      className="c-btn"
                       style={{ padding: '5px var(--sp-3)', fontSize: 'var(--font-size-label)' }}
                       onClick={e => {
                         e.stopPropagation()

@@ -240,6 +240,8 @@ export default function LineDetail() {
 /* ═══ Config helpers — build entries dynamically from real instance config ═══ */
 const CONFIG_EXCLUDE_KEYS = new Set(['name', 'type', 'adminPhones', 'paths', 'healthPort'])
 
+const CONFIG_PATH_KEYS = new Set(['cwd', 'instructionsPath', 'socketPath', 'configDir', 'dataDir', 'stateDir'])
+
 function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: 'string' | 'number' | 'boolean' | 'path' }[] {
   return Object.entries(rawConfig)
     .filter(([k]) => !CONFIG_EXCLUDE_KEYS.has(k))
@@ -248,7 +250,7 @@ function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; 
       value: typeof value === 'object' ? JSON.stringify(value) : String(value),
       type: typeof value === 'boolean' ? 'boolean' as const
         : typeof value === 'number' ? 'number' as const
-        : String(value).startsWith('/') || String(value).startsWith('~') ? 'path' as const
+        : CONFIG_PATH_KEYS.has(key) ? 'path' as const
         : 'string' as const,
     }))
 }
@@ -804,15 +806,19 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   const bottomRef = React.useRef<HTMLDivElement>(null)
   const [showJumpToBottom, setShowJumpToBottom] = React.useState(false)
   const [msgText, setMsgText] = React.useState('')
+  const [isSending, setIsSending] = React.useState(false)
 
   const handleSend = async () => {
-    if (!msgText.trim() || !selectedChat) return
+    if (!msgText.trim() || !selectedChat || isSending) return
+    setIsSending(true)
     try {
       await api.sendMessage(lineName, selectedChat, msgText.trim())
       setMsgText('')
       queryClient.invalidateQueries({ queryKey: ['messages', lineName, selectedChat] })
     } catch (e) {
       toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setIsSending(false)
     }
   }
 
