@@ -26,38 +26,34 @@ export async function handleSend(
 
   const body = await readBody(req);
 
-  // Mode-aware routing
-  if ((instance.type === 'passive' || instance.type === 'agent') && instance.socketPath) {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      jsonResponse(res, 400, { error: 'invalid JSON body' });
-      return;
-    }
-    // Auto-append WhatsApp JID suffix if missing (console sends conversation keys without @)
+  // Normalize JID in request body
+  let fixedBody = body;
+  try {
+    const parsed = JSON.parse(body);
     if (typeof parsed.chatJid === 'string' && !parsed.chatJid.includes('@')) {
       parsed.chatJid = parsed.chatJid.includes('_at_g.us')
-        ? parsed.chatJid.replace('_at_g.us', '@g.us')  // group conversation key
-        : `${parsed.chatJid}@s.whatsapp.net`;           // personal JID
+        ? parsed.chatJid.replace('_at_g.us', '@g.us')
+        : `${parsed.chatJid}@s.whatsapp.net`;
+      fixedBody = JSON.stringify(parsed);
     }
-    const result = await mcpCall(instance.socketPath, 'send_message', parsed);
-    jsonResponse(res, result.success ? 200 : 502, result);
-    return;
+  } catch { /* use original body */ }
+
+  // Route 1: Try MCP socket (passive instances with verified socket)
+  if (instance.type === 'passive' && instance.socketPath) {
+    try {
+      const socketStat = await import('node:fs').then(f => f.existsSync(instance.socketPath!));
+      if (socketStat) {
+        const parsed = JSON.parse(fixedBody);
+        const result = await mcpCall(instance.socketPath, 'send_message', parsed);
+        jsonResponse(res, result.success ? 200 : 502, result);
+        return;
+      }
+    } catch { /* fall through to HTTP */ }
   }
 
-  if (instance.type === 'chat') {
-    // Auto-append JID suffix for chat-mode proxy too
-    let fixedBody = body;
-    try {
-      const parsed = JSON.parse(body);
-      if (typeof parsed.chatJid === 'string' && !parsed.chatJid.includes('@')) {
-        parsed.chatJid = parsed.chatJid.includes('_at_g.us')
-          ? parsed.chatJid.replace('_at_g.us', '@g.us')
-          : `${parsed.chatJid}@s.whatsapp.net`;
-        fixedBody = JSON.stringify(parsed);
-      }
-    } catch { /* use original body */ }
+  // Route 2: HTTP health server /send (works for ALL instance types)
+  // This is the universal fallback — every instance has a health port
+  if (instance.healthPort) {
     const result = await proxyToInstance(
       instance.healthPort, '/send', 'POST', fixedBody, instance.healthToken,
     );
@@ -67,7 +63,7 @@ export async function handleSend(
   }
 
   jsonResponse(res, 422, {
-    error: `no send route available for instance '${params.name}' (type=${instance.type}, socketPath=${instance.socketPath ?? 'none'})`,
+    error: `no send route available for instance '${params.name}' (type=${instance.type})`,
   });
 }
 
