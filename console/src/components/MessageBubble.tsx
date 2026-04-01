@@ -1,4 +1,4 @@
-import { type FC, useState } from 'react'
+import { type FC, useState, useRef, useCallback } from 'react'
 import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatTime } from '../lib/format-time'
@@ -31,48 +31,37 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
       style={{
         bottom: '100%',
         left: 0,
-        marginBottom: 'var(--sp-1)',
+        marginBottom: 'var(--sp-2)',
         padding: 'var(--sp-3) var(--sp-4)',
-        background: 'var(--color-d6)',
-        border: 'var(--bw) solid var(--b2)',
-        borderRadius: 'var(--radius-md)',
-        boxShadow: 'var(--shadow-md)',
+        background: 'var(--color-d5)',
+        border: 'var(--bw) solid var(--b3)',
+        borderRadius: 'var(--radius-lg)',
+        boxShadow: 'var(--shadow-lg)',
         minWidth: 'var(--tooltip-min-w)',
-        fontSize: 'var(--font-size-sm)',
       }}
     >
-      <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-        <div className="flex justify-between">
-          <span className="c-label">Time</span>
-          <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{fullTime}</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="c-label">Sender</span>
-          <span className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)', maxWidth: 'var(--tooltip-val-max)' }}>
-            {resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—')}
-          </span>
-        </div>
-        {msg.senderJid && (
-          <div className="flex justify-between">
-            <span className="c-label">JID</span>
-            <span className="font-mono text-t4 truncate" style={{ fontSize: 'var(--font-size-xs)', maxWidth: 'var(--tooltip-val-max)' }}>
-              {msg.senderJid}
+      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+        {[
+          { label: 'Time', value: fullTime },
+          { label: 'Sender', value: resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '\u2014') },
+          ...(msg.senderJid ? [{ label: 'JID', value: msg.senderJid, muted: true }] : []),
+          { label: 'Type', value: msg.type },
+          { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
+        ].map(({ label, value, muted }) => (
+          <div key={label} className="flex justify-between" style={{ gap: 'var(--sp-4)' }}>
+            <span className="c-label flex-shrink-0">{label}</span>
+            <span className={`c-data truncate ${muted ? 'text-t5' : ''}`} style={{ maxWidth: 'var(--tooltip-val-max)' }}>
+              {value}
             </span>
           </div>
-        )}
-        <div className="flex justify-between">
-          <span className="c-label">Type</span>
-          <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{msg.type}</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="c-label">Direction</span>
-          <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{msg.fromMe ? 'Outbound' : 'Inbound'}</span>
-        </div>
-        <div className="flex justify-between" style={{ borderTop: 'var(--bw) solid var(--b1)', paddingTop: 'var(--sp-1)', marginTop: 'var(--sp-1)' }}>
-          <span className="c-label">ID</span>
-          <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
-            {msg.pk < 0 ? 'pending' : `pk:${msg.pk}`}
-          </span>
+        ))}
+        <div style={{ borderTop: 'var(--bw) solid var(--b2)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
+          <div className="flex justify-between">
+            <span className="c-label">ID</span>
+            <span className="c-data text-t5">
+              {msg.pk < 0 ? 'pending' : `pk:${msg.pk}`}
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -114,6 +103,16 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
 const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, animate, onRetry }) => {
   const isMedia = msg.type !== 'text'
   const [showDetail, setShowDetail] = useState(false)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const onEnter = useCallback(() => {
+    hoverTimer.current = setTimeout(() => setShowDetail(true), 500)
+  }, [])
+  const onLeave = useCallback(() => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+    hoverTimer.current = null
+    setShowDetail(false)
+  }, [])
 
   return (
     <div
@@ -142,8 +141,8 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
       {/* Message bubble — with hover detail card */}
       <div
         className="relative"
-        onMouseEnter={() => setShowDetail(true)}
-        onMouseLeave={() => setShowDetail(false)}
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
       >
         {showDetail && <DetailCard msg={msg} />}
         <div

@@ -1,45 +1,40 @@
-import { useRef, useLayoutEffect, useCallback, useState } from 'react'
+import { useRef, useLayoutEffect, useEffect, useCallback, useState } from 'react'
 
 /**
  * Shared auto-scroll hook for chat-like containers.
  *
- * Behavior:
- *  - Pinned to bottom by default on mount and key change.
- *  - Detaches when user scrolls >150px from bottom.
- *  - Re-attaches when user scrolls within 150px of bottom.
- *  - Shows "jump to newest" button when detached >200px.
- *
- * @param items  - dependency array (e.g. reversed messages) — triggers scroll check on change
- * @param key    - reset key (e.g. selectedChat) — force-pin on change
+ * Pinned to bottom by default. Detaches on scroll up (>150px).
+ * Re-attaches on scroll back down (within 150px). Shows jump
+ * button when >200px away.
  */
 export function useStickyScroll<T>(items: T[], key: string | null) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [showJump, setShowJump] = useState(false)
-  const prevKeyRef = useRef(key)
+  const needsPinRef = useRef(true)
 
-  // Key change: force-pin — runs synchronously in useLayoutEffect before paint
-  useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
+  // Key change → force pin on next layout effect
+  useEffect(() => {
+    needsPinRef.current = true
+    // Defer state update to avoid cascading render warning
+    queueMicrotask(() => setShowJump(false))
   }, [key])
 
-  // Items change: scroll to bottom if already near bottom
+  // After DOM updates: scroll if pinned or near bottom
   useLayoutEffect(() => {
-    // Skip if key just changed (the key effect already scrolled)
-    if (prevKeyRef.current !== key) {
-      prevKeyRef.current = key
+    const el = scrollRef.current
+    if (!el || items.length === 0) return
+
+    if (needsPinRef.current) {
+      el.scrollTop = el.scrollHeight
+      needsPinRef.current = false
       return
     }
-
-    const el = scrollRef.current
-    if (!el) return
 
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight
     if (gap <= 150) {
       el.scrollTop = el.scrollHeight
     }
-  }, [items, key])
+  }, [items])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -52,6 +47,7 @@ export function useStickyScroll<T>(items: T[], key: string | null) {
     const el = scrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
+    needsPinRef.current = false
     setShowJump(false)
   }, [])
 

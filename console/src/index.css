@@ -337,6 +337,9 @@ body::before {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+  background: var(--color-s-ok);
+  border-color: var(--color-s-ok);
+  color: var(--color-d0);
   transition: padding 0.2s ease, gap 0.2s ease;
 }
 .c-btn-send .c-btn-send-label {
@@ -348,7 +351,7 @@ body::before {
 .c-btn-send:hover {
   padding: 6px 12px;
   gap: var(--sp-2);
-  opacity: 1;
+  opacity: 1 !important;
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
 }
