@@ -36,12 +36,12 @@ export default defineConfig([
 
         // Hardcoded font-size — use var(--font-size-xs/label/sm/data/heading/body/lg/xl/2xl)
         {
-          selector: 'Property[key.value="fontSize"][value.value=/^[0-9]+\\.?[0-9]*(rem|em)$/]',
+          selector: 'Property[key.name="fontSize"][value.value=/^[0-9]+\\.?[0-9]*(rem|em)$/]',
           message: '⛔ Hardcoded fontSize — use var(--font-size-*) token.',
         },
         // Hardcoded letter-spacing — use var(--tracking-tight/label/caps)
         {
-          selector: 'Property[key.value="letterSpacing"][value.value=/^-?[0-9]+\\.?[0-9]*(rem|em)$/]',
+          selector: 'Property[key.name="letterSpacing"][value.value=/^-?[0-9]+\\.?[0-9]*(rem|em)$/]',
           message: '⛔ Hardcoded letterSpacing — use var(--tracking-*) token.',
         },
 
@@ -49,7 +49,7 @@ export default defineConfig([
 
         // Hardcoded borderRadius — use var(--radius-sm/md/lg)
         {
-          selector: 'Property[key.value="borderRadius"][value.value=/^[0-9]+px$/]',
+          selector: 'Property[key.name="borderRadius"][value.value=/^[0-9]+px$/]',
           message: '⛔ Hardcoded borderRadius — use var(--radius-sm/md/lg).',
         },
         // Tailwind rounded-[Npx] arbitrary — use design token
@@ -121,15 +121,15 @@ export default defineConfig([
         // Hardcoded large padding/margin px — should use var(--sp-*) tokens
         // Only flags values ≥ 10px to avoid false positives on structural 1px/2px
         {
-          selector: 'Property[key.value="padding"][value.value=/^\\d{2,}px$/]',
+          selector: 'Property[key.name="padding"][value.value=/^\\d{2,}px$/]',
           message: '⛔ Hardcoded padding px — use var(--sp-*) spacing token.',
         },
         {
-          selector: 'Property[key.value="margin"][value.value=/^\\d{2,}px$/]',
+          selector: 'Property[key.name="margin"][value.value=/^\\d{2,}px$/]',
           message: '⛔ Hardcoded margin px — use var(--sp-*) spacing token.',
         },
         {
-          selector: 'Property[key.value="gap"][value.value=/^\\d{2,}px$/]',
+          selector: 'Property[key.name="gap"][value.value=/^\\d{2,}px$/]',
           message: '⛔ Hardcoded gap px — use var(--sp-*) spacing token.',
         },
 
@@ -138,11 +138,11 @@ export default defineConfig([
         // Hardcoded width/height in style — flag large values that should use tokens
         // (avatars, panels, columns should use --avatar-*, --panel-*, --log-col-*)
         {
-          selector: 'Property[key.value="width"][value.value=/^\\d{3,}px$/]',
+          selector: 'Property[key.name="width"][value.value=/^\\d{3,}px$/]',
           message: '⛔ Hardcoded width ≥100px — use a panel/column token (--panel-*, --log-col-*).',
         },
         {
-          selector: 'Property[key.value="minWidth"][value.value=/^\\d{3,}px$/]',
+          selector: 'Property[key.name="minWidth"][value.value=/^\\d{3,}px$/]',
           message: '⛔ Hardcoded minWidth ≥100px — use a sizing token.',
         },
 
@@ -161,14 +161,14 @@ export default defineConfig([
         // ═══ LINE HEIGHT ═══
         // Use Tailwind leading-* classes (leading-none/tight/snug/normal/relaxed/loose)
         {
-          selector: 'Property[key.value="lineHeight"]',
+          selector: 'Property[key.name="lineHeight"]',
           message: '⛔ Inline lineHeight — use Tailwind leading-none/tight/snug/normal/relaxed/loose class.',
         },
 
         // ═══ FONT WEIGHT ═══
         // Use Tailwind font-* classes (font-normal/medium/semibold/bold/extrabold/black)
         {
-          selector: 'Property[key.value="fontWeight"]',
+          selector: 'Property[key.name="fontWeight"]',
           message: '⛔ Inline fontWeight — use Tailwind font-normal/medium/semibold/bold/extrabold/black class.',
         },
 
@@ -179,7 +179,7 @@ export default defineConfig([
 
         // Hardcoded box-shadow — use var(--card-shadow/--shadow-inset/--shadow-md/--shadow-lg)
         {
-          selector: 'Property[key.value="boxShadow"][value.value=/^[0-9]/]',
+          selector: 'Property[key.name="boxShadow"][value.value=/^[0-9]/]',
           message: '⛔ Hardcoded boxShadow — use var(--card-shadow), var(--shadow-inset/md/lg).',
         },
 
@@ -187,12 +187,12 @@ export default defineConfig([
 
         // Inline outline styles — focus rings must use the global :focus-visible rule in index.css
         {
-          selector: 'Property[key.value="outline"][value.value=/[0-9]+px/]',
+          selector: 'Property[key.name="outline"][value.value=/[0-9]+px/]',
           message: '⛔ Inline outline — focus rings are set globally via :focus-visible in index.css.',
         },
         // Inline outlineWidth — same reason
         {
-          selector: 'Property[key.value="outlineWidth"]',
+          selector: 'Property[key.name="outlineWidth"]',
           message: '⛔ Inline outlineWidth — focus ring width is set globally in index.css (1px/1.5px).',
         },
 
@@ -200,23 +200,23 @@ export default defineConfig([
 
         // Hardcoded border with px width — use var(--bw) or var(--bw-accent)
         {
-          selector: 'Property[key.value="border"][value.value=/^[0-9]+px solid/]',
+          selector: 'Property[key.name="border"][value.value=/^[0-9]+px solid/]',
           message: '⛔ Hardcoded border width — use var(--bw) solid var(--b*) or var(--bw-accent).',
         },
         {
-          selector: 'Property[key.value="borderTop"][value.value=/^[0-9]+px solid/]',
+          selector: 'Property[key.name="borderTop"][value.value=/^[0-9]+px solid/]',
           message: '⛔ Hardcoded borderTop width — use var(--bw) solid var(--b*).',
         },
         {
-          selector: 'Property[key.value="borderBottom"][value.value=/^[0-9]+px solid/]',
+          selector: 'Property[key.name="borderBottom"][value.value=/^[0-9]+px solid/]',
           message: '⛔ Hardcoded borderBottom width — use var(--bw) solid var(--b*).',
         },
         {
-          selector: 'Property[key.value="borderLeft"][value.value=/^[0-9]+px solid/]',
+          selector: 'Property[key.name="borderLeft"][value.value=/^[0-9]+px solid/]',
           message: '⛔ Hardcoded borderLeft width — use var(--bw-accent) solid var(--color-*).',
         },
         {
-          selector: 'Property[key.value="borderRight"][value.value=/^[0-9]+px solid/]',
+          selector: 'Property[key.name="borderRight"][value.value=/^[0-9]+px solid/]',
           message: '⛔ Hardcoded borderRight width — use var(--bw) solid var(--b*).',
         },
       ],

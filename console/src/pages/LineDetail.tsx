@@ -541,7 +541,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
       </div>
       {/* c-config block — syntax-highlighted JSON-like display */}
       <div
-        className="font-mono overflow-x-auto whitespace-pre"
+        className="font-mono overflow-x-auto whitespace-pre leading-relaxed"
         style={{
           background: 'var(--color-d1)',
           border: 'var(--bw) solid var(--b1)',
@@ -549,7 +549,6 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
           padding: '14px var(--sp-4)',
           fontSize: 'var(--font-size-data)',
           color: 'var(--color-t2)',
-          lineHeight: 1.7,
         }}
       >
         {'{\n'}
@@ -919,7 +918,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       >
         <textarea
           ref={textareaRef}
-          className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
+          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight"
           rows={1}
           style={{
             fontSize: 'var(--font-size-body)',
@@ -930,7 +929,6 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             maxHeight: '120px',
             resize: 'none',
             overflow: 'hidden',
-            lineHeight: '1.25',
           }}
           placeholder="Type a reply..."
           value={msgText}
@@ -1056,11 +1054,10 @@ function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: s
         {filtered.map((log, i) => (
           <div
             key={`${log.timestamp}-${log.source}-${i}`}
-            className="flex gap-0 hover:bg-d3 c-hover"
+            className="flex gap-0 hover:bg-d3 c-hover leading-relaxed"
             style={{
               borderBottom: 'var(--bw) solid var(--b1)',
               background: levelLineBg[log.level],
-              lineHeight: 1.7,
             }}
           >
             {/* Timestamp */}

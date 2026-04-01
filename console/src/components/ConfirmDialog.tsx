@@ -40,7 +40,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
           background: 'var(--color-d2)',
           border: 'var(--bw) solid var(--b2)',
           borderRadius: 'var(--radius-lg)',
-          width: '420px',
+          width: 'var(--panel-confirm)',
           maxWidth: '90%',
           boxShadow: 'var(--shadow-lg)',
         }}

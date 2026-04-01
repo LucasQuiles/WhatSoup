@@ -59,7 +59,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
                     right: "12px",
                     height: "2px",
                     background: "var(--color-s-ok)",
-                    borderRadius: "1px",
+                    borderRadius: "var(--radius-sm)",
                   }}
                 />
               )}
@@ -108,7 +108,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
                     right: "12px",
                     height: "2px",
                     background: "var(--color-s-ok)",
-                    borderRadius: "1px",
+                    borderRadius: "var(--radius-sm)",
                   }}
                 />
               )}
@@ -140,7 +140,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
                     right: "12px",
                     height: "2px",
                     background: "var(--color-s-ok)",
-                    borderRadius: "1px",
+                    borderRadius: "var(--radius-sm)",
                   }}
                 />
               )}

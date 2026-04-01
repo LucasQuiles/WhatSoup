@@ -35,7 +35,7 @@ const ModeBadge: FC<ModeBadgeProps> = ({ mode }) => {
       className={`inline-flex items-center gap-1.5 font-mono font-medium ${textClass}`}
       style={{
         fontSize: "var(--font-size-label)",
-        letterSpacing: "0.03em",
+        letterSpacing: "var(--tracking-pill)",
         padding: "3px 10px 3px 8px",
         borderRadius: "var(--radius-sm)",
         backgroundColor: washVar,

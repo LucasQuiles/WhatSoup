@@ -189,7 +189,7 @@ export function handleGetMessages(
     senderName: row.sender_name,
     content: row.content,
     type: row.content_type,
-    timestamp: new Date(row.timestamp).toISOString(),
+    timestamp: new Date(row.timestamp > 1e12 ? row.timestamp : row.timestamp * 1000).toISOString(),
     fromMe: row.is_from_me === 1,
   }));
 

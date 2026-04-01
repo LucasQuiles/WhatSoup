@@ -54,7 +54,7 @@ function formatWhatsAppText(text: string): (string | JSX.Element)[] {
           <code key={key++} className="font-mono" style={{
             padding: '1px var(--sp-1)',
             background: 'var(--color-d1)',
-            borderRadius: '2px',
+            borderRadius: 'var(--radius-sm)',
             fontSize: 'var(--font-size-data)',
           }}>{match[2]}</code>
         )

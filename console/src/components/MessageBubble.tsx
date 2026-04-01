@@ -37,7 +37,7 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
         border: 'var(--bw) solid var(--b2)',
         borderRadius: 'var(--radius-md)',
         boxShadow: 'var(--shadow-md)',
-        minWidth: '220px',
+        minWidth: 'var(--tooltip-min-w)',
         fontSize: 'var(--font-size-sm)',
       }}
     >

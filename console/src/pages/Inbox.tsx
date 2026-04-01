@@ -214,7 +214,7 @@ export default function Inbox() {
             >
               <textarea
                 ref={textareaRef}
-                className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
+                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight"
                 rows={1}
                 style={{
                   fontSize: 'var(--font-size-body)',
@@ -225,7 +225,6 @@ export default function Inbox() {
                   maxHeight: '120px',
                   resize: 'none',
                   overflow: 'hidden',
-                  lineHeight: '1.25',
                 }}
                 placeholder="Type a message..."
                 value={msgText}

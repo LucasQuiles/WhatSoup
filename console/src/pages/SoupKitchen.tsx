@@ -422,7 +422,7 @@ const SoupKitchen: FC = () => {
           className="flex flex-col min-h-0"
           style={{
             flex: 1,
-            minWidth: "240px",
+            minWidth: "var(--feed-min-w)",
             background: "var(--color-d1)",
             border: "var(--bw) solid var(--b1)",
             borderRadius: 'var(--radius-lg)',
