@@ -14,6 +14,7 @@ import {
 import { levelColor, levelBg } from '../lib/log-theme'
 import { api } from '../lib/api'
 import { useToast } from '../hooks/toast-context'
+import { displayInstanceName } from '../lib/text-utils'
 
 export default function Ops() {
   const toast = useToast()
@@ -109,7 +110,7 @@ export default function Ops() {
                   <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
                     <StatusDot status={line.status} size="sm" />
                     <span className="font-sans font-medium text-t1" style={{ fontSize: 'var(--font-size-body)' }}>
-                      {line.name}
+                      {displayInstanceName(line.name)}
                     </span>
                     <ModeBadge mode={line.mode} />
                   </div>
@@ -196,7 +197,7 @@ export default function Ops() {
                 }}
               >
                 {currentLine && <StatusDot status={currentLine.status} size="sm" />}
-                <span className="font-medium">{activeLine || 'Select line'}</span>
+                <span className="font-medium">{activeLine ? displayInstanceName(activeLine) : 'Select line'}</span>
                 <ChevronDown size={11} className={`text-t4 transition-transform duration-200 ${linePickerOpen ? 'rotate-180' : ''}`} />
               </button>
 
@@ -215,7 +216,7 @@ export default function Ops() {
                       style={{ fontSize: 'var(--font-size-sm)' }}
                     >
                       <StatusDot status={line.status} size="sm" />
-                      <span className="font-mono">{line.name}</span>
+                      <span className="font-mono">{displayInstanceName(line.name)}</span>
                       <ModeBadge mode={line.mode} />
                     </button>
                   ))}

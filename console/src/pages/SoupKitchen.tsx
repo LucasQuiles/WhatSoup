@@ -12,7 +12,7 @@ import StatusDot from "../components/StatusDot";
 import ModeBadge from "../components/ModeBadge";
 import FilterPill from "../components/FilterPill";
 import { formatRelative } from "../lib/format-time";
-import { formatPhone } from "../lib/text-utils";
+import { formatPhone, displayInstanceName } from "../lib/text-utils";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -145,7 +145,7 @@ const SoupKitchen: FC = () => {
         className="flex-shrink-0"
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(5, 1fr)",
+          gridTemplateColumns: "repeat(7, 1fr)",
           gap: "var(--sp-2)",
           background: "var(--color-d1)",
           border: "1px solid var(--b1)",
@@ -169,11 +169,18 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "attention"}
         />
         <KpiCard
-          value={kpis.unread}
-          label="Unread (Passive)"
-          color="text-s-warn"
-          onClick={() => toggleKpi("unread")}
-          active={activeKpi === "unread"}
+          value={kpis.totalSent.toLocaleString()}
+          label="Messages Sent"
+          color="text-m-cht"
+          onClick={() => toggleKpi("messages")}
+          active={activeKpi === "messages"}
+        />
+        <KpiCard
+          value={kpis.totalReceived.toLocaleString()}
+          label="Messages Received"
+          color="text-t2"
+          onClick={() => toggleKpi("messages")}
+          active={activeKpi === "messages"}
         />
         <KpiCard
           value={kpis.agentSessions}
@@ -183,9 +190,16 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "agent"}
         />
         <KpiCard
-          value={kpis.messagesToday.toLocaleString()}
-          label="Messages Today"
-          color="text-m-cht"
+          value={kpis.unread}
+          label="Unread"
+          color="text-s-warn"
+          onClick={() => toggleKpi("unread")}
+          active={activeKpi === "unread"}
+        />
+        <KpiCard
+          value={kpis.totalMedia.toLocaleString()}
+          label="Media Processed"
+          color="text-s-ok"
           onClick={() => toggleKpi("messages")}
           active={activeKpi === "messages"}
         />
@@ -336,7 +350,7 @@ const SoupKitchen: FC = () => {
                             className="font-sans font-medium text-t1"
                             style={{ fontSize: 'var(--font-size-body)' }}
                           >
-                            {line.name}
+                            {displayInstanceName(line.name)}
                           </span>
                           <span
                             className="c-label"

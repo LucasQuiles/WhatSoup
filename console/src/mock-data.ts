@@ -46,6 +46,13 @@ export interface LineInstance {
   activeSessions?: number;
   lastSessionStatus?: string | null;
   messagesToday?: number;
+  messageStats?: {
+    sent: number;
+    received: number;
+    images: number;
+    audio: number;
+    documents: number;
+  };
   group?: string;
   config?: Record<string, unknown>;
 }
@@ -983,12 +990,18 @@ export function computeKpis(lines: LineInstance[]): {
   agentSessions: number;
   messagesToday: number;
   avgResponseMs: number;
+  totalSent: number;
+  totalReceived: number;
+  totalMedia: number;
 } {
   let connected = 0;
   let needAttention = 0;
   let unread = 0;
   let agentSessions = 0;
   let messagesToday = 0;
+  let totalSent = 0;
+  let totalReceived = 0;
+  let totalMedia = 0;
 
   for (const line of lines) {
     if (line.status === 'online') connected++;
@@ -1001,10 +1014,16 @@ export function computeKpis(lines: LineInstance[]): {
     if (rt?.agent) agentSessions += rt.agent.activeSessions;
 
     messagesToday += line.messagesToday ?? 0;
+
+    if (line.messageStats) {
+      totalSent += line.messageStats.sent;
+      totalReceived += line.messageStats.received;
+      totalMedia += line.messageStats.images + line.messageStats.audio + line.messageStats.documents;
+    }
   }
 
   // Mock avg response — Phase 2 will compute from real latency data
   const avgResponseMs = 247;
 
-  return { connected, needAttention, unread, agentSessions, messagesToday, avgResponseMs };
+  return { connected, needAttention, unread, agentSessions, messagesToday, avgResponseMs, totalSent, totalReceived, totalMedia };
 }

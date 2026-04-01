@@ -78,8 +78,50 @@ function countMessagesToday(dbReader: FleetDbReader, inst: DiscoveredInstance): 
   return count;
 }
 
+/** Detailed message stats by direction and content type — 60s cache. */
+interface MessageStats {
+  sent: number;
+  received: number;
+  images: number;
+  audio: number;
+  documents: number;
+}
+
+const messageStatsCache = new Map<string, { stats: MessageStats; cachedAt: number }>();
+
+function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): MessageStats {
+  const now = Date.now();
+  const cached = messageStatsCache.get(inst.name);
+  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.stats;
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const startSec = Math.floor(startOfDay.getTime() / 1000);
+
+  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+    const rows = db.prepare(
+      'SELECT content_type, is_from_me, COUNT(*) as cnt FROM messages WHERE timestamp >= ? GROUP BY content_type, is_from_me',
+    ).all(startSec) as { content_type: string; is_from_me: number; cnt: number }[];
+    return rows;
+  });
+
+  const stats: MessageStats = { sent: 0, received: 0, images: 0, audio: 0, documents: 0 };
+  if (result.ok) {
+    for (const row of result.data) {
+      if (row.is_from_me === 1) stats.sent += row.cnt;
+      else stats.received += row.cnt;
+      if (row.content_type === 'image') stats.images += row.cnt;
+      else if (row.content_type === 'audio') stats.audio += row.cnt;
+      else if (row.content_type === 'document') stats.documents += row.cnt;
+    }
+  }
+
+  messageStatsCache.set(inst.name, { stats, cachedAt: now });
+  return stats;
+}
+
 /** Build the enriched LineInstance object the console expects. */
-function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, messagesToday?: number): Record<string, unknown> {
+function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, messagesToday?: number, messageStats?: MessageStats): Record<string, unknown> {
   const h = poll?.health ?? null;
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
@@ -118,6 +160,7 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     enrichmentUnprocessed: enrichmentUnprocessed ?? 0,
     activeSessions: activeSessions ?? 0,
     lastSessionStatus,
+    messageStats: messageStats ?? null,
   };
 }
 
@@ -137,7 +180,8 @@ export function handleGetLines(
   const lines = Array.from(instances.values()).map((inst) => {
     const poll = statuses.get(inst.name);
     const todayCount = countMessagesToday(deps.dbReader, inst);
-    return enrichInstance(inst, poll, todayCount);
+    const stats = getMessageStats(deps.dbReader, inst);
+    return enrichInstance(inst, poll, todayCount, stats);
   });
 
   jsonResponse(res, 200, lines);
@@ -160,7 +204,8 @@ export async function handleGetLine(
   const dbStats = deps.dbReader.getSummaryStats(instance.name, instance.dbPath);
 
   // Start with the enriched shape the console expects, then add detail fields
-  const enriched = enrichInstance(instance, poll);
+  const stats = getMessageStats(deps.dbReader, instance);
+  const enriched = enrichInstance(instance, poll, undefined, stats);
 
   let instanceConfig: Record<string, unknown> = {};
   try {
