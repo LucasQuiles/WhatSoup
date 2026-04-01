@@ -5,7 +5,7 @@ import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import EmptyState from '../components/EmptyState'
 import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Shield } from 'lucide-react'
-import { getInitials } from '../lib/text-utils'
+import { getInitials, stripMarkdown } from '../lib/text-utils'
 
 export default function Inbox() {
   const { data: lines } = useLines()
@@ -111,7 +111,7 @@ export default function Inbox() {
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="text-t4 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
-                      {chat.lastMessagePreview}
+                      {stripMarkdown(chat.lastMessagePreview ?? '')}
                     </div>
                     {chat.unreadCount > 0 && (
                       <span
@@ -178,7 +178,7 @@ export default function Inbox() {
                 </div>
               )}
               <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-                {messages?.map(msg => (
+                {[...(messages ?? [])].reverse().map(msg => (
                   <div
                     key={msg.pk}
                     className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}

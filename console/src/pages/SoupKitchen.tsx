@@ -11,6 +11,7 @@ import ActivityFeed from "../components/ActivityFeed";
 import StatusDot from "../components/StatusDot";
 import ModeBadge from "../components/ModeBadge";
 import { formatRelative } from "../lib/format-time";
+import { formatPhone } from "../lib/text-utils";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -350,7 +351,7 @@ const SoupKitchen: FC = () => {
                           <span
                             className="c-label"
                           >
-                            {line.phone}
+                            {formatPhone(line.phone)}
                           </span>
                         </div>
                       </td>

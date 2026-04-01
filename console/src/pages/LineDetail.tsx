@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
 import { formatRelative, formatTime, formatChatTime } from '../lib/format-time'
-import { getInitials } from '../lib/text-utils'
+import { getInitials, stripMarkdown } from '../lib/text-utils'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
 import { useToast } from '../hooks/toast-context'
 import ModeBadge from '../components/ModeBadge'
@@ -201,7 +201,7 @@ export default function LineDetail() {
       </div>
 
       {/* ═══ Tab content ═══ */}
-      <div className="flex-1 overflow-auto scrollbar-hide" style={{ padding: 'var(--sp-5)' }}>
+      <div className="flex-1 overflow-hidden" style={{ padding: 'var(--sp-5)' }}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -740,8 +740,8 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
     <div
-      className="flex overflow-hidden"
-      style={{ border: '1px solid var(--b1)', borderRadius: 'var(--radius-lg)', height: '100%' }}
+      className="flex overflow-hidden h-full"
+      style={{ border: '1px solid var(--b1)', borderRadius: 'var(--radius-lg)' }}
     >
       {/* Chat list */}
       <div
@@ -789,7 +789,7 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="text-t4 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
-                      {chat.lastMessagePreview}
+                      {stripMarkdown(chat.lastMessagePreview ?? '')}
                     </div>
                     {chat.unreadCount > 0 && (
                       <span
@@ -819,7 +819,7 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
                 </div>
               )}
               <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-                {messages.map(msg => (
+                {[...messages].reverse().map(msg => (
                   <div
                     key={msg.pk}
                     className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
