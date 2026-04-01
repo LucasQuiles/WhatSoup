@@ -11,8 +11,11 @@ import {
 } from 'lucide-react'
 
 import { levelColor, levelBg } from '../lib/log-theme'
+import { api } from '../lib/api'
+import { useToast } from '../hooks/toast-context'
 
 export default function Ops() {
+  const toast = useToast()
   const { data: lines = [] } = useLines()
   const { data: feed = [] } = useFeed()
   const [logFilter, setLogFilter] = useState<string>('all')
@@ -144,14 +147,26 @@ export default function Ops() {
                     <button
                       className="c-btn c-btn-ghost"
                       style={{ padding: '5px var(--sp-3)', fontSize: 'var(--font-size-label)' }}
-                      onClick={e => e.stopPropagation()}
+                      onClick={e => {
+                        e.stopPropagation()
+                        toast.info(`Restarting ${line.name}...`)
+                        api.restart(line.name)
+                          .then(() => toast.success(`${line.name} restart requested`))
+                          .catch(err => toast.error(`Failed: ${err.message}`))
+                      }}
                     >
                       <RefreshCw size={12} strokeWidth={1.75} /> Reconnect
                     </button>
                     <button
                       className="c-btn c-btn-danger"
                       style={{ padding: '5px var(--sp-3)', fontSize: 'var(--font-size-label)' }}
-                      onClick={e => e.stopPropagation()}
+                      onClick={e => {
+                        e.stopPropagation()
+                        toast.info(`Restarting ${line.name}...`)
+                        api.restart(line.name)
+                          .then(() => toast.success(`${line.name} restart requested`))
+                          .catch(err => toast.error(`Failed: ${err.message}`))
+                      }}
                     >
                       <Power size={12} strokeWidth={1.75} /> Restart
                     </button>

@@ -149,7 +149,6 @@ const SoupKitchen: FC = () => {
           color="text-s-ok"
           onClick={() => toggleKpi("connected")}
           active={activeKpi === "connected"}
-          sparkData={[0.6, 0.65, 0.7, 0.68, 0.75, 0.72, 0.8, 0.85, 0.82, 0.9, 0.88, 0.95]}
         />
         <KpiCard
           value={kpis.needAttention}
@@ -164,7 +163,6 @@ const SoupKitchen: FC = () => {
           color="text-s-warn"
           onClick={() => toggleKpi("unread")}
           active={activeKpi === "unread"}
-          sparkData={[0.9, 0.75, 0.8, 0.6, 0.65, 0.45, 0.5, 0.35, 0.55, 0.25, 0.4]}
         />
         <KpiCard
           value={kpis.agentSessions}
@@ -179,7 +177,6 @@ const SoupKitchen: FC = () => {
           color="text-m-cht"
           onClick={() => toggleKpi("messages")}
           active={activeKpi === "messages"}
-          sparkData={[0.8, 0.65, 0.7, 0.45, 0.55, 0.35, 0.5, 0.25, 0.4, 0.15, 0.25]}
         />
       </motion.div>
 
