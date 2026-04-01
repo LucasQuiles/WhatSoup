@@ -37,14 +37,14 @@ export function markdownToWhatsApp(text: string): string {
   // --- Fix broken formatting ---
 
   // **bold** → *bold* (WhatsApp bold uses single asterisk)
-  // Must handle **text with spaces** across word boundaries
-  out = out.replace(/\*\*(.+?)\*\*/g, '*$1*');
+  // Use [\s\S] instead of . to handle multiline bold spans
+  out = out.replace(/\*\*([\s\S]+?)\*\*/g, '*$1*');
 
   // __text__ → _text_ (WhatsApp italic — rare from Claude but possible)
-  out = out.replace(/__(.+?)__/g, '_$1_');
+  out = out.replace(/__([\s\S]+?)__/g, '_$1_');
 
   // ~~strikethrough~~ → ~strikethrough~ (WhatsApp uses single tilde)
-  out = out.replace(/~~(.+?)~~/g, '~$1~');
+  out = out.replace(/~~([\s\S]+?)~~/g, '~$1~');
 
   // --- Strip noise ---
 
@@ -67,6 +67,33 @@ export function markdownToWhatsApp(text: string): string {
   // Bare bracket references: [text] without (url) → strip brackets
   // Must run AFTER link conversion to avoid mangling [text](url)
   out = out.replace(/\[([^\]]+)\]/g, '$1');
+
+  // --- Strip HTML ---
+
+  // <details>/<summary> blocks → keep content, strip tags
+  out = out.replace(/<summary>([\s\S]*?)<\/summary>/g, '*$1*');
+  out = out.replace(/<\/?details>/g, '');
+
+  // <br> / <br/> → newline
+  out = out.replace(/<br\s*\/?>/gi, '\n');
+
+  // Strip remaining HTML tags (but preserve content)
+  out = out.replace(/<[^>]+>/g, '');
+
+  // HTML entities
+  out = out.replace(/&lt;/g, '<');
+  out = out.replace(/&gt;/g, '>');
+  out = out.replace(/&amp;/g, '&');
+  out = out.replace(/&quot;/g, '"');
+  out = out.replace(/&#39;/g, "'");
+
+  // --- Clean tables ---
+
+  // Pipe table separator rows: | --- | --- | → remove
+  out = out.replace(/^\|[\s\-:|]+\|\s*$/gm, '');
+
+  // Pipe table rows: | cell | cell | → cell | cell (strip leading/trailing pipes)
+  out = out.replace(/^\|\s*(.+?)\s*\|\s*$/gm, '$1');
 
   // --- Clean whitespace ---
 

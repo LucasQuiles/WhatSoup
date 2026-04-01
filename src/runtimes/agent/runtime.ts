@@ -302,9 +302,56 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
 }
 
 /**
- * Classify a tool_result error as either a blocked tool (permission/hook denial)
- * or a genuine execution error. Returns an appropriate ToolUpdate with the tool
- * name and a short description of what went wrong.
+ * Rewrite common technical error messages into casual, user-friendly language.
+ * Returns null if no rewrite matches (use the original).
+ */
+function humanizeError(toolName: string, text: string): string | null {
+  const lower = text.toLowerCase();
+
+  // File too large to read
+  if (lower.includes('exceeds maximum allowed tokens') || lower.includes('content too large')) {
+    return `_${toolName} — that file was a bit too long, reading just the parts I need instead_`;
+  }
+  // File not found
+  if (lower.includes('no such file') || lower.includes('file not found') || lower.includes('enoent')) {
+    return `_${toolName} — file not found, looking for the right path_`;
+  }
+  // Command not found
+  if (lower.includes('command not found') || lower.includes('enoent') && toolName === 'Bash') {
+    return `_${toolName} — command not found, trying another approach_`;
+  }
+  // Timeout
+  if (lower.includes('timed out') || lower.includes('timeout')) {
+    return `_${toolName} — that took too long, retrying_`;
+  }
+  // Network / connection errors
+  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed')) {
+    return `_${toolName} — connection failed, will retry_`;
+  }
+  // No matches found (grep/glob)
+  if (lower.includes('no matches found') || lower.includes('no files found')) {
+    return `_${toolName} — no results, refining search_`;
+  }
+  // Git conflicts
+  if (lower.includes('merge conflict') || lower.includes('conflict')) {
+    return `_${toolName} — merge conflict, resolving_`;
+  }
+  // Rate limit / overloaded
+  if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429')) {
+    return `_${toolName} — rate limited, waiting a moment_`;
+  }
+  // Syntax/parse errors from bash
+  if (lower.includes('syntax error') && toolName === 'Bash') {
+    return `_${toolName} — syntax error, fixing command_`;
+  }
+
+  return null;
+}
+
+/**
+ * Classify a tool_result error as either a blocked tool (permission/hook denial),
+ * cancelled, or a genuine execution error. Returns an appropriate ToolUpdate with
+ * user-friendly messaging.
  */
 export function classifyToolError(toolName: string, content: string): ToolUpdate {
   // Strip internal XML-like tags from Claude error content
@@ -330,19 +377,23 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
     lower.includes('is not in the allow') ||
     lower.includes('disallowed');
 
-  // Extract a short, user-facing reason
+  const category = isCancelled ? 'cancelled' : isBlocked ? 'blocked' : 'error';
+
+  // Try human-friendly rewrite first (only for errors, not blocked/cancelled)
+  if (category === 'error' && toolName !== 'unknown') {
+    const humanized = humanizeError(toolName, cleaned);
+    if (humanized) return { category, detail: humanized };
+  }
+
+  // Fallback: technical detail
   const firstLine = cleaned.split('\n')[0] ?? cleaned;
-  // Simplify "Cancelled: parallel tool call Bash(...)" → "Cancelled"
   const simplified = firstLine
     .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
     .replace(/^Exit code (\d+)$/, 'exit code $1');
   const reason = simplified.length > 100 ? simplified.slice(0, 99) + '…' : simplified;
 
-  // Format: "toolName — reason" for known tools, just reason for unknown
   const humanName = toolName === 'unknown' ? '' : toolName;
   const detail = humanName ? `${humanName} — ${reason}` : reason;
-
-  const category = isCancelled ? 'cancelled' : isBlocked ? 'blocked' : 'error';
 
   return { category, detail };
 }

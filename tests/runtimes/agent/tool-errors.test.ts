@@ -49,9 +49,10 @@ describe('classifyToolError', () => {
     expect(result.detail).not.toContain('</tool_use_error>');
   });
 
-  it('strips <error> XML tags', () => {
+  it('strips <error> XML tags and humanizes content', () => {
     const result = classifyToolError('Read', '<error>File not found</error>');
-    expect(result.detail).toBe('Read — File not found');
+    expect(result.detail).toContain('file not found');
+    expect(result.detail).not.toContain('<error>');
   });
 
   it('classifies cancelled tool calls as cancelled category', () => {
@@ -79,5 +80,39 @@ describe('classifyToolError', () => {
   it('uses first line only for multiline errors', () => {
     const result = classifyToolError('Bash', 'first line\nsecond line\nthird line');
     expect(result.detail).toBe('Bash — first line');
+  });
+
+  // ── Human-friendly rewrites ──
+
+  it('humanizes file-too-large errors', () => {
+    const result = classifyToolError('Read', 'File content (17906 tokens) exceeds maximum allowed tokens (10000). Use offset and limit parameters to read specific ranges.');
+    expect(result.category).toBe('error');
+    expect(result.detail).toContain('too long');
+    expect(result.detail).toMatch(/^_.*_$/); // wrapped in italics
+  });
+
+  it('humanizes file-not-found errors', () => {
+    const result = classifyToolError('Read', 'ENOENT: no such file or directory, open \'/tmp/missing.txt\'');
+    expect(result.detail).toContain('file not found');
+  });
+
+  it('humanizes timeout errors', () => {
+    const result = classifyToolError('Bash', 'Command timed out after 120000ms');
+    expect(result.detail).toContain('too long');
+  });
+
+  it('humanizes connection errors', () => {
+    const result = classifyToolError('WebFetch', 'fetch failed: ECONNREFUSED 127.0.0.1:3000');
+    expect(result.detail).toContain('connection failed');
+  });
+
+  it('humanizes rate limit errors', () => {
+    const result = classifyToolError('Bash', 'Error: 429 rate limit exceeded');
+    expect(result.detail).toContain('rate limited');
+  });
+
+  it('falls through to technical detail for unknown patterns', () => {
+    const result = classifyToolError('Bash', 'segfault at 0x0');
+    expect(result.detail).toBe('Bash — segfault at 0x0');
   });
 });

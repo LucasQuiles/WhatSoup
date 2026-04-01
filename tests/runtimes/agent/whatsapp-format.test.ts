@@ -110,6 +110,50 @@ describe('markdownToWhatsApp', () => {
       .toBe('click here (https://example.com) and ref');
   });
 
+  // ── Multiline bold ──
+
+  it('converts **bold** spanning multiple lines', () => {
+    expect(markdownToWhatsApp('the **quick brown\nfox** jumps'))
+      .toBe('the *quick brown\nfox* jumps');
+  });
+
+  // ── HTML cleanup ──
+
+  it('strips <details>/<summary> and bolds summary text', () => {
+    expect(markdownToWhatsApp('<details><summary>Click here</summary>\nHidden content\n</details>'))
+      .toBe('*Click here*\nHidden content\n');
+  });
+
+  it('converts <br> to newline', () => {
+    expect(markdownToWhatsApp('line one<br>line two')).toBe('line one\nline two');
+  });
+
+  it('strips other HTML tags but keeps content', () => {
+    expect(markdownToWhatsApp('<em>italic</em> and <strong>bold</strong>'))
+      .toBe('italic and bold');
+  });
+
+  it('decodes HTML entities', () => {
+    expect(markdownToWhatsApp('a &lt; b &amp; c &gt; d')).toBe('a < b & c > d');
+    expect(markdownToWhatsApp('&quot;hello&quot;')).toBe('"hello"');
+  });
+
+  // ── Table cleanup ──
+
+  it('strips pipe table separator rows', () => {
+    expect(markdownToWhatsApp('| --- | --- |')).toBe('');
+  });
+
+  it('strips leading/trailing pipes from table rows', () => {
+    expect(markdownToWhatsApp('| name | value |')).toBe('name | value');
+  });
+
+  it('handles a full pipe table', () => {
+    const input = '| Tool | Status |\n| --- | --- |\n| Read | OK |\n| Write | OK |';
+    const expected = 'Tool | Status\nRead | OK\nWrite | OK';
+    expect(markdownToWhatsApp(input)).toBe(expected);
+  });
+
   // ── Preserved formatting ──
 
   it('leaves > quotes alone', () => {
