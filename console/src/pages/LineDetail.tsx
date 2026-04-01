@@ -201,7 +201,7 @@ export default function LineDetail() {
       </div>
 
       {/* ═══ Tab content ═══ */}
-      <div className="flex-1 overflow-hidden" style={{ padding: 'var(--sp-5)' }}>
+      <div className="flex-1 overflow-hidden min-h-0 flex flex-col" style={{ padding: 'var(--sp-5)' }}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -209,6 +209,7 @@ export default function LineDetail() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+            className="flex-1 min-h-0 flex flex-col overflow-hidden"
           >
             {activeTab === 'summary' && <SummaryTab line={line} />}
             {activeTab === 'mode' && <ModeTab mode={line.mode} />}
