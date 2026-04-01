@@ -7,7 +7,7 @@ import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { dequeueNextReport } from '../../core/heal.ts';
+import { dequeueNextReport, emitHealReport } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -19,7 +19,7 @@ import {
   getResumableSessionForChat,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
-import { SessionManager, formatAge } from './session.ts';
+import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -497,7 +497,7 @@ export class AgentRuntime implements Runtime {
         cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
         onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
-        onCrash: () => {
+        onCrash: (info) => {
           this.recordCrash();
           this.getActiveQueue()?.abortTurn();
           this.turnHadVisibleOutput = false;
@@ -505,6 +505,18 @@ export class AgentRuntime implements Runtime {
           if (this.durability && this.currentInboundSeq !== undefined) {
             this.durability.markInboundFailed(this.currentInboundSeq);
             this.currentInboundSeq = undefined;
+          }
+          if (config.controlPeers.size > 0) {
+            try {
+              emitHealReport(this.db, this.messenger, this.durability, {
+                type: 'crash',
+                chatJid: resumeChatJid,
+                exitCode: info.exitCode ?? undefined,
+                signal: info.signal ?? undefined,
+              }, this.activeControlReportId);
+            } catch (err) {
+              log.warn({ err }, 'failed to emit heal report for session crash');
+            }
           }
         },
         notifyUser: (msg) => this.handleCrashNotify(msg),
@@ -1132,7 +1144,7 @@ export class AgentRuntime implements Runtime {
         chatJid: syntheticJid,
         cwd: controlCwd,
         onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
-        onCrash: () => {
+        onCrash: (_info) => {
           log.warn('control session crashed');
           this.activeControlReportId = null;
         },
@@ -1292,7 +1304,7 @@ export class AgentRuntime implements Runtime {
     chatJid: string;
     cwd: string | undefined;
     onEvent: (event: AgentEvent) => void;
-    onCrash: () => void;
+    onCrash: (info: SessionCrashInfo) => void;
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
   }): SessionManager {
@@ -1380,7 +1392,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         cwd: workspacePath,  // scoped cwd instead of this.cwd
         onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
-        onCrash: () => this.handlePerChatCrash(workspaceKey),
+        onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
         notifyUser: (msg) => {
           this.chatSessions.delete(workspaceKey);
           this.chatQueues.get(workspaceKey)?.abortTurn();
@@ -1433,7 +1445,7 @@ export class AgentRuntime implements Runtime {
           chatJid,
           cwd: this.cwd,
           onEvent: (event) => this.handleEventPerChat(chatJid, event),
-          onCrash: () => this.handlePerChatCrash(chatJid),
+          onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
           notifyUser: (msg) => {
             // Remove crashed session so next message spawns a fresh one
             this.chatSessions.delete(chatJid);
@@ -1459,7 +1471,7 @@ export class AgentRuntime implements Runtime {
         chatJid,
         cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
-        onCrash: () => {
+        onCrash: (info) => {
           this.recordCrash();
           this.getActiveQueue()?.abortTurn();
           this.turnHadVisibleOutput = false;
@@ -1467,6 +1479,18 @@ export class AgentRuntime implements Runtime {
           if (this.durability && this.currentInboundSeq !== undefined) {
             this.durability.markInboundFailed(this.currentInboundSeq);
             this.currentInboundSeq = undefined;
+          }
+          if (config.controlPeers.size > 0) {
+            try {
+              emitHealReport(this.db, this.messenger, this.durability, {
+                type: 'crash',
+                chatJid,
+                exitCode: info.exitCode ?? undefined,
+                signal: info.signal ?? undefined,
+              }, this.activeControlReportId);
+            } catch (err) {
+              log.warn({ err }, 'failed to emit heal report for session crash');
+            }
           }
         },
         notifyUser: (msg) => this.handleCrashNotify(msg),
@@ -1495,7 +1519,7 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private handlePerChatCrash(mapKey: string): void {
+  private handlePerChatCrash(mapKey: string, chatJid?: string, info?: SessionCrashInfo): void {
     this.recordCrash();
     this.chatQueues.get(mapKey)?.abortTurn();
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
@@ -1503,6 +1527,18 @@ export class AgentRuntime implements Runtime {
     if (this.durability && inboundSeq !== undefined) {
       this.durability.markInboundFailed(inboundSeq);
       seqQueue.shift();
+    }
+    if (config.controlPeers.size > 0 && chatJid) {
+      try {
+        emitHealReport(this.db, this.messenger, this.durability, {
+          type: 'crash',
+          chatJid,
+          exitCode: info?.exitCode ?? undefined,
+          signal: info?.signal ?? undefined,
+        }, this.activeControlReportId);
+      } catch (err) {
+        log.warn({ err }, 'failed to emit heal report for session crash');
+      }
     }
   }
 

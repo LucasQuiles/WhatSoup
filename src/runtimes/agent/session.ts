@@ -27,6 +27,11 @@ export const WATCHDOG_SOFT_MS  = 600_000;   // 10 min — first soft probe
 export const WATCHDOG_WARN_MS  = 1_200_000; // 20 min — second soft probe
 export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 
+export interface SessionCrashInfo {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+}
+
 export interface SessionManagerOptions {
   db: Database;
   messenger: Messenger;
@@ -34,7 +39,7 @@ export interface SessionManagerOptions {
   onEvent: (event: AgentEvent) => void;
   instanceName?: string;
   onResumeFailed?: () => void;
-  onCrash?: () => void;
+  onCrash?: (info: SessionCrashInfo) => void;
   notifyUser?: (msg: string) => void;
   cwd?: string;
   instructionsPath?: string;
@@ -70,7 +75,7 @@ export class SessionManager {
   /** Called instead of the crash message when a --resume attempt is rejected. */
   private readonly onResumeFailed: (() => void) | undefined;
   /** Called when the session crashes unexpectedly (not for resume failures). */
-  private readonly onCrash: (() => void) | undefined;
+  private readonly onCrash: ((info: SessionCrashInfo) => void) | undefined;
   /**
    * Optional override for crash notification delivery. When provided, the crash
    * message is passed to this callback (allowing the runtime to route it through
@@ -307,7 +312,7 @@ export class SessionManager {
         // Allow the runtime to clean up the outbound queue (clears typing heartbeat).
         // onCrash does NOT send 'paused' — the composing indicator times out naturally,
         // acting as a soft signal to the user that the session is in trouble.
-        this.onCrash?.();
+        this.onCrash?.({ exitCode: code, signal });
 
         // Notify user of unexpected crash (rate-limited to avoid flood on rapid restarts).
         // Deferred via setImmediate so any synchronous onCrash cleanup runs first.
