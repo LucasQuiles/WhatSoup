@@ -63,7 +63,7 @@ export function createIngestHandler(
             log.error({ err, messageId: msg.messageId }, 'failed to store control message');
           }
 
-          log.info({ messageId: msg.messageId, protocol, peer: msg.senderJid }, 'control message intercepted');
+          log.debug({ protocol, peer: msg.senderJid, messageId: msg.messageId }, 'control message intercepted');
 
           // Route HEAL_COMPLETE and HEAL_ESCALATE to the heal state machine
           if (protocol === 'HEAL_COMPLETE' || protocol === 'HEAL_ESCALATE') {

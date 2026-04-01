@@ -75,8 +75,9 @@ export function emitHealReport(
   }
 
   // Check global valve
-  if (!checkGlobalValve(db)) {
-    log.warn({ errorClass }, 'global valve triggered — escalating to admin');
+  const valveCount = getGlobalValveCount(db);
+  if (valveCount >= GLOBAL_VALVE_LIMIT) {
+    log.warn({ sendsThisHour: valveCount }, 'global heal valve triggered');
     // TODO: send admin notification
     return null;
   }
@@ -93,7 +94,7 @@ export function emitHealReport(
   log.info({ reportId, errorClass, type: data.type, state }, 'heal report created');
 
   if (state === 'queued') {
-    log.info({ reportId, errorClass }, 'heal report queued — single-flight slot occupied');
+    log.info({ reportId, errorClass }, 'heal report queued — slot occupied');
     return reportId;
   }
 
@@ -138,7 +139,9 @@ export function emitHealReport(
  * creates an authoritative row from the completion payload (Type 3 adoption).
  */
 export function handleHealComplete(db: Database, payload: HealCompletePayload): void {
-  const { reportId, errorClass, result } = payload;
+  const { reportId, errorClass, result, diagnosis } = payload;
+
+  log.info({ reportId, result, errorClass }, 'heal complete received');
 
   // Idempotent: check if already resolved
   const row = (db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get(reportId) ?? undefined) as { state: string } | undefined;
@@ -148,7 +151,7 @@ export function handleHealComplete(db: Database, payload: HealCompletePayload): 
       INSERT OR IGNORE INTO heal_reports (report_id, error_class, error_type, state, attempt_count, resolved_at)
       VALUES (?, ?, 'service_crash', 'resolved', 1, datetime('now'))
     `).run(reportId, errorClass);
-    log.info({ reportId, errorClass }, 'Type 3 heal report adopted on completion');
+    log.info({ reportId, errorClass }, 'Type 3 heal report adopted');
     return;
   }
 
@@ -162,7 +165,11 @@ export function handleHealComplete(db: Database, payload: HealCompletePayload): 
     UPDATE heal_reports SET state = ?, resolved_at = datetime('now') WHERE report_id = ?
   `).run(newState, reportId);
 
-  log.info({ reportId, errorClass, from: row.state, to: newState }, 'heal report state transition');
+  log.info({ reportId, from: row.state, to: newState }, 'heal report state transition');
+
+  if (newState === 'escalated') {
+    log.warn({ reportId, errorClass, diagnosis }, 'heal escalated to admin');
+  }
 }
 
 /**
@@ -202,20 +209,25 @@ export function dequeueNextReport(db: Database): HealReportRow | null {
 }
 
 /**
+ * Get the count of non-queued heal reports created in the past hour.
+ * Used by emitHealReport for global valve logging.
+ */
+function getGlobalValveCount(db: Database): number {
+  const windowMinutes = -Math.floor(GLOBAL_VALVE_WINDOW_MS / 60_000);
+  return (db.raw.prepare(`
+    SELECT COUNT(*) as cnt FROM heal_reports
+    WHERE state != 'queued' AND created_at > datetime('now', ? || ' minutes')
+  `).get(`${windowMinutes}`) as { cnt: number }).cnt;
+}
+
+/**
  * Check whether the global valve allows a new heal report to be emitted.
  *
  * Returns true (allowed) if fewer than GLOBAL_VALVE_LIMIT non-queued reports
  * have been created in the past hour.
  */
 export function checkGlobalValve(db: Database): boolean {
-  // Use SQLite datetime arithmetic to avoid timezone format mismatches between
-  // JS ISO-8601 ('T'/'Z') and SQLite datetime() (space separator, no 'Z').
-  const windowMinutes = -Math.floor(GLOBAL_VALVE_WINDOW_MS / 60_000);
-  const count = (db.raw.prepare(`
-    SELECT COUNT(*) as cnt FROM heal_reports
-    WHERE state != 'queued' AND created_at > datetime('now', ? || ' minutes')
-  `).get(`${windowMinutes}`) as { cnt: number }).cnt;
-  return count < GLOBAL_VALVE_LIMIT;
+  return getGlobalValveCount(db) < GLOBAL_VALVE_LIMIT;
 }
 
 /**
