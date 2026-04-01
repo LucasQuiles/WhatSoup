@@ -53,7 +53,7 @@ describe('agent session-db', () => {
   // @check CHK-022
   // @traces REQ-005.AC-03
   it('createSession inserts a row with status=active and returns id > 0', () => {
-    const id = createSession(db, 12345, '/home/q/project');
+    const id = createSession(db, 12345, '~/project');
     expect(id).toBeGreaterThan(0);
 
     const row = db.raw
@@ -70,7 +70,7 @@ describe('agent session-db', () => {
     expect(row).toBeDefined();
     expect(row?.status).toBe('active');
     expect(row?.claude_pid).toBe(12345);
-    expect(row?.started_in_directory).toBe('/home/q/project');
+    expect(row?.started_in_directory).toBe('~/project');
     expect(row?.session_id).toBeNull();
     expect(row?.started_at).toBeTruthy();
   });
@@ -201,7 +201,7 @@ describe('agent session-db', () => {
   });
 
   it('backfillWorkspaceKeys: root-cwd row is marked ended', () => {
-    const instanceCwd = '/home/q/LAB/WhatSoup';
+    const instanceCwd = '/workspace/WhatSoup';
     // Row started in instance root — pre-isolation shared session
     const id = createSession(db, 20001, instanceCwd, '9990000001@s.whatsapp.net');
     backfillWorkspaceKeys(db, instanceCwd);
@@ -214,11 +214,11 @@ describe('agent session-db', () => {
   });
 
   it('backfillWorkspaceKeys: row under users/ gets workspace_key backfilled', () => {
-    const instanceCwd = '/home/q/LAB/WhatSoup';
+    const instanceCwd = '/workspace/WhatSoup';
     const id = createSession(
       db,
       20002,
-      '/home/q/LAB/WhatSoup/users/9990000002',
+      '/workspace/WhatSoup/users/9990000002',
       '9990000002@s.whatsapp.net',
     );
     backfillWorkspaceKeys(db, instanceCwd);
@@ -231,11 +231,11 @@ describe('agent session-db', () => {
   });
 
   it('backfillWorkspaceKeys: skips rows that already have workspace_key', () => {
-    const instanceCwd = '/home/q/LAB/WhatSoup';
+    const instanceCwd = '/workspace/WhatSoup';
     const id = createSession(
       db,
       20003,
-      '/home/q/LAB/WhatSoup/users/9990000003',
+      '/workspace/WhatSoup/users/9990000003',
       '9990000003@s.whatsapp.net',
       'already-set',
     );

@@ -14,7 +14,7 @@ import { request } from 'node:http';
 
 vi.mock('../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set(['18459780919']),
+    adminPhones: new Set(['15550100001']),
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
@@ -208,7 +208,7 @@ describe('POST /send — Authorization header check', () => {
 
   it('returns 401 when WHATSOUP_HEALTH_TOKEN is set and Authorization header is missing', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
-    const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net', text: 'hi' });
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload);
     expect(status).toBe(401);
     expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
@@ -216,7 +216,7 @@ describe('POST /send — Authorization header check', () => {
 
   it('returns 401 when Bearer token does not match', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
-    const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net', text: 'hi' });
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });
     const { status } = await httpReq(port, '/send', 'POST', payload, {
       authorization: 'Bearer wrong-token',
     });
@@ -225,7 +225,7 @@ describe('POST /send — Authorization header check', () => {
 
   it('proceeds (200) when correct Bearer token is provided', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
-    const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net', text: 'hello' });
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
       authorization: 'Bearer secret-token',
     });
@@ -235,7 +235,7 @@ describe('POST /send — Authorization header check', () => {
 
   it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {
     // WHATSOUP_HEALTH_TOKEN not set — endpoint must reject (fail-closed)
-    const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net', text: 'hello' });
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload);
     expect(status).toBe(401);
     expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
@@ -243,7 +243,7 @@ describe('POST /send — Authorization header check', () => {
 
   it('returns 400 when chatJid or text is missing', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
-    const payload = JSON.stringify({ chatJid: '18459780919@s.whatsapp.net' });
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net' });
     const { status, body } = await httpReq(port, '/send', 'POST', payload, {
       authorization: 'Bearer secret-token',
     });

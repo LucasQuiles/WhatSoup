@@ -9,7 +9,7 @@ OnFailure=whatsoup-heal-notify@%i.service
 
 [Service]
 Type=simple
-ExecStart=/home/q/.local/bin/whatsoup %i
+ExecStart=%h/.local/bin/whatsoup %i
 Restart=on-failure
 # Base restart delay — matches Baileys reconnect cooldown.
 RestartSec=15

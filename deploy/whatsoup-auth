@@ -5,9 +5,19 @@ set -euo pipefail
 # Usage: whatsoup-auth <instance-name>
 
 INSTANCE="${1:?Usage: whatsoup-auth <instance-name>}"
-NODE=/home/q/.nvm/versions/node/v24.13.0/bin/node
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_NODE="$HOME/.nvm/versions/node/v24.13.0/bin/node"
+NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
+if [ ! -x "$NODE" ]; then
+  NODE="$(command -v node || true)"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "FATAL: node not found. Set WHATSOUP_NODE or install node." >&2
+  exit 1
+fi
 
 exec "$NODE" \
   --disable-warning=ExperimentalWarning \
   --experimental-strip-types \
-  /home/q/LAB/WhatSoup/src/bootstrap-auth.ts "$INSTANCE"
+  "$REPO_ROOT/src/bootstrap-auth.ts" "$INSTANCE"

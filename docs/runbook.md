@@ -22,10 +22,10 @@
 
 | Instance | Type | Access Mode | Health Port | Description |
 |----------|------|-------------|-------------|-------------|
-| `personal` | passive | self_only | **9094** | Your personal phone — MCP-only, no auto-response |
-| `q` | agent | allowlist | **9092** | Q's full-access autonomous agent |
-| `loops` | agent | allowlist | **9091** | Sandboxed per-chat agent for friends |
-| `besbot` | chat | open_dm | **9093** | BES Bot — direct LLM chat, no agent, no MCP |
+| `primary-line` | passive | self_only | **9094** | Primary line — MCP-only, no auto-response |
+| `operator-agent` | agent | allowlist | **9092** | Full-access autonomous agent |
+| `sandbox-agent` | agent | allowlist | **9091** | Sandboxed per-chat agent |
+| `chat-bot` | chat | open_dm | **9093** | Chat Bot — direct LLM chat, no agent, no MCP |
 
 **Key paths (per instance, replace `<name>`):**
 
@@ -48,16 +48,16 @@ WhatSoup runs as a systemd user template unit (`whatsoup@<name>.service`).
 
 ```bash
 # Start an instance
-systemctl --user start whatsoup@loops
+systemctl --user start whatsoup@sandbox-agent
 
 # Stop an instance (graceful SIGTERM, 10s timeout then forced exit)
-systemctl --user stop whatsoup@loops
+systemctl --user stop whatsoup@sandbox-agent
 
 # Restart an instance
-systemctl --user restart whatsoup@loops
+systemctl --user restart whatsoup@sandbox-agent
 
 # Check status
-systemctl --user status whatsoup@loops
+systemctl --user status whatsoup@sandbox-agent
 
 # Reload without full restart (not supported — always use restart)
 ```
@@ -66,20 +66,20 @@ systemctl --user status whatsoup@loops
 
 ```bash
 # Enable auto-start on graphical login
-systemctl --user enable whatsoup@loops
+systemctl --user enable whatsoup@sandbox-agent
 
 # Disable auto-start
-systemctl --user disable whatsoup@loops
+systemctl --user disable whatsoup@sandbox-agent
 ```
 
 ### Manage All Instances
 
 ```bash
 # Start all four instances
-for i in personal q loops besbot; do systemctl --user start whatsoup@$i; done
+for i in primary-line operator-agent sandbox-agent chat-bot; do systemctl --user start whatsoup@$i; done
 
 # Stop all four instances
-for i in personal q loops besbot; do systemctl --user stop whatsoup@$i; done
+for i in primary-line operator-agent sandbox-agent chat-bot; do systemctl --user stop whatsoup@$i; done
 
 # Check status of all instances
 systemctl --user status 'whatsoup@*'
@@ -87,7 +87,7 @@ systemctl --user status 'whatsoup@*'
 
 ### Systemd Unit Configuration
 
-The unit file is at `/home/q/LAB/WhatSoup/deploy/whatsoup@.service`.
+The unit file is at `deploy/whatsoup@.service`.
 
 Key parameters:
 - `Restart=on-failure` — automatically restarts on non-zero exit
@@ -97,8 +97,8 @@ Key parameters:
 
 To reset the restart counter after fixing a crash loop:
 ```bash
-systemctl --user reset-failed whatsoup@loops
-systemctl --user start whatsoup@loops
+systemctl --user reset-failed whatsoup@sandbox-agent
+systemctl --user start whatsoup@sandbox-agent
 ```
 
 ---
@@ -115,13 +115,13 @@ Logs are written to two sinks simultaneously:
 
 ```bash
 # Via journald (real-time)
-journalctl --user -u whatsoup@loops -f
+journalctl --user -u whatsoup@sandbox-agent -f
 
 # Via journald (last 100 lines)
-journalctl --user -u whatsoup@loops -n 100
+journalctl --user -u whatsoup@sandbox-agent -n 100
 
 # Via rolling log file
-tail -f ~/.local/share/whatsoup/instances/loops/logs/*.log
+tail -f ~/.local/share/whatsoup/instances/sandbox-agent/logs/*.log
 
 # All instances combined (journald)
 journalctl --user -u 'whatsoup@*' -f
@@ -158,7 +158,7 @@ Set `LOG_LEVEL` in the instance's environment before starting, or add it to a sy
 
 ```bash
 # Create a drop-in override
-systemctl --user edit whatsoup@loops
+systemctl --user edit whatsoup@sandbox-agent
 # Add:
 # [Service]
 # Environment="LOG_LEVEL=debug"
@@ -168,16 +168,16 @@ systemctl --user edit whatsoup@loops
 
 ```bash
 # Show only errors and fatals
-journalctl --user -u whatsoup@loops | grep '"level":5'
+journalctl --user -u whatsoup@sandbox-agent | grep '"level":5'
 
 # Show WhatsApp connection events
-journalctl --user -u whatsoup@loops | grep 'connection'
+journalctl --user -u whatsoup@sandbox-agent | grep 'connection'
 
 # Show access decisions for a specific phone
-journalctl --user -u whatsoup@loops | grep '15551234567'
+journalctl --user -u whatsoup@sandbox-agent | grep '15551234567'
 
 # Show durability/recovery events
-journalctl --user -u whatsoup@loops | grep -E 'preConnect|postConnect|quarantine'
+journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|quarantine'
 ```
 
 ---
@@ -188,10 +188,10 @@ journalctl --user -u whatsoup@loops | grep -E 'preConnect|postConnect|quarantine
 
 | Instance | URL |
 |----------|-----|
-| personal | `http://127.0.0.1:9094/health` |
+| primary-line | `http://127.0.0.1:9094/health` |
 | q | `http://127.0.0.1:9092/health` |
-| loops | `http://127.0.0.1:9091/health` |
-| besbot | `http://127.0.0.1:9093/health` |
+| sandbox-agent | `http://127.0.0.1:9091/health` |
+| chat-bot | `http://127.0.0.1:9093/health` |
 
 ### Authentication
 
@@ -306,17 +306,17 @@ curl -s http://127.0.0.1:9091/health | python3 -m json.tool
 
 # 2. Check enrichment last_run timestamp
 # If enrichment.last_run is > 10 minutes ago on a chat instance, this triggers degraded.
-# Enrichment only runs on ChatRuntime (besbot). AgentRuntime and PassiveRuntime
+# Enrichment only runs on ChatRuntime (chat-bot). AgentRuntime and PassiveRuntime
 # report degraded only if the runtime itself flags an issue.
 
 # 3. Check durability quarantine count
 # If durability.quarantinedOutbound > 0, messages were lost — investigate.
 
-# 4. Check logs for enrichment errors (besbot only)
-journalctl --user -u whatsoup@besbot -n 100 | grep -i enrich
+# 4. Check logs for enrichment errors (chat-bot only)
+journalctl --user -u whatsoup@chat-bot -n 100 | grep -i enrich
 ```
 
-**Common causes for besbot:**
+**Common causes for chat-bot:**
 - Anthropic/OpenAI API key expired or rate-limited
 - Network connectivity issue
 - `enrichment_retries` maxed out on many messages (run `reset_enrichment_errors` MCP tool)
@@ -332,7 +332,7 @@ journalctl --user -u whatsoup@besbot -n 100 | grep -i enrich
 
 **Quick check:**
 ```bash
-journalctl --user -u whatsoup@loops -n 30 | grep -E 'disconnect|loggedOut|reconnect'
+journalctl --user -u whatsoup@sandbox-agent -n 30 | grep -E 'disconnect|loggedOut|reconnect'
 ```
 
 **If the process is reconnecting automatically:** Wait — the connection manager retries on transient disconnects (e.g. `restartRequired`).
@@ -342,10 +342,10 @@ journalctl --user -u whatsoup@loops -n 30 | grep -E 'disconnect|loggedOut|reconn
 **If the service keeps restart-looping:**
 ```bash
 # Check restart count
-systemctl --user status whatsoup@loops | grep 'Start Limit'
+systemctl --user status whatsoup@sandbox-agent | grep 'Start Limit'
 
 # If hit the burst limit, reset it
-systemctl --user reset-failed whatsoup@loops
+systemctl --user reset-failed whatsoup@sandbox-agent
 ```
 
 ---
@@ -359,22 +359,22 @@ This occurs when a previous process died without releasing the health port, or (
 **Fix:**
 
 ```bash
-# 1. Check what holds the port (e.g. 9091 for loops)
+# 1. Check what holds the port (e.g. 9091 for sandbox-agent)
 lsof -i :9091
 
 # 2. If it's a zombie whatsoup process, kill it
 kill -9 <PID>
 
 # 3. Check for orphaned lock file
-ls -la ~/.local/state/whatsoup/instances/loops/whatsoup.lock
+ls -la ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
 # 4. The lock file is self-healing: on next startup, WhatSoup checks if the PID
 # in the lock is still alive. If not, it removes the stale lock and continues.
 # Force-remove only if you're sure the process is dead:
-rm ~/.local/state/whatsoup/instances/loops/whatsoup.lock
+rm ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
 # 5. Restart
-systemctl --user start whatsoup@loops
+systemctl --user start whatsoup@sandbox-agent
 ```
 
 ---
@@ -409,7 +409,7 @@ kill <PID>
 
 ```bash
 # 1. Check who holds the lock
-cat ~/.local/state/whatsoup/instances/loops/whatsoup.lock
+cat ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 # Output: {"pid":12345,"startedAt":"2026-03-30T10:00:00.000Z"}
 
 # 2. Check if that PID is alive
@@ -418,10 +418,10 @@ kill -0 12345 2>&1
 
 # 3. If stale, WhatSoup removes it automatically on the next startup attempt.
 # If it doesn't (e.g. permission issue), remove manually:
-rm ~/.local/state/whatsoup/instances/loops/whatsoup.lock
+rm ~/.local/state/whatsoup/instances/sandbox-agent/whatsoup.lock
 
 # 4. Start the service
-systemctl --user start whatsoup@loops
+systemctl --user start whatsoup@sandbox-agent
 ```
 
 ---
@@ -432,14 +432,14 @@ systemctl --user start whatsoup@loops
 
 ```bash
 # 1. Check outbound_ops for stuck or quarantined operations
-sqlite3 ~/.local/share/whatsoup/instances/loops/bot.db \
+sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
   "SELECT id, status, op_type, replay_policy, submitted_at, error
    FROM outbound_ops
    WHERE status NOT IN ('echoed', 'failed_permanent')
    ORDER BY id DESC LIMIT 20;"
 
 # 2. Check for quarantined outbound ops (messages durability engine gave up on)
-sqlite3 ~/.local/share/whatsoup/instances/loops/bot.db \
+sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
   "SELECT COUNT(*) FROM outbound_ops WHERE status = 'quarantined';"
 
 # 3. Check health for durability stats
@@ -472,18 +472,18 @@ Use when credentials are expired (logged out) or the auth directory is corrupted
 
 ```bash
 # 1. Stop the instance
-systemctl --user stop whatsoup@loops
+systemctl --user stop whatsoup@sandbox-agent
 
 # 2. (Optional) Back up existing auth state
-cp -r ~/.config/whatsoup/instances/loops/auth/ \
-      ~/.config/whatsoup/instances/loops/auth.bak.$(date +%Y%m%d)/
+cp -r ~/.config/whatsoup/instances/sandbox-agent/auth/ \
+      ~/.config/whatsoup/instances/sandbox-agent/auth.bak.$(date +%Y%m%d)/
 
 # 3. (If logged out / corrupted) Delete old auth state
-rm -rf ~/.config/whatsoup/instances/loops/auth/
+rm -rf ~/.config/whatsoup/instances/sandbox-agent/auth/
 
 # 4. Run the auth CLI — this prints a QR code to terminal
 # Ensure no bot process holds the lock first (auth.ts checks for this)
-node --experimental-strip-types /home/q/LAB/WhatSoup/src/transport/auth.ts
+node --experimental-strip-types ./src/transport/auth.ts
 
 # 5. Scan the QR code with WhatsApp on your phone:
 #    WhatsApp > Settings > Linked Devices > Link a Device
@@ -492,7 +492,7 @@ node --experimental-strip-types /home/q/LAB/WhatSoup/src/transport/auth.ts
 # 6. Wait for "Authenticated successfully as <jid>" and "Done. You can now start the bot."
 
 # 7. Start the instance
-systemctl --user start whatsoup@loops
+systemctl --user start whatsoup@sandbox-agent
 ```
 
 **Note:** The auth CLI uses `config.authDir` from the instance config — it reads `INSTANCE_CONFIG` from the environment. To pair for a specific instance, set the env var first, or run through the whatsoup launcher wrapper which sets it automatically.
@@ -500,11 +500,11 @@ systemctl --user start whatsoup@loops
 A simpler approach is to run via the launcher with a temporary config:
 ```bash
 # Stop, auth, restart
-systemctl --user stop whatsoup@loops
-INSTANCE_CONFIG="$(cat ~/.config/whatsoup/instances/loops/config.json | \
+systemctl --user stop whatsoup@sandbox-agent
+INSTANCE_CONFIG="$(cat ~/.config/whatsoup/instances/sandbox-agent/config.json | \
   node -e "const p=require('./src/instance-loader.ts'); ...")" \
   node --experimental-strip-types src/transport/auth.ts
-systemctl --user start whatsoup@loops
+systemctl --user start whatsoup@sandbox-agent
 ```
 
 ---
@@ -514,7 +514,7 @@ systemctl --user start whatsoup@loops
 After an unclean shutdown (OOM kill, power loss, etc.), run this before restarting:
 
 ```bash
-INSTANCE=loops
+INSTANCE=sandbox-agent
 
 # 1. Stop the service (in case systemd is still trying to restart it)
 systemctl --user stop whatsoup@$INSTANCE
@@ -553,7 +553,7 @@ journalctl --user -u whatsoup@$INSTANCE -n 50 | grep -E 'preConnect|postConnect|
 Quarantined outbound operations are messages the durability engine could not safely replay after a crash. They are preserved in the database for manual inspection.
 
 ```bash
-INSTANCE=loops
+INSTANCE=sandbox-agent
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 
 # 1. Inspect quarantined messages
@@ -585,7 +585,7 @@ sqlite3 $DB "UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id =
 ### 6.4 Restarting After Database Corruption
 
 ```bash
-INSTANCE=loops
+INSTANCE=sandbox-agent
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 
 # 1. Stop the service
@@ -632,7 +632,7 @@ After `ALLOW`, any messages the user sent while pending are replayed automatical
 ### 7.2 Manage the Access List Directly
 
 ```bash
-INSTANCE=loops
+INSTANCE=sandbox-agent
 DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
 
 # View all access list entries
@@ -664,7 +664,7 @@ sqlite3 $DB \
 ### 7.3 Check Inbound/Outbound Durability State
 
 ```bash
-DB=~/.local/share/whatsoup/instances/loops/bot.db
+DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
 
 # Inbound events — messages currently being processed
 sqlite3 $DB \
@@ -695,7 +695,7 @@ sqlite3 $DB \
 ### 7.4 Useful SQL Queries
 
 ```bash
-DB=~/.local/share/whatsoup/instances/loops/bot.db
+DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
 
 # Recent messages (last 20)
 sqlite3 $DB \
@@ -756,7 +756,7 @@ sqlite3 $DB \
 ```bash
 #!/usr/bin/env bash
 # Check all instance health endpoints
-INSTANCES=( "personal:9094" "q:9092" "loops:9091" "besbot:9093" )
+INSTANCES=( "primary-line:9094" "operator-agent:9092" "sandbox-agent:9091" "chat-bot:9093" )
 
 for entry in "${INSTANCES[@]}"; do
   name="${entry%%:*}"
@@ -829,7 +829,7 @@ cd ~/LAB/WhatSoup && npm test
 ```
 curl -s localhost:<port>/health | python3 -m json.tool
 ```
-Instance ports: personal=9090, loops=9091, q=9092, besbot=9093
+Instance ports: primary-line=9094, sandbox-agent=9091, operator-agent=9092, chat-bot=9093
 
 ### DB locations
 `~/.local/share/whatsoup/instances/<name>/bot.db`
@@ -837,4 +837,4 @@ Instance ports: personal=9090, loops=9091, q=9092, besbot=9093
 ### Heal system
 - `heal_reports` table: circuit breaker state per error class
 - `control_messages` table: audit trail of all control traffic
-- `pending_heal_reports` table: Q's temporary dedupe state for Type 3
+- `pending_heal_reports` table: the operator agent's temporary dedupe state for Type 3

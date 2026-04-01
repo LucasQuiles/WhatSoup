@@ -323,11 +323,11 @@ h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
     <div class="comp-card" data-name="Text Inputs">
       <div class="c-field">
         <label class="c-label">Instance Name</label>
-        <input class="c-input mono" value="besbot" />
+        <input class="c-input mono" value="chat-bot" />
       </div>
       <div class="c-field">
         <label class="c-label">System Prompt</label>
-        <textarea class="c-textarea">You are BES Bot, a helpful co-worker at BES Efficiency Solutions. You help the team find information about accounts, contacts, buildings, work orders, and other business data.</textarea>
+        <textarea class="c-textarea">You are Chat Bot, a helpful co-worker at your team. You help the team find information about accounts, contacts, buildings, work orders, and other business data.</textarea>
       </div>
       <div class="c-field">
         <label class="c-label">Max Tokens</label>
@@ -395,7 +395,7 @@ h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
       <span class="c-line-dot ok"></span>
       <div class="c-line-identity">
         <div class="c-line-name">
-          BES Bot
+          Chat Bot
           <span style="font-family:var(--f-mono);font-size:0.7rem;font-weight:500;padding:2px 8px;border-radius:3px;background:rgba(56,189,248,0.1);color:var(--m-cht);">chat</span>
         </div>
         <div class="c-line-phone">+1 555-0200 / 14600648175816@s.whatsapp.net</div>
@@ -601,11 +601,11 @@ h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
       <button class="c-btn sm" style="padding:2px 8px;font-size:0.65rem;color:var(--s-crit);">error</button>
     </div>
     <div>
-      <div class="c-log-line"><span class="c-log-time">12:04:12</span><span class="c-log-level info">info</span><span class="c-log-msg">msg received from +18459780919, dispatching to chat pipeline</span></div>
+      <div class="c-log-line"><span class="c-log-time">12:04:12</span><span class="c-log-level info">info</span><span class="c-log-msg">msg received from +15555550100, dispatching to chat pipeline</span></div>
       <div class="c-log-line"><span class="c-log-time">12:04:12</span><span class="c-log-level info">info</span><span class="c-log-msg">pinecone query: "WO-4521 status" topK=20 rerank=true</span></div>
       <div class="c-log-line"><span class="c-log-time">12:04:13</span><span class="c-log-level info">info</span><span class="c-log-msg">anthropic call: claude-sonnet-4-6 input=1247tok output=89tok 340ms</span></div>
-      <div class="c-log-line"><span class="c-log-time">12:04:13</span><span class="c-log-level info">info</span><span class="c-log-msg">reply sent to +18459780919 via sendTracked</span></div>
-      <div class="c-log-line warn-line"><span class="c-log-time">12:03:45</span><span class="c-log-level warn">warn</span><span class="c-log-msg">rate limit approaching: 58/60 responses this hour for +16566225768547</span></div>
+      <div class="c-log-line"><span class="c-log-time">12:04:13</span><span class="c-log-level info">info</span><span class="c-log-msg">reply sent to +15555550100 via sendTracked</span></div>
+      <div class="c-log-line warn-line"><span class="c-log-time">12:03:45</span><span class="c-log-level warn">warn</span><span class="c-log-msg">rate limit approaching: 58/60 responses this hour for +15555550101</span></div>
       <div class="c-log-line error-line"><span class="c-log-time">12:01:02</span><span class="c-log-level error">error</span><span class="c-log-msg">enrichment poller failed: pinecone timeout after 5000ms, retrying in 30s</span></div>
       <div class="c-log-line"><span class="c-log-time">12:00:30</span><span class="c-log-level info">info</span><span class="c-log-msg">enrichment poller: 14 unprocessed messages, starting batch</span></div>
     </div>
@@ -616,7 +616,7 @@ h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
 <div class="section">
   <div class="section-label">Config Display (Mode Tab)</div>
   <div class="comp-card" data-name="Instance Config JSON">
-    <div class="c-config"><span class="key">"name"</span>: <span class="val-str">"besbot"</span>,
+    <div class="c-config"><span class="key">"name"</span>: <span class="val-str">"chat-bot"</span>,
 <span class="key">"type"</span>: <span class="val-str">"chat"</span>,
 <span class="key">"accessMode"</span>: <span class="val-str">"open_dm"</span>,
 <span class="key">"models"</span>: {
@@ -690,7 +690,7 @@ h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
   <div class="comp-card" data-name="Action Feedback">
     <div style="display:flex;flex-direction:column;gap:12px;">
       <div class="c-toast success"><i data-lucide="check-circle-2"></i><span class="c-toast-msg">Message sent to +1 845-978-0919</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
-      <div class="c-toast error"><i data-lucide="alert-circle"></i><span class="c-toast-msg">Failed to restart besbot: service timeout</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
+      <div class="c-toast error"><i data-lucide="alert-circle"></i><span class="c-toast-msg">Failed to restart chat-bot: service timeout</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
       <div class="c-toast info"><i data-lucide="info"></i><span class="c-toast-msg">Config saved. Restarting instance...</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
     </div>
   </div>
@@ -708,7 +708,7 @@ h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
         </div>
         <div class="c-dialog-body">
           <p style="font-size:0.88rem;color:var(--t2);line-height:1.7;">
-            This will restart <strong style="color:var(--t1);">besbot</strong> (chat). Active conversations will be interrupted and the queue will be cleared. The instance will reconnect to WhatsApp automatically.
+            This will restart <strong style="color:var(--t1);">chat-bot</strong> (chat). Active conversations will be interrupted and the queue will be cleared. The instance will reconnect to WhatsApp automatically.
           </p>
         </div>
         <div class="c-dialog-footer">

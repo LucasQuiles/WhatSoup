@@ -237,12 +237,12 @@ describe('classifyActiveSessions', () => {
   // ── Integration scenario ──
 
   it('reproduces the Q zombie scenario: 4 sessions, 1 authoritative, 3 stale', () => {
-    insertSession({ claudePid: 2880080, sessionId: 'ses-96', chatJid: '16566225768547@lid' });
-    insertSession({ claudePid: 3180200, sessionId: 'ses-97', chatJid: '16566225768547@lid' });
-    insertSession({ claudePid: 3331484, sessionId: 'ses-98', chatJid: '16566225768547@lid' });
-    insertSession({ claudePid: 3521309, sessionId: 'ses-99', chatJid: '16566225768547@lid' });
+    insertSession({ claudePid: 2880080, sessionId: 'ses-96', chatJid: '15550100002@lid' });
+    insertSession({ claudePid: 3180200, sessionId: 'ses-97', chatJid: '15550100002@lid' });
+    insertSession({ claudePid: 3331484, sessionId: 'ses-98', chatJid: '15550100002@lid' });
+    insertSession({ claudePid: 3521309, sessionId: 'ses-99', chatJid: '15550100002@lid' });
 
-    durability.upsertSessionCheckpoint('16566225768547', {
+    durability.upsertSessionCheckpoint('15550100002', {
       claudePid: 3521309, sessionId: 'ses-99', sessionStatus: 'active',
     });
 
@@ -260,10 +260,10 @@ describe('classifyActiveSessions', () => {
   });
 
   it('Q zombie scenario with unowned PIDs falls to ambiguous', () => {
-    insertSession({ claudePid: 2880080, sessionId: 'ses-96', chatJid: '16566225768547@lid' });
-    insertSession({ claudePid: 3521309, sessionId: 'ses-99', chatJid: '16566225768547@lid' });
+    insertSession({ claudePid: 2880080, sessionId: 'ses-96', chatJid: '15550100002@lid' });
+    insertSession({ claudePid: 3521309, sessionId: 'ses-99', chatJid: '15550100002@lid' });
 
-    durability.upsertSessionCheckpoint('16566225768547', {
+    durability.upsertSessionCheckpoint('15550100002', {
       claudePid: 3521309, sessionId: 'ses-99', sessionStatus: 'active',
     });
 

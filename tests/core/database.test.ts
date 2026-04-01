@@ -134,9 +134,9 @@ describe('FTS5 triggers', () => {
     deletedAt?: string | null;
   }) {
     const {
-      chatJid = '18459780919@s.whatsapp.net',
-      conversationKey = '18459780919',
-      senderJid = '18459780919@s.whatsapp.net',
+      chatJid = '15550100001@s.whatsapp.net',
+      conversationKey = '15550100001',
+      senderJid = '15550100001@s.whatsapp.net',
       content = 'hello world',
       deletedAt = null,
     } = opts;
@@ -278,22 +278,22 @@ describe('importFromLegacyDb', () => {
     legacy.exec(`
       INSERT INTO messages (chat_jid, sender_jid, sender_name, message_id, content, content_type,
                             is_from_me, timestamp, created_at)
-      VALUES ('18459780919@s.whatsapp.net', '18459780919@s.whatsapp.net', 'Alice',
+      VALUES ('15550100001@s.whatsapp.net', '15550100001@s.whatsapp.net', 'Alice',
               'msg-001', 'Hello from legacy', 'text', 0, 1700000000, datetime('now'));
 
       INSERT INTO messages (chat_jid, sender_jid, sender_name, message_id, content, content_type,
                             is_from_me, timestamp, created_at)
-      VALUES ('120363123456789@g.us', '18459780919@s.whatsapp.net', 'Alice',
+      VALUES ('120363123456789@g.us', '15550100001@s.whatsapp.net', 'Alice',
               'msg-002', 'Group message', 'text', 0, 1700000001, datetime('now'));
 
       INSERT INTO access_list (subject_type, subject_id, status, display_name, requested_at)
-      VALUES ('phone', '18459780919', 'allowed', 'Alice', datetime('now'));
+      VALUES ('phone', '15550100001', 'allowed', 'Alice', datetime('now'));
 
       INSERT INTO agent_sessions (session_id, claude_pid, started_in_directory, started_at, status)
       VALUES ('sess-1', 12345, '/tmp/ws', datetime('now'), 'active');
 
       INSERT INTO rate_limits (sender_jid, response_at)
-      VALUES ('18459780919@s.whatsapp.net', datetime('now'));
+      VALUES ('15550100001@s.whatsapp.net', datetime('now'));
 
       INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted)
       VALUES (datetime('now'), datetime('now'), 10, 5, 5);
@@ -319,8 +319,8 @@ describe('importFromLegacyDb', () => {
 
     expect(rows).toHaveLength(2);
 
-    const dm = rows.find((r) => r.chat_jid === '18459780919@s.whatsapp.net');
-    expect(dm?.conversation_key).toBe('18459780919');
+    const dm = rows.find((r) => r.chat_jid === '15550100001@s.whatsapp.net');
+    expect(dm?.conversation_key).toBe('15550100001');
 
     const group = rows.find((r) => r.chat_jid === '120363123456789@g.us');
     expect(group?.conversation_key).toBe('120363123456789_at_g.us');
@@ -339,7 +339,7 @@ describe('importFromLegacyDb', () => {
     targetDb.importFromLegacyDb(legacyPath);
 
     const row = targetDb.raw
-      .prepare("SELECT * FROM access_list WHERE subject_id = '18459780919'")
+      .prepare("SELECT * FROM access_list WHERE subject_id = '15550100001'")
       .get() as { status: string } | undefined;
     expect(row?.status).toBe('allowed');
   });

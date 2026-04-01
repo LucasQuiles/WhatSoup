@@ -3,7 +3,7 @@ import { toConversationKey } from '../../src/core/conversation-key.ts';
 
 describe('toConversationKey', () => {
   it('normalizes @s.whatsapp.net DM to bare phone', () => {
-    expect(toConversationKey('18459780919@s.whatsapp.net')).toBe('18459780919');
+    expect(toConversationKey('15550100001@s.whatsapp.net')).toBe('15550100001');
   });
 
   it('normalizes @lid DM to numeric ID without device qualifier', () => {

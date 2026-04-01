@@ -57,7 +57,7 @@ describe('classifyToolError', () => {
   });
 
   it('classifies cancelled tool calls as cancelled category', () => {
-    const result = classifyToolError('Bash', '<tool_use_error>Cancelled: parallel tool call Bash(cd /home/q/agents/q/.worktrees/fleet-module && git diff) error</tool_use_error>');
+    const result = classifyToolError('Bash', '<tool_use_error>Cancelled: parallel tool call Bash(cd ~/agents/q/.worktrees/fleet-module && git diff) error</tool_use_error>');
     expect(result.category).toBe('cancelled');
     expect(result.detail).toBe('Bash — Cancelled');
   });

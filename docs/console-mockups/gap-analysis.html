@@ -5,7 +5,7 @@
   <h3>Live Instances (from Nucles)</h3>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem;">
     <div style="padding:0.75rem;background:rgba(63,185,80,0.08);border-left:3px solid #3fb950;border-radius:4px;">
-      <strong>personal</strong>
+      <strong>primary-line</strong>
       <div style="font-size:0.8rem;color:#3fb950;">passive</div>
       <div style="font-size:0.75rem;opacity:0.6;">self_only | port 9094</div>
     </div>
@@ -15,12 +15,12 @@
       <div style="font-size:0.75rem;opacity:0.6;">allowlist | port 9092 | per_chat</div>
     </div>
     <div style="padding:0.75rem;background:rgba(188,140,255,0.08);border-left:3px solid #bc8cff;border-radius:4px;">
-      <strong>loops</strong>
+      <strong>sandbox-agent</strong>
       <div style="font-size:0.8rem;color:#bc8cff;">agent</div>
       <div style="font-size:0.75rem;opacity:0.6;">allowlist | port 9091 | sandboxed per_chat</div>
     </div>
     <div style="padding:0.75rem;background:rgba(88,166,255,0.08);border-left:3px solid #58a6ff;border-radius:4px;">
-      <strong>besbot</strong>
+      <strong>chat-bot</strong>
       <div style="font-size:0.8rem;color:#58a6ff;">chat</div>
       <div style="font-size:0.75rem;opacity:0.6;">open_dm | port 9093 | Pinecone RAG</div>
     </div>
@@ -145,7 +145,7 @@
       </tr>
       <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
         <td style="padding:0.5rem;color:#f85149;">Group concept</td>
-        <td style="padding:0.5rem;">Instances are flat (personal, q, loops, besbot). No grouping mechanism. The GUI needs a "Group" layer above instances.</td>
+        <td style="padding:0.5rem;">Instances are flat (primary-line, operator-agent, sandbox-agent, chat-bot). No grouping mechanism. The GUI needs a "Group" layer above instances.</td>
         <td style="padding:0.5rem;color:#3fb950;">Small — config/metadata only</td>
       </tr>
       <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">

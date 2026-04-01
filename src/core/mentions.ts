@@ -51,7 +51,7 @@ export class ContactsDirectory {
 
     const keys: string[] = [];
 
-    // Always map phone → phone (so @18459780919 always resolves)
+    // Always map phone → phone (so @15550100001 always resolves)
     keys.push(phone);
 
     if (senderName) {

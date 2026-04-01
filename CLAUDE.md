@@ -15,7 +15,7 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 - `src/transport/` — Baileys connection management
 - `src/mcp/` — MCP tool registry, socket server, tool implementations
 - `src/runtimes/agent/` — Claude Code agent subprocess management
-- `src/runtimes/chat/` — Direct LLM API chat (BES Bot)
+- `src/runtimes/chat/` — Direct LLM API chat (Chat Bot)
 - `deploy/` — systemd units, hooks, proxy scripts
 
 ## Key Concepts
@@ -28,10 +28,10 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 ## Instance Model
 
 Four independent processes via systemd template unit (`whatsoup@<name>.service`):
-- `personal` — user's phone, passive MCP-only (tier: global, no auto-response)
-- `q` — Q's full-access autonomous agent (tier: global)
-- `loops` — sandboxed per-chat agent for friends (tier: chat-scoped per workspace)
-- `besbot` — chat API bot, no MCP, no agent
+- `primary-line` — passive MCP-only line for manual oversight (tier: global, no auto-response)
+- `operator-agent` — full-access autonomous agent (tier: global)
+- `sandbox-agent` — sandboxed per-chat agent (tier: chat-scoped per workspace)
+- `chat-bot` — chat API bot, no MCP, no agent
 
 ## Conventions
 

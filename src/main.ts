@@ -204,7 +204,7 @@ if (instanceType === 'agent') {
   const anthropic = createAnthropicProvider();
   const openai = createOpenAIProvider();
   const pinecone = new PineconeMemory();
-  // Disable enrichment for instances using external Pinecone indexes (e.g., besbot)
+  // Disable enrichment for instances using external Pinecone indexes (e.g., chatbot)
   const enableEnrichment = config.pineconeIndex === DEFAULT_PINECONE_INDEX;
   runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
     enableEnrichment,

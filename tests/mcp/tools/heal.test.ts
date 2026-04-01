@@ -192,12 +192,12 @@ const configWithPeers = {
     ['loops', '15559990001'],
     ['q', '15559990002'],
   ]),
-  adminPhones: new Set<string>(['18459780919']),
+  adminPhones: new Set<string>(['15550100001']),
 };
 
 const configWithoutPeers = {
   controlPeers: new Map<string, string>(),
-  adminPhones: new Set<string>(['18459780919']),
+  adminPhones: new Set<string>(['15550100001']),
 };
 
 // Default mock — overridden per-test via vi.mocked pattern
@@ -207,7 +207,7 @@ vi.mock('../../../src/config.ts', () => ({
       ['loops', '15559990001'],
       ['q', '15559990002'],
     ]),
-    adminPhones: new Set<string>(['18459780919']),
+    adminPhones: new Set<string>(['15550100001']),
   },
 }));
 
@@ -420,7 +420,7 @@ describe('emit_heal_result MCP tool', () => {
     // Admin DM is also sent
     expect(mockSendTracked).toHaveBeenCalledOnce();
     const [, adminJid, adminMsg] = mockSendTracked.mock.calls[0] as [unknown, string, string];
-    expect(adminJid).toBe('18459780919@s.whatsapp.net');
+    expect(adminJid).toBe('15550100001@s.whatsapp.net');
     expect(adminMsg).toContain('[HEAL_ESCALATE]');
     expect(adminMsg).toContain('crash__oom');
   });
