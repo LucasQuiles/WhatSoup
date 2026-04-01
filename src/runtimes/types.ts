@@ -10,4 +10,6 @@ export interface Runtime {
   setDurability(engine: DurabilityEngine): void;
   /** Update delivery JID for active sessions/queues when a LID→phone mapping changes. */
   handleJidAliasChanged?(conversationKey: string, newJid: string): void;
+  /** Inject a repair turn into the control session for self-healing. */
+  handleControlTurn?(reportId: string, payload: string): Promise<void>;
 }

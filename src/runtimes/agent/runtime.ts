@@ -23,6 +23,7 @@ import {
   type ToolUpdate,
   type ToolCategory,
 } from './outbound-queue.ts';
+import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -337,6 +338,10 @@ export class AgentRuntime implements Runtime {
   private globalSocketServer: WhatSoupSocketServer | null = null;
 
   private durability: DurabilityEngine | null = null;
+
+  // ─── Control session (self-healing repair) ────────────────────────────────
+  private activeControlReportId: string | null = null;
+  private controlSession: SessionManager | null = null;
 
   constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
     this.db = db;
@@ -1009,6 +1014,80 @@ export class AgentRuntime implements Runtime {
         sessionId: status?.sessionId ?? null,
       },
     };
+  }
+
+  /**
+   * Inject a repair turn into the control session for self-healing.
+   * Single-flight: if a repair is already in-flight the call returns immediately;
+   * the caller (heal.ts) is responsible for queuing subsequent reports.
+   */
+  async handleControlTurn(reportId: string, payload: string): Promise<void> {
+    // Single-flight gate
+    if (this.activeControlReportId) {
+      log.info(
+        { reportId, activeReportId: this.activeControlReportId },
+        'repair slot occupied — report will be queued by caller',
+      );
+      return;
+    }
+
+    this.activeControlReportId = reportId;
+
+    const syntheticJid = 'control@heal.internal';
+
+    // Use a workspace at <cwd>/heal/ for the control session
+    const controlCwd = this.cwd ? join(this.cwd, 'heal') : join(homedir(), 'heal');
+    mkdirSync(controlCwd, { recursive: true });
+
+    // Create or reuse control session
+    if (!this.controlSession) {
+      this.controlSession = this.createSessionManager({
+        chatJid: syntheticJid,
+        cwd: controlCwd,
+        onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
+        onCrash: () => {
+          log.warn('control session crashed');
+          this.activeControlReportId = null;
+        },
+        notifyUser: () => {},
+        onResumeFailed: () => {},
+      });
+
+      // Use ControlQueue instead of OutboundQueue so output is not forwarded as WhatsApp messages
+      const controlQueue = new ControlQueue(syntheticJid, this.messenger);
+      this.chatQueues.set('control@heal.internal', controlQueue);
+      this.chatSessions.set('control@heal.internal', this.controlSession);
+    }
+
+    // Spawn session if not active
+    if (!this.controlSession.getStatus().active) {
+      await this.controlSession.spawnSession();
+    }
+
+    // Format the turn
+    const turn = `[REPAIR REQUEST — report_id: ${reportId}]\n${payload}`;
+
+    try {
+      await this.controlSession.sendTurn(turn);
+    } catch (err) {
+      log.error({ err, reportId }, 'failed to send repair turn to control session');
+      this.activeControlReportId = null;
+    }
+  }
+
+  /** Return the ControlQueue for the control session, or null if none exists. */
+  getControlQueue(): ControlQueue | null {
+    return (this.chatQueues.get('control@heal.internal') as ControlQueue) ?? null;
+  }
+
+  /** Report ID currently being repaired, or null if no repair is in-flight. */
+  get currentControlReportId(): string | null {
+    return this.activeControlReportId;
+  }
+
+  /** Clear the in-flight repair slot so the next report can be dispatched. */
+  clearControlReport(): void {
+    this.activeControlReportId = null;
   }
 
   async shutdown(): Promise<void> {
