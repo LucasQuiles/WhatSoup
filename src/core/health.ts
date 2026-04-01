@@ -211,6 +211,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count pending access-list entries',
       );
 
+      // Mode-specific runtime block for control-plane
+      let runtimeBlock: Record<string, unknown> = {};
+      if (deps.runtime) {
+        const snap = deps.runtime.getHealthSnapshot();
+        if (deps.instanceType === 'passive') {
+          runtimeBlock = { passive: snap.details };
+        } else if (deps.instanceType === 'chat') {
+          const details = snap.details as Record<string, unknown>;
+          const queue = details.queue as { activeChats?: number; queuedChats?: number } | undefined;
+          runtimeBlock = {
+            chat: {
+              queueDepth: (queue?.activeChats ?? 0) + (queue?.queuedChats ?? 0),
+              enrichmentUnprocessed: enrichmentStats.unprocessed,
+            },
+          };
+        } else if (deps.instanceType === 'agent') {
+          runtimeBlock = { agent: snap.details };
+        }
+      }
+
       const body = JSON.stringify({
         status,
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
@@ -240,6 +260,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           fallback: config.models.fallback,
         },
         durability: deps.durability?.getHealthStats() ?? null,
+        runtime: runtimeBlock,
       });
 
       // 'degraded' returns 200: enrichment staleness is a warning, not a
