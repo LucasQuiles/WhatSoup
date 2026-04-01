@@ -465,6 +465,7 @@ const healthServer = startHealthServer({
   connectionManager,
   startedAt,
   durability,
+  runtime,
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;

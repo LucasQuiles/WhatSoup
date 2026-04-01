@@ -542,8 +542,9 @@ export class AgentRuntime implements Runtime {
       };
     }
 
-    // Register emit_heal_result MCP tool (once, for control-plane repair completion)
-    if (config.controlPeers.size > 0) {
+    // Register emit_heal_result MCP tool (once, for control-plane repair completion).
+    // Only on non-sandboxed instances (Q) — sandboxed instances (Loops) are repair targets, not repairers.
+    if (config.controlPeers.size > 0 && !this.sandboxPerChat && !this.sandbox) {
       this.registry.register({
         name: 'emit_heal_result',
         description: 'Signal completion of a repair cycle. Only callable during an active repair session.',
@@ -1121,6 +1122,11 @@ export class AgentRuntime implements Runtime {
    * the caller (heal.ts) is responsible for queuing subsequent reports.
    */
   async handleControlTurn(reportId: string, payload: string): Promise<void> {
+    // Only non-sandboxed instances (Q) can run repairs
+    if (this.sandboxPerChat || this.sandbox) {
+      log.warn({ reportId }, 'handleControlTurn called on sandboxed instance — ignoring');
+      return;
+    }
     // Single-flight gate
     if (this.activeControlReportId) {
       log.info(
