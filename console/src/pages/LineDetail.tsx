@@ -841,9 +841,17 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
   const reversed = React.useMemo(() => [...messages].reverse(), [messages])
 
-  // Auto-scroll to bottom on new messages
+  // Track whether user is near the bottom
+  const isNearBottom = React.useRef(true)
+
+  // Auto-scroll to bottom on new messages — only if already at bottom or switching chats
+  const prevChat = React.useRef(selectedChat)
   React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const chatChanged = prevChat.current !== selectedChat
+    prevChat.current = selectedChat
+    if (chatChanged || isNearBottom.current) {
+      bottomRef.current?.scrollIntoView({ behavior: chatChanged ? 'auto' : 'smooth' })
+    }
   }, [selectedChat, messages.length])
 
   // Show/hide jump-to-bottom FAB based on scroll position
@@ -851,6 +859,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
     const el = scrollRef.current
     if (!el) return
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    isNearBottom.current = distFromBottom < 100
     setShowJumpToBottom(distFromBottom > 200)
   }, [])
 
@@ -895,29 +904,32 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         <div ref={bottomRef} />
       </div>
 
-      {/* Jump to bottom FAB */}
+      {/* Jump to newest */}
       {showJumpToBottom && (
-        <button
-          onClick={jumpToBottom}
-          className="absolute c-btn c-btn-ghost"
+        <div
+          className="absolute flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
           style={{
-            right: 'var(--sp-5)',
-            bottom: '80px',
-            padding: 'var(--sp-2)',
-            borderRadius: '50%',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            bottom: '72px',
+            padding: 'var(--sp-2) var(--sp-5)',
+            gap: 'var(--sp-2)',
             background: 'var(--color-d4)',
             border: '1px solid var(--b2)',
+            borderRadius: 'var(--radius-md)',
             boxShadow: 'var(--shadow-md)',
+            zIndex: 10,
           }}
-          title="Jump to latest"
+          onClick={jumpToBottom}
         >
-          <ChevronsUp size={16} strokeWidth={2} className="rotate-180" />
-        </button>
+          <ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />
+          <span style={{ fontSize: 'var(--font-size-sm)' }}>Jump to newest</span>
+        </div>
       )}
 
       {/* Input bar */}
       <div
-        className="flex flex-shrink-0"
+        className="flex flex-shrink-0 items-end"
         style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
       >
         <input
@@ -928,16 +940,18 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             background: 'var(--color-d1)',
             border: '1px solid var(--b2)',
             borderRadius: 'var(--radius-md)',
+            height: '40px',
           }}
           placeholder="Type a reply..."
           value={msgText}
           onChange={e => setMsgText(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handleSend()}
+          onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
         />
         <button
           className="c-btn c-btn-primary flex-shrink-0"
-          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
+          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', height: '40px' }}
           onClick={handleSend}
+          disabled={isSending || !msgText.trim()}
         >
           <Send size={15} strokeWidth={2} />
           Send

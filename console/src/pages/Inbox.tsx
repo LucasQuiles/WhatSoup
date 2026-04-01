@@ -200,7 +200,7 @@ export default function Inbox() {
 
             {/* Input bar */}
             <div
-              className="flex flex-shrink-0"
+              className="flex flex-shrink-0 items-end"
               style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
             >
               <input
@@ -211,17 +211,18 @@ export default function Inbox() {
                   background: 'var(--color-d1)',
                   border: '1px solid var(--b2)',
                   borderRadius: 'var(--radius-md)',
-                  transition: 'border-color 0.2s var(--ease)',
+                  height: '40px',
                 }}
                 placeholder="Type a message..."
                 value={msgText}
                 onChange={e => setMsgText(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSend()}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
               />
               <button
                 className="c-btn c-btn-primary flex-shrink-0"
-                style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
+                style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', height: '40px' }}
                 onClick={handleSend}
+                disabled={isSending || !msgText.trim()}
               >
                 <Send size={15} strokeWidth={2} />
                 Send
