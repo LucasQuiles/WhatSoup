@@ -98,6 +98,55 @@ body::before {
   border-radius: 4px;
 }
 
+/* ═══ Button variants — c-btn from design system ═══ */
+@utility c-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  border: 1px solid var(--b2);
+  background: var(--color-d4);
+  color: var(--color-t2);
+  cursor: pointer;
+  transition: all 0.15s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@utility c-btn-primary {
+  background: var(--color-m-cht);
+  border-color: var(--color-m-cht);
+  color: var(--color-d0);
+}
+@utility c-btn-danger {
+  background: transparent;
+  border-color: rgba(252, 129, 129, 0.3);
+  color: var(--color-s-crit);
+}
+@utility c-btn-success {
+  background: transparent;
+  border-color: rgba(45, 212, 168, 0.3);
+  color: var(--color-s-ok);
+}
+@utility c-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-t3);
+}
+@utility c-btn-sm {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+}
+
+/* ═══ Toggle switch — c-toggle from design system ═══ */
+@utility c-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
 /* Focus ring — design system: --m-cht with 2px box-shadow at wash opacity */
 button:focus-visible,
 input:focus-visible,

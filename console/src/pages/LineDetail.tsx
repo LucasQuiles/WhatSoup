@@ -205,6 +205,7 @@ export default function LineDetail() {
                 messages={messages || []}
                 selectedChat={selectedChat}
                 onSelectChat={setSelectedChat}
+                mode={line.mode}
               />
             )}
             {activeTab === 'logs' && <LogsTab logs={logs || []} filter={logFilter} onFilterChange={setLogFilter} />}
@@ -247,6 +248,12 @@ function SummaryTab({ line }: { line: any }) {
   )
 }
 
+/* ═══ Config Block — c-config from components.html ═══ */
+function ConfigValue({ value, type }: { value: string; type: 'string' | 'number' | 'boolean' | 'path' }) {
+  const colorMap = { string: 'var(--color-m-pas)', number: 'var(--color-s-warn)', boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)' }
+  return <span style={{ color: colorMap[type] }}>{value}</span>
+}
+
 /* ═══ Mode Tab ═══ */
 function ModeTab({ mode }: { mode: Mode }) {
   if (mode === 'passive') {
@@ -259,37 +266,56 @@ function ModeTab({ mode }: { mode: Mode }) {
     )
   }
 
-  const fields = mode === 'chat'
-    ? [
-        { label: 'MODEL', value: 'claude-sonnet-4-20250514' },
-        { label: 'SYSTEM PROMPT', value: 'You are a helpful support assistant for BES...' },
-        { label: 'MAX TOKENS', value: '4096' },
-        { label: 'TOKEN BUDGET', value: '100,000 / day' },
-        { label: 'RATE LIMIT', value: '30 / hour' },
-        { label: 'PINECONE INDEX', value: 'bes-knowledge-base' },
-      ]
-    : [
-        { label: 'SESSION SCOPE', value: 'per_chat' },
-        { label: 'WORKING DIR', value: '~/LAB/agent-workspace' },
-        { label: 'INSTRUCTIONS', value: 'CLAUDE.md' },
-        { label: 'SANDBOX', value: 'enabled (sandboxPerChat)' },
-        { label: 'MCP SERVERS', value: '3 configured' },
-      ]
+  const chatConfig: { key: string; value: string; type: 'string' | 'number' | 'boolean' | 'path' }[] = [
+    { key: 'model', value: '"claude-sonnet-4-20250514"', type: 'string' },
+    { key: 'systemPrompt', value: '"You are a helpful support assistant for BES..."', type: 'string' },
+    { key: 'maxTokens', value: '4096', type: 'number' },
+    { key: 'tokenBudget', value: '100000', type: 'number' },
+    { key: 'rateLimitPerHour', value: '30', type: 'number' },
+    { key: 'pineconeIndex', value: '"bes-knowledge-base"', type: 'string' },
+    { key: 'ragEnabled', value: 'true', type: 'boolean' },
+  ]
+  const agentConfig: typeof chatConfig = [
+    { key: 'sessionScope', value: '"per_chat"', type: 'string' },
+    { key: 'cwd', value: '"~/LAB/agent-workspace"', type: 'path' },
+    { key: 'instructionsPath', value: '"CLAUDE.md"', type: 'path' },
+    { key: 'sandbox', value: 'true', type: 'boolean' },
+    { key: 'sandboxPerChat', value: 'true', type: 'boolean' },
+    { key: 'mcpServers', value: '3', type: 'number' },
+    { key: 'perUserDirs', value: 'true', type: 'boolean' },
+  ]
+  const config = mode === 'chat' ? chatConfig : agentConfig
 
   return (
-    <div className="space-y-3">
-      {fields.map(field => (
-        <div
-          key={field.label}
-          className="rounded-md p-4"
-          style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)' }}
-        >
-          <div className="font-mono text-t5 mb-1" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-            {field.label}
-          </div>
-          <div className="font-mono text-sm text-t2">{field.value}</div>
-        </div>
-      ))}
+    <div className="space-y-4">
+      <div className="font-mono text-t5" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+        {mode} Configuration
+      </div>
+      {/* c-config block — syntax-highlighted JSON-like display */}
+      <div
+        className="font-mono overflow-x-auto whitespace-pre"
+        style={{
+          background: 'var(--color-d1)',
+          border: '1px solid var(--b1)',
+          borderRadius: '8px',
+          padding: '14px 16px',
+          fontSize: '0.78rem',
+          color: 'var(--color-t2)',
+          lineHeight: 1.7,
+        }}
+      >
+        {'{\n'}
+        {config.map((entry, i) => (
+          <span key={entry.key}>
+            {'  '}<span style={{ color: 'var(--color-m-cht)' }}>{entry.key}</span>
+            <span style={{ color: 'var(--color-t5)' }}>: </span>
+            <ConfigValue value={entry.value} type={entry.type} />
+            {i < config.length - 1 ? ',' : ''}
+            {'\n'}
+          </span>
+        ))}
+        {'}'}
+      </div>
     </div>
   )
 }
@@ -349,11 +375,18 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
   const pending = access.filter(e => e.status === 'pending' || e.status === 'seen')
 
   const statusIcon = (status: string, type: string) => {
-    if (status === 'blocked') return <UserX size={14} strokeWidth={1.75} className="text-s-crit" />
-    if (status === 'pending' || status === 'seen') return <UserPlus size={14} strokeWidth={1.75} className="text-s-warn" />
+    if (status === 'blocked') return <UserX size={16} strokeWidth={1.75} className="text-s-crit" />
+    if (status === 'pending' || status === 'seen') return <UserPlus size={16} strokeWidth={1.75} className="text-s-warn" />
     return type === 'group'
-      ? <Users size={14} strokeWidth={1.75} className="text-t3" />
-      : <User size={14} strokeWidth={1.75} className="text-t3" />
+      ? <Users size={16} strokeWidth={1.75} className="text-t3" />
+      : <User size={16} strokeWidth={1.75} className="text-t3" />
+  }
+
+  const statusBadge: Record<string, { bg: string; color: string; label: string }> = {
+    allowed: { bg: 'rgba(45,212,168,0.1)', color: 'var(--color-s-ok)', label: 'allowed' },
+    blocked: { bg: 'rgba(252,129,129,0.1)', color: 'var(--color-s-crit)', label: 'blocked' },
+    pending: { bg: 'rgba(246,173,85,0.1)', color: 'var(--color-s-warn)', label: 'pending' },
+    seen:    { bg: 'rgba(246,173,85,0.1)', color: 'var(--color-s-warn)', label: 'seen' },
   }
 
   const renderItem = (entry: AccessEntry, showActions: 'pending' | 'allowed' | 'blocked') => (
@@ -361,29 +394,43 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       key={entry.subjectId}
       className="flex items-center gap-3 hover:bg-d3 transition-colors"
       style={{
-        padding: '8px 14px',
+        padding: '10px 16px',
         borderBottom: '1px solid var(--b1)',
         ...(showActions === 'pending' ? { background: 'var(--s-warn-wash)' } : {}),
         ...(showActions === 'blocked' ? { opacity: 0.6 } : {}),
       }}
     >
-      {/* Avatar — 28px circle with icon */}
+      {/* Avatar — 32px circle with icon (c-access-avatar) */}
       <div
         className="rounded-full flex items-center justify-center flex-shrink-0"
-        style={{ width: '28px', height: '28px', background: 'var(--color-d5)' }}
+        style={{ width: '32px', height: '32px', background: 'var(--color-d5)' }}
       >
         {statusIcon(entry.status, entry.subjectType)}
       </div>
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="font-sans font-medium text-t2" style={{ fontSize: '0.82rem' }}>
+        <div className="font-sans font-medium text-t2" style={{ fontSize: '0.85rem' }}>
           {entry.subjectName}
         </div>
-        <div className="font-mono text-t4" style={{ fontSize: '0.68rem' }}>
+        <div className="font-mono text-t4" style={{ fontSize: '0.72rem' }}>
           {entry.subjectId}
         </div>
       </div>
+
+      {/* Status badge (c-access-status) */}
+      <span
+        className="font-mono font-medium flex-shrink-0"
+        style={{
+          fontSize: '0.7rem',
+          padding: '2px 8px',
+          borderRadius: '3px',
+          background: statusBadge[entry.status]?.bg,
+          color: statusBadge[entry.status]?.color,
+        }}
+      >
+        {statusBadge[entry.status]?.label ?? entry.status}
+      </span>
 
       {/* Actions */}
       {showActions === 'pending' && (
@@ -476,9 +523,10 @@ function getInitials(name: string): string {
   return name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
 }
 
-function HistoryTab({ chats, messages, selectedChat, onSelectChat }: {
-  chats: ChatItem[]; messages: any[]; selectedChat: string | null; onSelectChat: (key: string) => void
+function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
+  chats: ChatItem[]; messages: any[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode
 }) {
+  const outgoingBg = mode === 'agent' ? 'rgba(167,139,250,0.15)' : 'rgba(56,189,248,0.15)'
   return (
     <div
       className="flex gap-0 rounded-lg overflow-hidden"
@@ -569,7 +617,7 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat }: {
                       fontSize: '0.85rem',
                       lineHeight: 1.5,
                       ...(msg.fromMe
-                        ? { background: 'rgba(56,189,248,0.15)', borderBottomRightRadius: '4px' }
+                        ? { background: outgoingBg, borderBottomRightRadius: '4px' }
                         : { background: 'var(--color-d4)', borderBottomLeftRadius: '4px' }),
                     }}
                   >
