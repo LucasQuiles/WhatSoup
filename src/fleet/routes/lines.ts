@@ -56,8 +56,20 @@ function buildHeartbeat(poll: InstanceStatus | undefined): ('up' | 'down')[] {
   ] as ('up' | 'down')[];
 }
 
+/** Count messages since midnight today for an instance. */
+function countMessagesToday(dbReader: FleetDbReader, inst: DiscoveredInstance): number {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const startMs = startOfDay.getTime();
+  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+    const row = db.prepare('SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= ?').get(startMs) as { cnt: number };
+    return row.cnt;
+  });
+  return result.ok ? result.data : 0;
+}
+
 /** Build the enriched LineInstance object the console expects. */
-function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined): Record<string, unknown> {
+function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, messagesToday?: number): Record<string, unknown> {
   const h = poll?.health ?? null;
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
@@ -87,7 +99,7 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     phone: phoneFromJid(accountJid),
     uptime: formatUptime(uptimeSec),
     messagesTotal: messagesTotal ?? 0,
-    messagesToday: messagesTotal ?? 0, // approximation for now
+    messagesToday: messagesToday ?? messagesTotal ?? 0,
     health: h,
     heartbeat: buildHeartbeat(poll),
     lastActive: poll?.lastPollAt ?? null,
@@ -114,7 +126,8 @@ export function handleGetLines(
 
   const lines = Array.from(instances.values()).map((inst) => {
     const poll = statuses.get(inst.name);
-    return enrichInstance(inst, poll);
+    const todayCount = countMessagesToday(deps.dbReader, inst);
+    return enrichInstance(inst, poll, todayCount);
   });
 
   jsonResponse(res, 200, lines);
