@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { jsonResponse, parseQueryString } from '../../lib/http.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
+import { proxyToInstance } from '../http-proxy.ts';
 
 import { findLatestLogFile } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
@@ -344,4 +345,32 @@ export function handleGetLogs(
 
   // Return the last `limit` entries
   jsonResponse(res, 200, collapsed.slice(-limit));
+}
+
+/** GET /api/typing — aggregate typing indicators from all instances. */
+export async function handleGetTyping(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  deps: DataDeps,
+): Promise<void> {
+  const instances = deps.discovery.getInstances();
+  const typing: { instance: string; jid: string; since: number }[] = [];
+
+  // Query all instances in parallel
+  const promises = Array.from(instances.values()).map(async (inst) => {
+    if (!inst.healthPort) return;
+    try {
+      const result = await proxyToInstance(inst.healthPort, '/typing', 'GET', null, inst.healthToken, 2000);
+      if (result.status !== 200) return;
+      const data = JSON.parse(result.body);
+      if (Array.isArray(data.composing)) {
+        for (const entry of data.composing) {
+          typing.push({ instance: inst.name, jid: entry.jid, since: entry.since });
+        }
+      }
+    } catch { /* instance unreachable — skip */ }
+  });
+
+  await Promise.all(promises);
+  jsonResponse(res, 200, typing);
 }

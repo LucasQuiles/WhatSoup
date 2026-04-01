@@ -10,7 +10,7 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
-import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs } from './routes/data.ts';
+import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleRestart, handleConfigUpdate } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -53,6 +53,7 @@ const handlers: Record<string, HandlerFn> = {
   accessUpdate: (req, res, deps, params) => handleAccessUpdate(req, res, deps, params as any),
   restart:      (req, res, deps, params) => handleRestart(req, res, deps, params as any),
   configUpdate: (req, res, deps, params) => handleConfigUpdate(req, res, deps, params as any),
+  getTyping:    (req, res, deps, _params) => handleGetTyping(req, res, deps),
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
 };
 
@@ -84,6 +85,7 @@ export async function loadOrCreateFleetToken(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 const ROUTES = [
+  { method: 'GET',   path: /^\/api\/typing$/, handler: 'getTyping' },
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/lines$/, handler: 'getLines' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },

@@ -193,6 +193,20 @@ body::before {
   50% { opacity: 0.6; transform: scale(0.95); }
 }
 
+/* Typing indicator bouncing dots */
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.typing-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-m-cht);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
 @utility animate-breathe {
   animation: breathe 3s ease-in-out infinite;
 }

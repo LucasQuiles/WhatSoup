@@ -66,6 +66,15 @@ export function useLogs(name: string) {
   });
 }
 
+/** Typing indicators from all instances — refreshes every 2 s. */
+export function useTyping() {
+  return useQuery({
+    queryKey: ['typing'],
+    queryFn: () => api.getTyping(),
+    refetchInterval: 2000,
+  });
+}
+
 /** Global activity feed — refreshes every 5 s. */
 export function useFeed() {
   return useQuery({

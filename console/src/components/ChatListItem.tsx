@@ -7,9 +7,10 @@ interface ChatListItemProps {
   chat: ChatItem
   isSelected: boolean
   onClick: () => void
+  isTyping?: boolean
 }
 
-const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick }) => {
+const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTyping }) => {
   const displayName = resolveDisplayName(chat.name)
 
   return (
@@ -56,8 +57,16 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick }) => {
           </span>
         </div>
 
-        {/* Row 2: Preview + Unread badge */}
+        {/* Row 2: Preview / Typing indicator + Unread badge */}
         <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+          {isTyping ? (
+            <span className="flex items-center text-m-cht" style={{ fontSize: 'var(--font-size-data)', flex: '1 1 0', gap: '3px' }}>
+              <span className="typing-dot" style={{ animationDelay: '0ms' }} />
+              <span className="typing-dot" style={{ animationDelay: '150ms' }} />
+              <span className="typing-dot" style={{ animationDelay: '300ms' }} />
+              <span style={{ marginLeft: 'var(--sp-1)' }}>typing</span>
+            </span>
+          ) : (
           <span
             className="text-t4"
             style={{
@@ -71,6 +80,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick }) => {
           >
             {stripMarkdown(chat.lastMessagePreview ?? '')}
           </span>
+          )}
           {chat.unreadCount > 0 && (
             <span
               className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0"

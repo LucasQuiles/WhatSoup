@@ -96,6 +96,9 @@ export const api = {
     () => mock.getFeed(),
   ),
 
+  getTyping: () =>
+    apiFetch<{ instance: string; jid: string; since: number }[]>('/api/typing').catch(() => []),
+
   // ── Write operations (no mock fallback — these require a live fleet server) ──
 
   restart: (name: string) =>
