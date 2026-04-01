@@ -5,7 +5,7 @@ import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
-import { deleteOldMessages } from './core/messages.ts';
+import { deleteOldMessages, getMessagesBySender } from './core/messages.ts';
 import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
@@ -17,7 +17,7 @@ import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
@@ -29,7 +29,7 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
-import { lookupAccess, updateAccess, insertAllowed, extractPhone } from './core/access-list.ts';
+import { lookupAccess, updateAccess, upsertAllowed, insertAllowed, extractPhone } from './core/access-list.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
@@ -477,6 +477,39 @@ const healthServer = startHealthServer({
       unprocessed = row.cnt;
     } catch (err) { log.warn({ err }, 'failed to get enrichment stats'); }
     return { lastRun, unprocessed, runtimeDegraded };
+  },
+  handleAccessDecision: async (action, subjectType, subjectId) => {
+    if (action === 'allow') {
+      upsertAllowed(db, subjectType, subjectId);
+      log.info({ subjectType, subjectId, action: 'allowed_by_console' }, 'access granted via console');
+
+      // Replay queued messages for phone subjects
+      if (subjectType === 'phone') {
+        const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
+        for (const senderJid of jidFormats) {
+          const stored = getMessagesBySender(db, senderJid);
+          for (const msg of stored) {
+            await runtime.handleMessage({
+              messageId: msg.messageId,
+              chatJid: msg.chatJid,
+              senderJid: msg.senderJid,
+              senderName: msg.senderName,
+              content: msg.content,
+              contentType: msg.contentType,
+              isFromMe: false,
+              isGroup: false,
+              mentionedJids: [],
+              timestamp: msg.timestamp,
+              quotedMessageId: msg.quotedMessageId,
+              isResponseWorthy: true,
+            });
+          }
+        }
+      }
+    } else {
+      updateAccess(db, subjectType, subjectId, 'blocked');
+      log.info({ subjectType, subjectId, action: 'blocked_by_console' }, 'access blocked via console');
+    }
   },
 });
 
