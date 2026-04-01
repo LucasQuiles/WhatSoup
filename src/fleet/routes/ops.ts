@@ -35,14 +35,31 @@ export async function handleSend(
       jsonResponse(res, 400, { error: 'invalid JSON body' });
       return;
     }
+    // Auto-append WhatsApp JID suffix if missing (console sends conversation keys without @)
+    if (typeof parsed.chatJid === 'string' && !parsed.chatJid.includes('@')) {
+      parsed.chatJid = parsed.chatJid.includes('_at_g.us')
+        ? parsed.chatJid.replace('_at_g.us', '@g.us')  // group conversation key
+        : `${parsed.chatJid}@s.whatsapp.net`;           // personal JID
+    }
     const result = await mcpCall(instance.socketPath, 'send_message', parsed);
     jsonResponse(res, result.success ? 200 : 502, result);
     return;
   }
 
   if (instance.type === 'chat') {
+    // Auto-append JID suffix for chat-mode proxy too
+    let fixedBody = body;
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed.chatJid === 'string' && !parsed.chatJid.includes('@')) {
+        parsed.chatJid = parsed.chatJid.includes('_at_g.us')
+          ? parsed.chatJid.replace('_at_g.us', '@g.us')
+          : `${parsed.chatJid}@s.whatsapp.net`;
+        fixedBody = JSON.stringify(parsed);
+      }
+    } catch { /* use original body */ }
     const result = await proxyToInstance(
-      instance.healthPort, '/send', 'POST', body, instance.healthToken,
+      instance.healthPort, '/send', 'POST', fixedBody, instance.healthToken,
     );
     res.writeHead(result.status, { 'Content-Type': 'application/json' });
     res.end(result.body);
