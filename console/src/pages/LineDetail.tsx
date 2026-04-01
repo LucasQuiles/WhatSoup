@@ -453,9 +453,10 @@ function SummaryTab({ line }: { line: LineInstance }) {
             </button>
             <div style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
               <button
-                onClick={() => setConfirmAction('stop')}
-                className="c-btn c-btn-danger w-full justify-center"
+                disabled
+                className="c-btn c-btn-danger w-full justify-center opacity-50 cursor-not-allowed"
                 style={{ fontSize: 'var(--font-size-label)' }}
+                title="Stop endpoint coming in Phase 2"
               >
                 <Power size={13} strokeWidth={1.75} /> Stop Instance
               </button>
@@ -489,30 +490,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
         </ul>
       </ConfirmDialog>
 
-      <ConfirmDialog
-        open={confirmAction === 'stop'}
-        title={`Stop ${line.name}?`}
-        confirmLabel="Stop Instance"
-        confirmVariant="danger"
-        confirmIcon={<Power size={14} strokeWidth={1.75} />}
-        onConfirm={() => {
-          setConfirmAction(null)
-          toast.info(`Stopping ${line.name}...`)
-          // systemctl stop (not restart)
-          api.restart(line.name)
-            .then(() => toast.success(`${line.name} stop requested`))
-            .catch(e => toast.error(`Stop failed: ${e.message}`))
-        }}
-        onCancel={() => setConfirmAction(null)}
-      >
-        <p>Stopping <strong>{line.name}</strong> will take it fully offline.</p>
-        <ul style={{ marginTop: 'var(--sp-2)', paddingLeft: 'var(--sp-5)' }}>
-          <li>The line will not respond to any messages while stopped</li>
-          <li>Messages received while offline may not be visible to the agent</li>
-          <li>WhatsApp may mark the line as "last seen" at the time of disconnect</li>
-          <li>You will need to manually restart the instance to bring it back online</li>
-        </ul>
-      </ConfirmDialog>
+      {/* Stop dialog deferred to Phase 2 — no stop endpoint yet */}
     </div>
   )
 }
@@ -527,8 +505,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
   if (mode === 'passive') {
     return (
       <div
-        style={{ borderRadius: 'var(--radius-lg)' }}
-        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
+        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
       >
         <EmptyState
           icon={<Bot size={40} strokeWidth={1.25} />}
@@ -544,8 +521,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
 
   return (
     <div
-      style={{ borderRadius: 'var(--radius-lg)' }}
-      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
+      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
     >
       <div className="c-col-header mb-5">
         {mode} Configuration

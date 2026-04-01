@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useLines, useChats, useMessages } from '../hooks/use-fleet'
+import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
@@ -12,6 +13,7 @@ import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
   const { data: lines } = useLines()
+  const toast = useToast()
   const [selectedLine, setSelectedLine] = useState<string>('')
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
   const [linePickerOpen, setLinePickerOpen] = useState(false)
@@ -34,7 +36,7 @@ export default function Inbox() {
       setMsgText('')
       queryClient.invalidateQueries({ queryKey: ['messages', activeLine, selectedChat] })
     } catch (e) {
-      console.error('Send failed:', e instanceof Error ? e.message : e)
+      toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setIsSending(false)
     }
