@@ -209,7 +209,7 @@ export default function Inbox() {
 
             {/* Input bar */}
             <div
-              className="flex flex-shrink-0 items-end"
+              className="flex flex-shrink-0 items-center"
               style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
             >
               <textarea
@@ -239,12 +239,20 @@ export default function Inbox() {
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
               />
               <button
-                className="c-btn c-btn-primary flex-shrink-0"
-                style={{ padding: 'var(--sp-2) var(--sp-4)', fontSize: 'var(--font-size-body)', lineHeight: '1.25', alignSelf: 'flex-end' }}
+                className="flex-shrink-0 cursor-pointer flex items-center justify-center rounded-md"
+                style={{
+                  width: '38px',
+                  height: '38px',
+                  background: 'var(--color-m-cht)',
+                  color: 'var(--color-d0)',
+                  border: '1px solid var(--color-m-cht)',
+                  opacity: (!msgText.trim() || isSending) ? 0.4 : 1,
+                  transition: 'opacity 0.15s ease',
+                }}
                 onClick={handleSend}
                 disabled={isSending || !msgText.trim()}
               >
-                <Send size={14} strokeWidth={2} />
+                <Send size={16} strokeWidth={2} />
               </button>
             </div>
           </>
