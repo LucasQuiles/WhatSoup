@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import React, { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
@@ -733,6 +733,153 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
   )
 }
 
+/* ═══ History Messages — scroll-to-bottom + load older + create contact ═══ */
+function HistoryMessages({ messages, outgoingBg, selectedChat }: {
+  messages: Message[]; outgoingBg: string; selectedChat: string;
+}) {
+  const toast = useToast()
+  const scrollRef = React.useRef<HTMLDivElement>(null)
+  const bottomRef = React.useRef<HTMLDivElement>(null)
+  const [showJumpToBottom, setShowJumpToBottom] = React.useState(false)
+
+  const reversed = React.useMemo(() => [...messages].reverse(), [messages])
+
+  // Auto-scroll to bottom on new messages
+  React.useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [selectedChat, messages.length])
+
+  // Show/hide jump-to-bottom FAB based on scroll position
+  const handleScroll = React.useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    setShowJumpToBottom(distFromBottom > 200)
+  }, [])
+
+  const jumpToBottom = () => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  const isRawJid = (name: string) => /^\d{5,}$/.test(name)
+
+  return (
+    <>
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative"
+        style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+      >
+        {/* Load older messages */}
+        {reversed.length > 0 && (
+          <div
+            className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
+            style={{ padding: 'var(--sp-3) 0 var(--sp-4)', gap: 'var(--sp-2)' }}
+            onClick={() => toast.info('Cursor pagination coming in Phase 2')}
+          >
+            <ChevronsUp size={14} strokeWidth={1.75} />
+            <span style={{ fontSize: 'var(--font-size-sm)' }}>Load older messages</span>
+          </div>
+        )}
+
+        {/* Message list */}
+        <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+          {reversed.map(msg => (
+            <div
+              key={msg.pk}
+              className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
+            >
+              {!msg.fromMe && (
+                <div className="flex items-center" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)', gap: 'var(--sp-2)' }}>
+                  <span className="c-label">{resolveDisplayName(msg.senderName)}</span>
+                  {isRawJid(msg.senderName ?? '') && (
+                    <button
+                      onClick={() => toast.info(`Save contact: ${resolveDisplayName(msg.senderName)}`)}
+                      className="c-hover cursor-pointer text-t5 hover:text-m-cht"
+                      style={{ fontSize: 'var(--font-size-xs)' }}
+                      title="Save as contact"
+                    >
+                      <UserPlus size={10} strokeWidth={2} />
+                    </button>
+                  )}
+                </div>
+              )}
+              <div
+                className="c-msg-bubble"
+                style={{
+                  padding: 'var(--sp-2h) var(--msg-pad-h)',
+                  borderRadius: 'var(--radius-lg)',
+                  fontSize: 'var(--font-size-body)',
+                  ...(msg.fromMe
+                    ? { background: outgoingBg, borderBottomRightRadius: 'var(--radius-sm)' }
+                    : { background: 'var(--color-d3)', borderBottomLeftRadius: 'var(--radius-sm)' }),
+                }}
+              >
+                <div className="text-t1 leading-relaxed">{msg.content}</div>
+              </div>
+              <span
+                className={`font-mono text-t5 ${msg.fromMe ? 'text-right' : ''}`}
+                style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)' }}
+              >
+                {formatTime(msg.timestamp)}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Scroll anchor */}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Jump to bottom FAB */}
+      {showJumpToBottom && (
+        <button
+          onClick={jumpToBottom}
+          className="absolute c-btn c-btn-ghost"
+          style={{
+            right: 'var(--sp-5)',
+            bottom: '80px',
+            padding: 'var(--sp-2)',
+            borderRadius: '50%',
+            background: 'var(--color-d4)',
+            border: '1px solid var(--b2)',
+            boxShadow: 'var(--shadow-md)',
+          }}
+          title="Jump to latest"
+        >
+          <ChevronsUp size={16} strokeWidth={2} className="rotate-180" />
+        </button>
+      )}
+
+      {/* Input bar */}
+      <div
+        className="flex flex-shrink-0"
+        style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
+      >
+        <input
+          className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
+          style={{
+            fontSize: 'var(--font-size-body)',
+            padding: 'var(--sp-2h) var(--sp-4)',
+            background: 'var(--color-d1)',
+            border: '1px solid var(--b2)',
+            borderRadius: 'var(--radius-md)',
+          }}
+          placeholder="Type a reply..."
+        />
+        <button
+          className="c-btn c-btn-primary flex-shrink-0"
+          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
+        >
+          <Send size={15} strokeWidth={2} />
+          Send
+        </button>
+      </div>
+    </>
+  )
+}
+
 /* ═══ History Tab — matches chat component patterns ═══ */
 
 function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
@@ -811,74 +958,11 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
       {/* Messages */}
       <div className="flex-1 flex flex-col min-h-0" style={{ background: 'var(--color-d0)' }}>
         {selectedChat ? (
-          <>
-            <div className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
-              {messages.length > 0 && (
-                <div className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5" style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)' }}>
-                  <ChevronsUp size={14} strokeWidth={1.75} />
-                  <span style={{ fontSize: 'var(--font-size-sm)' }}>Load older messages</span>
-                </div>
-              )}
-              <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-                {[...messages].reverse().map(msg => (
-                  <div
-                    key={msg.pk}
-                    className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
-                  >
-                    {!msg.fromMe && (
-                      <span className="c-label" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)' }}>
-                        {msg.senderName}
-                      </span>
-                    )}
-                    <div
-                      style={{
-                        padding: 'var(--sp-2h) var(--msg-pad-h)',
-                        borderRadius: 'var(--radius-lg)',
-                        fontSize: 'var(--font-size-body)',
-                        lineHeight: 1.6,
-                        ...(msg.fromMe
-                          ? { background: outgoingBg, borderBottomRightRadius: 'var(--radius-sm)' }
-                          : { background: 'var(--color-d3)', borderBottomLeftRadius: 'var(--radius-sm)' }),
-                      }}
-                    >
-                      <div className="text-t1">{msg.content}</div>
-                    </div>
-                    <span
-                      className={`font-mono text-t5 ${msg.fromMe ? 'text-right' : ''}`}
-                      style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)' }}
-                    >
-                      {formatTime(msg.timestamp)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Input bar — matches Inbox pattern */}
-            <div
-              className="flex flex-shrink-0"
-              style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
-            >
-              <input
-                className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
-                style={{
-                  fontSize: 'var(--font-size-body)',
-                  padding: 'var(--sp-2h) var(--sp-4)',
-                  background: 'var(--color-d1)',
-                  border: '1px solid var(--b2)',
-                  borderRadius: 'var(--radius-md)',
-                }}
-                placeholder="Type a reply..."
-              />
-              <button
-                className="c-btn c-btn-primary flex-shrink-0"
-                style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
-              >
-                <Send size={15} strokeWidth={2} />
-                Send
-              </button>
-            </div>
-          </>
+          <HistoryMessages
+            messages={messages}
+            outgoingBg={outgoingBg}
+            selectedChat={selectedChat}
+          />
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <EmptyState
