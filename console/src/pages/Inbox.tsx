@@ -203,20 +203,29 @@ export default function Inbox() {
               className="flex flex-shrink-0 items-end"
               style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
             >
-              <input
+              <textarea
                 className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
+                rows={1}
                 style={{
                   fontSize: 'var(--font-size-body)',
                   padding: 'var(--sp-2h) var(--sp-4)',
                   background: 'var(--color-d1)',
                   border: '1px solid var(--b2)',
                   borderRadius: 'var(--radius-md)',
-                  height: '40px',
+                  minHeight: '40px',
+                  maxHeight: '120px',
+                  resize: 'none',
+                  overflow: 'auto',
+                  lineHeight: '1.4',
                 }}
                 placeholder="Type a message..."
                 value={msgText}
-                onChange={e => setMsgText(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                onChange={e => {
+                  setMsgText(e.target.value)
+                  e.target.style.height = 'auto'
+                  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+                }}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
               />
               <button
                 className="c-btn c-btn-primary flex-shrink-0"
