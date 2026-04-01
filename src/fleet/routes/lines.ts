@@ -209,7 +209,7 @@ export async function handleGetLine(
 
   let instanceConfig: Record<string, unknown> = {};
   try {
-    const raw = fs.readFileSync(instance.configPath, 'utf-8');
+    const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
     instanceConfig = JSON.parse(raw);
   } catch { /* config unreadable */ }
 

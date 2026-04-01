@@ -62,6 +62,11 @@ function synthesizeHealthEvents(
     previousStatuses.set(inst.name, currStatus);
   }
 
+  // Prune entries for instances no longer in discovery
+  for (const name of previousStatuses.keys()) {
+    if (!instances.has(name)) previousStatuses.delete(name);
+  }
+
   return events;
 }
 

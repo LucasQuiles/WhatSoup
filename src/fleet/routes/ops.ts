@@ -41,7 +41,7 @@ export async function handleSend(
   // Route 1: Try MCP socket (passive instances with verified socket)
   if (instance.type === 'passive' && instance.socketPath) {
     try {
-      const socketStat = await import('node:fs').then(f => f.existsSync(instance.socketPath!));
+      const socketStat = fs.existsSync(instance.socketPath!);
       if (socketStat) {
         const parsed = JSON.parse(fixedBody);
         const result = await mcpCall(instance.socketPath, 'send_message', parsed);
