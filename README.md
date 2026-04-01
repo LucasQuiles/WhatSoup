@@ -1,101 +1,118 @@
 # WhatSoup
 
-Consolidated WhatsApp platform. One process, one Baileys v7 connection, one SQLite database, 127 MCP tools.
+A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line.
 
-Replaces two legacy repos (`whatsapp-bot` + `whatsapp-mcp`) into a single codebase with embedded tool registry, dual runtime modes, and a durability engine.
+One process per instance. One SQLite database per instance. 127 MCP tools. No build step. Probably too many MCP tools.
+
+## What It Does
+
+Each WhatsApp number gets its own isolated process with its own runtime mode:
+
+| Mode | What Happens | Use Case |
+|------|-------------|----------|
+| **passive** | Stores messages. Does nothing else. Manual read/reply via MCP tools. | Personal number — just want the data accessible |
+| **chat** | Calls an LLM API (Anthropic/OpenAI) with optional RAG via Pinecone. Stateless request-response. | Customer support bot, Q&A assistant |
+| **agent** | Spawns a Claude Code SDK subprocess with tool access, file I/O, and multi-turn sessions. | Autonomous task execution, research, project work |
+
+These are not configuration flags on one bot. They are different codepaths with different message flows, different dependencies, and different failure modes. Treating them as settings on the same runtime was the mistake the previous two repos made.
 
 ## Requirements
 
-- **Node.js >= 23.10** (native `--experimental-strip-types`, no build step)
-- **ffmpeg** (for video frame extraction in chat runtime)
-- **SQLite** (via `node:sqlite`, bundled with Node 23+)
+- **Node.js >= 23.10** — uses native `--experimental-strip-types`, no transpilation
+- **ffmpeg** — video frame extraction in chat runtime (optional)
+- **SQLite** — via `node:sqlite`, bundled with Node 23+
 
 ## Quick Start
 
 ```bash
 npm install
 npm run typecheck
-npm test
+npm test                  # ~2000 tests, real SQLite, real Unix sockets, no mocks
 
-# Single-instance mode (requires Baileys auth)
+# Single instance (needs WhatsApp auth)
 npm start
 
-# Multi-instance mode (via systemd template)
-npm run start:instance    # reads INSTANCE_NAME env var
+# Multi-instance via systemd
+systemctl --user start whatsoup@<name>
 ```
 
 ## Architecture
 
 ```
 src/
-  core/         Shared infrastructure — DB, types, access control, messages,
-                durability engine, JID constants, workspace provisioning
-  transport/    Baileys v7 connection — auth, reconnection, message parsing,
-                event routing, @mention resolution
-  mcp/          MCP tool registry (117 tools), Unix socket server,
-                tool implementations across 13 modules
+  core/           DB, access control, messages, durability engine, JID handling
+  transport/      Baileys v7 — auth, reconnection, parsing, event routing
+  mcp/            Tool registry (127 tools), Unix socket server, 13 tool modules
   runtimes/
-    agent/      Claude Code agent subprocess — session management, watchdog,
-                outbound queue, media bridge, per-chat sandboxing
-    chat/       Direct LLM API chat — Anthropic/OpenAI providers, Pinecone
-                memory, enrichment pipeline, media processing
-  config.ts     Instance-aware config with env var fallbacks
-  logger.ts     Pino + pino-roll (stdout + daily rotating file)
-  main.ts       Bootstrap, lifecycle, health server
+    passive/      Store-only. No auto-response. MCP socket for external access.
+    chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
+    agent/        Claude Code subprocess — sessions, sandbox, outbound queue
+  config.ts       Instance-aware config from JSON + env vars
+  logger.ts       Pino structured logging with daily rotation
+  main.ts         Bootstrap, lifecycle, health server
 
 deploy/
-  whatsoup@.service   systemd template unit
-  hooks/              Agent sandbox enforcement (PreToolUse)
-  mcp/                send-media MCP server, whatsoup-proxy
-
-tests/                Mirrors src/ structure — 82 files, 1972 tests
+  whatsoup@.service   systemd template unit (one per instance)
+  hooks/              Agent sandbox enforcement
 ```
 
 ## Instance Model
 
-Three independent processes via `systemctl start whatsoup@<name>`:
+Each instance is an independent systemd service with isolated auth, database, logs, and config:
 
-| Instance | Type | Access | Description |
-|----------|------|--------|-------------|
-| `personal` | agent | self_only | Full-access Claude Code agent |
-| `loops` | agent | allowlist | Sandboxed per-chat agent for friends |
-| `besbot` | chat | open_dm | Direct LLM API chat bot |
+```
+~/.config/whatsoup/instances/<name>/config.json    # what mode, what model, what access
+~/.local/share/whatsoup/instances/<name>/bot.db     # messages, contacts, sessions
+~/.local/state/whatsoup/instances/<name>/            # lock files, MCP socket
+```
 
-Each instance has isolated auth credentials, SQLite database, log directory, and config at `~/.config/whatsapp-instances/<name>/instance.json`.
+Config example (chat mode):
+
+```json
+{
+  "name": "support",
+  "type": "chat",
+  "systemPrompt": "You are a helpful assistant.",
+  "models": { "conversation": "claude-sonnet-4-6" },
+  "accessMode": "open_dm",
+  "maxTokens": 500,
+  "rateLimitPerHour": 60,
+  "healthPort": 9093
+}
+```
+
+Access modes: `self_only` (just you), `allowlist` (approved contacts), `open_dm` (anyone can message), `groups_only` (WhatsApp groups only).
 
 ## Key Concepts
 
-- **conversation_key** — Canonical chat identity, stable across JID aliasing (`@s.whatsapp.net` vs `@lid`). All reads query on this.
-- **ToolRegistry** — In-process MCP tool declarations with scope enforcement (`chat` vs `global`) and replay policy (`read_only`, `safe`, `unsafe`).
-- **Durability engine** — Two-phase commit model for message delivery. Inbound journal + outbound ops + echo correlation.
-- **Media bridge** — Unix domain socket server per workspace that lets Claude Code subprocesses send WhatsApp media files.
+**conversation_key** — Canonical chat identity that stays stable when WhatsApp aliases JIDs between `@s.whatsapp.net` and `@lid`. Every query uses this instead of raw JIDs. Getting this wrong was responsible for roughly 40% of the bugs in the predecessor repos.
 
-## Environment Variables
+**ToolRegistry** — In-process MCP tool declarations with scope enforcement (`chat`-scoped vs `global`) and replay policy (`read_only`, `safe`, `unsafe`). Chat-scoped tools only see messages from the current conversation. Global tools see everything. The distinction matters when one instance serves multiple contacts.
 
-All have sensible defaults. Instance JSON config takes precedence when running in multi-instance mode.
+**Durability engine** — Two-phase commit for message delivery. Inbound journal captures what arrived. Outbound ops track what was sent. Echo correlation confirms delivery. If the process crashes between receiving a message and sending the reply, the journal replays on restart.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ADMIN_PHONES` | (empty) | Comma-separated phone numbers for admin access |
-| `HEALTH_PORT` | `9090` | HTTP health endpoint port |
-| `MAX_TOKENS` | `750` | Max LLM response tokens |
-| `RATE_LIMIT_PER_HOUR` | `45` | Per-user rate limit |
-| `LOG_LEVEL` | `info` | Pino log level |
-| `LOG_DIR` | `~/.local/share/whatsoup/<name>/logs` | Log file directory (enables pino-roll) |
-| `CONVERSATION_MODEL` | `claude-opus-4-6` | Primary LLM model |
-| `FALLBACK_MODEL` | `gpt-5.4` | Fallback LLM model |
-| `PINECONE_INDEX` | `whatsapp-bot` | Pinecone index name |
+**Media bridge** — Unix socket per workspace that lets Claude Code subprocesses send WhatsApp media (images, documents, audio) without direct Baileys access. The agent runtime owns the bridge; the subprocess just writes to a socket.
+
+## Health & Monitoring
+
+Each instance runs an HTTP health server:
+
+```bash
+curl http://127.0.0.1:9093/health
+```
+
+Returns connection status, uptime, message counts, enrichment state, durability stats, and model configuration. The health port is configurable per instance.
 
 ## Testing
 
 ```bash
-npm test              # 1972 tests, ~7s
-npm run test:watch    # Watch mode
+npm test              # ~2000 tests, ~15s
+npm run test:watch    # watch mode
 npm run typecheck     # tsc --noEmit
 ```
 
-Real SQLite (`:memory:` or temp files) and real Unix sockets in tests. No mocks for infrastructure.
+Tests use real SQLite (`:memory:` or temp files) and real Unix sockets. No infrastructure mocks. If the test passes, it works. If it doesn't, the mock was lying to you — which is why there aren't any.
 
 ## License
 
-Private.
+MIT
