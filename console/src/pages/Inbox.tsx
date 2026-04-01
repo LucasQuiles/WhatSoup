@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useLines, useChats, useMessages } from '../hooks/use-fleet'
+import { useLines, useChats, useMessages, useTyping } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import type { Message } from '../mock-data'
@@ -37,6 +37,11 @@ export default function Inbox() {
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
   const { data: chats } = useChats(activeLine)
   const { data: messages } = useMessages(activeLine, selectedChat || '')
+  const { data: typingData } = useTyping()
+  const typingJids = useMemo(() =>
+    new Set((typingData ?? []).filter(t => t.instance === activeLine).map(t => t.jid)),
+    [typingData, activeLine],
+  )
 
   const currentLine = lines?.find(l => l.name === activeLine)
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
@@ -138,6 +143,7 @@ export default function Inbox() {
               chat={chat}
               isSelected={selectedChat === chat.conversationKey}
               onClick={() => setSelectedChat(chat.conversationKey)}
+              isTyping={typingJids.has(chat.conversationKey)}
             />
           ))}
           {(!chats || chats.length === 0) && (

@@ -1,4 +1,4 @@
-import { useRef, useLayoutEffect, useEffect, useCallback, useState } from 'react'
+import { useRef, useLayoutEffect, useCallback, useState } from 'react'
 
 /**
  * Shared auto-scroll hook for chat-like containers.
@@ -15,29 +15,31 @@ import { useRef, useLayoutEffect, useEffect, useCallback, useState } from 'react
 export function useStickyScroll<T>(items: T[], key: string | null) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [showJump, setShowJump] = useState(false)
-  const forcePinRef = useRef(true)
+  const prevKeyRef = useRef(key)
 
-  // On key change: force pin
-  useEffect(() => {
-    forcePinRef.current = true
-  }, [key])
-
-  // After every render where items changed: scroll to bottom if pinned
+  // Key change: force-pin — runs synchronously in useLayoutEffect before paint
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [key])
 
-    if (forcePinRef.current) {
-      el.scrollTop = el.scrollHeight
-      if (items.length > 0) forcePinRef.current = false
+  // Items change: scroll to bottom if already near bottom
+  useLayoutEffect(() => {
+    // Skip if key just changed (the key effect already scrolled)
+    if (prevKeyRef.current !== key) {
+      prevKeyRef.current = key
       return
     }
+
+    const el = scrollRef.current
+    if (!el) return
 
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight
     if (gap <= 150) {
       el.scrollTop = el.scrollHeight
     }
-  }, [items])
+  }, [items, key])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current

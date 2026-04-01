@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
+import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '../hooks/use-fleet'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { formatRelative, formatTime } from '../lib/format-time'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
@@ -76,6 +76,11 @@ export default function LineDetail() {
   const { data: chats } = useChats(name || '')
   const { data: access } = useAccess(name || '')
   const { data: logs } = useLogs(name || '')
+  const { data: typingData } = useTyping()
+  const typingJids = React.useMemo(() =>
+    new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
+    [typingData, name],
+  )
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
   const { data: messages } = useMessages(name || '', selectedChat || '')
   const toast = useToast()
@@ -229,6 +234,7 @@ export default function LineDetail() {
                 onSelectChat={setSelectedChat}
                 mode={line.mode}
                 lineName={name || ''}
+                typingJids={typingJids}
               />
             )}
             {activeTab === 'logs' && <LogsTab logs={logs || []} filter={logFilter} onFilterChange={setLogFilter} />}
@@ -956,8 +962,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
 /* ═══ History Tab — matches chat component patterns ═══ */
 
-function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineName }: {
-  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode; lineName: string;
+function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineName, typingJids }: {
+  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode; lineName: string; typingJids: Set<string>;
 }) {
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
@@ -986,6 +992,7 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineNam
               chat={chat}
               isSelected={selectedChat === chat.conversationKey}
               onClick={() => onSelectChat(chat.conversationKey)}
+              isTyping={typingJids.has(chat.conversationKey)}
             />
           ))}
         </div>
