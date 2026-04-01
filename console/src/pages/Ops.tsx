@@ -4,6 +4,7 @@ import { formatTimeWithSeconds } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
+import FilterPill from '../components/FilterPill'
 import type { LogEntry } from '../mock-data'
 import {
   Terminal, ChevronDown, Power,
@@ -232,28 +233,16 @@ export default function Ops() {
           style={{ borderBottom: '1px solid var(--b2)' }}
         >
           <div className="flex" style={{ gap: 'var(--sp-1)' }}>
-            {['all', 'error', 'warn', 'info', 'debug'].map(l => {
-              const isActive = logFilter === l
-              const pillColor = l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'
-              return (
-                <button
-                  key={l}
-                  onClick={() => setLogFilter(l)}
-                  className={`font-mono cursor-pointer c-hover inline-flex items-center ${
-                    isActive ? `${pillColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
-                  }`}
-                  style={{
-                    fontSize: 'var(--font-size-label)',
-                    letterSpacing: 'var(--tracking-pill)',
-                    padding: '3px var(--sp-2)',
-                    borderRadius: 'var(--radius-sm)',
-                    border: isActive ? '1px solid var(--b3)' : '1px solid var(--b1)',
-                  }}
-                >
-                  {l}
-                </button>
-              )
-            })}
+            {['all', 'error', 'warn', 'info', 'debug'].map(l => (
+              <FilterPill
+                key={l}
+                label={l}
+                isActive={logFilter === l}
+                activeColor={l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'}
+                activeBorder={logFilter === l ? '1px solid var(--b3)' : undefined}
+                onClick={() => setLogFilter(l)}
+              />
+            ))}
           </div>
 
           <span className="c-label">{filteredLogs.length} entries</span>

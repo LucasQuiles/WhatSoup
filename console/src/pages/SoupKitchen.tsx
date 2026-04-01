@@ -10,6 +10,7 @@ import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import StatusDot from "../components/StatusDot";
 import ModeBadge from "../components/ModeBadge";
+import FilterPill from "../components/FilterPill";
 import { formatRelative } from "../lib/format-time";
 import { formatPhone } from "../lib/text-utils";
 
@@ -216,47 +217,29 @@ const SoupKitchen: FC = () => {
 
               {/* Mode filter pills */}
               <div className="flex" style={{ gap: "var(--sp-1h)" }}>
-                {modeFilterOptions.map((m) => {
-                  const isActive = modeFilter === m;
-                  const colorClass =
-                    m === "all"
-                      ? "text-t2"
-                      : modeTextClass[m];
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setModeFilter(m)}
-                      className={`
-                        font-mono cursor-pointer c-hover
-                        inline-flex items-center
-                        ${
-                          isActive
-                            ? `${colorClass} bg-d4`
-                            : "text-t4 hover:text-t2 hover:bg-d3"
-                        }
-                      `}
-                      style={{
-                        fontSize: "var(--font-size-label)",
-                        letterSpacing: 'var(--tracking-pill)',
-                        padding: "5px var(--sp-3)",
-                        borderRadius: "var(--radius-sm)",
-                        gap: "var(--sp-1h)",
-                        border: isActive
-                          ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
-                          : "1px solid var(--b1)",
-                      }}
-                    >
-                      {m === "all" ? "All" : m}
+                {modeFilterOptions.map((m) => (
+                  <FilterPill
+                    key={m}
+                    label={m === "all" ? "All" : m}
+                    isActive={modeFilter === m}
+                    activeColor={m === "all" ? "text-t2" : modeTextClass[m]}
+                    activeBorder={
+                      modeFilter === m
+                        ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
+                        : undefined
+                    }
+                    onClick={() => setModeFilter(m)}
+                    style={{ padding: "5px var(--sp-3)", gap: "var(--sp-1h)" }}
+                    suffix={
                       <span
                         className="text-t5"
                         style={{ fontSize: "var(--font-size-xs)", opacity: 0.7 }}
                       >
                         {modeCounts[m]}
                       </span>
-                    </button>
-                  );
-                })}
+                    }
+                  />
+                ))}
               </div>
             </div>
 

@@ -1,6 +1,7 @@
 import { type FC, useState, useMemo } from "react";
 import { Pause, Play, AlertTriangle } from "lucide-react";
 import { formatTime } from "../lib/format-time";
+import FilterPill from "./FilterPill";
 
 type Mode = "passive" | "chat" | "agent";
 
@@ -71,50 +72,37 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
           style={{ borderBottom: "1px solid var(--b2)" }}
         >
           <div className="flex items-center" style={{ gap: "var(--sp-1)" }}>
-            {modeFilters.map((m) => {
-              const isActive = modeFilter === m;
-              return (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setModeFilter(m)}
-                  className={`font-mono cursor-pointer c-hover inline-flex items-center ${
-                    isActive ? modeTextColor[m] + " bg-d4" : "text-t4 hover:text-t2 hover:bg-d3"
-                  }`}
-                  style={{
-                    fontSize: "var(--font-size-label)",
-                    letterSpacing: 'var(--tracking-pill)',
-                    padding: "3px var(--sp-2)",
-                    borderRadius: "var(--radius-sm)",
-                    border: isActive
-                      ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
-                      : "1px solid var(--b1)",
-                  }}
-                >
-                  {m === "all" ? "All" : m}
-                </button>
-              );
-            })}
+            {modeFilters.map((m) => (
+              <FilterPill
+                key={m}
+                label={m === "all" ? "All" : m}
+                isActive={modeFilter === m}
+                activeColor={modeTextColor[m]}
+                activeBorder={
+                  modeFilter === m
+                    ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
+                    : undefined
+                }
+                onClick={() => setModeFilter(m)}
+              />
+            ))}
           </div>
 
           {errorCount > 0 && (
-            <button
-              type="button"
+            <FilterPill
+              label=""
+              isActive={errorsOnly}
+              activeColor="text-s-crit"
+              activeBorder={errorsOnly ? "1px solid var(--color-s-crit)" : undefined}
               onClick={() => setErrorsOnly((p) => !p)}
-              className={`inline-flex items-center font-mono cursor-pointer c-hover ${
-                errorsOnly ? "text-s-crit bg-d4" : "text-t4 hover:text-t2 hover:bg-d3"
-              }`}
-              style={{
-                fontSize: "var(--font-size-label)",
-                gap: "var(--sp-1)",
-                padding: "3px var(--sp-2)",
-                borderRadius: "var(--radius-sm)",
-                border: errorsOnly ? "1px solid var(--color-s-crit)" : "1px solid var(--b1)",
-              }}
-            >
-              <AlertTriangle size={10} strokeWidth={2} />
-              <span>{errorCount}</span>
-            </button>
+              style={{ gap: "var(--sp-1)" }}
+              suffix={
+                <>
+                  <AlertTriangle size={10} strokeWidth={2} />
+                  <span>{errorCount}</span>
+                </>
+              }
+            />
           )}
         </div>
       </div>

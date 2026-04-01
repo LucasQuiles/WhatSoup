@@ -3,14 +3,16 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
-import { formatRelative, formatTime, formatChatTime } from '../lib/format-time'
-import { getInitials, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
+import { formatRelative, formatTime } from '../lib/format-time'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import EmptyState from '../components/EmptyState'
+import ChatListItem from '../components/ChatListItem'
+import MessageBubble from '../components/MessageBubble'
+import FilterPill from '../components/FilterPill'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
 import {
@@ -841,8 +843,6 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
-  const isRawJid = (name: string) => /^\d{5,}$/.test(name)
-
   return (
     <>
       <div
@@ -866,45 +866,12 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         {/* Message list */}
         <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
           {reversed.map(msg => (
-            <div
+            <MessageBubble
               key={msg.pk}
-              className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
-            >
-              {!msg.fromMe && (
-                <div className="flex items-center" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)', gap: 'var(--sp-2)' }}>
-                  <span className="c-label">{resolveDisplayName(msg.senderName)}</span>
-                  {isRawJid(msg.senderName ?? '') && (
-                    <button
-                      onClick={() => toast.info(`Save contact: ${resolveDisplayName(msg.senderName)}`)}
-                      className="c-hover cursor-pointer text-t5 hover:text-m-cht"
-                      style={{ fontSize: 'var(--font-size-xs)' }}
-                      title="Save as contact"
-                    >
-                      <UserPlus size={10} strokeWidth={2} />
-                    </button>
-                  )}
-                </div>
-              )}
-              <div
-                className="c-msg-bubble"
-                style={{
-                  padding: 'var(--sp-2h) var(--msg-pad-h)',
-                  borderRadius: 'var(--radius-lg)',
-                  fontSize: 'var(--font-size-body)',
-                  ...(msg.fromMe
-                    ? { background: outgoingBg, borderBottomRightRadius: 'var(--radius-sm)' }
-                    : { background: 'var(--color-d3)', borderBottomLeftRadius: 'var(--radius-sm)' }),
-                }}
-              >
-                <div className="text-t1 leading-relaxed">{msg.content}</div>
-              </div>
-              <span
-                className={`font-mono text-t5 ${msg.fromMe ? 'text-right' : ''}`}
-                style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)' }}
-              >
-                {formatTime(msg.timestamp)}
-              </span>
-            </div>
+              msg={msg}
+              outgoingBg={outgoingBg}
+              onCreateContact={(name) => toast.info(`Save contact: ${name}`)}
+            />
           ))}
         </div>
 
@@ -990,52 +957,14 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineNam
         </div>
 
         <div className="flex-1 overflow-auto scrollbar-hide">
-          {chats.map(chat => {
-            const isSelected = selectedChat === chat.conversationKey
-            return (
-              <div
-                key={chat.conversationKey}
-                onClick={() => onSelectChat(chat.conversationKey)}
-                className={`flex cursor-pointer c-chat-item ${isSelected ? 'active' : ''}`}
-                style={{
-                  padding: 'var(--sp-3) var(--sp-4)',
-                  gap: 'var(--sp-3)',
-                  borderBottom: '1px solid var(--b1)',
-                  ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : {}),
-                }}
-              >
-                <div
-                  className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
-                  style={{ width: 'var(--avatar-md)', height: 'var(--avatar-md)', background: 'var(--color-d5)', fontSize: 'var(--font-size-sm)' }}
-                >
-                  {getInitials(resolveDisplayName(chat.name))}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between" style={{ marginBottom: '2px' }}>
-                    <span className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--chat-name-max)' }}>
-                      {resolveDisplayName(chat.name)}
-                    </span>
-                    <span className="c-label flex-shrink-0" style={{ marginLeft: 'var(--sp-2)' }}>
-                      {formatChatTime(chat.lastMessageAt)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="text-t4 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
-                      {stripMarkdown(chat.lastMessagePreview ?? '')}
-                    </div>
-                    {chat.unreadCount > 0 && (
-                      <span
-                        className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0"
-                        style={{ fontSize: 'var(--font-size-xs)', width: 'var(--badge-unread)', height: 'var(--badge-unread)', marginLeft: 'var(--sp-2)' }}
-                      >
-                        {chat.unreadCount}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+          {chats.map(chat => (
+            <ChatListItem
+              key={chat.conversationKey}
+              chat={chat}
+              isSelected={selectedChat === chat.conversationKey}
+              onClick={() => onSelectChat(chat.conversationKey)}
+            />
+          ))}
         </div>
       </div>
 
@@ -1081,28 +1010,16 @@ function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: s
       >
         <span className="c-heading">Logs</span>
         <div className="flex" style={{ gap: 'var(--sp-1)' }}>
-          {levels.map(l => {
-            const isActive = filter === l
-            const pillColor = l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'
-            return (
-              <button
-                key={l}
-                onClick={() => onFilterChange(l)}
-                className={`font-mono cursor-pointer c-hover inline-flex items-center ${
-                  isActive ? `${pillColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
-                }`}
-                style={{
-                  fontSize: 'var(--font-size-label)',
-                  letterSpacing: 'var(--tracking-pill)',
-                  padding: '3px var(--sp-2)',
-                  borderRadius: 'var(--radius-sm)',
-                  border: isActive ? '1px solid var(--b3)' : '1px solid var(--b1)',
-                }}
-              >
-                {l}
-              </button>
-            )
-          })}
+          {levels.map(l => (
+            <FilterPill
+              key={l}
+              label={l}
+              isActive={filter === l}
+              activeColor={l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'}
+              activeBorder={filter === l ? '1px solid var(--b3)' : undefined}
+              onClick={() => onFilterChange(l)}
+            />
+          ))}
         </div>
       </div>
 
