@@ -868,9 +868,10 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
     if (!el) return
 
     if (forcePinRef.current) {
-      // Forced pin (chat switch / mount) — always scroll
+      // Forced pin (chat switch / mount) — always scroll.
+      // Only clear the flag once there's actual content to scroll to.
       el.scrollTop = el.scrollHeight
-      forcePinRef.current = false
+      if (reversed.length > 0) forcePinRef.current = false
       return
     }
 
