@@ -95,4 +95,27 @@ export const api = {
     () => apiFetch<mock.FeedEvent[]>('/api/feed'),
     () => mock.getFeed(),
   ),
+
+  // ── Write operations (no mock fallback — these require a live fleet server) ──
+
+  restart: (name: string) =>
+    apiFetch<{ status: string; instance: string }>(`/api/lines/${encodeURIComponent(name)}/restart`, { method: 'POST' }),
+
+  sendMessage: (name: string, chatJid: string, text: string) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
+      method: 'POST',
+      body: JSON.stringify({ chatJid, text }),
+    }),
+
+  accessDecision: (name: string, subjectType: string, subjectId: string, action: 'allow' | 'block') =>
+    apiFetch<{ ok: boolean; result: string }>(`/api/lines/${encodeURIComponent(name)}/access`, {
+      method: 'POST',
+      body: JSON.stringify({ subjectType, subjectId, action }),
+    }),
+
+  updateConfig: (name: string, patch: Record<string, unknown>) =>
+    apiFetch<Record<string, unknown>>(`/api/lines/${encodeURIComponent(name)}/config`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
 };

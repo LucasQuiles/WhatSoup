@@ -6,9 +6,11 @@ import { formatRelative, formatTime, formatChatTime } from '../lib/format-time'
 import { getInitials, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
 import { useToast } from '../hooks/toast-context'
+import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import EmptyState from '../components/EmptyState'
+import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield, Send,
@@ -147,7 +149,7 @@ export default function LineDetail() {
         {/* Heartbeat + Restart */}
         <HeartbeatStrip beats={line.heartbeat} />
         <button
-          onClick={() => toast.info(`Restarting ${line.name}...`)}
+          onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-t3 hover:text-t1 hover:bg-d5 cursor-pointer c-hover"
           style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
         >
@@ -214,7 +216,7 @@ export default function LineDetail() {
             {activeTab === 'summary' && <SummaryTab line={line} />}
             {activeTab === 'mode' && <ModeTab mode={line.mode} />}
             {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
-            {activeTab === 'access' && <AccessTab access={access || []} />}
+            {activeTab === 'access' && <AccessTab access={access || []} lineName={name || ''} />}
             {activeTab === 'history' && (
               <HistoryTab
                 chats={chats || []}
@@ -260,6 +262,7 @@ const TYPE_COLOR: Record<string, string> = {
 /* ═══ Summary Tab — KPI strip + pipeline strip + config/actions columns ═══ */
 function SummaryTab({ line }: { line: LineInstance }) {
   const toast = useToast()
+  const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
@@ -403,7 +406,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
           </div>
           <div className="flex flex-col" style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-2)' }}>
             <button
-              onClick={() => toast.info(`Restarting ${line.name}...`)}
+              onClick={() => setConfirmAction('restart')}
               className="c-btn w-full justify-center"
               style={{ fontSize: 'var(--font-size-label)' }}
             >
@@ -427,7 +430,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             </button>
             <div style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
               <button
-                onClick={() => toast.error(`Stopping ${line.name}...`)}
+                onClick={() => setConfirmAction('stop')}
                 className="c-btn c-btn-danger w-full justify-center"
                 style={{ fontSize: 'var(--font-size-label)' }}
               >
@@ -437,6 +440,56 @@ function SummaryTab({ line }: { line: LineInstance }) {
           </div>
         </motion.div>
       </div>
+
+      {/* Confirmation dialogs for destructive actions */}
+      <ConfirmDialog
+        open={confirmAction === 'restart'}
+        title={`Restart ${line.name}?`}
+        confirmLabel="Restart"
+        confirmVariant="primary"
+        confirmIcon={<RotateCw size={14} strokeWidth={1.75} />}
+        onConfirm={() => {
+          setConfirmAction(null)
+          toast.info(`Restarting ${line.name}...`)
+          api.restart(line.name)
+            .then(() => toast.success(`${line.name} restart requested`))
+            .catch(e => toast.error(`Restart failed: ${e.message}`))
+        }}
+        onCancel={() => setConfirmAction(null)}
+      >
+        <p>Restarting will briefly disconnect <strong>{line.name}</strong> from WhatsApp.</p>
+        <ul style={{ marginTop: 'var(--sp-2)', paddingLeft: 'var(--sp-5)' }}>
+          <li>Active chat sessions will be interrupted</li>
+          <li>Agent sessions will be terminated and must restart</li>
+          <li>Messages received during restart will be queued</li>
+          <li>The instance will attempt to reconnect automatically</li>
+        </ul>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmAction === 'stop'}
+        title={`Stop ${line.name}?`}
+        confirmLabel="Stop Instance"
+        confirmVariant="danger"
+        confirmIcon={<Power size={14} strokeWidth={1.75} />}
+        onConfirm={() => {
+          setConfirmAction(null)
+          toast.info(`Stopping ${line.name}...`)
+          // systemctl stop (not restart)
+          api.restart(line.name)
+            .then(() => toast.success(`${line.name} stop requested`))
+            .catch(e => toast.error(`Stop failed: ${e.message}`))
+        }}
+        onCancel={() => setConfirmAction(null)}
+      >
+        <p>Stopping <strong>{line.name}</strong> will take it fully offline.</p>
+        <ul style={{ marginTop: 'var(--sp-2)', paddingLeft: 'var(--sp-5)' }}>
+          <li>The line will not respond to any messages while stopped</li>
+          <li>Messages received while offline may not be visible to the agent</li>
+          <li>WhatsApp may mark the line as "last seen" at the time of disconnect</li>
+          <li>You will need to manually restart the instance to bring it back online</li>
+        </ul>
+      </ConfirmDialog>
     </div>
   )
 }
@@ -583,8 +636,15 @@ function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance
 }
 
 /* ═══ Access Tab — compact layout from components.html ═══ */
-function AccessTab({ access }: { access: AccessEntry[] }) {
+function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: string }) {
   const toast = useToast()
+
+  const handleAccess = (subjectType: string, subjectId: string, subjectName: string, action: 'allow' | 'block') => {
+    const label = action === 'allow' ? 'Allow' : 'Block'
+    api.accessDecision(lineName, subjectType, subjectId, action)
+      .then(() => toast.success(`${label}ed ${subjectName}`))
+      .catch(e => toast.error(`${label} failed: ${e.message}`))
+  }
   const allowed = access.filter(e => e.status === 'allowed')
   const blocked = access.filter(e => e.status === 'blocked')
   const pending = access.filter(e => e.status === 'pending' || e.status === 'seen')
@@ -651,14 +711,14 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       {showActions === 'pending' && (
         <div className="flex gap-1.5">
           <button
-            onClick={() => toast.success(`Allowed ${entry.subjectName}`)}
+            onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
             className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
             style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
           >
             <UserCheck size={11} strokeWidth={1.75} /> Allow
           </button>
           <button
-            onClick={() => toast.error(`Blocked ${entry.subjectName}`)}
+            onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
             className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
             style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
           >
@@ -668,7 +728,7 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       )}
       {showActions === 'allowed' && (
         <button
-          onClick={() => toast.error(`Blocked ${entry.subjectName}`)}
+          onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
           className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
           style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
         >
@@ -677,7 +737,7 @@ function AccessTab({ access }: { access: AccessEntry[] }) {
       )}
       {showActions === 'blocked' && (
         <button
-          onClick={() => toast.success(`Allowed ${entry.subjectName}`)}
+          onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
           className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
           style={{ fontSize: 'var(--font-size-label)', border: '1px solid var(--b2)' }}
         >
