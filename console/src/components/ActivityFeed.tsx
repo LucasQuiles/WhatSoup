@@ -83,7 +83,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
                   }`}
                   style={{
                     fontSize: "var(--font-size-label)",
-                    letterSpacing: "0.02em",
+                    letterSpacing: 'var(--tracking-pill)',
                     padding: "3px var(--sp-2)",
                     borderRadius: "var(--radius-sm)",
                     border: isActive

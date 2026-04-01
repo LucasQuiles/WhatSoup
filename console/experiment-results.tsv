@@ -5,3 +5,4 @@ commit	metric	status	description
 22031ca	0 problems	keep	ban inline lineHeight — 3 fixes + lint rule
 19e91b0	0 problems	keep	tokenize dropdown min-width + --dropdown-min-w token
 71fe569	0 problems	keep	fix missed inline transition-all on SoupKitchen pills
+4a0cb7c	0 problems	keep	promote all design system rules from warn → error

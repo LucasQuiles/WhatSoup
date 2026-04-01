@@ -240,7 +240,7 @@ const SoupKitchen: FC = () => {
                       `}
                       style={{
                         fontSize: "var(--font-size-label)",
-                        letterSpacing: "0.02em",
+                        letterSpacing: 'var(--tracking-pill)',
                         padding: "5px var(--sp-3)",
                         borderRadius: "var(--radius-sm)",
                         gap: "var(--sp-1h)",
@@ -281,7 +281,7 @@ const SoupKitchen: FC = () => {
                   padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) 28px",
                   border: "1px solid var(--b2)",
                   borderRadius: "var(--radius-sm)",
-                  transition: "border-color 0.2s ease",
+                  transition: "border-color 0.2s var(--ease)",
                 }}
               />
             </div>

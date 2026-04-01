@@ -186,7 +186,7 @@ export default function Ops() {
                 className="flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4"
                 style={{
                   fontSize: 'var(--font-size-label)',
-                  letterSpacing: '0.02em',
+                  letterSpacing: 'var(--tracking-pill)',
                   padding: '5px var(--sp-3)',
                   borderRadius: 'var(--radius-sm)',
                   border: '1px solid var(--b2)',
@@ -242,7 +242,7 @@ export default function Ops() {
                   }`}
                   style={{
                     fontSize: 'var(--font-size-label)',
-                    letterSpacing: '0.02em',
+                    letterSpacing: 'var(--tracking-pill)',
                     padding: '3px var(--sp-2)',
                     borderRadius: 'var(--radius-sm)',
                     border: isActive ? '1px solid var(--b3)' : '1px solid var(--b1)',

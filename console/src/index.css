@@ -38,6 +38,7 @@
   /* ═══ Letter spacing ═══ */
   --tracking-tighter: -0.06em; /* logo, display text */
   --tracking-tight: -0.04em;  /* KPI values, page titles */
+  --tracking-pill: 0.02em;    /* filter pills, subtle nudge */
   --tracking-label: 0.06em;   /* labels */
   --tracking-caps: 0.12em;    /* column headers, uppercase labels */
 
@@ -78,6 +79,8 @@
   /* Semantic tier — spec completeness */
   --s-warn-soft: rgba(246,173,85, 0.19);
   --s-crit-border: rgba(252,129,129, 0.1);
+  --s-crit-ring: rgba(252,129,129, 0.3);
+  --s-ok-ring: rgba(45,212,168, 0.3);
   /* ═══ Elevation shadows ═══ */
   --shadow-inset: inset 0 -2px 8px rgba(0,0,0,0.15);
   --shadow-md: 0 8px 24px rgba(0,0,0,0.4);
@@ -113,6 +116,7 @@
   --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */
   --sp-2h: 10px;             /* 2.5 × 4px — table cell vertical, toolbar padding */
   --msg-pad-h: 14px;         /* message bubble horizontal padding */
+  --btn-pad-v: 7px;          /* button vertical padding (spec §2.2) */
   /* ═══ Spacing — 4px grid from design spec ═══ */
   --sp-1:  4px;
   --sp-2:  8px;
@@ -276,7 +280,7 @@ body::before {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 7px 14px;
+  padding: var(--btn-pad-v) var(--msg-pad-h);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-data);
   font-weight: 500;
@@ -289,13 +293,13 @@ body::before {
 .c-btn:hover         { background: var(--color-d5); border-color: var(--b3); }
 .c-btn-primary       { background: var(--color-m-cht); border-color: var(--color-m-cht); color: var(--color-d0); }
 .c-btn-primary:hover { opacity: 0.88; }
-.c-btn-danger        { background: transparent; border-color: rgba(252, 129, 129, 0.3); color: var(--color-s-crit); }
+.c-btn-danger        { background: transparent; border-color: var(--s-crit-ring); color: var(--color-s-crit); }
 .c-btn-danger:hover  { background: var(--s-crit-wash); }
-.c-btn-success       { background: transparent; border-color: rgba(45, 212, 168, 0.3); color: var(--color-s-ok); }
+.c-btn-success       { background: transparent; border-color: var(--s-ok-ring); color: var(--color-s-ok); }
 .c-btn-success:hover { background: var(--s-ok-wash); }
 .c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
 .c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
-.c-btn-sm      { padding: var(--sp-1) 10px; font-size: var(--font-size-data); }
+.c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
 
 /* ═══ Toggle switch — c-toggle from design system ═══ */
 .c-toggle {
