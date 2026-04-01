@@ -954,11 +954,12 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             background: 'var(--color-d1)',
             border: '1px solid var(--b2)',
             borderRadius: 'var(--radius-md)',
-            minHeight: '40px',
+            minHeight: '38px',
             maxHeight: '120px',
             resize: 'none',
             overflow: 'auto',
             lineHeight: '1.4',
+            boxSizing: 'border-box',
           }}
           placeholder="Type a reply..."
           value={msgText}
@@ -972,7 +973,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         />
         <button
           className="c-btn c-btn-primary flex-shrink-0"
-          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', height: '40px' }}
+          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', height: '38px', boxSizing: 'border-box' }}
           onClick={handleSend}
           disabled={isSending || !msgText.trim()}
         >
