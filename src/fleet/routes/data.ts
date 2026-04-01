@@ -253,7 +253,7 @@ export function handleGetLogs(
       // Derive ISO timestamp from pino's time/timestamp field
       const rawTs = obj.time ?? obj.timestamp;
       const timestamp = typeof rawTs === 'number'
-        ? new Date(rawTs).toISOString()
+        ? new Date(rawTs > 1e12 ? rawTs : rawTs * 1000).toISOString()  // handle both ms and seconds
         : typeof rawTs === 'string'
           ? rawTs
           : new Date().toISOString();
@@ -270,6 +270,24 @@ export function handleGetLogs(
     }
   }
 
+  // Collapse consecutive identical messages into "msg (×N)"
+  const collapsed: LogEntry[] = [];
+  for (const entry of entries) {
+    const prev = collapsed[collapsed.length - 1];
+    if (prev && prev.msg === entry.msg && prev.source === entry.source && prev.level === entry.level) {
+      // Update timestamp to latest and append count
+      prev.timestamp = entry.timestamp;
+      const match = prev.msg.match(/\(×(\d+)\)$/);
+      if (match) {
+        prev.msg = prev.msg.replace(/\(×\d+\)$/, `(×${parseInt(match[1], 10) + 1})`);
+      } else {
+        prev.msg = `${prev.msg} (×2)`;
+      }
+    } else {
+      collapsed.push({ ...entry });
+    }
+  }
+
   // Return the last `limit` entries
-  jsonResponse(res, 200, entries.slice(-limit));
+  jsonResponse(res, 200, collapsed.slice(-limit));
 }
