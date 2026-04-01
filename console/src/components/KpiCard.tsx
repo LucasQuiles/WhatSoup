@@ -34,7 +34,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
       `}
       style={{
         background: active ? "var(--color-d3)" : "var(--color-d2)",
-        border: active ? `1px solid ${strokeColor}` : "1px solid var(--b1)",
+        border: active ? `var(--bw) solid ${strokeColor}` : "var(--bw) solid var(--b1)",
         borderRadius: "var(--radius-md)",
         boxShadow: active
           ? `var(--shadow-inset)`

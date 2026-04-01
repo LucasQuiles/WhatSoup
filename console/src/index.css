@@ -47,6 +47,12 @@
   --radius-md: 6px;   /* buttons, alert banners */
   --radius-lg: 10px;  /* cards, panels, table containers */
 
+  /* ═══ Border width ═══ */
+  --bw: 1px;            /* default border width */
+  --bw-accent: 2px;     /* active indicator / accent borders */
+  --bw-focus: 1px;      /* focus ring inner spread */
+  --bw-focus-outer: 1.5px; /* focus ring outer spread */
+
   --font-sans: 'Outfit', system-ui, -apple-system, sans-serif;
   --font-mono: 'IBM Plex Mono', 'SF Mono', 'Cascadia Code', monospace;
 }
@@ -290,7 +296,7 @@ body::before {
   border-radius: var(--radius-sm);
   font-size: var(--font-size-data);
   font-weight: 500;
-  border: 1px solid var(--b2);
+  border: var(--bw) solid var(--b2);
   background: var(--color-d4);
   color: var(--color-t2);
   cursor: pointer;
@@ -350,7 +356,7 @@ select:focus-visible,
 textarea:focus-visible,
 a:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 1px var(--m-cht-wash), 0 0 0 1.5px var(--m-cht-soft);
+  box-shadow: 0 0 0 var(--bw-focus) var(--m-cht-wash), 0 0 0 var(--bw-focus-outer) var(--m-cht-soft);
   border-color: var(--color-m-cht) !important;
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }

@@ -148,7 +148,7 @@ const SoupKitchen: FC = () => {
           gridTemplateColumns: "repeat(7, 1fr)",
           gap: "var(--sp-2)",
           background: "var(--color-d1)",
-          border: "1px solid var(--b1)",
+          border: "var(--bw) solid var(--b1)",
           borderRadius: "var(--radius-lg)",
           padding: "var(--sp-2)",
         }}
@@ -222,7 +222,7 @@ const SoupKitchen: FC = () => {
           style={{
             flex: 3,
             background: "var(--color-d2)",
-            border: "1px solid var(--b1)",
+            border: "var(--bw) solid var(--b1)",
             borderRadius: 'var(--radius-lg)',
             overflow: "hidden",
           }}
@@ -230,7 +230,7 @@ const SoupKitchen: FC = () => {
           {/* Toolbar */}
           <div
             className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-            style={{ borderBottom: "1px solid var(--b1)" }}
+            style={{ borderBottom: "var(--bw) solid var(--b1)" }}
           >
             <div className="flex items-center gap-4">
               <h2
@@ -249,7 +249,7 @@ const SoupKitchen: FC = () => {
                     activeColor={m === "all" ? "text-t2" : modeTextClass[m]}
                     activeBorder={
                       modeFilter === m
-                        ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
+                        ? `var(--bw) solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
                         : undefined
                     }
                     onClick={() => setModeFilter(m)}
@@ -284,7 +284,7 @@ const SoupKitchen: FC = () => {
                 style={{
                   fontSize: "var(--font-size-label)",
                   padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) 28px",
-                  border: "1px solid var(--b2)",
+                  border: "var(--bw) solid var(--b2)",
                   borderRadius: "var(--radius-sm)",
                   transition: "border-color 0.2s var(--ease)",
                 }}
@@ -298,7 +298,7 @@ const SoupKitchen: FC = () => {
               <thead>
                 <tr
                   className="sticky top-0 bg-d3 z-10"
-                  style={{ borderBottom: "1px solid var(--b2)" }}
+                  style={{ borderBottom: "var(--bw) solid var(--b2)" }}
                 >
                   {[
                     { label: "", w: "36px" },
@@ -330,7 +330,7 @@ const SoupKitchen: FC = () => {
                       onClick={() => navigate(`/lines/${line.name}`)}
                       className="cursor-pointer c-row-hover"
                       style={{
-                        borderBottom: "1px solid var(--b1)",
+                        borderBottom: "var(--bw) solid var(--b1)",
                         ...(isError
                           ? { backgroundColor: "var(--s-crit-wash)" }
                           : isDegraded
@@ -424,7 +424,7 @@ const SoupKitchen: FC = () => {
             flex: 1,
             minWidth: "240px",
             background: "var(--color-d1)",
-            border: "1px solid var(--b1)",
+            border: "var(--bw) solid var(--b1)",
             borderRadius: 'var(--radius-lg)',
             overflow: "hidden",
           }}

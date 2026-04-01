@@ -44,7 +44,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
         borderRadius: 'var(--radius-md)',
         fontSize: 'var(--font-size-body)',
         fontWeight: 500,
-        border: `1px solid ${borderColor[variant]}`,
+        border: `var(--bw) solid ${borderColor[variant]}`,
         background: 'var(--color-d3)',
         boxShadow: 'var(--shadow-md)',
         maxWidth: '360px',

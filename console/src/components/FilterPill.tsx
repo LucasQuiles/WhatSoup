@@ -4,7 +4,7 @@ interface FilterPillProps {
   label: string
   isActive: boolean
   activeColor?: string    // Tailwind text color class when active, e.g. "text-m-pas"
-  activeBorder?: string   // CSS border value when active, e.g. "1px solid var(--color-m-pas)"
+  activeBorder?: string   // CSS border value when active, e.g. "var(--bw) solid var(--color-m-pas)"
   onClick: () => void
   suffix?: ReactNode      // Optional suffix element (e.g., count badge)
   style?: React.CSSProperties  // Optional style overrides
@@ -26,8 +26,8 @@ const FilterPill: FC<FilterPillProps> = ({
         padding: '3px var(--sp-2)',
         borderRadius: 'var(--radius-sm)',
         border: isActive
-          ? (activeBorder ?? '1px solid var(--b4)')
-          : '1px solid var(--b1)',
+          ? (activeBorder ?? 'var(--bw) solid var(--b4)')
+          : 'var(--bw) solid var(--b1)',
         ...style,
       }}
     >

@@ -195,6 +195,30 @@ export default defineConfig([
           selector: 'Property[key.value="outlineWidth"]',
           message: '⛔ Inline outlineWidth — focus ring width is set globally in index.css (1px/1.5px).',
         },
+
+        // ═══ BORDER WIDTH ═══
+
+        // Hardcoded border with px width — use var(--bw) or var(--bw-accent)
+        {
+          selector: 'Property[key.value="border"][value.value=/^[0-9]+px solid/]',
+          message: '⛔ Hardcoded border width — use var(--bw) solid var(--b*) or var(--bw-accent).',
+        },
+        {
+          selector: 'Property[key.value="borderTop"][value.value=/^[0-9]+px solid/]',
+          message: '⛔ Hardcoded borderTop width — use var(--bw) solid var(--b*).',
+        },
+        {
+          selector: 'Property[key.value="borderBottom"][value.value=/^[0-9]+px solid/]',
+          message: '⛔ Hardcoded borderBottom width — use var(--bw) solid var(--b*).',
+        },
+        {
+          selector: 'Property[key.value="borderLeft"][value.value=/^[0-9]+px solid/]',
+          message: '⛔ Hardcoded borderLeft width — use var(--bw-accent) solid var(--color-*).',
+        },
+        {
+          selector: 'Property[key.value="borderRight"][value.value=/^[0-9]+px solid/]',
+          message: '⛔ Hardcoded borderRight width — use var(--bw) solid var(--b*).',
+        },
       ],
     },
   },

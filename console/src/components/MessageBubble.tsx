@@ -34,7 +34,7 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
         marginBottom: 'var(--sp-1)',
         padding: 'var(--sp-3) var(--sp-4)',
         background: 'var(--color-d6)',
-        border: '1px solid var(--b2)',
+        border: 'var(--bw) solid var(--b2)',
         borderRadius: 'var(--radius-md)',
         boxShadow: 'var(--shadow-md)',
         minWidth: '220px',
@@ -68,7 +68,7 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
           <span className="c-label">Direction</span>
           <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{msg.fromMe ? 'Outbound' : 'Inbound'}</span>
         </div>
-        <div className="flex justify-between" style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-1)', marginTop: 'var(--sp-1)' }}>
+        <div className="flex justify-between" style={{ borderTop: 'var(--bw) solid var(--b1)', paddingTop: 'var(--sp-1)', marginTop: 'var(--sp-1)' }}>
           <span className="c-label">ID</span>
           <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
             {msg.pk < 0 ? 'pending' : `pk:${msg.pk}`}

@@ -38,7 +38,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         className="overflow-hidden"
         style={{
           background: 'var(--color-d2)',
-          border: '1px solid var(--b2)',
+          border: 'var(--bw) solid var(--b2)',
           borderRadius: 'var(--radius-lg)',
           width: '420px',
           maxWidth: '90%',
@@ -49,7 +49,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         {/* Header */}
         <div
           className="flex items-center justify-between"
-          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: '1px solid var(--b1)' }}
+          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
         >
           <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
             {title}
@@ -74,7 +74,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
           className="flex justify-end gap-2"
           style={{
             padding: 'var(--sp-3) var(--sp-5)',
-            borderTop: '1px solid var(--b1)',
+            borderTop: 'var(--bw) solid var(--b1)',
             background: 'var(--color-d1)',
           }}
         >
@@ -90,7 +90,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
             style={{
               fontSize: 'var(--font-size-heading)',
-              border: `1px solid ${confirmStyles.borderColor}`,
+              border: `var(--bw) solid ${confirmStyles.borderColor}`,
               background: confirmStyles.background,
               color: confirmStyles.color,
             }}

@@ -44,7 +44,7 @@ export default function Ops() {
         style={{
           flex: 1,
           background: 'var(--color-d1)',
-          border: '1px solid var(--b1)',
+          border: 'var(--bw) solid var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -52,7 +52,7 @@ export default function Ops() {
         {/* Row 1: Header — matches toolbar pattern */}
         <div
           className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-          style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+          style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
         >
           <span className="c-heading">Fleet Status</span>
           {alerts.length > 0 ? (
@@ -71,7 +71,7 @@ export default function Ops() {
         {/* Row 2: Summary stats — matches column header row */}
         <div
           className="flex items-center justify-between flex-shrink-0 c-cell"
-          style={{ borderBottom: '1px solid var(--b2)' }}
+          style={{ borderBottom: 'var(--bw) solid var(--b2)' }}
         >
           <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
             <span className="c-label">{lines.length} lines</span>
@@ -101,7 +101,7 @@ export default function Ops() {
                     : line.status === 'degraded'
                     ? 'var(--s-warn-wash)'
                     : 'var(--color-d2)',
-                  border: '1px solid var(--b1)',
+                  border: 'var(--bw) solid var(--b1)',
                 }}
                 onClick={() => { setSelectedLine(line.name); setLinePickerOpen(false) }}
               >
@@ -145,7 +145,7 @@ export default function Ops() {
 
                 {/* Row 3: Actions for unhealthy lines */}
                 {line.status !== 'online' && (
-                  <div className="flex" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-3)', paddingTop: 'var(--sp-3)', borderTop: '1px solid var(--b1)' }}>
+                  <div className="flex" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-3)', paddingTop: 'var(--sp-3)', borderTop: 'var(--bw) solid var(--b1)' }}>
                     <button
                       className="c-btn"
                       style={{ padding: '5px var(--sp-3)', fontSize: 'var(--font-size-label)' }}
@@ -172,7 +172,7 @@ export default function Ops() {
         className="flex flex-col min-h-0"
         style={{
           flex: 1.6,
-          border: '1px solid var(--b1)',
+          border: 'var(--bw) solid var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -180,7 +180,7 @@ export default function Ops() {
         {/* Row 1: Line picker toolbar — matches c-toolbar */}
         <div
           className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-          style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+          style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
         >
           <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
             <Terminal size={15} strokeWidth={1.75} className="text-m-agt" />
@@ -193,7 +193,7 @@ export default function Ops() {
                   letterSpacing: 'var(--tracking-pill)',
                   padding: '5px var(--sp-3)',
                   borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--b2)',
+                  border: 'var(--bw) solid var(--b2)',
                 }}
               >
                 {currentLine && <StatusDot status={currentLine.status} size="sm" />}
@@ -204,7 +204,7 @@ export default function Ops() {
               {linePickerOpen && (
                 <div
                   className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto"
-                  style={{ minWidth: 'var(--dropdown-min-w)', background: 'var(--color-d6)', border: '1px solid var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
+                  style={{ minWidth: 'var(--dropdown-min-w)', background: 'var(--color-d6)', border: 'var(--bw) solid var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
                 >
                   {lines.map(line => (
                     <button
@@ -231,7 +231,7 @@ export default function Ops() {
         {/* Row 2: Level filter pills — matches column header row */}
         <div
           className="flex items-center justify-between flex-shrink-0 c-cell"
-          style={{ borderBottom: '1px solid var(--b2)' }}
+          style={{ borderBottom: 'var(--bw) solid var(--b2)' }}
         >
           <div className="flex" style={{ gap: 'var(--sp-1)' }}>
             {['all', 'error', 'warn', 'info', 'debug'].map(l => (
@@ -240,7 +240,7 @@ export default function Ops() {
                 label={l}
                 isActive={logFilter === l}
                 activeColor={l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'}
-                activeBorder={logFilter === l ? '1px solid var(--b3)' : undefined}
+                activeBorder={logFilter === l ? 'var(--bw) solid var(--b3)' : undefined}
                 onClick={() => setLogFilter(l)}
               />
             ))}
@@ -256,19 +256,19 @@ export default function Ops() {
               <div
                 key={`${log.timestamp}-${log.source}-${i}`}
                 className="flex items-start c-row-hover"
-                style={{ borderBottom: '1px solid var(--b1)' }}
+                style={{ borderBottom: 'var(--bw) solid var(--b1)' }}
               >
                 {/* Timestamp */}
                 <div
                   className="flex-shrink-0 text-t5"
-                  style={{ width: 'var(--log-col-time)', padding: 'var(--sp-2) var(--sp-3)', borderRight: '1px solid var(--b1)' }}
+                  style={{ width: 'var(--log-col-time)', padding: 'var(--sp-2) var(--sp-3)', borderRight: 'var(--bw) solid var(--b1)' }}
                 >
                   {formatTimeWithSeconds(log.timestamp)}
                 </div>
                 {/* Level badge */}
                 <div
                   className="flex-shrink-0 text-center"
-                  style={{ width: 'var(--log-col-level)', padding: 'var(--sp-2)', borderRight: '1px solid var(--b1)' }}
+                  style={{ width: 'var(--log-col-level)', padding: 'var(--sp-2)', borderRight: 'var(--bw) solid var(--b1)' }}
                 >
                   <span
                     className={`inline-block px-1.5 py-0.5 rounded font-medium ${levelColor[log.level]}`}
@@ -280,7 +280,7 @@ export default function Ops() {
                 {/* Source */}
                 <div
                   className="flex-shrink-0 text-t5 truncate"
-                  style={{ width: 'var(--log-col-source)', padding: 'var(--sp-2) var(--sp-2)', borderRight: '1px solid var(--b1)' }}
+                  style={{ width: 'var(--log-col-source)', padding: 'var(--sp-2) var(--sp-2)', borderRight: 'var(--bw) solid var(--b1)' }}
                 >
                   {log.source}
                 </div>
@@ -302,7 +302,7 @@ export default function Ops() {
         {/* Status bar */}
         <div
           className="flex items-center justify-between flex-shrink-0 font-mono text-t5"
-          style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1h) var(--sp-4)', borderTop: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+          style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1h) var(--sp-4)', borderTop: 'var(--bw) solid var(--b1)', background: 'var(--color-d1)' }}
         >
           <span>{filteredLogs.length} entries</span>
           <span>{activeLine} — {currentLine?.mode ?? '—'}</span>

@@ -86,7 +86,7 @@ export default function Inbox() {
         style={{
           width: 'var(--panel-chat-list)',
           background: 'var(--color-d1)',
-          border: '1px solid var(--b1)',
+          border: 'var(--bw) solid var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -96,7 +96,7 @@ export default function Inbox() {
           <button
             onClick={() => setLinePickerOpen(!linePickerOpen)}
             className="w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover"
-            style={{ fontSize: 'var(--font-size-body)', borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+            style={{ fontSize: 'var(--font-size-body)', borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
           >
             <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
               {currentLine && <StatusDot status={currentLine.status} size="sm" />}
@@ -109,7 +109,7 @@ export default function Inbox() {
           {linePickerOpen && (
             <div
               className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide"
-              style={{ background: 'var(--color-d6)', border: '1px solid var(--b2)', borderTop: 'none', borderRadius: '0 0 var(--radius-md) var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
+              style={{ background: 'var(--color-d6)', border: 'var(--bw) solid var(--b2)', borderTop: 'none', borderRadius: '0 0 var(--radius-md) var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
             >
               {lines?.map(line => (
                 <button
@@ -153,7 +153,7 @@ export default function Inbox() {
         className="flex-1 flex flex-col min-h-0"
         style={{
           background: 'var(--color-d0)',
-          border: '1px solid var(--b1)',
+          border: 'var(--bw) solid var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -163,7 +163,7 @@ export default function Inbox() {
             {/* Chat header */}
             <div
               className="flex items-center bg-d3 c-toolbar"
-              style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
+              style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
             >
               <div
                 className="rounded-full flex items-center justify-center flex-shrink-0"
@@ -210,7 +210,7 @@ export default function Inbox() {
             {/* Input bar */}
             <div
               className="flex flex-shrink-0 items-center"
-              style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
+              style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: 'var(--bw) solid var(--b1)', background: 'var(--color-d2)' }}
             >
               <textarea
                 ref={textareaRef}
@@ -220,7 +220,7 @@ export default function Inbox() {
                   fontSize: 'var(--font-size-body)',
                   padding: 'var(--sp-2h) var(--sp-4)',
                   background: 'var(--color-d1)',
-                  border: '1px solid var(--b2)',
+                  border: 'var(--bw) solid var(--b2)',
                   borderRadius: 'var(--radius-md)',
                   maxHeight: '120px',
                   resize: 'none',
@@ -265,7 +265,7 @@ export default function Inbox() {
         style={{
           width: 'var(--panel-contact)',
           background: 'var(--color-d1)',
-          border: '1px solid var(--b1)',
+          border: 'var(--bw) solid var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -275,7 +275,7 @@ export default function Inbox() {
             {/* Contact header */}
             <div
               className="flex items-center bg-d3 c-toolbar"
-              style={{ borderBottom: '1px solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
+              style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
             >
               <div
                 className="rounded-full flex items-center justify-center flex-shrink-0"
@@ -300,7 +300,7 @@ export default function Inbox() {
                 <div
                   style={{
                     background: 'var(--color-d2)',
-                    border: '1px solid var(--b1)',
+                    border: 'var(--bw) solid var(--b1)',
                     borderRadius: 'var(--radius-md)',
                     padding: 'var(--sp-3) var(--sp-4)',
                   }}
@@ -316,7 +316,7 @@ export default function Inbox() {
                       className="flex justify-between"
                       style={{
                         padding: 'var(--sp-2) 0',
-                        ...(i < arr.length - 1 ? { borderBottom: '1px solid var(--b1)' } : {}),
+                        ...(i < arr.length - 1 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}),
                       }}
                     >
                       <span className="c-label">{item.label}</span>
@@ -336,7 +336,7 @@ export default function Inbox() {
                   <button className="c-btn c-btn-danger w-full justify-center">
                     <Ban size={14} strokeWidth={1.75} /> Block Contact
                   </button>
-                  <div style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
+                  <div style={{ borderTop: 'var(--bw) solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
                     <button className="c-btn c-btn-ghost w-full justify-center">
                       <Shield size={14} strokeWidth={1.75} /> View Access List
                     </button>

@@ -19,8 +19,8 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick }) => {
       style={{
         padding: 'var(--sp-3) var(--sp-4)',
         gap: 'var(--sp-3)',
-        borderBottom: '1px solid var(--b1)',
-        ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : {}),
+        borderBottom: 'var(--bw) solid var(--b1)',
+        ...(isSelected ? { borderLeft: 'var(--bw-accent) solid var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : {}),
       }}
     >
       {/* Avatar — fixed size */}

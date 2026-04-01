@@ -20,7 +20,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
       style={{
         height: "var(--nav-h)",
         padding: "0 var(--sp-5)",
-        borderBottom: "1px solid var(--b1)",
+        borderBottom: "var(--bw) solid var(--b1)",
         gap: "var(--sp-6)",
       }}
     >

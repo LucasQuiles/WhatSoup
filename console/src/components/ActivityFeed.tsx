@@ -52,7 +52,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
         {/* Row 1: Title + pause — matches table toolbar height */}
         <div
           className="flex items-center justify-between c-toolbar"
-          style={{ borderBottom: "1px solid var(--b1)", minHeight: "var(--toolbar-h)" }}
+          style={{ borderBottom: "var(--bw) solid var(--b1)", minHeight: "var(--toolbar-h)" }}
         >
           <span className="c-heading">Live Activity</span>
           <button
@@ -69,7 +69,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
         {/* Row 2: Filter pills — matches table column header row (c-cell + --b2 border) */}
         <div
           className="flex items-center justify-between c-cell"
-          style={{ borderBottom: "1px solid var(--b2)" }}
+          style={{ borderBottom: "var(--bw) solid var(--b2)" }}
         >
           <div className="flex items-center" style={{ gap: "var(--sp-1)" }}>
             {modeFilters.map((m) => (
@@ -80,7 +80,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
                 activeColor={modeTextColor[m]}
                 activeBorder={
                   modeFilter === m
-                    ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
+                    ? `var(--bw) solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
                     : undefined
                 }
                 onClick={() => setModeFilter(m)}
@@ -93,7 +93,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
               label=""
               isActive={errorsOnly}
               activeColor="text-s-crit"
-              activeBorder={errorsOnly ? "1px solid var(--color-s-crit)" : undefined}
+              activeBorder={errorsOnly ? "var(--bw) solid var(--color-s-crit)" : undefined}
               onClick={() => setErrorsOnly((p) => !p)}
               style={{ gap: "var(--sp-1)" }}
               suffix={
@@ -120,7 +120,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
               style={{
                 gap: "var(--sp-2)",
                 padding: "10px var(--sp-3)",
-                borderBottom: "1px solid var(--b1)",
+                borderBottom: "var(--bw) solid var(--b1)",
                 ...(isErr
                   ? { backgroundColor: "var(--s-crit-wash)" }
                   : {}),
