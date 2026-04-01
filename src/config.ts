@@ -215,6 +215,10 @@ export const config = {
   // System prompt
   systemPrompt: (instance?.systemPrompt as string | undefined) ?? DEFAULT_SYSTEM_PROMPT,
 
+  // Tool update mode — controls startup notification verbosity for agent instances
+  // 'normal' = notify admin on startup, 'minimal' = suppress lifecycle notifications
+  toolUpdateMode: (instance?.toolUpdateMode as string | undefined) ?? 'normal',
+
   // Access mode (from instance config, defaults to allowlist for backward compat)
   accessMode: (() => {
     const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;
