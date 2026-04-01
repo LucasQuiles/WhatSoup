@@ -307,7 +307,13 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
  * name and a short description of what went wrong.
  */
 export function classifyToolError(toolName: string, content: string): ToolUpdate {
-  const lower = content.toLowerCase();
+  // Strip internal XML-like tags from Claude error content
+  const cleaned = content
+    .replace(/<\/?tool_use_error>/g, '')
+    .replace(/<\/?error>/g, '')
+    .trim();
+
+  const lower = cleaned.toLowerCase();
   const isBlocked =
     lower.includes('not allowed') ||
     lower.includes('permission denied') ||
@@ -318,15 +324,21 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
     lower.includes('is not in the allow') ||
     lower.includes('disallowed');
 
-  // Extract a short reason from the error content
-  const firstLine = content.split('\n')[0] ?? content;
-  const reason = firstLine.length > 100 ? firstLine.slice(0, 99) + '…' : firstLine;
+  // Extract a short, user-facing reason
+  const firstLine = cleaned.split('\n')[0] ?? cleaned;
+  // Simplify "Cancelled: parallel tool call Bash(...)" → "Cancelled"
+  const simplified = firstLine
+    .replace(/^Cancelled:\s*parallel tool call\s+\S+\(.*$/, 'Cancelled')
+    .replace(/^Exit code (\d+)$/, 'exit code $1');
+  const reason = simplified.length > 100 ? simplified.slice(0, 99) + '…' : simplified;
 
-  const label = toolName === 'unknown' ? reason : `\`${toolName}\`: ${reason}`;
+  // Format: "toolName — reason" for known tools, just reason for unknown
+  const humanName = toolName === 'unknown' ? '' : toolName;
+  const detail = humanName ? `${humanName} — ${reason}` : reason;
 
   return {
     category: isBlocked ? 'blocked' : 'error',
-    detail: label,
+    detail,
   };
 }
 
