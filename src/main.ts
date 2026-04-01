@@ -470,6 +470,12 @@ const healthServer = startHealthServer({
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
+  handleAccessDecision: async (subjectType, subjectId, action) => {
+    if (action === 'allow') {
+      log.info({ subjectType, subjectId }, 'access: allowed via POST /access');
+    }
+    // Block requires no additional action beyond the DB update
+  },
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
