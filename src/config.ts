@@ -188,6 +188,11 @@ export const config = {
   // Access control — rehydrate from instance (string[]) or use defaults
   adminPhones: new Set<string>(resolvedAdminPhones),
 
+  // Control peers — phones trusted to send self-healing control messages
+  controlPeers: new Map<string, string>(
+    Object.entries((instance?.controlPeers ?? {}) as Record<string, string>)
+  ),
+
   // Media
   mediaDir,
 
