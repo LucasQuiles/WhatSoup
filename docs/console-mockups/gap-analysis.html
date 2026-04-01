@@ -1,0 +1,204 @@
+<h2>WhatSoup → Soup Kitchen Gap Analysis</h2>
+<p class="subtitle">What the backend already provides vs what the GUI needs</p>
+
+<div class="section">
+  <h3>Live Instances (from Nucles)</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem;">
+    <div style="padding:0.75rem;background:rgba(63,185,80,0.08);border-left:3px solid #3fb950;border-radius:4px;">
+      <strong>personal</strong>
+      <div style="font-size:0.8rem;color:#3fb950;">passive</div>
+      <div style="font-size:0.75rem;opacity:0.6;">self_only | port 9094</div>
+    </div>
+    <div style="padding:0.75rem;background:rgba(188,140,255,0.08);border-left:3px solid #bc8cff;border-radius:4px;">
+      <strong>q</strong>
+      <div style="font-size:0.8rem;color:#bc8cff;">agent</div>
+      <div style="font-size:0.75rem;opacity:0.6;">allowlist | port 9092 | per_chat</div>
+    </div>
+    <div style="padding:0.75rem;background:rgba(188,140,255,0.08);border-left:3px solid #bc8cff;border-radius:4px;">
+      <strong>loops</strong>
+      <div style="font-size:0.8rem;color:#bc8cff;">agent</div>
+      <div style="font-size:0.75rem;opacity:0.6;">allowlist | port 9091 | sandboxed per_chat</div>
+    </div>
+    <div style="padding:0.75rem;background:rgba(88,166,255,0.08);border-left:3px solid #58a6ff;border-radius:4px;">
+      <strong>besbot</strong>
+      <div style="font-size:0.8rem;color:#58a6ff;">chat</div>
+      <div style="font-size:0.75rem;opacity:0.6;">open_dm | port 9093 | Pinecone RAG</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>What the Backend Already Exposes</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+    <thead>
+      <tr style="border-bottom:2px solid rgba(255,255,255,0.15);">
+        <th style="text-align:left;padding:0.5rem;">Soup Kitchen Need</th>
+        <th style="text-align:left;padding:0.5rem;">Backend Status</th>
+        <th style="text-align:left;padding:0.5rem;">Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Connection health (connected/degraded/unhealthy)</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">GET /health on per-instance healthPort</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">WhatsApp account JID</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.whatsapp.account_jid</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Message count / totals</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.sqlite.messages_total</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Uptime</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.uptime_seconds</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Enrichment/RAG status</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.enrichment.last_run + unprocessed</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Access list / pending contacts</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.access_control.pending_count + DB table</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Agent sessions (active/status)</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">agent_sessions DB table (id, chat_jid, status, message_count, started_at)</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Rate limiting status</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">rate_limits DB table + rate-limiter.ts</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Instance config (type, accessMode, models, etc.)</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">config.json per instance + instance-loader.ts</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Durability engine stats</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.durability (getHealthStats())</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Send message (HTTP)</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">POST /send on health server (Bearer token auth)</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">MCP tool calls (30+ tools)</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">Unix socket JSON-RPC at whatsoup.sock</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">FTS message search</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">messages_fts virtual table + MCP search tool</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;">Model configuration per instance</td>
+        <td style="padding:0.5rem;color:#3fb950;">EXISTS</td>
+        <td style="padding:0.5rem;opacity:0.6;">health.models (conversation/extraction/validation/fallback)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h3>What the GUI Needs That Does NOT Exist Yet</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+    <thead>
+      <tr style="border-bottom:2px solid rgba(248,81,73,0.3);">
+        <th style="text-align:left;padding:0.5rem;">Soup Kitchen Need</th>
+        <th style="text-align:left;padding:0.5rem;">Gap</th>
+        <th style="text-align:left;padding:0.5rem;">Effort</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Centralized web server</td>
+        <td style="padding:0.5rem;">No HTTP web app exists. Health server is per-instance, minimal. No HTML/CSS/JS serving.</td>
+        <td style="padding:0.5rem;color:#d29922;">Major — new process needed</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Aggregated fleet view</td>
+        <td style="padding:0.5rem;">Each instance runs independently. No process knows about all instances at once. GUI must poll each health port or read all config.json files.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — discovery + aggregation</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">WebSocket real-time events</td>
+        <td style="padding:0.5rem;">No event streaming. Health is poll-only. No pub/sub for message events, connection state changes, agent turns.</td>
+        <td style="padding:0.5rem;color:#f85149;">Major — new transport layer</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Heartbeat history</td>
+        <td style="padding:0.5rem;">Health is current-state only. No historical uptime data stored. Need time-series for the heartbeat strips.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — periodic health snapshots to DB</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Group concept</td>
+        <td style="padding:0.5rem;">Instances are flat (personal, q, loops, besbot). No grouping mechanism. The GUI needs a "Group" layer above instances.</td>
+        <td style="padding:0.5rem;color:#3fb950;">Small — config/metadata only</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Cross-instance message inbox</td>
+        <td style="padding:0.5rem;">Each instance has its own SQLite DB. No unified view. GUI must query multiple DBs or aggregate.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — multi-DB reader</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Activity feed / event log</td>
+        <td style="padding:0.5rem;">Logs go to pino files + journald. No structured event stream for "msg received", "reply sent", "rule triggered".</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — event bus or log tail</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Rule engine</td>
+        <td style="padding:0.5rem;">No rule/automation engine. Command router exists but is instance-internal. No keyword triggers, auto-replies, or escalation rules exposed.</td>
+        <td style="padding:0.5rem;color:#f85149;">Major — new subsystem</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Metrics aggregation</td>
+        <td style="padding:0.5rem;">No response time tracking, message volume over time, API call counts. Rate limits exist but not exposed as metrics.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — counters + time-series</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Config editing via GUI</td>
+        <td style="padding:0.5rem;">config.json is static files on disk. No API to update instance config, change models, modify access lists at runtime.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — config write API + reload</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">Agent budget tracking</td>
+        <td style="padding:0.5rem;">tokenBudget exists in config but no real-time consumption tracking visible. agent_sessions tracks message_count but not token spend.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — token counter per session</td>
+      </tr>
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+        <td style="padding:0.5rem;color:#f85149;">QR auth flow via GUI</td>
+        <td style="padding:0.5rem;">Auth is CLI-only (bootstrap-auth.ts renders QR to terminal). No web-based QR pairing.</td>
+        <td style="padding:0.5rem;color:#d29922;">Medium — QR to WebSocket + web render</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section" style="margin-top:1.5rem;padding:1.25rem;background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);border-radius:8px;">
+  <h3>Architecture Implication</h3>
+  <p style="font-size:0.9rem;line-height:1.7;">The GUI is a <strong>new sidecar process</strong> that:</p>
+  <ul style="font-size:0.85rem;line-height:2;padding-left:1.2rem;">
+    <li><strong>Discovers instances</strong> by scanning <code>~/.config/whatsoup/instances/*/config.json</code></li>
+    <li><strong>Polls health</strong> from each instance's healthPort (GET /health)</li>
+    <li><strong>Reads databases</strong> directly (SQLite WAL mode supports concurrent readers) from <code>~/.local/share/whatsoup/instances/*/bot.db</code></li>
+    <li><strong>Calls MCP tools</strong> via each instance's Unix socket at <code>~/.local/state/whatsoup/instances/*/whatsoup.sock</code></li>
+    <li><strong>Sends messages</strong> via POST /send on the health server</li>
+    <li><strong>Streams events</strong> — needs a new event bus (instances emit, GUI subscribes)</li>
+    <li><strong>Manages config</strong> — writes config.json + signals instance to reload</li>
+  </ul>
+</div>
+
+<p class="subtitle" style="margin-top:2rem;">This is the real gap map. Review and tell me what's right, wrong, or re-prioritized.</p>

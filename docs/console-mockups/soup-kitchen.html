@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>WhatSoup — The Soup Kitchen</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0d1117; color:#c9d1d9; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:14px; }
+
+  /* Nav */
+  .nav { display:flex; align-items:center; padding:0 1.25rem; height:48px; background:#161b22; border-bottom:1px solid #30363d; gap:1.5rem; }
+  .nav .logo { font-weight:700; font-size:1rem; color:#58a6ff; }
+  .nav a { color:#8b949e; text-decoration:none; font-size:0.85rem; padding:0.4rem 0; border-bottom:2px solid transparent; }
+  .nav a.active { color:#c9d1d9; border-bottom-color:#58a6ff; }
+  .nav .spacer { flex:1; }
+  .nav .status { font-size:0.75rem; color:#3fb950; }
+
+  /* KPI Strip — Grafana-inspired stat cards with sparklines */
+  .kpi-strip { display:flex; gap:1px; background:#30363d; margin:0; }
+  .kpi { flex:1; background:#0d1117; padding:1rem 1.25rem; cursor:pointer; transition:background 0.15s; position:relative; }
+  .kpi:hover { background:#161b22; }
+  .kpi .value { font-size:1.75rem; font-weight:700; line-height:1; }
+  .kpi .label { font-size:0.65rem; text-transform:uppercase; letter-spacing:0.05em; color:#8b949e; margin-top:0.35rem; }
+  .kpi .spark { position:absolute; bottom:0; left:0; right:0; height:24px; opacity:0.3; }
+  .kpi .spark svg { width:100%; height:100%; }
+  .kpi.green .value { color:#3fb950; }
+  .kpi.red .value { color:#f85149; }
+  .kpi.blue .value { color:#58a6ff; }
+  .kpi.purple .value { color:#bc8cff; }
+  .kpi.amber .value { color:#d29922; }
+
+  /* Alert banner */
+  .alerts { background:rgba(248,81,73,0.08); border-bottom:1px solid rgba(248,81,73,0.2); padding:0.5rem 1.25rem; display:flex; align-items:center; gap:1rem; font-size:0.8rem; }
+  .alerts .badge { background:rgba(248,81,73,0.2); color:#f85149; padding:0.2rem 0.6rem; border-radius:4px; font-weight:600; white-space:nowrap; }
+  .alert-item { background:rgba(248,81,73,0.1); padding:0.25rem 0.6rem; border-radius:4px; cursor:pointer; white-space:nowrap; }
+  .alert-item:hover { background:rgba(248,81,73,0.2); }
+
+  /* Main layout */
+  .main { display:flex; height:calc(100vh - 48px - 80px - 36px); }
+
+  /* Connection table — Uptime Kuma inspired */
+  .table-area { flex:3; border-right:1px solid #30363d; display:flex; flex-direction:column; }
+  .table-toolbar { padding:0.5rem 1rem; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #21262d; background:#161b22; }
+  .filters { display:flex; gap:0.4rem; align-items:center; }
+  .filters span { font-weight:600; font-size:0.85rem; margin-right:0.5rem; }
+  .pill { padding:0.2rem 0.5rem; border-radius:3px; font-size:0.7rem; cursor:pointer; border:1px solid #30363d; }
+  .pill:hover { border-color:#58a6ff; }
+  .pill.active { background:rgba(88,166,255,0.15); border-color:#58a6ff; color:#58a6ff; }
+  .pill.p-passive { color:#3fb950; border-color:#238636; }
+  .pill.p-chat { color:#58a6ff; border-color:#1f6feb; }
+  .pill.p-agent { color:#bc8cff; border-color:#8957e5; }
+  .actions { display:flex; gap:0.5rem; align-items:center; }
+  .search-box { background:#0d1117; border:1px solid #30363d; border-radius:4px; padding:0.3rem 0.6rem; color:#8b949e; font-size:0.75rem; width:160px; }
+  .btn-add { background:#238636; color:#fff; border:none; padding:0.3rem 0.8rem; border-radius:4px; font-size:0.75rem; cursor:pointer; font-weight:600; }
+  .btn-add:hover { background:#2ea043; }
+
+  /* Table */
+  .table-scroll { flex:1; overflow-y:auto; }
+  table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+  thead th { position:sticky; top:0; background:#161b22; text-align:left; padding:0.5rem 0.75rem; color:#8b949e; font-weight:500; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em; border-bottom:1px solid #30363d; }
+  tbody tr { border-bottom:1px solid #21262d; cursor:pointer; transition:background 0.1s; }
+  tbody tr:hover { background:#161b22; }
+  tbody tr.error { background:rgba(248,81,73,0.04); }
+  tbody tr.error:hover { background:rgba(248,81,73,0.08); }
+  td { padding:0.55rem 0.75rem; }
+
+  /* Status dot */
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; }
+  .dot.green { background:#3fb950; box-shadow:0 0 4px rgba(63,185,80,0.4); }
+  .dot.red { background:#f85149; box-shadow:0 0 4px rgba(248,81,73,0.4); }
+  .dot.amber { background:#d29922; box-shadow:0 0 4px rgba(210,153,34,0.4); }
+
+  /* Heartbeat strip — Uptime Kuma style */
+  .heartbeat { display:flex; gap:1px; height:16px; align-items:flex-end; }
+  .heartbeat .beat { width:3px; border-radius:1px; min-height:4px; }
+  .heartbeat .beat.up { background:#238636; height:16px; }
+  .heartbeat .beat.down { background:#f85149; height:16px; }
+  .heartbeat .beat.slow { background:#d29922; height:10px; }
+
+  /* Profile badge */
+  .profile { padding:0.15rem 0.45rem; border-radius:3px; font-size:0.7rem; font-weight:500; }
+  .profile.passive { background:rgba(63,185,80,0.15); color:#3fb950; }
+  .profile.chat { background:rgba(88,166,255,0.15); color:#58a6ff; }
+  .profile.agent { background:rgba(188,140,255,0.15); color:#bc8cff; }
+
+  /* Pipeline status */
+  .pipeline { font-size:0.75rem; color:#8b949e; }
+  .pipeline.active { color:#bc8cff; }
+
+  /* Unread badge */
+  .unread { background:#30363d; padding:0.1rem 0.4rem; border-radius:10px; font-size:0.7rem; min-width:24px; text-align:center; display:inline-block; }
+
+  /* Activity feed — right sidebar */
+  .feed-area { flex:1.2; display:flex; flex-direction:column; min-width:280px; }
+  .feed-header { padding:0.5rem 1rem; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #21262d; background:#161b22; }
+  .feed-header span { font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em; color:#8b949e; }
+  .feed-header .pause { font-size:0.7rem; color:#8b949e; cursor:pointer; }
+  .feed-header .pause:hover { color:#c9d1d9; }
+  .feed-scroll { flex:1; overflow-y:auto; padding:0.5rem 0; }
+  .feed-item { display:flex; gap:0.6rem; padding:0.4rem 1rem; font-size:0.75rem; line-height:1.4; transition:background 0.1s; cursor:pointer; }
+  .feed-item:hover { background:#161b22; }
+  .feed-time { color:#484f58; white-space:nowrap; min-width:36px; }
+  .feed-dot { margin-top:3px; }
+  .feed-text { color:#8b949e; }
+
+  /* Group label in table */
+  .group-row td { background:#161b22; font-weight:600; font-size:0.75rem; color:#8b949e; text-transform:uppercase; letter-spacing:0.04em; padding:0.4rem 0.75rem; }
+  .group-row:hover td { background:#1c2128 !important; }
+  .group-chevron { color:#484f58; margin-right:0.4rem; }
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<div class="nav">
+  <span class="logo">WhatSoup</span>
+  <a class="active" href="#">Soup Kitchen</a>
+  <a href="#">Groups</a>
+  <a href="#">Lines</a>
+  <a href="#">Inbox</a>
+  <a href="#">Rules</a>
+  <a href="#">Ops</a>
+  <span class="spacer"></span>
+  <span class="status">All systems operational</span>
+</div>
+
+<!-- KPI Strip -->
+<div class="kpi-strip">
+  <div class="kpi green">
+    <div class="value">12</div>
+    <div class="label">Lines Connected</div>
+    <div class="spark"><svg viewBox="0 0 100 24" preserveAspectRatio="none"><polyline fill="none" stroke="#3fb950" stroke-width="1.5" points="0,20 8,18 16,12 24,14 32,10 40,12 48,8 56,6 64,10 72,4 80,6 88,4 96,2 100,4"/></svg></div>
+  </div>
+  <div class="kpi red">
+    <div class="value">2</div>
+    <div class="label">Need Attention</div>
+  </div>
+  <div class="kpi amber">
+    <div class="value">94</div>
+    <div class="label">Unread (Passive)</div>
+    <div class="spark"><svg viewBox="0 0 100 24" preserveAspectRatio="none"><polyline fill="none" stroke="#d29922" stroke-width="1.5" points="0,22 10,18 20,20 30,14 40,16 50,10 60,12 70,8 80,14 90,6 100,10"/></svg></div>
+  </div>
+  <div class="kpi purple">
+    <div class="value">3</div>
+    <div class="label">Agent Sessions</div>
+  </div>
+  <div class="kpi blue">
+    <div class="value">1.2k</div>
+    <div class="label">Messages Today</div>
+    <div class="spark"><svg viewBox="0 0 100 24" preserveAspectRatio="none"><polyline fill="none" stroke="#58a6ff" stroke-width="1.5" points="0,20 10,16 20,18 30,10 40,14 50,8 60,12 70,6 80,10 90,4 100,6"/></svg></div>
+  </div>
+  <div class="kpi">
+    <div class="value" style="color:#c9d1d9;">247<span style="font-size:0.8rem;font-weight:400;">ms</span></div>
+    <div class="label">Avg Response</div>
+    <div class="spark"><svg viewBox="0 0 100 24" preserveAspectRatio="none"><polyline fill="none" stroke="#484f58" stroke-width="1.5" points="0,12 10,14 20,10 30,12 40,8 50,14 60,10 70,12 80,8 90,10 100,12"/></svg></div>
+  </div>
+</div>
+
+<!-- Alert Banner -->
+<div class="alerts">
+  <span class="badge">2 alerts</span>
+  <span class="alert-item">+44 7700-0301 — auth expired 12m ago</span>
+  <span class="alert-item">Q-loops — budget 92% consumed</span>
+</div>
+
+<!-- Main: Table + Feed -->
+<div class="main">
+  <!-- Connection Table -->
+  <div class="table-area">
+    <div class="table-toolbar">
+      <div class="filters">
+        <span>Connections</span>
+        <span class="pill active">All (14)</span>
+        <span class="pill p-passive">passive (5)</span>
+        <span class="pill p-chat">chat (6)</span>
+        <span class="pill p-agent">agent (3)</span>
+      </div>
+      <div class="actions">
+        <input class="search-box" placeholder="Filter lines..." />
+        <button class="btn-add">+ Add Line</button>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:30px;"></th>
+            <th>Line</th>
+            <th>Profile</th>
+            <th>Health</th>
+            <th>Pipeline</th>
+            <th>Unread</th>
+            <th>Last Active</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Group: Personal -->
+          <tr class="group-row"><td colspan="7"><span class="group-chevron">&#9660;</span>Personal (3 lines)</td></tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+1 555-0100 <span style="color:#484f58;font-size:0.7rem;">My Main</span></td>
+            <td><span class="profile passive">passive</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">—</span></td>
+            <td><span class="unread">47</span></td>
+            <td style="color:#484f58;">2m ago</td>
+          </tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+1 555-0101 <span style="color:#484f58;font-size:0.7rem;">Work</span></td>
+            <td><span class="profile passive">passive</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat slow"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">—</span></td>
+            <td><span class="unread">23</span></td>
+            <td style="color:#484f58;">8m ago</td>
+          </tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+1 555-0102 <span style="color:#484f58;font-size:0.7rem;">Backup</span></td>
+            <td><span class="profile passive">passive</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">—</span></td>
+            <td><span class="unread">24</span></td>
+            <td style="color:#484f58;">15m ago</td>
+          </tr>
+
+          <!-- Group: BES Support -->
+          <tr class="group-row"><td colspan="7"><span class="group-chevron">&#9660;</span>BES Support (5 lines)</td></tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+1 555-0200 <span style="color:#484f58;font-size:0.7rem;">Support Main</span></td>
+            <td><span class="profile chat">chat</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">queued: 2 | 340ms avg</span></td>
+            <td style="color:#484f58;">—</td>
+            <td style="color:#484f58;">1m ago</td>
+          </tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+1 555-0201 <span style="color:#484f58;font-size:0.7rem;">Sales Bot</span></td>
+            <td><span class="profile chat">chat</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">idle | 280ms avg</span></td>
+            <td style="color:#484f58;">—</td>
+            <td style="color:#484f58;">4m ago</td>
+          </tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+1 555-0202 <span style="color:#484f58;font-size:0.7rem;">Q Agent</span></td>
+            <td><span class="profile agent">agent</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline active">session: active (turn 4) | 3 tools</span></td>
+            <td style="color:#484f58;">—</td>
+            <td style="color:#484f58;">30s ago</td>
+          </tr>
+
+          <!-- Group: Friends -->
+          <tr class="group-row"><td colspan="7"><span class="group-chevron">&#9660;</span>Friends (3 lines)</td></tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+44 7700-0300 <span style="color:#484f58;font-size:0.7rem;">Alex</span></td>
+            <td><span class="profile passive">passive</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">—</span></td>
+            <td style="color:#484f58;">—</td>
+            <td style="color:#484f58;">22m ago</td>
+          </tr>
+          <tr class="error">
+            <td><span class="dot red"></span></td>
+            <td>+44 7700-0301 <span style="color:#484f58;font-size:0.7rem;">Loops</span></td>
+            <td><span class="profile agent">agent</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat down"></div><div class="beat down"></div><div class="beat down"></div><div class="beat down"></div>
+              </div>
+            </td>
+            <td><span class="pipeline" style="color:#f85149;">auth expired</span></td>
+            <td style="color:#484f58;">—</td>
+            <td style="color:#f85149;">12m ago</td>
+          </tr>
+          <tr>
+            <td><span class="dot green"></span></td>
+            <td>+44 7700-0302 <span style="color:#484f58;font-size:0.7rem;">Jordan</span></td>
+            <td><span class="profile chat">chat</span></td>
+            <td>
+              <div class="heartbeat">
+                <div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div><div class="beat up"></div>
+              </div>
+            </td>
+            <td><span class="pipeline">idle | 310ms avg</span></td>
+            <td style="color:#484f58;">—</td>
+            <td style="color:#484f58;">5m ago</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Activity Feed -->
+  <div class="feed-area">
+    <div class="feed-header">
+      <span>Live Activity</span>
+      <span class="pause">pause</span>
+    </div>
+    <div class="feed-scroll">
+      <div class="feed-item"><span class="feed-time">12:04</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#58a6ff;box-shadow:none;"></span></span><span class="feed-text">msg in → +1 555-0200 → chat pipeline</span></div>
+      <div class="feed-item"><span class="feed-time">12:03</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#bc8cff;box-shadow:none;"></span></span><span class="feed-text">turn done — Q Agent (turn 4, 3 tools)</span></div>
+      <div class="feed-item"><span class="feed-time">12:01</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#58a6ff;box-shadow:none;"></span></span><span class="feed-text">reply sent — Sales Bot → +1 555-0201 (340ms)</span></div>
+      <div class="feed-item"><span class="feed-time">11:58</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#d29922;box-shadow:none;"></span></span><span class="feed-text">rule triggered: auto-greet on +1 555-0200</span></div>
+      <div class="feed-item"><span class="feed-time">11:55</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#3fb950;box-shadow:none;"></span></span><span class="feed-text">reconnected +1 555-0100</span></div>
+      <div class="feed-item"><span class="feed-time">11:52</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#bc8cff;box-shadow:none;"></span></span><span class="feed-text">agent started — Q Agent session #47</span></div>
+      <div class="feed-item"><span class="feed-time">11:50</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#3fb950;box-shadow:none;"></span></span><span class="feed-text">msg in → +1 555-0100 (passive, stored)</span></div>
+      <div class="feed-item" style="background:rgba(248,81,73,0.04);"><span class="feed-time" style="color:#f85149;">11:48</span><span class="feed-dot"><span class="dot red" style="width:6px;height:6px;box-shadow:none;"></span></span><span class="feed-text" style="color:#f85149;">auth expired — +44 7700-0301</span></div>
+      <div class="feed-item"><span class="feed-time">11:45</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#58a6ff;box-shadow:none;"></span></span><span class="feed-text">reply sent — Support Main (280ms)</span></div>
+      <div class="feed-item"><span class="feed-time">11:42</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#bc8cff;box-shadow:none;"></span></span><span class="feed-text">agent budget warning — Loops (92%)</span></div>
+      <div class="feed-item"><span class="feed-time">11:40</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#58a6ff;box-shadow:none;"></span></span><span class="feed-text">msg in → +44 7700-0302 → chat pipeline</span></div>
+      <div class="feed-item"><span class="feed-time">11:38</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#3fb950;box-shadow:none;"></span></span><span class="feed-text">msg in → +1 555-0101 (passive, stored)</span></div>
+      <div class="feed-item"><span class="feed-time">11:35</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#58a6ff;box-shadow:none;"></span></span><span class="feed-text">RAG query — Support Main (pinecone, 3 results)</span></div>
+      <div class="feed-item"><span class="feed-time">11:33</span><span class="feed-dot"><span class="dot green" style="width:6px;height:6px;background:#bc8cff;box-shadow:none;"></span></span><span class="feed-text">tool call — Q Agent → read_file (turn 3)</span></div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

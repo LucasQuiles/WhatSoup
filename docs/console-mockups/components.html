@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>WhatSoup — Extended Components</title>
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+:root {
+  --d0:#050709;--d1:#0a0d12;--d2:#0f1319;--d3:#141922;--d4:#1a202c;--d5:#212836;--d6:#2a3244;
+  --t1:#edf2f7;--t2:#a0aec0;--t3:#6b7a90;--t4:#5a6a82;--t5:#3d4e66;
+  --b1:rgba(255,255,255,0.05);--b2:rgba(255,255,255,0.09);--b3:rgba(255,255,255,0.16);--b4:rgba(255,255,255,0.24);
+  --m-pas:#2dd4a8;--m-pas-soft:#2dd4a830;--m-pas-wash:#2dd4a810;
+  --m-cht:#38bdf8;--m-cht-soft:#38bdf830;--m-cht-wash:#38bdf810;
+  --m-agt:#a78bfa;--m-agt-soft:#a78bfa30;--m-agt-wash:#a78bfa810;
+  --s-ok:#2dd4a8;--s-warn:#f6ad55;--s-warn-wash:#f6ad5512;--s-crit:#fc8181;--s-crit-wash:#fc818112;
+  --f-sans:'Outfit',system-ui,sans-serif;--f-mono:'IBM Plex Mono','SF Mono',monospace;
+  --ease:cubic-bezier(0.22,1,0.36,1);
+}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html{font-size:15px;}
+body{background:var(--d0);color:var(--t1);font-family:var(--f-sans);-webkit-font-smoothing:antialiased;line-height:1.6;}
+body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.015'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;}
+
+.page{max-width:1200px;margin:0 auto;padding:48px 40px;}
+h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
+.tagline{font-family:var(--f-mono);font-size:0.85rem;color:var(--t4);margin-bottom:40px;}
+
+.section{margin-bottom:36px;}
+.section-label{font-family:var(--f-mono);font-size:0.7rem;font-weight:500;text-transform:uppercase;letter-spacing:0.12em;color:var(--t4);margin-bottom:12px;padding-bottom:6px;border-bottom:1px solid var(--b1);}
+.subsection-label{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.08em;margin:16px 0 8px;}
+
+.comp-card{background:var(--d2);border:1px solid var(--b1);border-radius:10px;padding:20px;position:relative;overflow:hidden;margin-bottom:10px;}
+.comp-card::after{content:attr(data-name);position:absolute;top:10px;right:14px;font-family:var(--f-mono);font-size:0.6rem;color:var(--t5);text-transform:uppercase;letter-spacing:0.08em;}
+.comp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+
+/* ═══ FORM CONTROLS ═══ */
+.c-input{
+  display:block;width:100%;
+  background:var(--d1);border:1px solid var(--b2);border-radius:4px;
+  padding:6px 10px;color:var(--t1);font-family:var(--f-sans);font-size:0.85rem;
+  outline:none;transition:all 0.2s var(--ease);
+}
+.c-input:focus{border-color:var(--m-cht);box-shadow:0 0 0 2px rgba(56,189,248,0.12);}
+.c-input::placeholder{color:var(--t5);}
+.c-input.mono{font-family:var(--f-mono);font-size:0.82rem;}
+
+.c-textarea{
+  display:block;width:100%;min-height:80px;resize:vertical;
+  background:var(--d1);border:1px solid var(--b2);border-radius:4px;
+  padding:6px 10px;color:var(--t1);font-family:var(--f-mono);font-size:0.8rem;
+  outline:none;transition:all 0.2s var(--ease);line-height:1.6;
+}
+.c-textarea:focus{border-color:var(--m-cht);box-shadow:0 0 0 2px rgba(56,189,248,0.12);}
+
+.c-select{
+  display:block;width:100%;
+  background:var(--d1);border:1px solid var(--b2);border-radius:4px;
+  padding:6px 10px;color:var(--t1);font-family:var(--f-sans);font-size:0.85rem;
+  outline:none;cursor:pointer;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%235a6a82' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 12px center;
+  padding-right:36px;
+  transition:all 0.2s var(--ease);
+}
+.c-select:focus{border-color:var(--m-cht);box-shadow:0 0 0 2px rgba(56,189,248,0.12);}
+
+.c-toggle{
+  position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;
+}
+.c-toggle input{display:none;}
+.c-toggle-track{
+  position:absolute;inset:0;background:var(--d5);border-radius:10px;
+  transition:background 0.2s var(--ease);border:1px solid var(--b2);
+}
+.c-toggle input:checked + .c-toggle-track{background:var(--m-cht);border-color:var(--m-cht);}
+.c-toggle-knob{
+  position:absolute;top:3px;left:3px;width:14px;height:14px;
+  background:var(--t2);border-radius:50%;
+  transition:all 0.2s var(--ease);
+}
+.c-toggle input:checked ~ .c-toggle-knob{left:19px;background:var(--t1);}
+
+.c-label{
+  display:block;font-family:var(--f-mono);font-size:0.65rem;font-weight:500;
+  color:var(--t4);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;
+}
+.c-field{margin-bottom:12px;}
+.c-field:last-child{margin-bottom:0;}
+.c-hint{font-size:0.75rem;color:var(--t4);margin-top:3px;}
+
+/* ═══ BUTTONS ═══ */
+.c-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:7px 14px;border-radius:6px;font-size:0.82rem;font-weight:500;
+  border:1px solid var(--b2);background:var(--d4);color:var(--t2);
+  cursor:pointer;transition:all 0.15s var(--ease);
+}
+.c-btn:hover{background:var(--d5);border-color:var(--b3);color:var(--t1);}
+.c-btn [data-lucide]{width:15px;height:15px;stroke-width:1.75;}
+
+.c-btn.primary{background:var(--m-cht);border-color:var(--m-cht);color:var(--d0);}
+.c-btn.primary:hover{background:#5cc8f9;border-color:#5cc8f9;}
+.c-btn.primary [data-lucide]{color:var(--d0);}
+
+.c-btn.danger{background:transparent;border-color:rgba(252,129,129,0.3);color:var(--s-crit);}
+.c-btn.danger:hover{background:var(--s-crit-wash);border-color:var(--s-crit);}
+
+.c-btn.success{background:transparent;border-color:rgba(45,212,168,0.3);color:var(--s-ok);}
+.c-btn.success:hover{background:rgba(45,212,168,0.08);border-color:var(--s-ok);}
+
+.c-btn.ghost{background:transparent;border-color:transparent;color:var(--t3);}
+.c-btn.ghost:hover{background:var(--d4);color:var(--t2);}
+
+.c-btn.sm{padding:4px 10px;font-size:0.75rem;}
+.c-btn.sm [data-lucide]{width:13px;height:13px;}
+
+/* ═══ CHAT / MESSAGE COMPONENTS ═══ */
+.c-chat-list{display:flex;flex-direction:column;}
+.c-chat-item{
+  display:flex;gap:12px;padding:12px 16px;
+  border-bottom:1px solid var(--b1);cursor:pointer;
+  transition:background 0.12s var(--ease);
+}
+.c-chat-item:hover{background:var(--d3);}
+.c-chat-item.active{background:var(--d4);border-left:2px solid var(--m-cht);padding-left:14px;}
+.c-chat-avatar{
+  width:36px;height:36px;border-radius:50%;
+  background:var(--d5);display:flex;align-items:center;justify-content:center;
+  font-family:var(--f-mono);font-size:0.72rem;font-weight:600;color:var(--t3);
+  flex-shrink:0;
+}
+.c-chat-body{flex:1;min-width:0;}
+.c-chat-name{font-size:0.85rem;font-weight:500;display:flex;justify-content:space-between;align-items:baseline;}
+.c-chat-name .time{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);font-weight:400;white-space:nowrap;}
+.c-chat-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;align-self:center;}
+.c-chat-preview{font-size:0.78rem;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
+.c-chat-badge{
+  background:var(--m-cht);color:var(--d0);font-family:var(--f-mono);
+  font-size:0.6rem;font-weight:600;
+  width:20px;height:20px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;align-self:center;
+}
+
+/* Message bubbles */
+.c-msg-area{display:flex;flex-direction:column;gap:4px;padding:16px;}
+.c-msg{max-width:75%;display:flex;flex-direction:column;}
+.c-msg.incoming{align-self:flex-start;}
+.c-msg.outgoing{align-self:flex-end;}
+.c-msg-bubble{
+  padding:10px 14px;border-radius:12px;font-size:0.85rem;line-height:1.5;
+}
+.c-msg.incoming .c-msg-bubble{background:var(--d4);border-bottom-left-radius:4px;color:var(--t1);}
+.c-msg.outgoing .c-msg-bubble{background:rgba(56,189,248,0.15);border-bottom-right-radius:4px;color:var(--t1);}
+.c-msg.outgoing.agent-msg .c-msg-bubble{background:rgba(167,139,250,0.15);}
+.c-msg-meta{
+  font-family:var(--f-mono);font-size:0.62rem;color:var(--t5);
+  margin-top:3px;padding:0 4px;
+}
+.c-msg.outgoing .c-msg-meta{text-align:right;}
+.c-msg-sender{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);margin-bottom:3px;padding:0 4px;}
+
+/* ═══ ACCESS LIST ═══ */
+.c-access-item{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 16px;border-bottom:1px solid var(--b1);
+  transition:background 0.1s;
+}
+.c-access-item:hover{background:var(--d3);}
+.c-access-avatar{
+  width:32px;height:32px;border-radius:50%;background:var(--d5);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.c-access-avatar [data-lucide]{width:16px;height:16px;color:var(--t3);}
+.c-access-info{flex:1;min-width:0;}
+.c-access-name{font-size:0.85rem;font-weight:500;}
+.c-access-phone{font-family:var(--f-mono);font-size:0.72rem;color:var(--t4);}
+.c-access-status{font-family:var(--f-mono);font-size:0.7rem;font-weight:500;padding:2px 8px;border-radius:3px;}
+.c-access-status.allowed{background:rgba(45,212,168,0.1);color:var(--s-ok);}
+.c-access-status.blocked{background:rgba(252,129,129,0.1);color:var(--s-crit);}
+.c-access-status.pending{background:rgba(246,173,85,0.1);color:var(--s-warn);}
+.c-access-actions{display:flex;gap:6px;}
+
+/* ═══ LOG VIEWER ═══ */
+.c-log-line{
+  display:flex;gap:0;font-family:var(--f-mono);font-size:0.78rem;
+  border-bottom:1px solid var(--b1);line-height:1.7;
+}
+.c-log-line:hover{background:var(--d3);}
+.c-log-time{color:var(--t5);padding:4px 12px;min-width:80px;white-space:nowrap;}
+.c-log-level{padding:4px 8px;min-width:50px;font-weight:500;font-size:0.7rem;text-transform:uppercase;}
+.c-log-level.info{color:var(--t3);}
+.c-log-level.warn{color:var(--s-warn);}
+.c-log-level.error{color:var(--s-crit);}
+.c-log-msg{color:var(--t2);padding:4px 12px;flex:1;}
+.c-log-line.warn-line{background:var(--s-warn-wash);}
+.c-log-line.error-line{background:var(--s-crit-wash);}
+
+/* ═══ EMPTY STATE ═══ */
+.c-empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:32px 24px;text-align:center;
+}
+.c-empty [data-lucide]{width:40px;height:40px;color:var(--t5);margin-bottom:16px;stroke-width:1.25;}
+.c-empty-title{font-size:1rem;font-weight:600;color:var(--t3);margin-bottom:6px;}
+.c-empty-desc{font-size:0.85rem;color:var(--t4);max-width:320px;line-height:1.6;}
+
+/* ═══ SKELETON / LOADING ═══ */
+@keyframes shimmer{0%{background-position:-400px 0;}100%{background-position:400px 0;}}
+.c-skel{
+  background:linear-gradient(90deg, var(--d3) 0%, var(--d4) 40%, var(--d3) 80%);
+  background-size:800px 100%;
+  animation:shimmer 1.5s infinite linear;
+  border-radius:4px;
+}
+
+/* ═══ TOAST ═══ */
+.c-toast{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 16px;border-radius:8px;
+  font-size:0.85rem;font-weight:500;
+  border:1px solid var(--b2);background:var(--d3);
+  box-shadow:0 8px 24px rgba(0,0,0,0.4);
+  max-width:360px;
+}
+.c-toast [data-lucide]{width:18px;height:18px;flex-shrink:0;stroke-width:1.75;}
+.c-toast.success{border-color:rgba(45,212,168,0.2);} .c-toast.success [data-lucide]{color:var(--s-ok);}
+.c-toast.error{border-color:rgba(252,129,129,0.2);} .c-toast.error [data-lucide]{color:var(--s-crit);}
+.c-toast.info{border-color:rgba(56,189,248,0.2);} .c-toast.info [data-lucide]{color:var(--m-cht);}
+.c-toast-msg{flex:1;color:var(--t2);}
+.c-toast-close{color:var(--t5);cursor:pointer;} .c-toast-close [data-lucide]{width:14px;height:14px;}
+
+/* ═══ DIALOG / MODAL ═══ */
+.c-dialog-backdrop{
+  position:fixed;inset:0;background:rgba(5,7,9,0.75);
+  display:flex;align-items:center;justify-content:center;
+  /* static for demo */
+  position:relative;min-height:220px;border-radius:10px;
+}
+.c-dialog{
+  background:var(--d2);border:1px solid var(--b2);border-radius:12px;
+  width:420px;max-width:90%;overflow:hidden;
+  box-shadow:0 16px 48px rgba(0,0,0,0.5);
+}
+.c-dialog-header{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:16px 20px;border-bottom:1px solid var(--b1);
+}
+.c-dialog-title{font-size:0.95rem;font-weight:600;}
+.c-dialog-close{color:var(--t4);cursor:pointer;} .c-dialog-close [data-lucide]{width:18px;height:18px;}
+.c-dialog-body{padding:20px;}
+.c-dialog-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--b1);background:var(--d1);}
+
+/* ═══ LINE HEADER (breadcrumb + context) ═══ */
+.c-line-header{
+  display:flex;align-items:center;gap:16px;
+  padding:16px 20px;background:var(--d2);border:1px solid var(--b1);border-radius:10px;
+}
+.c-line-header [data-lucide]{width:18px;height:18px;stroke-width:1.75;}
+.c-line-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+.c-line-dot.ok{background:var(--s-ok);box-shadow:0 0 8px rgba(45,212,168,0.3);}
+.c-line-identity{flex:1;}
+.c-line-name{font-size:1rem;font-weight:600;display:flex;align-items:center;gap:8px;}
+.c-line-phone{font-family:var(--f-mono);font-size:0.78rem;color:var(--t3);}
+.c-line-meta{display:flex;gap:16px;font-family:var(--f-mono);font-size:0.72rem;color:var(--t4);}
+
+/* ═══ NAV BADGE (unread on inbox) ═══ */
+.c-nav-badge{
+  font-family:var(--f-mono);font-size:0.55rem;font-weight:600;
+  background:var(--s-crit);color:var(--d0);
+  padding:1px 5px;border-radius:6px;min-width:16px;text-align:center;
+  margin-left:4px;
+}
+
+/* ═══ CONFIG BLOCK (code display) ═══ */
+.c-config{
+  background:var(--d1);border:1px solid var(--b1);border-radius:8px;
+  padding:14px 16px;font-family:var(--f-mono);font-size:0.78rem;
+  color:var(--t2);line-height:1.7;overflow-x:auto;white-space:pre;
+}
+.c-config .key{color:var(--m-cht);}
+.c-config .val-str{color:var(--m-pas);}
+.c-config .val-num{color:var(--s-warn);}
+.c-config .val-bool{color:var(--m-agt);}
+
+/* ═══ PAGINATION / CURSOR ═══ */
+.c-loadmore{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  padding:12px;color:var(--t4);font-size:0.82rem;cursor:pointer;
+  transition:color 0.15s;
+}
+.c-loadmore:hover{color:var(--t2);}
+.c-loadmore [data-lucide]{width:16px;height:16px;stroke-width:1.75;}
+
+@keyframes fade-up{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
+.section{animation:fade-up 0.5s var(--ease) both;}
+.section:nth-child(2){animation-delay:0.05s;}
+.section:nth-child(3){animation-delay:0.1s;}
+.section:nth-child(4){animation-delay:0.15s;}
+.section:nth-child(5){animation-delay:0.2s;}
+.section:nth-child(6){animation-delay:0.25s;}
+.section:nth-child(7){animation-delay:0.3s;}
+.section:nth-child(8){animation-delay:0.35s;}
+.section:nth-child(9){animation-delay:0.4s;}
+.section:nth-child(10){animation-delay:0.45s;}
+.section:nth-child(11){animation-delay:0.5s;}
+.section:nth-child(12){animation-delay:0.55s;}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Extended Components</h1>
+<div class="tagline">Forms / Messages / Access lists / Logs / States / Dialogs / Config display</div>
+
+<!-- ═══ FORM CONTROLS ═══ -->
+<div class="section">
+  <div class="section-label">Form Controls</div>
+  <div class="comp-grid">
+    <div class="comp-card" data-name="Text Inputs">
+      <div class="c-field">
+        <label class="c-label">Instance Name</label>
+        <input class="c-input mono" value="besbot" />
+      </div>
+      <div class="c-field">
+        <label class="c-label">System Prompt</label>
+        <textarea class="c-textarea">You are BES Bot, a helpful co-worker at BES Efficiency Solutions. You help the team find information about accounts, contacts, buildings, work orders, and other business data.</textarea>
+      </div>
+      <div class="c-field">
+        <label class="c-label">Max Tokens</label>
+        <input class="c-input mono" type="number" value="500" style="width:120px;" />
+        <div class="c-hint">Maximum response token length per message</div>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Select + Toggle">
+      <div class="c-field">
+        <label class="c-label">Conversation Model</label>
+        <select class="c-select">
+          <option>claude-sonnet-4-6</option>
+          <option>claude-haiku-4-5-20251001</option>
+          <option>claude-opus-4-6</option>
+        </select>
+      </div>
+      <div class="c-field">
+        <label class="c-label">Access Mode</label>
+        <select class="c-select">
+          <option>open_dm</option>
+          <option>allowlist</option>
+          <option>self_only</option>
+          <option>groups_only</option>
+        </select>
+      </div>
+      <div class="c-field">
+        <label class="c-label">Pinecone Rerank</label>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label class="c-toggle"><input type="checkbox" checked><span class="c-toggle-track"></span><span class="c-toggle-knob"></span></label>
+          <span style="font-size:0.82rem;color:var(--t2);">Enabled</span>
+        </div>
+      </div>
+      <div class="c-field">
+        <label class="c-label">Sandbox Per Chat</label>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label class="c-toggle"><input type="checkbox"><span class="c-toggle-track"></span><span class="c-toggle-knob"></span></label>
+          <span style="font-size:0.82rem;color:var(--t3);">Disabled</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ BUTTONS ═══ -->
+<div class="section">
+  <div class="section-label">Buttons</div>
+  <div class="comp-card" data-name="Button Variants">
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+      <button class="c-btn primary"><i data-lucide="save"></i> Save Config</button>
+      <button class="c-btn"><i data-lucide="rotate-cw"></i> Restart</button>
+      <button class="c-btn success"><i data-lucide="user-check"></i> Allow</button>
+      <button class="c-btn danger"><i data-lucide="ban"></i> Block</button>
+      <button class="c-btn ghost"><i data-lucide="x"></i> Cancel</button>
+      <button class="c-btn sm"><i data-lucide="send"></i> Send</button>
+      <button class="c-btn sm success"><i data-lucide="check"></i> Approve</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ LINE HEADER ═══ -->
+<div class="section">
+  <div class="section-label">Line Header (Breadcrumb + Context)</div>
+  <div class="comp-card" data-name="Line Detail Header" style="padding:0;overflow:visible;">
+    <div class="c-line-header">
+      <span class="c-line-dot ok"></span>
+      <div class="c-line-identity">
+        <div class="c-line-name">
+          BES Bot
+          <span style="font-family:var(--f-mono);font-size:0.7rem;font-weight:500;padding:2px 8px;border-radius:3px;background:rgba(56,189,248,0.1);color:var(--m-cht);">chat</span>
+        </div>
+        <div class="c-line-phone">+1 555-0200 / 14600648175816@s.whatsapp.net</div>
+      </div>
+      <div class="c-line-meta">
+        <span>uptime: 4d 12h</span>
+        <span>port: 9093</span>
+        <span>msgs: 12,847</span>
+      </div>
+      <button class="c-btn sm"><i data-lucide="rotate-cw"></i> Restart</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CHAT / MESSAGES ═══ -->
+<div class="section">
+  <div class="section-label">Chat Components (Inbox + History)</div>
+  <div class="comp-grid">
+    <div class="comp-card" data-name="Chat List" style="padding:0;padding-top:28px;">
+      <div class="c-chat-list">
+        <div class="c-chat-item active">
+          <div class="c-chat-avatar">LR</div>
+          <div class="c-chat-body">
+            <div class="c-chat-name">Lucas Rodrigues</div>
+            <div class="c-chat-preview">Can you check the status of WO-4521?</div>
+          </div>
+          <div class="c-chat-right">
+            <span class="time" style="font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);">12:04</span>
+            <span class="c-chat-badge">3</span>
+          </div>
+        </div>
+        <div class="c-chat-item">
+          <div class="c-chat-avatar">SK</div>
+          <div class="c-chat-body">
+            <div class="c-chat-name">Sarah Kim</div>
+            <div class="c-chat-preview">Thanks, that's exactly what I needed.</div>
+          </div>
+          <div class="c-chat-right">
+            <span class="time" style="font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);">11:42</span>
+          </div>
+        </div>
+        <div class="c-chat-item">
+          <div class="c-chat-avatar">BES</div>
+          <div class="c-chat-body">
+            <div class="c-chat-name">BES Team Group</div>
+            <div class="c-chat-preview">@bot what's the invoice total for account 2847?</div>
+          </div>
+          <div class="c-chat-right">
+            <span class="time" style="font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);">11:15</span>
+            <span class="c-chat-badge">1</span>
+          </div>
+        </div>
+        <div class="c-chat-item">
+          <div class="c-chat-avatar">MJ</div>
+          <div class="c-chat-body">
+            <div class="c-chat-name">Mike Johnson</div>
+            <div class="c-chat-preview">Got it, I'll update the contact info.</div>
+          </div>
+          <div class="c-chat-right">
+            <span class="time" style="font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);">10:30</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Message Thread" style="padding:0;">
+      <div class="c-msg-area" style="min-height:280px;">
+        <div class="c-msg incoming">
+          <div class="c-msg-sender">Lucas Rodrigues</div>
+          <div class="c-msg-bubble">Can you check the status of WO-4521?</div>
+          <div class="c-msg-meta">12:02</div>
+        </div>
+        <div class="c-msg outgoing">
+          <div class="c-msg-bubble">WO-4521 is currently open, assigned to Mike Johnson. Last updated 2 hours ago. The task is for HVAC filter replacement at 250 Main St, Building B.</div>
+          <div class="c-msg-meta">12:02 / 340ms</div>
+        </div>
+        <div class="c-msg incoming">
+          <div class="c-msg-sender">Lucas Rodrigues</div>
+          <div class="c-msg-bubble">What about the invoice for that building?</div>
+          <div class="c-msg-meta">12:04</div>
+        </div>
+      </div>
+      <div style="padding:8px 12px;border-top:1px solid var(--b1);display:flex;gap:8px;">
+        <input class="c-input" placeholder="Type a reply..." style="flex:1;" />
+        <button class="c-btn primary sm"><i data-lucide="send"></i></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ACCESS CONTROL ═══ -->
+<div class="section">
+  <div class="section-label">Access Control</div>
+
+  <!-- 2-panel allow/block -->
+  <div class="comp-grid">
+    <div class="comp-card" data-name="Allowed" style="padding:0;padding-top:28px;">
+      <div>
+        <div class="c-access-item" style="padding:8px 14px;">
+          <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="user" style="width:14px;height:14px;"></i></div>
+          <div class="c-access-info">
+            <div class="c-access-name" style="font-size:0.82rem;">Lucas Rodrigues</div>
+            <div class="c-access-phone" style="font-size:0.68rem;">+1 845-978-0919</div>
+          </div>
+          <button class="c-btn sm danger" style="padding:2px 8px;font-size:0.65rem;"><i data-lucide="ban"></i></button>
+        </div>
+        <div class="c-access-item" style="padding:8px 14px;">
+          <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="user" style="width:14px;height:14px;"></i></div>
+          <div class="c-access-info">
+            <div class="c-access-name" style="font-size:0.82rem;">Sarah Kim</div>
+            <div class="c-access-phone" style="font-size:0.68rem;">+1 656-622-5768</div>
+          </div>
+          <button class="c-btn sm danger" style="padding:2px 8px;font-size:0.65rem;"><i data-lucide="ban"></i></button>
+        </div>
+        <div class="c-access-item" style="padding:8px 14px;">
+          <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="users" style="width:14px;height:14px;"></i></div>
+          <div class="c-access-info">
+            <div class="c-access-name" style="font-size:0.82rem;">BES Team Group</div>
+            <div class="c-access-phone" style="font-size:0.68rem;">120363...@g.us</div>
+          </div>
+          <button class="c-btn sm danger" style="padding:2px 8px;font-size:0.65rem;"><i data-lucide="ban"></i></button>
+        </div>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Blocked" style="padding:0;padding-top:28px;">
+      <div>
+        <div class="c-access-item" style="padding:8px 14px;opacity:0.6;">
+          <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="user-x" style="width:14px;height:14px;color:var(--s-crit);"></i></div>
+          <div class="c-access-info">
+            <div class="c-access-name" style="font-size:0.82rem;">Spam Account</div>
+            <div class="c-access-phone" style="font-size:0.68rem;">+91 98765-43210</div>
+          </div>
+          <button class="c-btn sm success" style="padding:2px 8px;font-size:0.65rem;"><i data-lucide="check"></i></button>
+        </div>
+        <div class="c-access-item" style="padding:8px 14px;opacity:0.6;">
+          <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="user-x" style="width:14px;height:14px;color:var(--s-crit);"></i></div>
+          <div class="c-access-info">
+            <div class="c-access-name" style="font-size:0.82rem;">Unknown +44</div>
+            <div class="c-access-phone" style="font-size:0.68rem;">+44 7911-123456</div>
+          </div>
+          <button class="c-btn sm success" style="padding:2px 8px;font-size:0.65rem;"><i data-lucide="check"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pending queue -->
+  <div class="comp-card" data-name="Pending Queue" style="padding:0;padding-top:28px;margin-top:10px;">
+    <div>
+      <div class="c-access-item" style="padding:8px 14px;background:var(--s-warn-wash);">
+        <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="user-plus" style="width:14px;height:14px;color:var(--s-warn);"></i></div>
+        <div class="c-access-info">
+          <div class="c-access-name" style="font-size:0.82rem;">Unknown Contact</div>
+          <div class="c-access-phone" style="font-size:0.68rem;">+44 7700-0301 / first msg 2m ago</div>
+        </div>
+        <div class="c-access-actions">
+          <button class="c-btn sm success" style="padding:3px 10px;"><i data-lucide="check"></i> Allow</button>
+          <button class="c-btn sm danger" style="padding:3px 10px;"><i data-lucide="ban"></i> Block</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Groups control -->
+  <div class="comp-card" data-name="WhatsApp Groups" style="padding:0;padding-top:28px;margin-top:10px;">
+    <div>
+      <div class="c-access-item" style="padding:8px 14px;">
+        <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="users" style="width:14px;height:14px;color:var(--m-cht);"></i></div>
+        <div class="c-access-info">
+          <div class="c-access-name" style="font-size:0.82rem;">BES Team</div>
+          <div class="c-access-phone" style="font-size:0.68rem;">12 members / active 3m ago</div>
+        </div>
+        <span class="c-access-status allowed" style="font-size:0.65rem;">listening</span>
+      </div>
+      <div class="c-access-item" style="padding:8px 14px;">
+        <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="users" style="width:14px;height:14px;color:var(--m-cht);"></i></div>
+        <div class="c-access-info">
+          <div class="c-access-name" style="font-size:0.82rem;">Project Alpha</div>
+          <div class="c-access-phone" style="font-size:0.68rem;">5 members / active 1h ago</div>
+        </div>
+        <span class="c-access-status allowed" style="font-size:0.65rem;">listening</span>
+      </div>
+      <div class="c-access-item" style="padding:8px 14px;opacity:0.5;">
+        <div class="c-access-avatar" style="width:28px;height:28px;"><i data-lucide="users" style="width:14px;height:14px;color:var(--t5);"></i></div>
+        <div class="c-access-info">
+          <div class="c-access-name" style="font-size:0.82rem;">Random Group</div>
+          <div class="c-access-phone" style="font-size:0.68rem;">47 members / active 2d ago</div>
+        </div>
+        <span class="c-access-status blocked" style="font-size:0.65rem;">muted</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ LOG VIEWER ═══ -->
+<div class="section">
+  <div class="section-label">Log Viewer</div>
+  <div class="comp-card" data-name="Instance Logs" style="padding:0;overflow:hidden;">
+    <div style="padding:8px 16px;background:var(--d3);border-bottom:1px solid var(--b1);display:flex;gap:8px;align-items:center;">
+      <span style="font-family:var(--f-mono);font-size:0.7rem;color:var(--t4);">Level:</span>
+      <button class="c-btn sm" style="padding:2px 8px;font-size:0.65rem;">all</button>
+      <button class="c-btn sm" style="padding:2px 8px;font-size:0.65rem;color:var(--t3);">info</button>
+      <button class="c-btn sm" style="padding:2px 8px;font-size:0.65rem;color:var(--s-warn);">warn</button>
+      <button class="c-btn sm" style="padding:2px 8px;font-size:0.65rem;color:var(--s-crit);">error</button>
+    </div>
+    <div>
+      <div class="c-log-line"><span class="c-log-time">12:04:12</span><span class="c-log-level info">info</span><span class="c-log-msg">msg received from +18459780919, dispatching to chat pipeline</span></div>
+      <div class="c-log-line"><span class="c-log-time">12:04:12</span><span class="c-log-level info">info</span><span class="c-log-msg">pinecone query: "WO-4521 status" topK=20 rerank=true</span></div>
+      <div class="c-log-line"><span class="c-log-time">12:04:13</span><span class="c-log-level info">info</span><span class="c-log-msg">anthropic call: claude-sonnet-4-6 input=1247tok output=89tok 340ms</span></div>
+      <div class="c-log-line"><span class="c-log-time">12:04:13</span><span class="c-log-level info">info</span><span class="c-log-msg">reply sent to +18459780919 via sendTracked</span></div>
+      <div class="c-log-line warn-line"><span class="c-log-time">12:03:45</span><span class="c-log-level warn">warn</span><span class="c-log-msg">rate limit approaching: 58/60 responses this hour for +16566225768547</span></div>
+      <div class="c-log-line error-line"><span class="c-log-time">12:01:02</span><span class="c-log-level error">error</span><span class="c-log-msg">enrichment poller failed: pinecone timeout after 5000ms, retrying in 30s</span></div>
+      <div class="c-log-line"><span class="c-log-time">12:00:30</span><span class="c-log-level info">info</span><span class="c-log-msg">enrichment poller: 14 unprocessed messages, starting batch</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CONFIG DISPLAY ═══ -->
+<div class="section">
+  <div class="section-label">Config Display (Mode Tab)</div>
+  <div class="comp-card" data-name="Instance Config JSON">
+    <div class="c-config"><span class="key">"name"</span>: <span class="val-str">"besbot"</span>,
+<span class="key">"type"</span>: <span class="val-str">"chat"</span>,
+<span class="key">"accessMode"</span>: <span class="val-str">"open_dm"</span>,
+<span class="key">"models"</span>: {
+  <span class="key">"conversation"</span>: <span class="val-str">"claude-sonnet-4-6"</span>,
+  <span class="key">"extraction"</span>: <span class="val-str">"claude-haiku-4-5-20251001"</span>,
+  <span class="key">"validation"</span>: <span class="val-str">"claude-haiku-4-5-20251001"</span>
+},
+<span class="key">"pineconeIndex"</span>: <span class="val-str">"oneplatform-search"</span>,
+<span class="key">"pineconeRerank"</span>: <span class="val-bool">true</span>,
+<span class="key">"maxTokens"</span>: <span class="val-num">500</span>,
+<span class="key">"tokenBudget"</span>: <span class="val-num">50000</span>,
+<span class="key">"rateLimitPerHour"</span>: <span class="val-num">60</span>,
+<span class="key">"healthPort"</span>: <span class="val-num">9093</span></div>
+  </div>
+</div>
+
+<!-- ═══ EMPTY STATES ═══ -->
+<div class="section">
+  <div class="section-label">Empty States</div>
+  <div class="comp-grid">
+    <div class="comp-card" data-name="No Messages">
+      <div class="c-empty">
+        <i data-lucide="message-square-off"></i>
+        <div class="c-empty-title">No messages yet</div>
+        <div class="c-empty-desc">This conversation has no message history. Messages will appear here as they are received.</div>
+      </div>
+    </div>
+    <div class="comp-card" data-name="No Agent Sessions">
+      <div class="c-empty">
+        <i data-lucide="bot"></i>
+        <div class="c-empty-title">No active sessions</div>
+        <div class="c-empty-desc">No agent sessions are currently running on this line. Sessions start when a message is received from an allowed contact.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ LOADING STATES ═══ -->
+<div class="section">
+  <div class="section-label">Loading States</div>
+  <div class="comp-card" data-name="Skeleton Shimmer">
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div style="display:flex;gap:12px;align-items:center;">
+        <div class="c-skel" style="width:8px;height:8px;border-radius:50%;"></div>
+        <div class="c-skel" style="width:160px;height:14px;"></div>
+        <div class="c-skel" style="width:60px;height:18px;border-radius:3px;"></div>
+        <div style="flex:1;"></div>
+        <div class="c-skel" style="width:40px;height:14px;"></div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;">
+        <div class="c-skel" style="width:8px;height:8px;border-radius:50%;"></div>
+        <div class="c-skel" style="width:140px;height:14px;"></div>
+        <div class="c-skel" style="width:50px;height:18px;border-radius:3px;"></div>
+        <div style="flex:1;"></div>
+        <div class="c-skel" style="width:40px;height:14px;"></div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;">
+        <div class="c-skel" style="width:8px;height:8px;border-radius:50%;"></div>
+        <div class="c-skel" style="width:180px;height:14px;"></div>
+        <div class="c-skel" style="width:55px;height:18px;border-radius:3px;"></div>
+        <div style="flex:1;"></div>
+        <div class="c-skel" style="width:40px;height:14px;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TOAST NOTIFICATIONS ═══ -->
+<div class="section">
+  <div class="section-label">Toast Notifications</div>
+  <div class="comp-card" data-name="Action Feedback">
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div class="c-toast success"><i data-lucide="check-circle-2"></i><span class="c-toast-msg">Message sent to +1 845-978-0919</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
+      <div class="c-toast error"><i data-lucide="alert-circle"></i><span class="c-toast-msg">Failed to restart besbot: service timeout</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
+      <div class="c-toast info"><i data-lucide="info"></i><span class="c-toast-msg">Config saved. Restarting instance...</span><span class="c-toast-close"><i data-lucide="x"></i></span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ DIALOG ═══ -->
+<div class="section">
+  <div class="section-label">Dialog / Confirmation</div>
+  <div class="comp-card" data-name="Confirm Restart" style="padding:0;">
+    <div class="c-dialog-backdrop">
+      <div class="c-dialog">
+        <div class="c-dialog-header">
+          <span class="c-dialog-title">Restart Instance</span>
+          <span class="c-dialog-close"><i data-lucide="x"></i></span>
+        </div>
+        <div class="c-dialog-body">
+          <p style="font-size:0.88rem;color:var(--t2);line-height:1.7;">
+            This will restart <strong style="color:var(--t1);">besbot</strong> (chat). Active conversations will be interrupted and the queue will be cleared. The instance will reconnect to WhatsApp automatically.
+          </p>
+        </div>
+        <div class="c-dialog-footer">
+          <button class="c-btn ghost">Cancel</button>
+          <button class="c-btn danger"><i data-lucide="rotate-cw"></i> Restart</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CURSOR PAGINATION ═══ -->
+<div class="section">
+  <div class="section-label">Pagination</div>
+  <div class="comp-card" data-name="Cursor-Based Load More">
+    <div class="c-loadmore"><i data-lucide="chevrons-up"></i> Load older messages</div>
+    <div style="font-size:0.82rem;color:var(--t4);margin-top:8px;">
+      Cursor-based: uses <span style="font-family:var(--f-mono);color:var(--t3);">conversationKey</span> + <span style="font-family:var(--f-mono);color:var(--t3);">beforePk</span>. No page numbers. Append to top on load.
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => { if (typeof lucide !== 'undefined') lucide.createIcons(); });
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+</script>
+</body>
+</html>

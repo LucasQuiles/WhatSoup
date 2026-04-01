@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>WhatSoup — Design Principles & UX Guidelines</title>
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+:root {
+  --d0:#050709;--d1:#0a0d12;--d2:#0f1319;--d3:#141922;--d4:#1a202c;--d5:#212836;--d6:#2a3244;
+  --t1:#edf2f7;--t2:#a0aec0;--t3:#6b7a90;--t4:#5a6a82;--t5:#3d4e66;
+  --b1:rgba(255,255,255,0.05);--b2:rgba(255,255,255,0.09);--b3:rgba(255,255,255,0.16);
+  --m-pas:#2dd4a8;--m-cht:#38bdf8;--m-agt:#a78bfa;
+  --s-ok:#2dd4a8;--s-warn:#f6ad55;--s-crit:#fc8181;
+  --f-sans:'Outfit',system-ui,sans-serif;--f-mono:'IBM Plex Mono','SF Mono',monospace;
+  --ease:cubic-bezier(0.22,1,0.36,1);
+}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html{font-size:15px;}
+body{background:var(--d0);color:var(--t1);font-family:var(--f-sans);-webkit-font-smoothing:antialiased;line-height:1.6;}
+body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.015'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;}
+
+.page{max-width:1100px;margin:0 auto;padding:48px 40px;}
+h1{font-size:2.2rem;font-weight:800;letter-spacing:-0.04em;margin-bottom:6px;}
+.tagline{font-family:var(--f-mono);font-size:0.85rem;color:var(--t4);margin-bottom:56px;}
+
+.section{margin-bottom:56px;}
+.section-label{font-family:var(--f-mono);font-size:0.7rem;font-weight:500;text-transform:uppercase;letter-spacing:0.12em;color:var(--t4);margin-bottom:20px;padding-bottom:8px;border-bottom:1px solid var(--b1);}
+
+.principle{background:var(--d2);border:1px solid var(--b1);border-radius:10px;padding:28px;margin-bottom:12px;display:grid;grid-template-columns:200px 1fr;gap:24px;}
+.principle-title{font-weight:700;font-size:1rem;letter-spacing:-0.02em;}
+.principle-sub{font-family:var(--f-mono);font-size:0.7rem;color:var(--t4);margin-top:4px;text-transform:uppercase;letter-spacing:0.06em;}
+.principle-body{font-size:0.88rem;color:var(--t2);line-height:1.75;}
+.principle-body strong{color:var(--t1);font-weight:600;}
+
+.spec-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;}
+.spec-card{background:var(--d3);border:1px solid var(--b1);border-radius:6px;padding:16px 20px;}
+.spec-card .label{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;}
+.spec-card .value{font-family:var(--f-mono);font-size:0.8rem;color:var(--t2);line-height:1.9;}
+
+.scale{display:flex;gap:8px;align-items:flex-end;margin-top:16px;}
+.scale-item{display:flex;flex-direction:column;align-items:center;gap:6px;}
+.scale-box{background:var(--m-cht);border-radius:3px;opacity:0.3;}
+.scale-label{font-family:var(--f-mono);font-size:0.65rem;color:var(--t5);}
+
+.color-intent{display:grid;grid-template-columns:60px 1fr;gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid var(--b1);}
+.color-intent:last-child{border-bottom:none;}
+.color-swatch{width:48px;height:34px;border-radius:4px;}
+.color-meaning{font-size:0.85rem;color:var(--t2);line-height:1.6;}
+.color-meaning strong{color:var(--t1);}
+
+/* Icon cells using Lucide SVG */
+.icon-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:12px;}
+.icon-cell{
+  background:var(--d3);border:1px solid var(--b1);border-radius:6px;
+  padding:16px 8px 12px;text-align:center;
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  transition:all 0.2s var(--ease);
+}
+.icon-cell:hover{border-color:var(--b3);background:var(--d4);transform:translateY(-1px);}
+.icon-cell [data-lucide]{width:22px;height:22px;color:var(--t2);stroke-width:1.75;}
+.icon-cell .icon-label{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);}
+
+/* Nav icon row */
+.icon-nav-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;}
+.icon-nav-cell{
+  background:var(--d3);border:1px solid var(--b1);border-radius:8px;
+  padding:16px;display:flex;align-items:center;gap:14px;
+  transition:all 0.2s var(--ease);
+}
+.icon-nav-cell:hover{border-color:var(--b3);background:var(--d4);}
+.icon-nav-cell [data-lucide]{width:20px;height:20px;stroke-width:1.75;}
+.icon-nav-cell .nav-text{font-size:0.85rem;font-weight:500;}
+.icon-nav-cell .nav-sub{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);margin-top:2px;}
+
+/* Action icon pairs */
+.icon-action-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-top:12px;}
+.icon-action{
+  background:var(--d3);border:1px solid var(--b1);border-radius:6px;
+  padding:14px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:8px;
+  transition:all 0.2s var(--ease);cursor:pointer;
+}
+.icon-action:hover{border-color:var(--b3);background:var(--d4);}
+.icon-action [data-lucide]{width:18px;height:18px;stroke-width:1.75;}
+.icon-action .action-label{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);}
+.icon-action.ok [data-lucide]{color:var(--s-ok);}
+.icon-action.warn [data-lucide]{color:var(--s-warn);}
+.icon-action.crit [data-lucide]{color:var(--s-crit);}
+.icon-action.cht [data-lucide]{color:var(--m-cht);}
+.icon-action.agt [data-lucide]{color:var(--m-agt);}
+.icon-action.pas [data-lucide]{color:var(--m-pas);}
+.icon-action.neu [data-lucide]{color:var(--t3);}
+
+.hierarchy-demo{display:flex;flex-direction:column;gap:4px;background:var(--d2);border:1px solid var(--b1);border-radius:8px;padding:24px;margin-top:12px;}
+.h-level{display:flex;align-items:baseline;gap:12px;padding:4px 0;}
+.h-num{font-family:var(--f-mono);font-size:0.65rem;color:var(--t5);width:16px;}
+
+.subsection-label{font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.08em;margin:24px 0 10px;}
+
+@keyframes fade-up{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
+.section{animation:fade-up 0.5s var(--ease) both;}
+.section:nth-child(2){animation-delay:0.05s;}
+.section:nth-child(3){animation-delay:0.1s;}
+.section:nth-child(4){animation-delay:0.15s;}
+.section:nth-child(5){animation-delay:0.2s;}
+.section:nth-child(6){animation-delay:0.25s;}
+.section:nth-child(7){animation-delay:0.3s;}
+.section:nth-child(8){animation-delay:0.35s;}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Design Principles & UX</h1>
+<div class="tagline">Semantic coloring / Visual hierarchy / Spacing / Iconography / User psychology</div>
+
+<!-- ═══ SEMANTIC COLORING ═══ -->
+<div class="section">
+  <div class="section-label">1. Semantic Color System</div>
+
+  <div class="principle">
+    <div><div class="principle-title">Color = Meaning</div><div class="principle-sub">Never decorative</div></div>
+    <div class="principle-body">Every color communicates something specific. Emerald means passive. Blue means chat. Violet means agent. Amber means warning. Red means failure. <strong>No color exists without semantic purpose.</strong></div>
+  </div>
+
+  <div style="background:var(--d2);border:1px solid var(--b1);border-radius:10px;padding:24px;margin-top:12px;">
+    <div class="color-intent">
+      <div class="color-swatch" style="background:var(--m-pas);"></div>
+      <div class="color-meaning"><strong>Passive emerald</strong> -- listening, storing, human-operated. Mode badges, pipeline, feed dots, heartbeat bars, unread KPI.</div>
+    </div>
+    <div class="color-intent">
+      <div class="color-swatch" style="background:var(--m-cht);"></div>
+      <div class="color-meaning"><strong>Chat cyan-blue</strong> -- conversational AI, API-driven, RAG-augmented. Mode badges, queue depth, response latency, feed dots, focus rings.</div>
+    </div>
+    <div class="color-intent">
+      <div class="color-swatch" style="background:var(--m-agt);"></div>
+      <div class="color-meaning"><strong>Agent violet</strong> -- autonomous, SDK-driven, multi-turn, tool-using. Mode badges, session state, turn counts, tool calls, feed dots.</div>
+    </div>
+    <div class="color-intent">
+      <div class="color-swatch" style="background:var(--s-warn);"></div>
+      <div class="color-meaning"><strong>Warning amber</strong> -- degraded, approaching limits, needs attention soon. Degraded dots, budget warnings, high unread counts, degraded heartbeats.</div>
+    </div>
+    <div class="color-intent">
+      <div class="color-swatch" style="background:var(--s-crit);"></div>
+      <div class="color-meaning"><strong>Critical coral</strong> -- disconnected, failed, expired, requires action. Error dots, error rows, auth-expired alerts, failed heartbeats.</div>
+    </div>
+    <div class="color-intent">
+      <div class="color-swatch" style="background:var(--t2);"></div>
+      <div class="color-meaning"><strong>Neutral gray</strong> -- informational, no urgency. Timestamps, secondary text, neutral KPIs, pipeline neutral nodes.</div>
+    </div>
+  </div>
+
+  <div class="principle" style="margin-top:12px;">
+    <div><div class="principle-title">Three Opacity Tiers</div><div class="principle-sub">Per mode color</div></div>
+    <div class="principle-body">
+      <strong>Full (100%)</strong> -- text, dots, active indicators. Draws the eye.<br>
+      <strong>Soft (30%)</strong> -- badge backgrounds, glow shadows. Suggests association.<br>
+      <strong>Wash (6-12%)</strong> -- row highlights, card backgrounds, hover states. Whispers context.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ VISUAL HIERARCHY ═══ -->
+<div class="section">
+  <div class="section-label">2. Visual Hierarchy</div>
+
+  <div class="principle">
+    <div><div class="principle-title">5-Second Rule</div><div class="principle-sub">Scan pattern</div></div>
+    <div class="principle-body">
+      The Soup Kitchen answers "is everything OK?" in under 5 seconds:<br><br>
+      <strong>1st:</strong> KPI strip -- large numbers, color-coded. Red = problem.<br>
+      <strong>2nd:</strong> Alert banner -- only visible when something needs you.<br>
+      <strong>3rd:</strong> Status dot column -- vertical scan of green/amber/red.<br>
+      <strong>4th:</strong> Pipeline column -- mode-specific runtime state.<br>
+      <strong>5th:</strong> Activity feed -- peripheral, ambient awareness.
+    </div>
+  </div>
+
+  <div class="hierarchy-demo">
+    <div class="h-level"><span class="h-num">1</span><span style="font-family:var(--f-mono);font-size:1.8rem;font-weight:600;color:var(--s-crit);">2</span><span style="font-family:var(--f-mono);font-size:0.65rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.08em;margin-left:4px;">ATTENTION</span></div>
+    <div class="h-level"><span class="h-num">2</span><span style="font-size:0.85rem;color:var(--s-crit);padding:4px 10px;background:rgba(252,129,129,0.08);border-radius:4px;">Loops -- auth expired</span></div>
+    <div class="h-level"><span class="h-num">3</span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--s-ok);box-shadow:0 0 8px rgba(45,212,168,0.3);"></span><span style="font-family:var(--f-mono);font-size:0.8rem;color:var(--t2);margin-left:8px;">+1 555-0200 BES Bot</span></div>
+    <div class="h-level"><span class="h-num">4</span><span style="font-family:var(--f-mono);font-size:0.75rem;color:var(--m-cht);">queued: 2</span></div>
+    <div class="h-level"><span class="h-num">5</span><span style="font-family:var(--f-mono);font-size:0.7rem;color:var(--t5);">12:04</span><span style="font-size:0.8rem;color:var(--t3);margin-left:8px;">msg in &rarr; BES Bot</span></div>
+  </div>
+
+  <div class="principle" style="margin-top:12px;">
+    <div><div class="principle-title">Text Weight Scale</div><div class="principle-sub">5 levels</div></div>
+    <div class="principle-body">
+      <strong>t1 (#edf2f7)</strong> -- Primary. Titles, active states, KPI values.<br>
+      <strong>t2 (#a0aec0)</strong> -- Secondary. Body text, data values.<br>
+      <strong>t3 (#6b7a90)</strong> -- Tertiary. Feed text, supporting info.<br>
+      <strong>t4 (#5a6a82)</strong> -- Muted. Labels, timestamps, inactive tabs.<br>
+      <strong>t5 (#3d4e66)</strong> -- Ghost. Column headers, placeholders, structure.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SPACING SYSTEM ═══ -->
+<div class="section">
+  <div class="section-label">3. Spacing & Sizing</div>
+
+  <div class="principle">
+    <div><div class="principle-title">4px Base Grid</div><div class="principle-sub">Consistent rhythm</div></div>
+    <div class="principle-body">All spacing derives from a 4px base unit. This creates visual rhythm even when elements vary in size.</div>
+  </div>
+
+  <div class="scale">
+    <div class="scale-item"><div class="scale-box" style="width:4px;height:4px;"></div><span class="scale-label">4</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:8px;height:8px;"></div><span class="scale-label">8</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:12px;height:12px;"></div><span class="scale-label">12</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:16px;height:16px;"></div><span class="scale-label">16</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:20px;height:20px;"></div><span class="scale-label">20</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:24px;height:24px;"></div><span class="scale-label">24</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:32px;height:32px;"></div><span class="scale-label">32</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:40px;height:40px;"></div><span class="scale-label">40</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:48px;height:48px;"></div><span class="scale-label">48</span></div>
+    <div class="scale-item"><div class="scale-box" style="width:56px;height:56px;"></div><span class="scale-label">56</span></div>
+  </div>
+
+  <div class="spec-grid" style="margin-top:20px;">
+    <div class="spec-card">
+      <div class="label">Component Padding</div>
+      <div class="value">
+        KPI card: 16px 20px<br>
+        Table cell: 10px 16px<br>
+        Alert chip: 4px 12px<br>
+        Mode badge: 3px 10px 3px 8px<br>
+        Nav item: 6px 12px<br>
+        Tab: 10px 16px<br>
+        Filter pill: 4px 12px<br>
+        Search input: 6px 12px
+      </div>
+    </div>
+    <div class="spec-card">
+      <div class="label">Section Spacing</div>
+      <div class="value">
+        Page padding: 48px 40px<br>
+        Section gap: 56px<br>
+        Component gap: 12px<br>
+        Card internal gap: 24px<br>
+        Table toolbar: 10px 16px<br>
+        Feed item: 8px 0<br>
+        Nav height: 52px<br>
+        KPI strip: 1px grid gap
+      </div>
+    </div>
+    <div class="spec-card">
+      <div class="label">Sizing</div>
+      <div class="value">
+        Status dot: 8px (table), 6px (feed)<br>
+        Mode badge dot: 5px<br>
+        Heartbeat bar: 3px w x 20px h<br>
+        Heartbeat gap: 1px<br>
+        Border radius: 4/6/10/14px<br>
+        Search width: 200px<br>
+        Icon inline: 16px<br>
+        Icon nav: 20px
+      </div>
+    </div>
+    <div class="spec-card">
+      <div class="label">Consistency Rules</div>
+      <div class="value">
+        Same element = same size always<br>
+        Mode badge never changes dims<br>
+        Status dot always 8px in tables<br>
+        Heartbeat strips always 20 bars<br>
+        Mono font for ALL data values<br>
+        Sans font for ALL UI chrome<br>
+        4px grid for all padding/margin<br>
+        1px borders always var(--b1)
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ICONOGRAPHY ═══ -->
+<div class="section">
+  <div class="section-label">4. Iconography -- Lucide</div>
+
+  <div class="principle">
+    <div><div class="principle-title">Lucide React</div><div class="principle-sub">lucide.dev</div></div>
+    <div class="principle-body">Stroke-based, consistent 1.75px weight. <strong>16px inline, 20px navigation, 24px empty states.</strong> Never mix icon sets. Color follows semantic rules: icons inherit the text color of their context. Production uses <code>lucide-react</code> package.</div>
+  </div>
+
+  <div class="subsection-label">Primary Navigation</div>
+  <div class="icon-nav-row">
+    <div class="icon-nav-cell">
+      <i data-lucide="layout-dashboard" style="color:var(--s-ok);"></i>
+      <div><div class="nav-text">Soup Kitchen</div><div class="nav-sub">Fleet overview</div></div>
+    </div>
+    <div class="icon-nav-cell">
+      <i data-lucide="radio" style="color:var(--t2);"></i>
+      <div><div class="nav-text">Lines</div><div class="nav-sub">All connections</div></div>
+    </div>
+    <div class="icon-nav-cell">
+      <i data-lucide="inbox" style="color:var(--t2);"></i>
+      <div><div class="nav-text">Inbox</div><div class="nav-sub">Chats + reply</div></div>
+    </div>
+    <div class="icon-nav-cell">
+      <i data-lucide="terminal" style="color:var(--t2);"></i>
+      <div><div class="nav-text">Ops</div><div class="nav-sub">Logs + status</div></div>
+    </div>
+  </div>
+
+  <div class="subsection-label">Line Detail Tabs</div>
+  <div class="icon-grid">
+    <div class="icon-cell"><i data-lucide="info"></i><span class="icon-label">Summary</span></div>
+    <div class="icon-cell"><i data-lucide="sliders-horizontal"></i><span class="icon-label">Mode</span></div>
+    <div class="icon-cell"><i data-lucide="git-branch"></i><span class="icon-label">Pipeline</span></div>
+    <div class="icon-cell"><i data-lucide="shield"></i><span class="icon-label">Access</span></div>
+    <div class="icon-cell"><i data-lucide="message-square"></i><span class="icon-label">History</span></div>
+    <div class="icon-cell"><i data-lucide="scroll-text"></i><span class="icon-label">Logs</span></div>
+    <div class="icon-cell"><i data-lucide="bar-chart-3"></i><span class="icon-label">Metrics</span></div>
+  </div>
+
+  <div class="subsection-label">Status + Actions</div>
+  <div class="icon-action-grid">
+    <div class="icon-action ok"><i data-lucide="check-circle-2"></i><span class="action-label">Connected</span></div>
+    <div class="icon-action warn"><i data-lucide="alert-triangle"></i><span class="action-label">Degraded</span></div>
+    <div class="icon-action crit"><i data-lucide="x-circle"></i><span class="action-label">Down</span></div>
+    <div class="icon-action ok"><i data-lucide="user-check"></i><span class="action-label">Allow</span></div>
+    <div class="icon-action crit"><i data-lucide="ban"></i><span class="action-label">Block</span></div>
+    <div class="icon-action neu"><i data-lucide="clock"></i><span class="action-label">Pending</span></div>
+  </div>
+
+  <div class="subsection-label">Mode-Specific</div>
+  <div class="icon-action-grid">
+    <div class="icon-action pas"><i data-lucide="eye"></i><span class="action-label">Passive</span></div>
+    <div class="icon-action cht"><i data-lucide="message-circle"></i><span class="action-label">Chat</span></div>
+    <div class="icon-action agt"><i data-lucide="bot"></i><span class="action-label">Agent</span></div>
+    <div class="icon-action cht"><i data-lucide="send"></i><span class="action-label">Send</span></div>
+    <div class="icon-action neu"><i data-lucide="rotate-cw"></i><span class="action-label">Restart</span></div>
+    <div class="icon-action neu"><i data-lucide="settings"></i><span class="action-label">Config</span></div>
+  </div>
+
+  <div class="subsection-label">Feed Event Types</div>
+  <div class="icon-action-grid">
+    <div class="icon-action cht"><i data-lucide="arrow-down-left"></i><span class="action-label">Msg In</span></div>
+    <div class="icon-action cht"><i data-lucide="arrow-up-right"></i><span class="action-label">Reply Sent</span></div>
+    <div class="icon-action agt"><i data-lucide="play"></i><span class="action-label">Turn Start</span></div>
+    <div class="icon-action agt"><i data-lucide="wrench"></i><span class="action-label">Tool Call</span></div>
+    <div class="icon-action ok"><i data-lucide="wifi"></i><span class="action-label">Connected</span></div>
+    <div class="icon-action crit"><i data-lucide="wifi-off"></i><span class="action-label">Disconnected</span></div>
+  </div>
+</div>
+
+<!-- ═══ USER PSYCHOLOGY ═══ -->
+<div class="section">
+  <div class="section-label">5. User Psychology</div>
+
+  <div class="principle">
+    <div><div class="principle-title">Calm by Default</div><div class="principle-sub">Alarm by exception</div></div>
+    <div class="principle-body">The console feels <strong>quiet when everything is healthy</strong>. Emerald dots, gray timestamps, muted text. The absence of color IS the signal that things are fine. Red and amber only appear when something needs attention.</div>
+  </div>
+
+  <div class="principle">
+    <div><div class="principle-title">Progressive Disclosure</div><div class="principle-sub">Depth on demand</div></div>
+    <div class="principle-body">
+      <strong>Soup Kitchen:</strong> Fleet-wide health at a glance. No detail.<br>
+      <strong>Line row click:</strong> One line's full context. 7 tabs of depth.<br>
+      <strong>Tab navigation:</strong> Each tab reveals a single concern.<br>
+      <strong>Inline expand:</strong> Agent sessions, access entries expand in-place.
+    </div>
+  </div>
+
+  <div class="principle">
+    <div><div class="principle-title">Mode = Mental Model</div><div class="principle-sub">Cognitive wayfinding</div></div>
+    <div class="principle-body">When viewing a passive line, the UI shifts to emerald tones. Chat = blue. Agent = violet. <strong>Cognitive wayfinding.</strong> Switching modes feels like entering a different room.</div>
+  </div>
+
+  <div class="principle">
+    <div><div class="principle-title">Data Density</div><div class="principle-sub">Information not noise</div></div>
+    <div class="principle-body">
+      <strong>Monospace for data, sans for chrome.</strong> The eye scans mono for facts, skips sans for structure.<br>
+      <strong>Align data in columns.</strong> The table is the primary pattern.<br>
+      <strong>Ghost text for structure.</strong> Headers and labels at t5 orient without competing.
+    </div>
+  </div>
+
+  <div class="principle">
+    <div><div class="principle-title">Motion with Purpose</div><div class="principle-sub">Not decoration</div></div>
+    <div class="principle-body">
+      <strong>Status dot breathing:</strong> Connected lines pulse gently. Confirms liveness.<br>
+      <strong>Staggered page load:</strong> Components fade-up with 50ms delays. Systems coming online.<br>
+      <strong>Hover lift on KPI cards:</strong> 1px translateY + border highlight. Confirms interactivity.<br>
+      <strong>Feed prepend slide:</strong> New events enter with a subtle animation.<br>
+      <strong>No animation on:</strong> mode switching, tab transitions, table sorting. Instant and mechanical.
+    </div>
+  </div>
+</div>
+
+<!-- ═══ LAYOUT ═══ -->
+<div class="section">
+  <div class="section-label">6. Layout</div>
+
+  <div class="principle">
+    <div><div class="principle-title">Desktop-First</div><div class="principle-sub">1280px+ primary</div></div>
+    <div class="principle-body">
+      Ops console. Desktop monitor. Design for 1280px+ first.<br><br>
+      <strong>1280px+:</strong> Full layout. KPI 6-col, table + feed side-by-side, 3-panel inbox.<br>
+      <strong>1024px:</strong> KPI wraps 3+3. Feed below table. Inbox 2-panel.<br>
+      <strong>v1:</strong> Only build 1280px+. Responsive is Phase 2.
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+  // Initialize Lucide icons after DOM loads
+  document.addEventListener('DOMContentLoaded', () => {
+    if (typeof lucide !== 'undefined') {
+      lucide.createIcons();
+    }
+  });
+  // Also try immediately in case DOMContentLoaded already fired
+  if (typeof lucide !== 'undefined') {
+    lucide.createIcons();
+  }
+</script>
+</body>
+</html>

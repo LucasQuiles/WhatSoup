@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>WhatSoup — Design System v2</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN TOKENS — "Submarine Control Room"
+   Deep blacks, phosphor-precise mode colors, analog warmth
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Depth Stack (darkest → lightest) ── */
+  --d0: #050709;
+  --d1: #0a0d12;
+  --d2: #0f1319;
+  --d3: #141922;
+  --d4: #1a202c;
+  --d5: #212836;
+  --d6: #2a3244;
+
+  /* ── Text ── */
+  --t1: #edf2f7;
+  --t2: #a0aec0;
+  --t3: #6b7a90;
+  --t4: #45536b;
+  --t5: #2d3a50;
+
+  /* ── Borders ── */
+  --b1: rgba(255,255,255,0.04);
+  --b2: rgba(255,255,255,0.08);
+  --b3: rgba(255,255,255,0.14);
+  --b4: rgba(255,255,255,0.22);
+
+  /* ── Mode: Passive (phosphor emerald) ── */
+  --m-pas: #2dd4a8;
+  --m-pas-soft: #2dd4a830;
+  --m-pas-wash: #2dd4a810;
+  --m-pas-glow: 0 0 12px #2dd4a840;
+
+  /* ── Mode: Chat (signal cyan-blue) ── */
+  --m-cht: #38bdf8;
+  --m-cht-soft: #38bdf830;
+  --m-cht-wash: #38bdf810;
+  --m-cht-glow: 0 0 12px #38bdf840;
+
+  /* ── Mode: Agent (plasma violet) ── */
+  --m-agt: #a78bfa;
+  --m-agt-soft: #a78bfa30;
+  --m-agt-wash: #a78bfa10;
+  --m-agt-glow: 0 0 12px #a78bfa40;
+
+  /* ── Semantic ── */
+  --s-ok: #2dd4a8;
+  --s-warn: #f6ad55;
+  --s-warn-wash: #f6ad5512;
+  --s-crit: #fc8181;
+  --s-crit-wash: #fc818112;
+  --s-crit-soft: #fc818130;
+
+  /* ── Typography ── */
+  --f-sans: 'Outfit', system-ui, -apple-system, sans-serif;
+  --f-mono: 'IBM Plex Mono', 'SF Mono', 'Cascadia Code', monospace;
+
+  /* ── Radii ── */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+
+  /* ── Transition ── */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ═══ Reset & Base ═══ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { font-size: 14px; }
+body {
+  background: var(--d0);
+  color: var(--t1);
+  font-family: var(--f-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.55;
+}
+
+/* subtle noise texture */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.015'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ═══ Page Shell ═══ */
+.page { max-width: 1300px; margin: 0 auto; padding: 48px 40px; }
+
+/* ═══ Section ═══ */
+.section { margin-bottom: 56px; }
+.section-label {
+  font-family: var(--f-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--t4);
+  margin-bottom: 20px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--b1);
+}
+
+/* ═══ Header ═══ */
+.ds-header {
+  margin-bottom: 64px;
+  position: relative;
+}
+.ds-header h1 {
+  font-size: 2.4rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  background: linear-gradient(135deg, var(--t1) 0%, var(--t3) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.ds-header .tagline {
+  font-family: var(--f-mono);
+  font-size: 0.8rem;
+  color: var(--t4);
+  margin-top: 8px;
+  letter-spacing: 0.02em;
+}
+.ds-header .mode-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: 16px;
+}
+.ds-header .mode-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: pulse-dot 3s ease infinite;
+}
+.ds-header .mode-dots span:nth-child(1) { background: var(--m-pas); box-shadow: var(--m-pas-glow); animation-delay: 0s; }
+.ds-header .mode-dots span:nth-child(2) { background: var(--m-cht); box-shadow: var(--m-cht-glow); animation-delay: 1s; }
+.ds-header .mode-dots span:nth-child(3) { background: var(--m-agt); box-shadow: var(--m-agt-glow); animation-delay: 2s; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* ═══ Typography Specimens ═══ */
+.type-row {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 24px;
+  padding: 20px 24px;
+  border-radius: var(--r-md);
+  background: var(--d2);
+  border: 1px solid var(--b1);
+  margin-bottom: 8px;
+  align-items: center;
+}
+.type-specimen { }
+.type-meta {
+  font-family: var(--f-mono);
+  font-size: 0.6rem;
+  color: var(--t4);
+  line-height: 1.7;
+  text-align: right;
+}
+
+/* ═══ Color Grid ═══ */
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px;
+}
+.color-chip {
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--b1);
+  transition: transform 0.2s var(--ease), border-color 0.2s;
+}
+.color-chip:hover { transform: translateY(-2px); border-color: var(--b3); }
+.color-chip .swatch { height: 48px; position: relative; }
+.color-chip .swatch.glow::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  filter: blur(14px);
+  opacity: 0.4;
+}
+.color-chip .label {
+  padding: 6px 10px;
+  background: var(--d2);
+  font-family: var(--f-mono);
+  font-size: 0.55rem;
+  line-height: 1.5;
+}
+.color-chip .label .name { color: var(--t2); display: block; font-weight: 500; }
+.color-chip .label .hex { color: var(--t5); }
+
+/* ═══ Component Cards ═══ */
+.comp-card {
+  background: var(--d2);
+  border: 1px solid var(--b1);
+  border-radius: var(--r-xl);
+  padding: 28px;
+  position: relative;
+  overflow: hidden;
+}
+.comp-card::after {
+  content: attr(data-name);
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  font-family: var(--f-mono);
+  font-size: 0.55rem;
+  color: var(--t5);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.comp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.comp-full { grid-column: 1 / -1; }
+
+/* ═══════════════════════════════════════════════════════════════
+   COMPONENT LIBRARY
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Navigation ── */
+.c-nav {
+  display: flex;
+  align-items: center;
+  height: 52px;
+  padding: 0 20px;
+  background: var(--d1);
+  border: 1px solid var(--b1);
+  border-radius: var(--r-lg);
+  gap: 24px;
+}
+.c-nav-logo {
+  font-family: var(--f-mono);
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: -0.01em;
+}
+.c-nav-logo .w { color: var(--t2); }
+.c-nav-logo .s { color: var(--s-ok); }
+.c-nav-items { display: flex; gap: 4px; }
+.c-nav-item {
+  padding: 6px 12px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--t4);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: all 0.2s var(--ease);
+  position: relative;
+}
+.c-nav-item:hover { color: var(--t2); background: var(--d3); }
+.c-nav-item.active {
+  color: var(--t1);
+  background: var(--d4);
+}
+.c-nav-item.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--s-ok);
+  border-radius: 1px;
+}
+.c-nav-spacer { flex: 1; }
+.c-nav-status {
+  font-family: var(--f-mono);
+  font-size: 0.6rem;
+  color: var(--t4);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── KPI Card ── */
+.c-kpi {
+  background: var(--d2);
+  border: 1px solid var(--b1);
+  border-radius: var(--r-md);
+  padding: 16px 20px;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.25s var(--ease);
+}
+.c-kpi:hover {
+  border-color: var(--b3);
+  background: var(--d3);
+  transform: translateY(-1px);
+}
+.c-kpi-value {
+  font-family: var(--f-mono);
+  font-size: 1.7rem;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.c-kpi-label {
+  font-family: var(--f-mono);
+  font-size: 0.55rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--t4);
+  margin-top: 6px;
+}
+.c-kpi-spark {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  opacity: 0.15;
+}
+.c-kpi-spark svg { width: 100%; height: 100%; }
+.c-kpi:hover .c-kpi-spark { opacity: 0.3; transition: opacity 0.3s; }
+.c-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  background: var(--b1);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.c-kpi-strip .c-kpi { border-radius: 0; border: none; }
+
+/* ── Status Indicator ── */
+.c-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: relative;
+}
+.c-dot.ok { background: var(--s-ok); box-shadow: var(--m-pas-glow); }
+.c-dot.warn { background: var(--s-warn); box-shadow: 0 0 10px #f6ad5540; }
+.c-dot.crit { background: var(--s-crit); box-shadow: 0 0 10px #fc818140; }
+/* breathing animation for connected dots */
+.c-dot.ok::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1px solid var(--m-pas-soft);
+  animation: breathe 3s ease infinite;
+}
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 0.4; }
+  50% { transform: scale(1.3); opacity: 0; }
+}
+
+/* ── Mode Badge ── */
+.c-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px 2px 8px;
+  border-radius: 3px;
+  font-family: var(--f-mono);
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+.c-mode::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+.c-mode.passive { background: var(--m-pas-wash); color: var(--m-pas); }
+.c-mode.passive::before { background: var(--m-pas); }
+.c-mode.chat { background: var(--m-cht-wash); color: var(--m-cht); }
+.c-mode.chat::before { background: var(--m-cht); }
+.c-mode.agent { background: var(--m-agt-wash); color: var(--m-agt); }
+.c-mode.agent::before { background: var(--m-agt); }
+
+/* ── Heartbeat Strip ── */
+.c-hb { display: flex; gap: 1px; align-items: flex-end; height: 20px; }
+.c-hb-beat {
+  width: 3px;
+  border-radius: 1px;
+  transition: all 0.15s var(--ease);
+}
+.c-hb-beat.up { background: var(--s-ok); height: 20px; opacity: 0.55; }
+.c-hb-beat.up:hover { opacity: 1; }
+.c-hb-beat.down { background: var(--s-crit); height: 20px; opacity: 0.85; }
+.c-hb-beat.slow { background: var(--s-warn); height: 12px; opacity: 0.6; }
+
+/* ── Alert Banner ── */
+.c-alert {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--s-crit-wash);
+  border: 1px solid rgba(252,129,129,0.1);
+  border-radius: var(--r-md);
+  font-size: 0.78rem;
+}
+.c-alert-badge {
+  font-family: var(--f-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: var(--s-crit);
+  background: var(--s-crit-soft);
+  padding: 2px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.c-alert-chip {
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  background: rgba(252,129,129,0.06);
+  color: var(--t2);
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+.c-alert-chip:hover { background: rgba(252,129,129,0.12); }
+
+/* ── Filter Pill ── */
+.c-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--r-sm);
+  font-family: var(--f-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--b2);
+  color: var(--t3);
+  cursor: pointer;
+  transition: all 0.15s var(--ease);
+  background: transparent;
+}
+.c-pill:hover { border-color: var(--b3); color: var(--t2); background: var(--d3); }
+.c-pill.active { background: var(--d5); border-color: var(--b4); color: var(--t1); }
+.c-pill.pas { border-color: var(--m-pas-soft); color: var(--m-pas); }
+.c-pill.pas:hover { background: var(--m-pas-wash); }
+.c-pill.cht { border-color: var(--m-cht-soft); color: var(--m-cht); }
+.c-pill.cht:hover { background: var(--m-cht-wash); }
+.c-pill.agt { border-color: var(--m-agt-soft); color: var(--m-agt); }
+.c-pill.agt:hover { background: var(--m-agt-wash); }
+
+/* ── Tab Bar ── */
+.c-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--b2);
+}
+.c-tab {
+  padding: 10px 16px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--t4);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s var(--ease);
+  position: relative;
+}
+.c-tab:hover { color: var(--t2); }
+.c-tab.active {
+  color: var(--t1);
+  border-bottom-color: var(--m-cht);
+}
+
+/* ── Search Input ── */
+.c-search {
+  background: var(--d1);
+  border: 1px solid var(--b2);
+  border-radius: var(--r-sm);
+  padding: 5px 12px;
+  color: var(--t2);
+  font-family: var(--f-mono);
+  font-size: 0.65rem;
+  outline: none;
+  transition: all 0.2s var(--ease);
+  width: 200px;
+}
+.c-search:focus { border-color: var(--m-cht); box-shadow: 0 0 0 2px var(--m-cht-wash); }
+.c-search::placeholder { color: var(--t5); }
+
+/* ── Pipeline Flow ── */
+.c-pipe { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+.c-pipe-node {
+  padding: 5px 12px;
+  border-radius: var(--r-sm);
+  font-family: var(--f-mono);
+  font-size: 0.65rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.c-pipe-node.n { background: var(--d4); color: var(--t3); }
+.c-pipe-node.pas { background: var(--m-pas-wash); color: var(--m-pas); border: 1px solid var(--m-pas-soft); }
+.c-pipe-node.cht { background: var(--m-cht-wash); color: var(--m-cht); border: 1px solid var(--m-cht-soft); }
+.c-pipe-node.agt { background: var(--m-agt-wash); color: var(--m-agt); border: 1px solid var(--m-agt-soft); }
+.c-pipe-arrow {
+  font-family: var(--f-mono);
+  color: var(--t5);
+  padding: 0 6px;
+  font-size: 0.65rem;
+}
+
+/* ── Table ── */
+.c-table-wrap {
+  background: var(--d2);
+  border: 1px solid var(--b1);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.c-table-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--d3);
+  border-bottom: 1px solid var(--b1);
+}
+.c-table-title { font-weight: 600; font-size: 0.82rem; }
+.c-table-filters { display: flex; gap: 4px; margin-left: 16px; }
+table.c-table { width: 100%; border-collapse: collapse; }
+.c-table thead th {
+  text-align: left;
+  padding: 7px 16px;
+  font-family: var(--f-mono);
+  font-size: 0.55rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--t5);
+  border-bottom: 1px solid var(--b1);
+}
+.c-table tbody tr {
+  border-bottom: 1px solid var(--b1);
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.c-table tbody tr:last-child { border-bottom: none; }
+.c-table tbody tr:hover { background: var(--d3); }
+.c-table tbody tr.err { background: var(--s-crit-wash); }
+.c-table tbody tr.err:hover { background: rgba(252,129,129,0.06); }
+.c-table td { padding: 10px 16px; font-size: 0.78rem; }
+.c-table td.mono { font-family: var(--f-mono); font-size: 0.72rem; }
+.c-table td.muted { color: var(--t4); }
+.c-table td.ghost { color: var(--t5); }
+
+/* group header */
+.c-table tr.grp td {
+  background: var(--d3);
+  font-family: var(--f-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--t4);
+  padding: 6px 16px;
+}
+
+/* ── Feed ── */
+.c-feed-item {
+  display: flex;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--b1);
+  cursor: pointer;
+  transition: background 0.1s;
+  font-size: 0.72rem;
+}
+.c-feed-item:last-child { border-bottom: none; }
+.c-feed-item:hover { background: var(--d3); margin: 0 -16px; padding: 6px 16px; }
+.c-feed-time {
+  font-family: var(--f-mono);
+  font-size: 0.6rem;
+  color: var(--t5);
+  min-width: 36px;
+  white-space: nowrap;
+}
+.c-feed-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+.c-feed-text { color: var(--t3); }
+.c-feed-item.err .c-feed-text { color: var(--s-crit); }
+.c-feed-item.err .c-feed-time { color: rgba(252,129,129,0.5); }
+
+/* ═══ Staggered entry animation ═══ */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.section { animation: fade-up 0.5s var(--ease) both; }
+.section:nth-child(2) { animation-delay: 0.05s; }
+.section:nth-child(3) { animation-delay: 0.1s; }
+.section:nth-child(4) { animation-delay: 0.15s; }
+.section:nth-child(5) { animation-delay: 0.2s; }
+.section:nth-child(6) { animation-delay: 0.25s; }
+.section:nth-child(7) { animation-delay: 0.3s; }
+.section:nth-child(8) { animation-delay: 0.35s; }
+.section:nth-child(9) { animation-delay: 0.4s; }
+.section:nth-child(10) { animation-delay: 0.45s; }
+.section:nth-child(11) { animation-delay: 0.5s; }
+
+/* ═══ Utility ═══ */
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.gap-4 { gap: 4px; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+.gap-24 { gap: 24px; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+<!-- ═══ Header ═══ -->
+<div class="ds-header section">
+  <h1>WhatSoup Console</h1>
+  <div class="tagline">Design System v2 — Submarine Control Room</div>
+  <div class="mode-dots">
+    <span></span><span></span><span></span>
+  </div>
+</div>
+
+<!-- ═══ TYPOGRAPHY ═══ -->
+<div class="section">
+  <div class="section-label">Typography</div>
+  <div class="type-row">
+    <div class="type-specimen" style="font-size:2rem;font-weight:800;letter-spacing:-0.04em;">The Soup Kitchen</div>
+    <div class="type-meta">Outfit 800<br>2rem · -0.04em tracking<br>Page titles, hero text</div>
+  </div>
+  <div class="type-row">
+    <div class="type-specimen" style="font-size:0.82rem;font-weight:600;">Line Detail — Summary · Mode · Pipeline · Access · History</div>
+    <div class="type-meta">Outfit 600<br>0.82rem<br>Section headings, tab labels</div>
+  </div>
+  <div class="type-row">
+    <div class="type-specimen" style="font-size:0.78rem;font-weight:400;color:var(--t2);">Messages awaiting manual reply on passive lines. Chat pipeline processing 2 queued messages.</div>
+    <div class="type-meta">Outfit 400<br>0.78rem<br>Body text, descriptions</div>
+  </div>
+  <div class="type-row">
+    <div class="type-specimen" style="font-family:var(--f-mono);font-size:1.7rem;font-weight:600;letter-spacing:-0.04em;">1,247</div>
+    <div class="type-meta">IBM Plex Mono 600<br>1.7rem · -0.04em<br>KPI values, hero numbers</div>
+  </div>
+  <div class="type-row">
+    <div class="type-specimen" style="font-family:var(--f-mono);font-size:0.72rem;font-weight:400;color:var(--t2);">+1 555-0200 · besbot · port 9093 · queued: 2 · 340ms avg</div>
+    <div class="type-meta">IBM Plex Mono 400<br>0.72rem<br>Data values, table cells</div>
+  </div>
+  <div class="type-row">
+    <div class="type-specimen" style="font-family:var(--f-mono);font-size:0.55rem;font-weight:500;text-transform:uppercase;letter-spacing:0.14em;color:var(--t5);">STATUS · LINE · MODE · PIPELINE · UNREAD · LAST ACTIVE</div>
+    <div class="type-meta">IBM Plex Mono 500<br>0.55rem · 0.14em<br>Headers, labels, ghost text</div>
+  </div>
+</div>
+
+<!-- ═══ SURFACES ═══ -->
+<div class="section">
+  <div class="section-label">Depth Stack</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="swatch" style="background:var(--d0);"></div><div class="label"><span class="name">d0 Void</span><span class="hex">#050709</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--d1);"></div><div class="label"><span class="name">d1 Base</span><span class="hex">#0a0d12</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--d2);"></div><div class="label"><span class="name">d2 Raised</span><span class="hex">#0f1319</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--d3);"></div><div class="label"><span class="name">d3 Surface</span><span class="hex">#141922</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--d4);"></div><div class="label"><span class="name">d4 Overlay</span><span class="hex">#1a202c</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--d5);"></div><div class="label"><span class="name">d5 Elevated</span><span class="hex">#212836</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--d6);"></div><div class="label"><span class="name">d6 Float</span><span class="hex">#2a3244</span></div></div>
+  </div>
+</div>
+
+<!-- ═══ MODE COLORS ═══ -->
+<div class="section">
+  <div class="section-label">Mode Colors — The Signature</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="swatch glow" style="background:var(--m-pas);"></div><div class="label"><span class="name">Passive</span><span class="hex">#2dd4a8</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--m-pas-soft);"></div><div class="label"><span class="name">Pas Soft</span><span class="hex">30% opacity</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--m-pas-wash);"></div><div class="label"><span class="name">Pas Wash</span><span class="hex">6% opacity</span></div></div>
+    <div class="color-chip"><div class="swatch glow" style="background:var(--m-cht);"></div><div class="label"><span class="name">Chat</span><span class="hex">#38bdf8</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--m-cht-soft);"></div><div class="label"><span class="name">Cht Soft</span><span class="hex">30% opacity</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--m-cht-wash);"></div><div class="label"><span class="name">Cht Wash</span><span class="hex">6% opacity</span></div></div>
+    <div class="color-chip"><div class="swatch glow" style="background:var(--m-agt);"></div><div class="label"><span class="name">Agent</span><span class="hex">#a78bfa</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--m-agt-soft);"></div><div class="label"><span class="name">Agt Soft</span><span class="hex">30% opacity</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--m-agt-wash);"></div><div class="label"><span class="name">Agt Wash</span><span class="hex">6% opacity</span></div></div>
+  </div>
+</div>
+
+<!-- ═══ SEMANTIC ═══ -->
+<div class="section">
+  <div class="section-label">Semantic</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="swatch" style="background:var(--s-ok);"></div><div class="label"><span class="name">OK</span><span class="hex">#2dd4a8</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--s-warn);"></div><div class="label"><span class="name">Warning</span><span class="hex">#f6ad55</span></div></div>
+    <div class="color-chip"><div class="swatch" style="background:var(--s-crit);"></div><div class="label"><span class="name">Critical</span><span class="hex">#fc8181</span></div></div>
+  </div>
+</div>
+
+<!-- ═══ NAVIGATION ═══ -->
+<div class="section">
+  <div class="section-label">Navigation</div>
+  <div class="comp-card" data-name="Nav Bar">
+    <div class="c-nav">
+      <span class="c-nav-logo"><span class="w">What</span><span class="s">Soup</span></span>
+      <div class="c-nav-items">
+        <span class="c-nav-item active">Soup Kitchen</span>
+        <span class="c-nav-item">Lines</span>
+        <span class="c-nav-item">Inbox</span>
+        <span class="c-nav-item">Ops</span>
+      </div>
+      <span class="c-nav-spacer"></span>
+      <span class="c-nav-status"><span class="c-dot ok"></span> 4 lines healthy</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ KPI STRIP ═══ -->
+<div class="section">
+  <div class="section-label">KPI Strip</div>
+  <div class="comp-card" data-name="Fleet Metrics" style="padding:0;overflow:hidden;">
+    <div class="c-kpi-strip">
+      <div class="c-kpi">
+        <div class="c-kpi-value" style="color:var(--s-ok);">12</div>
+        <div class="c-kpi-label">Lines Active</div>
+        <div class="c-kpi-spark"><svg viewBox="0 0 140 32" preserveAspectRatio="none"><polyline fill="none" stroke="var(--s-ok)" stroke-width="1.5" points="0,28 14,22 28,16 42,18 56,12 70,16 84,8 98,6 112,12 126,4 140,7"/></svg></div>
+      </div>
+      <div class="c-kpi">
+        <div class="c-kpi-value" style="color:var(--s-crit);">2</div>
+        <div class="c-kpi-label">Attention</div>
+      </div>
+      <div class="c-kpi">
+        <div class="c-kpi-value" style="color:var(--s-warn);">94</div>
+        <div class="c-kpi-label">Unread</div>
+        <div class="c-kpi-spark"><svg viewBox="0 0 140 32" preserveAspectRatio="none"><polyline fill="none" stroke="var(--s-warn)" stroke-width="1.5" points="0,28 14,22 28,26 42,18 56,20 70,12 84,16 98,8 112,14 126,6 140,11"/></svg></div>
+      </div>
+      <div class="c-kpi">
+        <div class="c-kpi-value" style="color:var(--m-agt);">3</div>
+        <div class="c-kpi-label">Agent Sessions</div>
+      </div>
+      <div class="c-kpi">
+        <div class="c-kpi-value" style="color:var(--m-cht);">1.2k</div>
+        <div class="c-kpi-label">Msgs Today</div>
+        <div class="c-kpi-spark"><svg viewBox="0 0 140 32" preserveAspectRatio="none"><polyline fill="none" stroke="var(--m-cht)" stroke-width="1.5" points="0,26 14,20 28,24 42,14 56,18 70,8 84,16 98,6 112,12 126,4 140,9"/></svg></div>
+      </div>
+      <div class="c-kpi">
+        <div class="c-kpi-value" style="color:var(--t2);">247<span style="font-size:0.8rem;font-weight:400;color:var(--t4);">ms</span></div>
+        <div class="c-kpi-label">Avg Response</div>
+        <div class="c-kpi-spark"><svg viewBox="0 0 140 32" preserveAspectRatio="none"><polyline fill="none" stroke="var(--t5)" stroke-width="1.5" points="0,16 14,18 28,14 42,16 56,12 70,18 84,14 98,16 112,12 126,14 140,16"/></svg></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ATOMS ═══ -->
+<div class="section">
+  <div class="section-label">Atoms</div>
+  <div class="comp-grid">
+    <div class="comp-card" data-name="Status">
+      <div class="flex gap-24 items-center">
+        <div class="flex gap-8 items-center"><span class="c-dot ok"></span><span style="font-size:0.78rem;">Connected</span></div>
+        <div class="flex gap-8 items-center"><span class="c-dot warn"></span><span style="font-size:0.78rem;">Degraded</span></div>
+        <div class="flex gap-8 items-center"><span class="c-dot crit"></span><span style="font-size:0.78rem;">Down</span></div>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Modes">
+      <div class="flex gap-12 items-center">
+        <span class="c-mode passive">passive</span>
+        <span class="c-mode chat">chat</span>
+        <span class="c-mode agent">agent</span>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Heartbeats">
+      <div class="flex flex-col gap-16">
+        <div class="flex gap-12 items-center"><span style="font-family:var(--f-mono);font-size:0.6rem;color:var(--t4);width:60px;">Healthy</span>
+          <div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div></div>
+        </div>
+        <div class="flex gap-12 items-center"><span style="font-family:var(--f-mono);font-size:0.6rem;color:var(--t4);width:60px;">Degraded</span>
+          <div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat slow"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat slow"></div><div class="c-hb-beat slow"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat slow"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat slow"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div></div>
+        </div>
+        <div class="flex gap-12 items-center"><span style="font-family:var(--f-mono);font-size:0.6rem;color:var(--t4);width:60px;">Failed</span>
+          <div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Alert">
+      <div class="c-alert">
+        <span class="c-alert-badge">2 alerts</span>
+        <span class="c-alert-chip">Loops — auth expired</span>
+        <span class="c-alert-chip">Q — budget 92%</span>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Filters">
+      <div class="flex gap-4">
+        <span class="c-pill active">All (14)</span>
+        <span class="c-pill pas">passive</span>
+        <span class="c-pill cht">chat</span>
+        <span class="c-pill agt">agent</span>
+      </div>
+    </div>
+    <div class="comp-card" data-name="Tabs">
+      <div class="c-tabs">
+        <span class="c-tab active">Summary</span>
+        <span class="c-tab">Mode</span>
+        <span class="c-tab">Pipeline</span>
+        <span class="c-tab">Access</span>
+        <span class="c-tab">History</span>
+        <span class="c-tab">Logs</span>
+        <span class="c-tab">Metrics</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PIPELINE VIZ ═══ -->
+<div class="section">
+  <div class="section-label">Pipeline Visualizations</div>
+  <div class="comp-card" data-name="Per-Mode Flows">
+    <div class="flex flex-col gap-24">
+      <div>
+        <div style="font-family:var(--f-mono);font-size:0.55rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Passive</div>
+        <div class="c-pipe">
+          <span class="c-pipe-node n">inbound</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node pas">store</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node n">done</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-family:var(--f-mono);font-size:0.55rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Chat</div>
+        <div class="c-pipe">
+          <span class="c-pipe-node n">inbound</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node n">access</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node cht">queue</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node cht">RAG</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node cht">API</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node n">outbound</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-family:var(--f-mono);font-size:0.55rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Agent</div>
+        <div class="c-pipe">
+          <span class="c-pipe-node n">inbound</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node agt">router</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node agt">SDK loop</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node agt">tools</span><span class="c-pipe-arrow">→</span>
+          <span class="c-pipe-node n">outbound</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TABLE ═══ -->
+<div class="section">
+  <div class="section-label">Connection Table</div>
+  <div class="comp-card comp-full" data-name="Fleet Table" style="padding:0;overflow:hidden;">
+    <div class="c-table-wrap">
+      <div class="c-table-bar">
+        <div class="flex items-center">
+          <span class="c-table-title">Connections</span>
+          <div class="c-table-filters">
+            <span class="c-pill active">All (14)</span>
+            <span class="c-pill pas">passive</span>
+            <span class="c-pill cht">chat</span>
+            <span class="c-pill agt">agent</span>
+          </div>
+        </div>
+        <input class="c-search" placeholder="Filter lines...">
+      </div>
+      <table class="c-table">
+        <thead><tr><th style="width:36px"></th><th>Line</th><th>Mode</th><th>Health</th><th>Pipeline</th><th>Unread</th><th>Active</th></tr></thead>
+        <tbody>
+          <tr class="grp"><td colspan="7">Personal (2 lines)</td></tr>
+          <tr>
+            <td><span class="c-dot ok"></span></td>
+            <td class="mono">+1 555-0100 <span style="color:var(--t5);">My Main</span></td>
+            <td><span class="c-mode passive">passive</span></td>
+            <td><div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div></div></td>
+            <td class="ghost">—</td>
+            <td class="mono" style="color:var(--s-warn);">47</td>
+            <td class="muted">2m</td>
+          </tr>
+          <tr class="grp"><td colspan="7">BES Support (2 lines)</td></tr>
+          <tr>
+            <td><span class="c-dot ok"></span></td>
+            <td class="mono">+1 555-0200 <span style="color:var(--t5);">BES Bot</span></td>
+            <td><span class="c-mode chat">chat</span></td>
+            <td><div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div></div></td>
+            <td class="mono" style="color:var(--m-cht);font-size:0.65rem;">queued: 2</td>
+            <td class="ghost">—</td>
+            <td class="muted">1m</td>
+          </tr>
+          <tr>
+            <td><span class="c-dot ok"></span></td>
+            <td class="mono">+1 555-0202 <span style="color:var(--t5);">Q</span></td>
+            <td><span class="c-mode agent">agent</span></td>
+            <td><div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div></div></td>
+            <td class="mono" style="color:var(--m-agt);font-size:0.65rem;">active (turn 4)</td>
+            <td class="ghost">—</td>
+            <td class="muted">30s</td>
+          </tr>
+          <tr class="grp"><td colspan="7">Friends (1 line)</td></tr>
+          <tr class="err">
+            <td><span class="c-dot crit"></span></td>
+            <td class="mono">+44 7700-0301 <span style="color:var(--t5);">Loops</span></td>
+            <td><span class="c-mode agent">agent</span></td>
+            <td><div class="c-hb"><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat up"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div><div class="c-hb-beat down"></div></div></td>
+            <td class="mono" style="color:var(--s-crit);font-size:0.65rem;">disconnected</td>
+            <td class="ghost">—</td>
+            <td style="color:var(--s-crit);">12m</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FEED ═══ -->
+<div class="section">
+  <div class="section-label">Activity Feed</div>
+  <div class="comp-card" data-name="Live Events">
+    <div>
+      <div class="c-feed-item"><span class="c-feed-time">12:04</span><span class="c-feed-dot" style="background:var(--m-cht);"></span><span class="c-feed-text">msg in → BES Bot → chat pipeline</span></div>
+      <div class="c-feed-item"><span class="c-feed-time">12:03</span><span class="c-feed-dot" style="background:var(--m-agt);"></span><span class="c-feed-text">turn done — Q (turn 4, 3 tools)</span></div>
+      <div class="c-feed-item"><span class="c-feed-time">12:01</span><span class="c-feed-dot" style="background:var(--m-cht);"></span><span class="c-feed-text">reply sent — BES Bot (340ms)</span></div>
+      <div class="c-feed-item"><span class="c-feed-time">11:58</span><span class="c-feed-dot" style="background:var(--s-warn);"></span><span class="c-feed-text">rule: auto-greet on BES Bot</span></div>
+      <div class="c-feed-item err"><span class="c-feed-time">11:48</span><span class="c-feed-dot" style="background:var(--s-crit);"></span><span class="c-feed-text">auth expired — Loops</span></div>
+      <div class="c-feed-item"><span class="c-feed-time">11:45</span><span class="c-feed-dot" style="background:var(--m-cht);"></span><span class="c-feed-text">RAG query — BES Bot (pinecone, 3 hits)</span></div>
+      <div class="c-feed-item"><span class="c-feed-time">11:42</span><span class="c-feed-dot" style="background:var(--m-pas);"></span><span class="c-feed-text">msg in → My Main (stored)</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TECH STACK ═══ -->
+<div class="section">
+  <div class="section-label">Recommended Tech Stack</div>
+  <div class="comp-card" data-name="Production Dependencies">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;">
+      <div>
+        <div style="font-family:var(--f-mono);font-size:0.55rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Framework</div>
+        <div style="font-size:0.78rem;color:var(--t2);line-height:1.8;">
+          React 19 + TypeScript<br>
+          Vite (build)<br>
+          React Router 7
+        </div>
+      </div>
+      <div>
+        <div style="font-family:var(--f-mono);font-size:0.55rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Styling + Components</div>
+        <div style="font-size:0.78rem;color:var(--t2);line-height:1.8;">
+          Tailwind CSS v4<br>
+          Radix UI (primitives)<br>
+          Motion (framer-motion)
+        </div>
+      </div>
+      <div>
+        <div style="font-family:var(--f-mono);font-size:0.55rem;color:var(--t4);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Data + Viz</div>
+        <div style="font-size:0.78rem;color:var(--t2);line-height:1.8;">
+          TanStack Table<br>
+          TanStack Query<br>
+          Recharts (sparklines)
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

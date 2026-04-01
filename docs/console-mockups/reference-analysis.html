@@ -1,0 +1,166 @@
+<h2>Reference Product Analysis</h2>
+<p class="subtitle">What to steal, what to skip, and what WhatSoup needs that none of them have.</p>
+
+<div class="section">
+  <h3>1. Wati — Multi-Number WhatsApp Management</h3>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">What they do well</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li><strong>Number picker sidebar</strong> — dropdown to switch between connected WhatsApp numbers, each tagged (Support, Sales, Marketing)</li>
+          <li><strong>Unified contact list</strong> — contacts from all numbers in one list, tagged with source number</li>
+          <li><strong>Per-number analytics</strong> — filter inbox analytics by specific number</li>
+          <li><strong>Shared automations</strong> — rules/chatbots run across all connected numbers</li>
+        </ul>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">What WhatSoup needs differently</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li>Wati treats all numbers identically. <strong>WhatSoup has three different runtimes per line</strong> — can't use a uniform inbox</li>
+          <li>No concept of groups — flat number list. <strong>WhatSoup needs group hierarchy</strong></li>
+          <li>No connection health monitoring — assumes cloud-hosted reliability</li>
+          <li>No agent/SDK concept at all</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:0.75rem;padding:0.75rem;background:rgba(102,153,187,0.1);border-radius:6px;font-size:0.85rem;">
+    <strong>Steal:</strong> Number picker/filter pattern. Tag lines visibly. Per-line analytics filtering.<br>
+    <strong>Skip:</strong> Flat structure. Uniform inbox assumption.
+  </div>
+</div>
+
+<div class="section">
+  <h3>2. Respond.io — Unified Messaging Inbox</h3>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">What they do well</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li><strong>Three-panel layout</strong> — sidebar (inboxes/teams/filters) | conversation list | chat view</li>
+          <li><strong>Quick Actions on hover</strong> — manage conversations without opening them</li>
+          <li><strong>Team inbox concept</strong> — conversations grouped by team, with counts</li>
+          <li><strong>Conversation cards</strong> — show channel icon, last message, timestamp, assigned agent, labels</li>
+          <li><strong>Real-time dashboard widgets</strong> — open, unattended, unassigned counts</li>
+        </ul>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">What WhatSoup needs differently</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li>Respond.io is <strong>conversation-centric</strong>. WhatSoup is <strong>line-centric</strong> — the line is the primary object, not the conversation</li>
+          <li>No concept of different processing pipelines per channel</li>
+          <li>Agent means "human agent" — WhatSoup's agent means "Claude SDK runtime"</li>
+          <li>Missing: connection management, auth lifecycle, runtime state</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:0.75rem;padding:0.75rem;background:rgba(102,153,187,0.1);border-radius:6px;font-size:0.85rem;">
+    <strong>Steal:</strong> Three-panel inbox layout for the Inbox screen. Conversation cards with context. Quick actions on hover. Real-time count widgets.<br>
+    <strong>Skip:</strong> Conversation-first navigation. Human agent assignment model.
+  </div>
+</div>
+
+<div class="section">
+  <h3>3. Chatwoot — Open-Source Multi-Channel</h3>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">What they do well</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li><strong>Live dashboard</strong> — real-time KPIs: Open, Unattended, Unassigned with agent avatars</li>
+          <li><strong>Heatmap</strong> — busiest times of day over last 7 days</li>
+          <li><strong>Agent workload view</strong> — conversations per agent in real-time</li>
+          <li><strong>Mine / Unassigned / All tabs</strong> — simple but effective filtering</li>
+          <li><strong>Labels and conversation tagging</strong></li>
+        </ul>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">What WhatSoup needs differently</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li>Chatwoot is <strong>support-team focused</strong> — agent assignment, SLAs, CSAT. WhatSoup is <strong>single-operator fleet management</strong></li>
+          <li>No connection/runtime monitoring</li>
+          <li>No concept of different processing modes per channel</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:0.75rem;padding:0.75rem;background:rgba(102,153,187,0.1);border-radius:6px;font-size:0.85rem;">
+    <strong>Steal:</strong> Live KPI cards. Heatmap for activity patterns. Simple tab filtering.<br>
+    <strong>Skip:</strong> Agent assignment model. Support-team workflows.
+  </div>
+</div>
+
+<div class="section">
+  <h3>4. Uptime Kuma — Self-Hosted Monitoring</h3>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">What they do well</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li><strong>Service list with status bars</strong> — left sidebar shows each monitor with a heartbeat strip (green/red blocks)</li>
+          <li><strong>Detail panel</strong> — click a service → see response time, uptime %, cert expiry, response chart</li>
+          <li><strong>Dark theme, ops-first</strong> — designed for monitoring, not marketing</li>
+          <li><strong>Grouping</strong> — monitors can be organized into collapsible groups</li>
+          <li><strong>Status badges</strong> — 100%, 0%, with color coding</li>
+        </ul>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">What WhatSoup needs differently</div>
+      <div class="mockup-body" style="font-size:0.85rem;">
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.8;">
+          <li>Uptime Kuma monitors <strong>external services</strong>. WhatSoup monitors <strong>its own managed connections + runtimes</strong></li>
+          <li>Need profile-aware detail panels, not just response time</li>
+          <li>Need inbox/messaging integration, not just uptime</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:0.75rem;padding:0.75rem;background:rgba(102,153,187,0.1);border-radius:6px;font-size:0.85rem;">
+    <strong>Steal:</strong> Heartbeat status strips per line. Ops-first dark aesthetic. Collapsible groups. Detail panel on click. KPI cards with sparklines (Grafana style).<br>
+    <strong>Skip:</strong> External monitoring model. Static status pages.
+  </div>
+</div>
+
+<div class="section" style="margin-top:2rem;padding:1.25rem;background:rgba(187,153,102,0.1);border:1px solid rgba(187,153,102,0.3);border-radius:8px;">
+  <h3>What None of Them Have (WhatSoup's Gap)</h3>
+  <ul style="margin:0;padding-left:1.2rem;line-height:2;font-size:0.9rem;">
+    <li><strong>Profile-aware pipelines</strong> — no product treats different lines as fundamentally different runtimes</li>
+    <li><strong>Agent SDK runtime monitoring</strong> — active sessions, turn counts, tool usage, budget tracking</li>
+    <li><strong>Hybrid AI escalation</strong> — rule engine → API → SDK is a unique flow</li>
+    <li><strong>Connection lifecycle management</strong> — QR auth, reconnection, multi-device state for self-hosted WhatsApp</li>
+    <li><strong>Single-operator fleet model</strong> — not a team tool, not a SaaS platform, but a personal ops console</li>
+  </ul>
+</div>
+
+<div class="section" style="margin-top:1.5rem;">
+  <h3>Synthesis: The Soup Kitchen Should Be...</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+    <div style="padding:1rem;background:rgba(255,255,255,0.04);border-radius:8px;">
+      <strong>From Uptime Kuma</strong>
+      <p style="font-size:0.85rem;margin:0.5rem 0 0;">Heartbeat strips per line. Dark ops aesthetic. Group → service hierarchy. Click-to-detail pattern.</p>
+    </div>
+    <div style="padding:1rem;background:rgba(255,255,255,0.04);border-radius:8px;">
+      <strong>From Grafana</strong>
+      <p style="font-size:0.85rem;margin:0.5rem 0 0;">KPI stat cards with sparklines at the top. Color-coded thresholds. Time-range selector for metrics.</p>
+    </div>
+    <div style="padding:1rem;background:rgba(255,255,255,0.04);border-radius:8px;">
+      <strong>From Respond.io</strong>
+      <p style="font-size:0.85rem;margin:0.5rem 0 0;">Three-panel inbox layout. Conversation cards. Quick actions on hover. Real-time count badges.</p>
+    </div>
+    <div style="padding:1rem;background:rgba(255,255,255,0.04);border-radius:8px;">
+      <strong>From Wati</strong>
+      <p style="font-size:0.85rem;margin:0.5rem 0 0;">Number/line picker with tags. Per-line analytics filtering. Unified contact view across lines.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:2rem;">Review the analysis and let me know what resonates, what's missing, or what direction to push. Respond in terminal.</p>
