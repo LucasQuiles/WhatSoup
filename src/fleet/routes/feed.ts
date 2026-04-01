@@ -5,6 +5,19 @@ import { jsonResponse, parseQueryString } from '../../lib/http.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { HealthPoller } from '../health-poller.ts';
 
+/** Find the most recent .log file in a directory (pino-roll uses numbered names). */
+function findLatestLogFile(logDir: string): string | null {
+  try {
+    const files = fs.readdirSync(logDir)
+      .filter(f => f.endsWith('.log'))
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(logDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return files.length > 0 ? path.join(logDir, files[0].name) : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface FeedDeps {
   discovery: FleetDiscovery;
   healthPoller: HealthPoller;
@@ -36,7 +49,8 @@ export function handleGetFeed(
   const events: FeedEvent[] = [];
 
   for (const inst of instances.values()) {
-    const logFile = path.join(inst.logDir, 'current.log');
+    const logFile = findLatestLogFile(inst.logDir);
+    if (!logFile) continue;
     const lines = readTailLines(logFile, 30);
 
     for (const line of lines) {

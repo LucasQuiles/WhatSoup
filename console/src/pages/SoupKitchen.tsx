@@ -60,6 +60,15 @@ const SoupKitchen: FC = () => {
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
 
+  // Derive sparkline data from per-line heartbeat arrays
+  const sparkConnected = useMemo(() => {
+    if (!lines.length) return undefined;
+    // Normalize message counts across lines as a sparkline
+    const vals = lines.map(l => l.messagesToday ?? 0);
+    const max = Math.max(...vals, 1);
+    return vals.map(v => v / max);
+  }, [lines]);
+
   // Derive alerts from lines
   const alerts = useMemo(
     () =>
@@ -150,6 +159,7 @@ const SoupKitchen: FC = () => {
           color="text-s-ok"
           onClick={() => toggleKpi("connected")}
           active={activeKpi === "connected"}
+          sparkData={sparkConnected}
         />
         <KpiCard
           value={kpis.needAttention}
