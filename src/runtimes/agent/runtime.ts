@@ -6,6 +6,9 @@ import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
+import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
+import { dequeueNextReport } from '../../core/heal.ts';
+import { sendTracked } from '../../core/durability.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -525,6 +528,90 @@ export class AgentRuntime implements Runtime {
         chatJid: resumeChatJid,
         text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
       };
+    }
+
+    // Register emit_heal_result MCP tool (once, for control-plane repair completion)
+    if (config.controlPeers.size > 0) {
+      this.registry.register({
+        name: 'emit_heal_result',
+        description: 'Signal completion of a repair cycle. Only callable during an active repair session.',
+        schema: EmitHealResultSchema,
+        scope: 'global',
+        targetMode: 'caller-supplied',
+        replayPolicy: 'unsafe',
+        handler: async (params) => {
+          const parsed = EmitHealResultSchema.parse(params);
+
+          // Validate: must match active repair
+          if (!this.activeControlReportId) {
+            throw new Error('No active repair session');
+          }
+          if (parsed.reportId !== this.activeControlReportId) {
+            throw new Error(`No active repair for reportId ${parsed.reportId}. Active: ${this.activeControlReportId}`);
+          }
+
+          const controlQueue = this.getControlQueue();
+          if (!controlQueue) {
+            throw new Error('Control queue not found');
+          }
+
+          // Determine target JID (Loops)
+          const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
+          const loopsJid = loopsPhone ? `${loopsPhone}@s.whatsapp.net` : null;
+
+          if (parsed.result === 'fixed') {
+            if (loopsJid) {
+              await controlQueue.sendControlMessage(loopsJid, 'HEAL_COMPLETE', {
+                reportId: parsed.reportId,
+                errorClass: parsed.errorClass,
+                result: 'fixed',
+                commitSha: parsed.commitSha,
+                diagnosis: parsed.diagnosis,
+              }, this.durability ?? undefined);
+            }
+          } else {
+            // escalate
+            if (loopsJid) {
+              await controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
+                reportId: parsed.reportId,
+                errorClass: parsed.errorClass,
+                diagnosis: parsed.diagnosis,
+              }, this.durability ?? undefined);
+            }
+            // Also DM admin
+            const adminPhone = [...config.adminPhones][0];
+            if (adminPhone) {
+              const adminJid = `${adminPhone}@s.whatsapp.net`;
+              await sendTracked(this.messenger, adminJid,
+                `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
+                this.durability ?? undefined, { replayPolicy: 'safe' });
+            }
+          }
+
+          // Resolve pending_heal_reports row (Type 3 cleanup)
+          try {
+            this.db.raw.prepare(
+              "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
+            ).run(parsed.reportId);
+          } catch { /* best-effort */ }
+
+          // Clear single-flight slot
+          this.clearControlReport();
+
+          // Dequeue next report if any
+          const next = dequeueNextReport(this.db);
+          if (next) {
+            const context = next.context ? JSON.parse(next.context) : {};
+            void this.handleControlTurn(next.report_id, JSON.stringify({
+              ...context,
+              reportId: next.report_id,
+              errorClass: next.error_class,
+            }));
+          }
+
+          return { sent: true, reportId: parsed.reportId, result: parsed.result };
+        },
+      });
     }
 
     log.info('AgentRuntime started');

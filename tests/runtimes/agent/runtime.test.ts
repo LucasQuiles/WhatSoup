@@ -105,10 +105,13 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
   }),
 }));
 
-// Mock config.adminPhones — default includes the test admin phone
+// Mock config — includes adminPhones and an empty controlPeers map.
+// emit_heal_result tool registration is gated on controlPeers.size > 0;
+// keeping it empty here avoids that path (which requires heal.ts / durability mocks).
 vi.mock('../../../src/config.ts', () => ({
   config: {
     adminPhones: new Set<string>(['18459780919']),
+    controlPeers: new Map<string, string>(),
   },
 }));
 
