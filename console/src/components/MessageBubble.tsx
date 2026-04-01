@@ -124,8 +124,8 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
     >
       {/* Sender label (incoming only) */}
       {!msg.fromMe && (
-        <div className="flex items-center" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)', gap: 'var(--sp-2)' }}>
-          <span className="c-label">{resolveDisplayName(msg.senderName)}</span>
+        <div className="flex items-center" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)', gap: 'var(--sp-2)', maxWidth: '100%' }}>
+          <span className="c-label truncate">{resolveDisplayName(msg.senderName)}</span>
           {onCreateContact && isRawJid(msg.senderName ?? '') && (
             <button
               onClick={() => onCreateContact(resolveDisplayName(msg.senderName))}

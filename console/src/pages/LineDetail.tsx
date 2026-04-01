@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
+import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { formatRelative, formatTime } from '../lib/format-time'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
 import { useToast } from '../hooks/toast-context'
@@ -792,10 +793,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const scrollRef = React.useRef<HTMLDivElement>(null)
-  const bottomRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
-  const [showJumpToBottom, setShowJumpToBottom] = React.useState(false)
   const [msgText, setMsgText] = React.useState('')
   const [isSending, setIsSending] = React.useState(false)
 
@@ -850,59 +848,14 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
   const reversed = React.useMemo(() => [...messages].reverse(), [messages])
 
-  // ── Auto-scroll logic ──
-  // Pinned to bottom by default. Detach on scroll up. Re-attach on scroll to bottom.
-  const forcePinRef = React.useRef(true) // true on mount + chat switch
-  const prevChatRef = React.useRef(selectedChat)
-
-  // On chat switch: force pin
-  if (prevChatRef.current !== selectedChat) {
-    prevChatRef.current = selectedChat
-    forcePinRef.current = true
-  }
-
-  // After every render where messages changed: scroll to bottom if pinned.
-  // Check ACTUAL scroll position, not a stale ref — this is the source of truth.
-  React.useLayoutEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-
-    if (forcePinRef.current) {
-      // Forced pin (chat switch / mount) — always scroll.
-      // Only clear the flag once there's actual content to scroll to.
-      el.scrollTop = el.scrollHeight
-      if (reversed.length > 0) forcePinRef.current = false
-      return
-    }
-
-    // Check if user is at the bottom RIGHT NOW (before we scroll)
-    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-    if (gap <= 150) {
-      // User is near bottom — keep them there
-      el.scrollTop = el.scrollHeight
-    }
-  }, [reversed]) // new array ref on every messages change
-
-  // Scroll handler: only controls the "Jump to newest" button visibility
-  const handleScroll = React.useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-    setShowJumpToBottom(gap > 200)
-  }, [])
-
-  const jumpToBottom = React.useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-    setShowJumpToBottom(false)
-  }, [])
+  // Shared auto-scroll hook
+  const { scrollRef: stickyScrollRef, showJump: showJumpToBottom, handleScroll, jumpToBottom } = useStickyScroll(reversed, selectedChat)
 
   return (
     <>
       <div className="relative flex-1 min-h-0 flex flex-col">
       <div
-        ref={scrollRef}
+        ref={stickyScrollRef}
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto scrollbar-hide"
         style={{ padding: 'var(--sp-4) var(--sp-5)' }}
@@ -932,8 +885,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           ))}
         </div>
 
-        {/* Scroll anchor */}
-        <div ref={bottomRef} />
+        {/* Scroll anchor (empty div at bottom for content termination) */}
+        <div />
       </div>
 
       {/* Jump to newest — floats above the input bar, inside the positioned wrapper */}
