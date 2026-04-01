@@ -44,13 +44,28 @@ export function handleGetChats(
     const unreadStmt = db.prepare(`
       SELECT unread_count FROM chats WHERE conversation_key = ? LIMIT 1
     `);
+    // Best display name: prefer chat.name, then non-numeric sender_name, then conversation_key
+    const chatNameStmt = db.prepare(`
+      SELECT name FROM chats WHERE conversation_key = ? LIMIT 1
+    `);
+    const senderNameStmt = db.prepare(`
+      SELECT sender_name FROM messages
+      WHERE conversation_key = ? AND sender_name IS NOT NULL
+        AND sender_name != conversation_key
+        AND sender_name NOT GLOB '[0-9]*'
+      ORDER BY timestamp DESC LIMIT 1
+    `);
 
     return result.data.map((chat) => {
       const preview = (previewStmt.get(chat.conversationKey) as any)?.content ?? null;
       const unread = (unreadStmt.get(chat.conversationKey) as any)?.unread_count ?? 0;
+      // Resolve best display name
+      const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
+      const senderName = (senderNameStmt.get(chat.conversationKey) as any)?.sender_name;
+      const displayName = chatName || senderName || chat.senderName || chat.conversationKey;
       return {
         conversationKey: chat.conversationKey,
-        name: chat.senderName,
+        name: displayName,
         lastMessagePreview: preview,
         lastMessageAt: chat.lastMessageAt != null ? new Date(chat.lastMessageAt).toISOString() : null,
         unreadCount: unread,
