@@ -859,11 +859,13 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
     const el = scrollRef.current
     if (!el) return
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    isNearBottom.current = distFromBottom < 100
-    setShowJumpToBottom(distFromBottom > 200)
+    isNearBottom.current = distFromBottom < 200
+    setShowJumpToBottom(distFromBottom > 300)
   }, [])
 
   const jumpToBottom = () => {
+    isNearBottom.current = true
+    setShowJumpToBottom(false)
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
