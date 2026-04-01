@@ -95,6 +95,21 @@ describe('markdownToWhatsApp', () => {
     expect(markdownToWhatsApp(input)).toBe('*yes* and `**no**` and *also*');
   });
 
+  // ── Bracket cleanup ──
+
+  it('strips bare [text] brackets', () => {
+    expect(markdownToWhatsApp('see [this section] for details')).toBe('see this section for details');
+  });
+
+  it('removes reference-style link definitions', () => {
+    expect(markdownToWhatsApp('[1]: https://example.com')).toBe('');
+  });
+
+  it('converts [text](url) before stripping bare brackets', () => {
+    expect(markdownToWhatsApp('[click here](https://example.com) and [ref]'))
+      .toBe('click here (https://example.com) and ref');
+  });
+
   // ── Preserved formatting ──
 
   it('leaves > quotes alone', () => {

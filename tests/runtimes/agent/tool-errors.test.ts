@@ -54,9 +54,15 @@ describe('classifyToolError', () => {
     expect(result.detail).toBe('Read — File not found');
   });
 
-  it('simplifies "Cancelled: parallel tool call" to "Cancelled"', () => {
+  it('classifies cancelled tool calls as cancelled category', () => {
     const result = classifyToolError('Bash', '<tool_use_error>Cancelled: parallel tool call Bash(cd /home/q/agents/q/.worktrees/fleet-module && git diff) error</tool_use_error>');
+    expect(result.category).toBe('cancelled');
     expect(result.detail).toBe('Bash — Cancelled');
+  });
+
+  it('classifies "was cancelled" as cancelled', () => {
+    const result = classifyToolError('Read', 'Tool call was cancelled by the user');
+    expect(result.category).toBe('cancelled');
   });
 
   it('lowercases "Exit code N"', () => {

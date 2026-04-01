@@ -21,7 +21,8 @@ export type ToolCategory =
   | 'skill'
   | 'other'
   | 'error'
-  | 'blocked';
+  | 'blocked'
+  | 'cancelled';
 
 export interface ToolUpdate {
   category: ToolCategory;
@@ -40,6 +41,7 @@ export const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: st
   other:     { label: 'Using',     emoji: '🛠️' },
   error:     { label: 'Error',     emoji: '⚠️' },
   blocked:   { label: 'Blocked',  emoji: '🚫' },
+  cancelled: { label: 'Cancelled', emoji: '⏭️' },
 };
 
 const MAX_MESSAGE_LENGTH = 4000;

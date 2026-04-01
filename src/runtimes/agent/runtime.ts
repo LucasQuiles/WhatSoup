@@ -314,6 +314,12 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
     .trim();
 
   const lower = cleaned.toLowerCase();
+
+  const isCancelled =
+    lower.startsWith('cancelled') ||
+    lower.includes('tool call cancelled') ||
+    lower.includes('was cancelled');
+
   const isBlocked =
     lower.includes('not allowed') ||
     lower.includes('permission denied') ||
@@ -336,10 +342,9 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   const humanName = toolName === 'unknown' ? '' : toolName;
   const detail = humanName ? `${humanName} — ${reason}` : reason;
 
-  return {
-    category: isBlocked ? 'blocked' : 'error',
-    detail,
-  };
+  const category = isCancelled ? 'cancelled' : isBlocked ? 'blocked' : 'error';
+
+  return { category, detail };
 }
 
 export class AgentRuntime implements Runtime {

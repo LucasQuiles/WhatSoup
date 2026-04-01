@@ -61,6 +61,13 @@ export function markdownToWhatsApp(text: string): string {
   // Links: [text](url) → text (url)
   out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
 
+  // Reference-style link definitions: [label]: url → remove
+  out = out.replace(/^\[([^\]]+)\]:\s+\S+.*$/gm, '');
+
+  // Bare bracket references: [text] without (url) → strip brackets
+  // Must run AFTER link conversion to avoid mangling [text](url)
+  out = out.replace(/\[([^\]]+)\]/g, '$1');
+
   // --- Clean whitespace ---
 
   // Collapse 3+ consecutive blank lines to 2
