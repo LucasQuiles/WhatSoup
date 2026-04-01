@@ -13,7 +13,8 @@ import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { extractPhone } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isControlPrefix, extractProtocol } from './heal-protocol.ts';
+import { isControlPrefix, extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
+import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
 
 const log = createChildLogger('ingest');
@@ -62,8 +63,24 @@ export function createIngestHandler(
             log.error({ err, messageId: msg.messageId }, 'failed to store control message');
           }
 
-          // TODO: handleControlMessage will be wired in Phase 5
           log.info({ messageId: msg.messageId, protocol, peer: msg.senderJid }, 'control message intercepted');
+
+          // Route HEAL_COMPLETE and HEAL_ESCALATE to the heal state machine
+          if (protocol === 'HEAL_COMPLETE' || protocol === 'HEAL_ESCALATE') {
+            try {
+              const payload = extractPayload(msg.content);
+              if (payload) {
+                const parsed = HealCompletePayloadSchema.parse(payload);
+                if (protocol === 'HEAL_COMPLETE') {
+                  handleHealComplete(db, parsed);
+                } else {
+                  handleHealEscalate(db, parsed);
+                }
+              }
+            } catch (err) {
+              log.error({ err, messageId: msg.messageId, protocol }, 'failed to handle control message payload');
+            }
+          }
 
           if (durability) {
             const seq = durability.journalInbound(msg.messageId, toConversationKey(msg.chatJid), msg.chatJid, 'control');
