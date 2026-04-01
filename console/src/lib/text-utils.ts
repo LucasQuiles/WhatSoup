@@ -32,13 +32,21 @@ export function resolveDisplayName(name: string | null | undefined): string {
 /** Format a phone-like JID for display. */
 export function formatPhone(raw: string): string {
   if (!raw || raw === 'unknown') return '—'
-  // Strip non-digits
   const digits = raw.replace(/\D/g, '')
+  // US number: +1 XXX-XXX-XXXX
   if (digits.length === 11 && digits.startsWith('1')) {
     return `+1 ${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7)}`
   }
   if (digits.length === 10) {
     return `+1 ${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`
+  }
+  // International with country code (12-15 digits)
+  if (digits.length >= 12 && digits.length <= 15) {
+    return `+${digits.slice(0, digits.length - 10)} ${digits.slice(-10, -7)}-${digits.slice(-7, -4)}-${digits.slice(-4)}`
+  }
+  // LID or other long identifier — show abbreviated
+  if (digits.length > 15) {
+    return `#${digits.slice(-6)}`
   }
   return `+${digits}`
 }
