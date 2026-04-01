@@ -13,6 +13,8 @@ import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { extractPhone } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { isControlPrefix, extractProtocol } from './heal-protocol.ts';
+import { config } from '../config.ts';
 
 const log = createChildLogger('ingest');
 
@@ -22,6 +24,8 @@ const log = createChildLogger('ingest');
  * given runtime.
  *
  * Steps (in order):
+ *   0. Control plane intercept — if isControlPrefix and sender is a controlPeer, store in
+ *      control_messages (NOT messages), journal as skipped, and return
  *   1. Store the message (always, even if later rejected)
  *   1b. Echo correlation — if isFromMe, call durabilityEngine.matchEcho and return
  *   1c. Passive short-circuit — journal as complete, return (no runtime dispatch)
@@ -42,6 +46,33 @@ export function createIngestHandler(
 ): (msg: IncomingMessage) => void {
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
+      // 0. Control plane intercept — before any normal storage
+      if (msg.content && isControlPrefix(msg.content)) {
+        const phone = extractPhone(msg.senderJid);
+        const isPeer = [...config.controlPeers.values()].includes(phone);
+        if (isPeer) {
+          const protocol = extractProtocol(msg.content);
+          // Store in control_messages, NOT messages
+          try {
+            db.raw.prepare(`
+              INSERT OR IGNORE INTO control_messages (message_id, direction, peer_jid, protocol, payload)
+              VALUES (?, 'inbound', ?, ?, ?)
+            `).run(msg.messageId, msg.senderJid, protocol, msg.content);
+          } catch (err) {
+            log.error({ err, messageId: msg.messageId }, 'failed to store control message');
+          }
+
+          // TODO: handleControlMessage will be wired in Phase 5
+          log.info({ messageId: msg.messageId, protocol, peer: msg.senderJid }, 'control message intercepted');
+
+          if (durability) {
+            const seq = durability.journalInbound(msg.messageId, toConversationKey(msg.chatJid), msg.chatJid, 'control');
+            durability.markInboundSkipped(seq, 'control_message');
+          }
+          return;
+        }
+      }
+
       // 1. Store the incoming message — always, even if we later reject it.
       //    Atomic insert: INSERT OR IGNORE returns false if message_id already exists.
       let conversationKey: string;
