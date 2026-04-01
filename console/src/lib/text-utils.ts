@@ -19,6 +19,16 @@ export function stripMarkdown(text: string): string {
     .trim()
 }
 
+/** Resolve a chat display name — format raw JIDs as phone numbers. */
+export function resolveDisplayName(name: string | null | undefined): string {
+  if (!name) return '—'
+  // If it's all digits (raw JID), format as phone
+  if (/^\d{5,}$/.test(name)) return formatPhone(name)
+  // If it ends with @g.us or @s.whatsapp.net, extract and format
+  if (name.includes('@')) return formatPhone(name.split('@')[0])
+  return name
+}
+
 /** Format a phone-like JID for display. */
 export function formatPhone(raw: string): string {
   if (!raw || raw === 'unknown') return '—'

@@ -5,7 +5,7 @@ import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import EmptyState from '../components/EmptyState'
 import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Shield } from 'lucide-react'
-import { getInitials, stripMarkdown } from '../lib/text-utils'
+import { getInitials, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
   const { data: lines } = useLines()
@@ -96,14 +96,14 @@ export default function Inbox() {
                   className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
                   style={{ width: 'var(--avatar-md)', height: 'var(--avatar-md)', background: 'var(--color-d5)', fontSize: 'var(--font-size-sm)' }}
                 >
-                  {getInitials(chat.name)}
+                  {getInitials(resolveDisplayName(chat.name))}
                 </div>
 
                 {/* Body */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between" style={{ marginBottom: '2px' }}>
                     <span className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--chat-name-max)' }}>
-                      {chat.name}
+                      {resolveDisplayName(chat.name)}
                     </span>
                     <span className="c-label flex-shrink-0" style={{ marginLeft: 'var(--sp-2)' }}>
                       {formatChatTime(chat.lastMessageAt)}
@@ -161,7 +161,7 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1">
-                <div className="text-t1 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>{currentChat.name}</div>
+                <div className="text-t1 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>{resolveDisplayName(currentChat.name)}</div>
                 <div className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-label)' }}>
                   {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
@@ -286,7 +286,7 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)' }}>{currentChat.name}</div>
+                <div className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)' }}>{resolveDisplayName(currentChat.name)}</div>
                 <div className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>

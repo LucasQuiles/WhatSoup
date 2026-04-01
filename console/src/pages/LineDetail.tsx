@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
 import { formatRelative, formatTime, formatChatTime } from '../lib/format-time'
-import { getInitials, stripMarkdown } from '../lib/text-utils'
+import { getInitials, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
 import { useToast } from '../hooks/toast-context'
 import ModeBadge from '../components/ModeBadge'
@@ -776,12 +776,12 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
                   className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
                   style={{ width: 'var(--avatar-md)', height: 'var(--avatar-md)', background: 'var(--color-d5)', fontSize: 'var(--font-size-sm)' }}
                 >
-                  {getInitials(chat.name)}
+                  {getInitials(resolveDisplayName(chat.name))}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between" style={{ marginBottom: '2px' }}>
                     <span className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--chat-name-max)' }}>
-                      {chat.name}
+                      {resolveDisplayName(chat.name)}
                     </span>
                     <span className="c-label flex-shrink-0" style={{ marginLeft: 'var(--sp-2)' }}>
                       {formatChatTime(chat.lastMessageAt)}
