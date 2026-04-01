@@ -798,6 +798,9 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   const [msgText, setMsgText] = React.useState('')
   const [isSending, setIsSending] = React.useState(false)
 
+  // Clear message input when switching conversations
+  React.useEffect(() => { setMsgText('') }, [selectedChat])
+
   const handleSend = async () => {
     if (!msgText.trim() || !selectedChat || isSending) return
     setIsSending(true)

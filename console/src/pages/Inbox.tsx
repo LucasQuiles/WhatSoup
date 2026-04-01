@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useLines, useChats, useMessages } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
@@ -20,6 +20,9 @@ export default function Inbox() {
   const [msgText, setMsgText] = useState('')
   const [isSending, setIsSending] = useState(false)
   const queryClient = useQueryClient()
+
+  // Clear message input when switching chats or lines
+  useEffect(() => { setMsgText('') }, [selectedChat, selectedLine])
 
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
   const { data: chats } = useChats(activeLine)
