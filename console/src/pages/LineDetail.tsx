@@ -272,11 +272,30 @@ function SummaryTab({ line }: { line: LineInstance }) {
     { label: 'ACTIVE', value: line.lastActive ? formatRelative(line.lastActive) : '—', color: 'text-t3' },
   ]
 
+  // Pipeline node active states driven by real runtime data
+  const isOnline = line.status === 'online'
   const pipelineNodes = line.mode === 'passive'
-    ? [{ label: 'Inbound', active: true }, { label: 'Store', active: true }, { label: 'Done', active: false }]
+    ? [
+        { label: 'Inbound', active: isOnline },
+        { label: 'Store', active: isOnline },
+        { label: 'Done', active: isOnline && (line.unread ?? 0) === 0 },
+      ]
     : line.mode === 'chat'
-    ? [{ label: 'Inbound', active: true }, { label: 'Access', active: true }, { label: 'Queue', active: (line.queueDepth ?? 0) > 0 }, { label: 'Enrich', active: false }, { label: 'API', active: true }, { label: 'Outbound', active: false }]
-    : [{ label: 'Inbound', active: true }, { label: 'Router', active: true }, { label: 'SDK Loop', active: (line.activeSessions ?? 0) > 0 }, { label: 'Tools', active: (line.activeSessions ?? 0) > 0 }, { label: 'Outbound', active: false }]
+    ? [
+        { label: 'Inbound', active: isOnline },
+        { label: 'Access', active: isOnline && line.accessMode !== 'self_only' },
+        { label: 'Queue', active: (line.queueDepth ?? 0) > 0 },
+        { label: 'Enrich', active: (line.enrichmentUnprocessed ?? 0) > 0 },
+        { label: 'API', active: isOnline },
+        { label: 'Outbound', active: (line.queueDepth ?? 0) > 0 },
+      ]
+    : [
+        { label: 'Inbound', active: isOnline },
+        { label: 'Router', active: isOnline },
+        { label: 'SDK Loop', active: (line.activeSessions ?? 0) > 0 },
+        { label: 'Tools', active: (line.activeSessions ?? 0) > 0 },
+        { label: 'Outbound', active: (line.activeSessions ?? 0) > 0 },
+      ]
 
   const rawConfig = line.config ?? {}
   const config = line.mode !== 'passive' ? buildConfigEntries(rawConfig) : null
@@ -558,61 +577,60 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
 
 /* ═══ Pipeline Tab ═══ */
 function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance; modeColor: string }) {
+  const isOnline = line.status === 'online'
   if (mode === 'passive') {
     return (
       <div
-        style={{ borderRadius: 'var(--radius-lg)' }}
-        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
+        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12">
-          <PipelineNode label="Inbound" color={modeColor} active />
+          <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
           <PipelineArrow />
-          <PipelineNode label="Store" color={modeColor} active />
+          <PipelineNode label="Store" color={modeColor} active={isOnline} />
           <PipelineArrow />
-          <PipelineNode label="Done" color={modeColor} />
+          <PipelineNode label="Done" color={modeColor} active={isOnline && (line.unread ?? 0) === 0} />
         </div>
       </div>
     )
   }
   if (mode === 'chat') {
-    const queueDepth = line.health?.runtime?.chat?.queueDepth ?? 0
+    const queueDepth = line.queueDepth ?? 0
+    const enrichUnproc = line.enrichmentUnprocessed ?? 0
     return (
       <div
-        style={{ borderRadius: 'var(--radius-lg)' }}
-        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
+        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
-          <PipelineNode label="Inbound" color={modeColor} active />
+          <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
           <PipelineArrow />
-          <PipelineNode label="Access" color={modeColor} />
+          <PipelineNode label="Access" color={modeColor} active={isOnline && line.accessMode !== 'self_only'} />
           <PipelineArrow />
           <PipelineNode label="Queue" value={`depth: ${queueDepth}`} color={modeColor} active={queueDepth > 0} />
           <PipelineArrow />
-          <PipelineNode label="Enrich" color={modeColor} />
+          <PipelineNode label="Enrich" value={enrichUnproc > 0 ? `${enrichUnproc} pending` : undefined} color={modeColor} active={enrichUnproc > 0} />
           <PipelineArrow />
-          <PipelineNode label="API" color={modeColor} active />
+          <PipelineNode label="API" color={modeColor} active={isOnline} />
           <PipelineArrow />
-          <PipelineNode label="Outbound" color={modeColor} />
+          <PipelineNode label="Outbound" color={modeColor} active={queueDepth > 0} />
         </div>
       </div>
     )
   }
-  const sessions = line.health?.runtime?.agent?.activeSessions ?? 0
+  const sessions = line.activeSessions ?? 0
   return (
     <div
-      style={{ borderRadius: 'var(--radius-lg)' }}
-      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
+      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: 'var(--sp-7)' }}
     >
       <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
-        <PipelineNode label="Inbound" color={modeColor} active />
+        <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
         <PipelineArrow />
-        <PipelineNode label="Router" color={modeColor} />
+        <PipelineNode label="Router" color={modeColor} active={isOnline} />
         <PipelineArrow />
         <PipelineNode label="SDK Loop" value={`sessions: ${sessions}`} color={modeColor} active={sessions > 0} />
         <PipelineArrow />
         <PipelineNode label="Tools" color={modeColor} active={sessions > 0} />
         <PipelineArrow />
-        <PipelineNode label="Outbound" color={modeColor} />
+        <PipelineNode label="Outbound" color={modeColor} active={sessions > 0} />
       </div>
     </div>
   )

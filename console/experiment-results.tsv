@@ -3,3 +3,4 @@ commit	metric	status	description
 3c141e8	7 items	keep	wire real config to SummaryTab+ModeTab, remove CHAT_CONFIG/AGENT_CONFIG
 e9e093f	5 items	keep	wire send message in Inbox + History tabs
 26891fd	2 items	keep	wire Ops restart buttons, remove hardcoded sparklines
+5f428a9	1 item	keep	real messagesToday from daily DB count
