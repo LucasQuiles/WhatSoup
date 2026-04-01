@@ -96,7 +96,7 @@ export class FleetDbReader {
           m.sender_name,
           COUNT(*) as message_count,
           MAX(m.timestamp) as last_message_at,
-          CASE WHEN m.conversation_key LIKE '%@g.us' THEN 1 ELSE 0 END as is_group
+          CASE WHEN m.conversation_key LIKE '%_at_g.us' OR m.conversation_key LIKE '%@g.us' THEN 1 ELSE 0 END as is_group
         FROM messages m
         WHERE m.deleted_at IS NULL
         GROUP BY m.conversation_key

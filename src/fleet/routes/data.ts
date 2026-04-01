@@ -39,41 +39,87 @@ export function handleGetChats(
   // Fetch last-message previews and unread counts in a single db pass.
   const enriched = deps.dbReader.query(instance.name, instance.dbPath, (db) => {
     const previewStmt = db.prepare(`
-      SELECT content FROM messages
+      SELECT content, sender_name, is_from_me FROM messages
       WHERE conversation_key = ? AND deleted_at IS NULL
       ORDER BY timestamp DESC LIMIT 1
     `);
     const unreadStmt = db.prepare(`
       SELECT unread_count FROM chats WHERE conversation_key = ? LIMIT 1
     `);
-    // Best display name: prefer chat.name, then non-numeric sender_name, then conversation_key
+    // Group name: check groups table (jid uses @g.us), then chats table
+    const groupNameStmt = db.prepare(`
+      SELECT subject FROM groups WHERE jid = ? LIMIT 1
+    `);
     const chatNameStmt = db.prepare(`
       SELECT name FROM chats WHERE conversation_key = ? LIMIT 1
     `);
-    const senderNameStmt = db.prepare(`
+    // DM name: find the OTHER person's name (not from_me, non-numeric)
+    const dmNameStmt = db.prepare(`
       SELECT sender_name FROM messages
-      WHERE conversation_key = ? AND sender_name IS NOT NULL
+      WHERE conversation_key = ? AND is_from_me = 0
+        AND sender_name IS NOT NULL
         AND sender_name != conversation_key
         AND sender_name NOT GLOB '[0-9]*'
       ORDER BY timestamp DESC LIMIT 1
     `);
+    // For groups without metadata: list unique participant names
+    const participantsStmt = db.prepare(`
+      SELECT DISTINCT sender_name FROM messages
+      WHERE conversation_key = ? AND sender_name IS NOT NULL
+        AND sender_name NOT GLOB '[0-9]*'
+        AND is_from_me = 0
+      LIMIT 4
+    `);
 
     return result.data.map((chat) => {
-      const preview = (previewStmt.get(chat.conversationKey) as any)?.content ?? null;
+      const lastMsg = previewStmt.get(chat.conversationKey) as any;
+      const preview = lastMsg?.content ?? null;
       const unread = (unreadStmt.get(chat.conversationKey) as any)?.unread_count ?? 0;
-      // Resolve best display name
-      const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
-      const senderName = (senderNameStmt.get(chat.conversationKey) as any)?.sender_name;
-      const displayName = chatName || senderName || chat.senderName || chat.conversationKey;
+
+      // Detect group: conversation_key contains _at_g.us or @g.us
+      const isGroup = chat.conversationKey.includes('_at_g.us') || chat.conversationKey.includes('@g.us');
+
+      // Resolve display name
+      let displayName: string;
+      if (isGroup) {
+        // Convert _at_g.us back to @g.us for the groups table lookup
+        const groupJid = chat.conversationKey.replace('_at_g.us', '@g.us');
+        const groupSubject = (groupNameStmt.get(groupJid) as any)?.subject;
+        const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
+        if (groupSubject) {
+          displayName = groupSubject;
+        } else if (chatName) {
+          displayName = chatName;
+        } else {
+          // No metadata — build from participant names
+          const parts = (participantsStmt.all(chat.conversationKey) as any[]).map(p => p.sender_name);
+          displayName = parts.length > 0 ? parts.join(', ') : chat.conversationKey;
+        }
+      } else {
+        // DM: prefer the other person's name
+        const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
+        const otherName = (dmNameStmt.get(chat.conversationKey) as any)?.sender_name;
+        displayName = chatName || otherName || chat.senderName || chat.conversationKey;
+      }
+
+      // Last message preview: prefix with sender name for groups
+      let formattedPreview = preview;
+      if (isGroup && preview && lastMsg?.sender_name && !lastMsg?.is_from_me) {
+        const short = lastMsg.sender_name.split(' ')[0]; // first name only
+        formattedPreview = `${short}: ${preview}`;
+      } else if (isGroup && preview && lastMsg?.is_from_me) {
+        formattedPreview = `You: ${preview}`;
+      }
+
       return {
         conversationKey: chat.conversationKey,
         name: displayName,
-        lastMessagePreview: preview,
+        lastMessagePreview: formattedPreview,
         lastMessageAt: chat.lastMessageAt != null
           ? new Date((chat.lastMessageAt > 1e12 ? chat.lastMessageAt : chat.lastMessageAt * 1000)).toISOString()
           : null,
         unreadCount: unread,
-        isGroup: chat.isGroup,
+        isGroup,
       };
     });
   });
