@@ -323,6 +323,8 @@ body::before {
 .c-btn-send:hover {
   padding: 6px 12px;
   gap: var(--sp-2);
+  opacity: 1;
+  filter: brightness(1.1);
 }
 .c-btn-send:hover .c-btn-send-label {
   max-width: 50px;
