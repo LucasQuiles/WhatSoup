@@ -843,35 +843,23 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
   // Auto-scroll: pinned to bottom unless user scrolls up
   const userScrolledUp = React.useRef(false)
-  const prevMsgCount = React.useRef(messages.length)
   const prevChat2 = React.useRef(selectedChat)
 
-  // On chat switch: always snap to bottom
+  // Single scroll effect: handles chat switch AND new messages
   React.useEffect(() => {
-    userScrolledUp.current = false
-    setShowJumpToBottom(false)
-    // Use requestAnimationFrame so DOM has rendered the new messages
-    requestAnimationFrame(() => {
-      const el = scrollRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    })
-  }, [selectedChat])
-
-  // On new messages arriving: auto-scroll only if pinned
-  React.useEffect(() => {
-    if (prevChat2.current !== selectedChat) {
+    const chatChanged = prevChat2.current !== selectedChat
+    if (chatChanged) {
       prevChat2.current = selectedChat
-      prevMsgCount.current = messages.length
-      return
+      userScrolledUp.current = false
+      setShowJumpToBottom(false)
     }
-    if (messages.length !== prevMsgCount.current) {
-      prevMsgCount.current = messages.length
-      if (!userScrolledUp.current) {
-        requestAnimationFrame(() => {
-          const el = scrollRef.current
-          if (el) el.scrollTop = el.scrollHeight
-        })
-      }
+
+    // Scroll to bottom if: chat just switched, OR user hasn't scrolled up
+    if (chatChanged || !userScrolledUp.current) {
+      requestAnimationFrame(() => {
+        const el = scrollRef.current
+        if (el) el.scrollTop = el.scrollHeight
+      })
     }
   }, [selectedChat, messages.length])
 
