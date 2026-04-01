@@ -265,8 +265,29 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
       return { category: 'skill', detail: `\`${trunc(str('skill') || 'skill')}\`` };
     case 'TodoWrite':
       return { category: 'planning', detail: 'Updating todos' };
+    case 'TaskCreate':
+      return { category: 'planning', detail: trunc(str('subject') || 'Creating task') };
+    case 'TaskUpdate':
+      return { category: 'planning', detail: `Updating task ${str('taskId')}` };
+    case 'TaskList':
+    case 'TaskGet':
+      return { category: 'planning', detail: 'Checking tasks' };
     case 'ToolSearch':
       return { category: 'skill', detail: `\`${trunc(str('query') || 'tools')}\`` };
+    case 'LS':
+      return { category: 'reading', detail: `\`${shortPath(str('path') || '.')}\`` };
+    case 'NotebookEdit':
+    case 'NotebookRead':
+      return { category: 'modifying', detail: `\`${shortPath(str('notebook'))}\`` };
+    case 'LSP':
+      return { category: 'searching', detail: trunc(str('command') || 'language server') };
+    case 'EnterPlanMode':
+    case 'ExitPlanMode':
+      return { category: 'planning', detail: toolName === 'EnterPlanMode' ? 'Planning' : 'Executing plan' };
+    case 'SendMessage':
+      return { category: 'agent', detail: trunc(`→ ${str('to')}`) };
+    case 'AskUserQuestion':
+      return { category: 'other', detail: 'Asking a question' };
     default: {
       // MCP tools: "mcp__<server>__<tool-name>" → human-readable monospace tool name
       if (toolName.startsWith('mcp__')) {
@@ -278,6 +299,35 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
       return { category: 'other', detail: `\`${trunc(toolName)}\`` };
     }
   }
+}
+
+/**
+ * Classify a tool_result error as either a blocked tool (permission/hook denial)
+ * or a genuine execution error. Returns an appropriate ToolUpdate with the tool
+ * name and a short description of what went wrong.
+ */
+export function classifyToolError(toolName: string, content: string): ToolUpdate {
+  const lower = content.toLowerCase();
+  const isBlocked =
+    lower.includes('not allowed') ||
+    lower.includes('permission denied') ||
+    lower.includes('blocked by') ||
+    lower.includes('hook blocked') ||
+    lower.includes('denied by') ||
+    lower.includes('not permitted') ||
+    lower.includes('is not in the allow') ||
+    lower.includes('disallowed');
+
+  // Extract a short reason from the error content
+  const firstLine = content.split('\n')[0] ?? content;
+  const reason = firstLine.length > 100 ? firstLine.slice(0, 99) + '…' : firstLine;
+
+  const label = toolName === 'unknown' ? reason : `\`${toolName}\`: ${reason}`;
+
+  return {
+    category: isBlocked ? 'blocked' : 'error',
+    detail: label,
+  };
 }
 
 export class AgentRuntime implements Runtime {
@@ -317,6 +367,9 @@ export class AgentRuntime implements Runtime {
   // lastCrashAt gives operators context to interpret a stale count.
   private recentCrashCount = 0;
   private lastCrashAt: string | null = null;
+
+  /** Maps toolId → toolName for the current turn, so tool_result errors can reference the tool. */
+  private activeToolNames = new Map<string, string>();
 
   private recordCrash(): void {
     this.recentCrashCount++;
@@ -1062,6 +1115,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
+        this.activeToolNames.set(event.toolId, event.toolName);
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
 
@@ -1077,14 +1131,17 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         if (event.isError) {
+          const toolName = this.activeToolNames.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
-          log.warn({ toolId: event.toolId, error: errorPreview }, 'tool error reported by agent');
-          queue.enqueueToolUpdate({ category: 'error', detail: 'Tool Error' });
+          log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
+          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
         }
+        this.activeToolNames.delete(event.toolId);
         break;
 
       case 'result':
         session?.clearTurnWatchdog();
+        this.activeToolNames.clear();
         if (event.text) {
           queue.enqueueText(event.text);
         }
@@ -1810,6 +1867,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
+        this.activeToolNames.set(event.toolId, event.toolName);
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
 
@@ -1831,18 +1889,22 @@ export class AgentRuntime implements Runtime {
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
         if (event.isError) {
+          const toolName = this.activeToolNames.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
+            toolName,
             error: errorPreview,
           }, 'tool error reported by agent');
-          queue.enqueueToolUpdate({ category: 'error', detail: 'Tool Error' });
+          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
         }
+        this.activeToolNames.delete(event.toolId);
         break;
 
       case 'result':
         this.session?.clearTurnWatchdog();
+        this.activeToolNames.clear();
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
           queue.enqueueText(event.text);

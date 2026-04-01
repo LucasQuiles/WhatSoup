@@ -700,7 +700,9 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'tool_result', isError: true, toolId: 'test', content: 'error msg' });
 
-    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'Tool Error' });
+    // classifyToolError uses content to determine error vs blocked.
+    // toolName is 'unknown' here (no prior tool_use event), so detail is just the error message.
+    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
   });
 
   it('tool_result with isError=false does not enqueue anything', async () => {
