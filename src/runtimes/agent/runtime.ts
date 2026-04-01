@@ -49,6 +49,9 @@ const log = createChildLogger('agent-runtime');
 /** Tracks workspace media directories already created — avoids redundant mkdirSync calls. */
 const createdMediaDirs = new Set<string>();
 
+/** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
+const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
  *
@@ -345,6 +348,7 @@ export class AgentRuntime implements Runtime {
   // ─── Control session (self-healing repair) ────────────────────────────────
   private activeControlReportId: string | null = null;
   private controlSession: SessionManager | null = null;
+  private controlSessionTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(db: Database, messenger: Messenger, instanceName?: string, options?: AgentRuntimeOptions) {
     this.db = db;
@@ -607,6 +611,12 @@ export class AgentRuntime implements Runtime {
               "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
             ).run(parsed.reportId);
           } catch { /* best-effort */ }
+
+          // Clear hard timeout (normal completion path)
+          if (this.controlSessionTimeout) {
+            clearTimeout(this.controlSessionTimeout);
+            this.controlSessionTimeout = null;
+          }
 
           // Clear single-flight slot
           this.clearControlReport();
@@ -888,6 +898,10 @@ export class AgentRuntime implements Runtime {
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
+      // Shut down old session first to prevent zombie processes.
+      // Without this, spawnSession() overwrites this.child, orphaning the old
+      // process and its DB row. Mirrors handleNew() pattern.
+      await session.shutdown();
       await session.spawnSession();
       // Successful spawn after a crash — decay the crash counter
       if (this.recentCrashCount > 0) this.recentCrashCount--;
@@ -1152,6 +1166,10 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
         onCrash: (_info) => {
           log.warn('control session crashed');
+          if (this.controlSessionTimeout) {
+            clearTimeout(this.controlSessionTimeout);
+            this.controlSessionTimeout = null;
+          }
           this.activeControlReportId = null;
         },
         notifyUser: () => {},
@@ -1174,8 +1192,56 @@ export class AgentRuntime implements Runtime {
 
     try {
       await this.controlSession.sendTurn(turn);
+      // Start hard timeout — if the control session doesn't resolve within 15 minutes,
+      // force-escalate and shut it down to prevent resource exhaustion.
+      this.controlSessionTimeout = setTimeout(() => {
+        log.warn({ reportId }, 'control session timed out after 15 minutes — force-escalating');
+
+        // Send HEAL_ESCALATE to Loops so its heal state is updated
+        const controlQueue = this.getControlQueue();
+        const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
+        if (controlQueue && loopsPhone) {
+          const loopsJid = `${loopsPhone}@s.whatsapp.net`;
+          controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
+            reportId,
+            errorClass: 'timeout',
+            diagnosis: 'Repair session timed out after 15 minutes without resolution',
+          }, this.durability ?? undefined).catch(err =>
+            log.error({ err, reportId }, 'failed to send HEAL_ESCALATE on timeout'));
+        }
+
+        // DM admin
+        const adminPhone = [...config.adminPhones][0];
+        if (adminPhone) {
+          const adminJid = `${adminPhone}@s.whatsapp.net`;
+          sendTracked(this.messenger, adminJid,
+            `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
+            this.durability ?? undefined, { replayPolicy: 'safe' })
+            .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
+        }
+
+        if (this.controlSession) {
+          void this.controlSession.shutdown().catch(() => {});
+        }
+        this.clearControlReport();
+
+        // Dequeue next report if any
+        const next = dequeueNextReport(this.db);
+        if (next) {
+          const context = next.context ? JSON.parse(next.context) : {};
+          void this.handleControlTurn(next.report_id, JSON.stringify({
+            ...context,
+            reportId: next.report_id,
+            errorClass: next.error_class,
+          }));
+        }
+      }, CONTROL_SESSION_TIMEOUT_MS);
     } catch (err) {
       log.error({ err, reportId }, 'failed to send repair turn to control session');
+      if (this.controlSessionTimeout) {
+        clearTimeout(this.controlSessionTimeout);
+        this.controlSessionTimeout = null;
+      }
       this.activeControlReportId = null;
     }
   }
@@ -1400,9 +1466,15 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
         onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
         notifyUser: (msg) => {
-          this.chatSessions.delete(workspaceKey);
-          this.chatQueues.get(workspaceKey)?.abortTurn();
-          this.chatQueues.delete(workspaceKey);
+          // Only remove session from map if it's actually dead (crash/exit).
+          // Watchdog warnings fire on ACTIVE sessions — removing those breaks
+          // event routing and causes cascading false-idle notifications.
+          const s = this.chatSessions.get(workspaceKey);
+          if (s && !s.getStatus().active) {
+            this.chatSessions.delete(workspaceKey);
+            this.chatQueues.get(workspaceKey)?.abortTurn();
+            this.chatQueues.delete(workspaceKey);
+          }
           this.handleCrashNotify(msg, chatJid);
         },
         onResumeFailed: () => this.handleResumeFailed(chatJid),
@@ -1453,10 +1525,15 @@ export class AgentRuntime implements Runtime {
           onEvent: (event) => this.handleEventPerChat(chatJid, event),
           onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
           notifyUser: (msg) => {
-            // Remove crashed session so next message spawns a fresh one
-            this.chatSessions.delete(chatJid);
-            this.chatQueues.get(chatJid)?.abortTurn();
-            this.chatQueues.delete(chatJid);
+            // Only remove session from map if it's actually dead (crash/exit).
+            // Watchdog warnings fire on ACTIVE sessions — removing those breaks
+            // event routing and causes cascading false-idle notifications.
+            const s = this.chatSessions.get(chatJid);
+            if (s && !s.getStatus().active) {
+              this.chatSessions.delete(chatJid);
+              this.chatQueues.get(chatJid)?.abortTurn();
+              this.chatQueues.delete(chatJid);
+            }
             this.handleCrashNotify(msg, chatJid);
           },
         });

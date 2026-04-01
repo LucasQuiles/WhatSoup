@@ -15,6 +15,7 @@ import { PineconeMemory } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
+import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid } from './core/jid-constants.ts';
@@ -509,7 +510,21 @@ const echoTimeoutInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'echo timeout sweep failed'); }
 }, 10_000);
 
-// 12. Seed contacts directory from message history (so @name mentions work after restart)
+// 12. Degradation signal check — detect persistent decryption failures (Type 2)
+// Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
+// Q itself has controlPeers but no 'q' entry — running the timer on Q would accumulate
+// local heal_reports rows and consume valve/single-flight state for no operational benefit.
+const degradationInterval = config.controlPeers.has('q') ? setInterval(() => {
+  try {
+    // runtime.currentControlReportId only exists on AgentRuntime
+    const controlReportId = 'currentControlReportId' in runtime
+      ? (runtime as any).currentControlReportId as string | null
+      : null;
+    checkDegradationSignals(db, connectionManager, durability, controlReportId);
+  } catch (err) { log.error({ err }, 'degradation signal check failed'); }
+}, 60_000) : null;
+
+// 13. Seed contacts directory from message history (so @name mentions work after restart)
 {
   const rows = db.raw.prepare(
     `SELECT DISTINCT sender_jid, sender_name FROM messages
@@ -525,7 +540,7 @@ const echoTimeoutInterval = setInterval(() => {
   }
 }
 
-// 12. Connect and start
+// 14. Connect and start
 async function start(): Promise<void> {
   // runtime.start() starts enrichment poller internally
   await runtime.start();
@@ -582,6 +597,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(startupCleanupTimeout);
     clearInterval(retentionInterval);
     clearInterval(echoTimeoutInterval);
+    if (degradationInterval) clearInterval(degradationInterval);
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally

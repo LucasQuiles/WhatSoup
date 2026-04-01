@@ -301,6 +301,7 @@ export class SessionManager {
         }
       }
 
+      this.clearTurnWatchdog();
       this.active = false;
       this.child = null;
       this.sessionId = null;
@@ -370,6 +371,7 @@ export class SessionManager {
 
   private handleWatchdogSoft(): void {
     this.watchdogSoft = null;
+    if (!this.active || this.child === null) return;
     if (this.hasPendingTools) {
       log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_soft', pendingTools: this.pendingToolIds.size }, 'agent busy 10 min — long-running tool in progress');
       this.notifyUser?.('_Agent is running a long operation (10+ min). Still working..._');
@@ -381,6 +383,7 @@ export class SessionManager {
 
   private handleWatchdogWarn(): void {
     this.watchdogWarn = null;
+    if (!this.active || this.child === null) return;
     if (this.hasPendingTools) {
       log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_warn', pendingTools: this.pendingToolIds.size }, 'agent busy 20 min — long-running tool, may be stalled');
       this.notifyUser?.('⚠️ _Agent has been running a long operation for 20+ min. Send any message to check in._');
@@ -391,8 +394,9 @@ export class SessionManager {
   }
 
   private handleWatchdogHard(): void {
-    log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
     this.watchdogHard = null;
+    if (!this.active || this.child === null) return;
+    log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
     this.child?.kill('SIGKILL');
   }
 
@@ -469,9 +473,9 @@ export class SessionManager {
    *                  false = ended (user chose /new, not resumable).
    */
   async shutdown(suspend = true): Promise<void> {
+    this.clearTurnWatchdog();
+
     if (this.child !== null) {
-      this.clearTurnWatchdog();
-      this.pendingToolIds.clear();
       this.active = false; // Suppress crash notification for clean shutdown
 
       const currentPid = this.child.pid ?? null;
