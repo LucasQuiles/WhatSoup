@@ -8,9 +8,9 @@ interface StatusDotProps {
   size?: Size;
 }
 
-const sizeMap: Record<Size, string> = {
-  sm: "h-1.5 w-1.5", // 6px — feeds
-  md: "h-2 w-2",     // 8px — tables
+const sizePx: Record<Size, number> = {
+  sm: 6,
+  md: 8,
 };
 
 const colorMap: Record<Status, string> = {
@@ -20,23 +20,36 @@ const colorMap: Record<Status, string> = {
 };
 
 const glowMap: Record<Status, string> = {
-  online: "0 0 12px rgba(45,212,168,0.25)",
+  online: "0 0 12px var(--m-pas-glow, rgba(45,212,168,0.25))",
   degraded: "0 0 12px rgba(246,173,85,0.25)",
   unreachable: "0 0 12px rgba(252,129,129,0.25)",
 };
 
 const StatusDot: FC<StatusDotProps> = ({ status, size = "md" }) => {
+  const px = sizePx[size];
+
   return (
     <span
-      className={`
-        inline-block rounded-full flex-shrink-0
-        ${sizeMap[size]}
-        ${colorMap[status]}
-        ${status === "online" ? "animate-breathe" : ""}
-      `}
-      style={{ boxShadow: glowMap[status] }}
+      className="relative inline-block flex-shrink-0"
+      style={{ width: `${px}px`, height: `${px}px` }}
       aria-label={status}
-    />
+    >
+      {/* Dot */}
+      <span
+        className={`absolute inset-0 rounded-full ${colorMap[status]}`}
+        style={{ boxShadow: glowMap[status] }}
+      />
+      {/* Expanding ring for online status */}
+      {status === "online" && (
+        <span
+          className="absolute rounded-full animate-breathe-ring"
+          style={{
+            inset: "-3px",
+            border: "1px solid var(--m-pas-soft)",
+          }}
+        />
+      )}
+    </span>
   );
 };
 

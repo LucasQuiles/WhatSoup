@@ -44,9 +44,17 @@ export default function Ops() {
   const alerts = useMemo(() => feed.filter(e => e.isError), [feed])
 
   return (
-    <div className="flex-1 flex" style={{ height: 'calc(100vh - 52px)' }}>
+    <div className="flex-1 flex" style={{ height: 'calc(100vh - 52px)', padding: '12px', gap: '8px' }}>
       {/* ── LEFT: Log stream ── */}
-      <div className="flex flex-col min-h-0" style={{ flex: 1.4, borderRight: '1px solid var(--b1)' }}>
+      <div
+        className="flex flex-col min-h-0"
+        style={{
+          flex: 1.4,
+          border: '1px solid var(--b1)',
+          borderRadius: '10px',
+          overflow: 'hidden',
+        }}
+      >
         {/* Line picker + level filter toolbar */}
         <div
           className="flex items-center justify-between px-4 py-2.5 flex-shrink-0"
@@ -170,7 +178,16 @@ export default function Ops() {
       </div>
 
       {/* ── RIGHT: Connection status + runtime state ── */}
-      <div className="flex flex-col min-h-0 overflow-auto" style={{ flex: 1, background: 'var(--color-d1)' }}>
+      <div
+        className="flex flex-col min-h-0 overflow-auto"
+        style={{
+          flex: 1,
+          background: 'var(--color-d1)',
+          border: '1px solid var(--b1)',
+          borderRadius: '10px',
+          overflow: 'hidden',
+        }}
+      >
         {/* Header */}
         <div
           className="flex items-center justify-between px-6 py-3 flex-shrink-0"

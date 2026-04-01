@@ -16,10 +16,13 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
 
   return (
     <div
-      className="flex items-center gap-3 px-10 py-2 flex-shrink-0"
+      className="flex items-center gap-3 flex-shrink-0"
       style={{
+        padding: "8px 16px",
         backgroundColor: "var(--s-crit-wash)",
-        borderBottom: "1px solid rgba(252,129,129,0.2)",
+        border: "1px solid rgba(252,129,129,0.1)",
+        borderRadius: "6px",
+        fontSize: "0.78rem",
       }}
     >
       {/* Count badge */}

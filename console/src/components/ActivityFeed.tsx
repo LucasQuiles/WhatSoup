@@ -55,20 +55,23 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
             <div
               key={i}
               className={`
-                flex items-start gap-2.5 px-4 py-2
-                transition-colors duration-150
+                flex items-start transition-colors duration-150
                 ${isErr ? "" : "hover:bg-d4"}
               `}
-              style={
-                isErr
+              style={{
+                gap: "10px",
+                padding: "6px 0",
+                borderBottom: "1px solid var(--b1)",
+                fontSize: "0.72rem",
+                ...(isErr
                   ? { backgroundColor: "rgba(252,129,129,0.08)" }
-                  : undefined
-              }
+                  : {}),
+              }}
             >
               {/* Time */}
               <span
-                className={`font-mono flex-shrink-0 ${isErr ? "text-s-crit" : "text-t4"}`}
-                style={{ fontSize: "0.7rem", lineHeight: "1.4", minWidth: "3.5rem" }}
+                className={`font-mono flex-shrink-0 ${isErr ? "text-s-crit" : "text-t5"}`}
+                style={{ fontSize: "0.6rem", lineHeight: "1.4", minWidth: "36px" }}
               >
                 {event.time}
               </span>
@@ -84,7 +87,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
               {/* Text */}
               <span
                 className={`font-mono leading-snug ${isErr ? "text-s-crit" : "text-t3"}`}
-                style={{ fontSize: "0.75rem" }}
+                style={{ fontSize: "0.72rem" }}
               >
                 {event.text}
               </span>

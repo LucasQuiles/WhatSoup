@@ -10,7 +10,7 @@ import Skeleton, { TableSkeleton } from '../components/Skeleton'
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
-  ChevronRight, User, Users, UserPlus, UserX,
+  User, Users, UserPlus, UserX,
   RotateCw, MessageSquareOff, Bot, ChevronsUp,
 } from 'lucide-react'
 import type { Mode, ChatItem, AccessEntry, LogEntry } from '../mock-data'
@@ -27,27 +27,35 @@ const TABS = [
 
 type TabId = typeof TABS[number]['id']
 
-/* ═══ Pipeline Node ═══ */
+/* ═══ Pipeline Node — compact inline pill (c-pipe-node) ═══ */
 function PipelineNode({ label, value, color, active }: { label: string; value?: string; color: string; active?: boolean }) {
+  const modeKey = color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt';
   return (
-    <div className="flex flex-col items-center gap-1">
-      <div
-        className="w-16 h-16 rounded-md flex items-center justify-center text-xs font-mono font-medium"
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        className="font-mono font-medium"
         style={{
-          background: active ? `var(--m-${color}-soft)` : 'var(--color-d5)',
-          color: active ? `var(--color-m-${color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt'})` : 'var(--color-t3)',
-          boxShadow: active ? `inset 0 0 0 1px var(--color-m-${color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt'})` : undefined,
+          padding: '5px 12px',
+          borderRadius: '4px',
+          fontSize: '0.65rem',
+          background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
+          color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
+          border: active ? `1px solid var(--m-${modeKey}-soft)` : '1px solid transparent',
         }}
       >
         {label}
-      </div>
-      {value && <span className="text-xs font-mono text-t3">{value}</span>}
-    </div>
+      </span>
+      {value && (
+        <span className="font-mono text-t4" style={{ fontSize: '0.6rem' }}>
+          {value}
+        </span>
+      )}
+    </span>
   )
 }
 
 function PipelineArrow() {
-  return <ChevronRight size={16} className="text-t5 mt-3 flex-shrink-0" />
+  return <span className="text-t5 font-mono flex-shrink-0" style={{ fontSize: '0.7rem' }}>→</span>
 }
 
 /* ═══ Main Component ═══ */
@@ -164,7 +172,7 @@ export default function LineDetail() {
                   ? 'text-t1 cursor-pointer'
                   : 'text-t4 hover:text-t3 cursor-pointer'
               }`}
-              style={{ padding: '10px 16px', fontSize: '0.85rem' }}
+              style={{ padding: '10px 16px', fontSize: '0.78rem', fontWeight: 500 }}
               title={isDeferred ? 'Coming in Phase 2' : undefined}
             >
               <Icon size={15} strokeWidth={1.75} />
@@ -186,7 +194,7 @@ export default function LineDetail() {
       </div>
 
       {/* ═══ Tab content ═══ */}
-      <div className="flex-1 overflow-auto p-6 px-10">
+      <div className="flex-1 overflow-auto" style={{ padding: '24px 40px 48px' }}>
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -228,20 +236,27 @@ function SummaryTab({ line }: { line: any }) {
   ]
 
   return (
-    <div className="grid grid-cols-3 gap-3">
+    <div className="grid grid-cols-3 gap-4">
       {cards.map((card, i) => (
         <motion.div
           key={card.label}
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: i * 0.05, ease: [0.22, 1, 0.36, 1] }}
-          className="rounded-lg p-5"
-          style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)' }}
+          className="rounded-lg"
+          style={{
+            padding: '20px 24px',
+            background: 'var(--color-d2)',
+            border: '1px solid var(--b2)',
+            boxShadow: 'var(--card-shadow)',
+          }}
         >
-          <div className="font-mono text-t5 mb-2" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+          <div className="font-mono text-t4 mb-3" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
             {card.label}
           </div>
-          <div className={`font-mono text-lg font-semibold ${card.color}`}>{card.value}</div>
+          <div className={`font-mono font-semibold ${card.color}`} style={{ fontSize: '1.4rem', letterSpacing: '-0.03em' }}>
+            {card.value}
+          </div>
         </motion.div>
       ))}
     </div>
@@ -258,11 +273,16 @@ function ConfigValue({ value, type }: { value: string; type: 'string' | 'number'
 function ModeTab({ mode }: { mode: Mode }) {
   if (mode === 'passive') {
     return (
-      <EmptyState
-        icon={<Bot size={40} strokeWidth={1.25} />}
-        title="Read-only Mode"
-        description="Passive instances listen and store — no configuration required."
-      />
+      <div
+        className="rounded-[10px]"
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+      >
+        <EmptyState
+          icon={<Bot size={40} strokeWidth={1.25} />}
+          title="Read-only Mode"
+          description="Passive instances listen and store — no configuration required."
+        />
+      </div>
     )
   }
 
@@ -287,8 +307,11 @@ function ModeTab({ mode }: { mode: Mode }) {
   const config = mode === 'chat' ? chatConfig : agentConfig
 
   return (
-    <div className="space-y-4">
-      <div className="font-mono text-t5" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+    <div
+      className="rounded-[10px]"
+      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+    >
+      <div className="font-mono text-t5 mb-5" style={{ fontSize: '0.65rem', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
         {mode} Configuration
       </div>
       {/* c-config block — syntax-highlighted JSON-like display */}
@@ -324,45 +347,60 @@ function ModeTab({ mode }: { mode: Mode }) {
 function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: any; modeColor: string }) {
   if (mode === 'passive') {
     return (
-      <div className="flex items-center justify-center gap-2 py-12">
-        <PipelineNode label="Inbound" color={modeColor} active />
-        <PipelineArrow />
-        <PipelineNode label="Store" color={modeColor} active />
-        <PipelineArrow />
-        <PipelineNode label="Done" color={modeColor} />
+      <div
+        className="rounded-[10px]"
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+      >
+        <div className="flex items-center justify-center gap-2 py-12">
+          <PipelineNode label="Inbound" color={modeColor} active />
+          <PipelineArrow />
+          <PipelineNode label="Store" color={modeColor} active />
+          <PipelineArrow />
+          <PipelineNode label="Done" color={modeColor} />
+        </div>
       </div>
     )
   }
   if (mode === 'chat') {
     const queueDepth = line.health?.runtime?.chat?.queueDepth ?? 0
     return (
-      <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
-        <PipelineNode label="Inbound" color={modeColor} active />
-        <PipelineArrow />
-        <PipelineNode label="Access" color={modeColor} />
-        <PipelineArrow />
-        <PipelineNode label="Queue" value={`depth: ${queueDepth}`} color={modeColor} active={queueDepth > 0} />
-        <PipelineArrow />
-        <PipelineNode label="Enrich" color={modeColor} />
-        <PipelineArrow />
-        <PipelineNode label="API" color={modeColor} active />
-        <PipelineArrow />
-        <PipelineNode label="Outbound" color={modeColor} />
+      <div
+        className="rounded-[10px]"
+        style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+      >
+        <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
+          <PipelineNode label="Inbound" color={modeColor} active />
+          <PipelineArrow />
+          <PipelineNode label="Access" color={modeColor} />
+          <PipelineArrow />
+          <PipelineNode label="Queue" value={`depth: ${queueDepth}`} color={modeColor} active={queueDepth > 0} />
+          <PipelineArrow />
+          <PipelineNode label="Enrich" color={modeColor} />
+          <PipelineArrow />
+          <PipelineNode label="API" color={modeColor} active />
+          <PipelineArrow />
+          <PipelineNode label="Outbound" color={modeColor} />
+        </div>
       </div>
     )
   }
   const sessions = line.health?.runtime?.agent?.activeSessions ?? 0
   return (
-    <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
-      <PipelineNode label="Inbound" color={modeColor} active />
-      <PipelineArrow />
-      <PipelineNode label="Router" color={modeColor} />
-      <PipelineArrow />
-      <PipelineNode label="SDK Loop" value={`sessions: ${sessions}`} color={modeColor} active={sessions > 0} />
-      <PipelineArrow />
-      <PipelineNode label="Tools" color={modeColor} active={sessions > 0} />
-      <PipelineArrow />
-      <PipelineNode label="Outbound" color={modeColor} />
+    <div
+      className="rounded-[10px]"
+      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+    >
+      <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
+        <PipelineNode label="Inbound" color={modeColor} active />
+        <PipelineArrow />
+        <PipelineNode label="Router" color={modeColor} />
+        <PipelineArrow />
+        <PipelineNode label="SDK Loop" value={`sessions: ${sessions}`} color={modeColor} active={sessions > 0} />
+        <PipelineArrow />
+        <PipelineNode label="Tools" color={modeColor} active={sessions > 0} />
+        <PipelineArrow />
+        <PipelineNode label="Outbound" color={modeColor} />
+      </div>
     </div>
   )
 }
@@ -688,7 +726,10 @@ function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: s
   const filtered = filter === 'all' ? logs : logs.filter(l => l.level === filter)
 
   return (
-    <div>
+    <div
+      className="rounded-[10px]"
+      style={{ background: 'var(--color-d2)', border: '1px solid var(--b1)', padding: '28px' }}
+    >
       {/* Level filter pills */}
       <div className="flex gap-1 mb-3">
         {levels.map(l => (

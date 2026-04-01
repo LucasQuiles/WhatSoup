@@ -6,10 +6,10 @@ interface HeartbeatStripProps {
   beats: Beat[];
 }
 
-const beatConfig: Record<Beat, { colorClass: string; heightClass: string }> = {
-  up:   { colorClass: "bg-s-ok",   heightClass: "h-5" },
-  down: { colorClass: "bg-s-crit", heightClass: "h-5" },
-  slow: { colorClass: "bg-s-warn", heightClass: "h-[10px]" },
+const beatConfig: Record<Beat, { colorClass: string; height: string; opacity: number }> = {
+  up:   { colorClass: "bg-s-ok",   height: "20px", opacity: 0.55 },
+  down: { colorClass: "bg-s-crit", height: "20px", opacity: 0.85 },
+  slow: { colorClass: "bg-s-warn", height: "12px", opacity: 0.6 },
 };
 
 const STRIP_LENGTH = 20;
@@ -23,11 +23,12 @@ const HeartbeatStrip: FC<HeartbeatStripProps> = ({ beats }) => {
   return (
     <div className="flex gap-[1px] h-5 items-end">
       {normalized.map((beat, i) => {
-        const { colorClass, heightClass } = beatConfig[beat];
+        const { colorClass, height, opacity } = beatConfig[beat];
         return (
           <div
             key={i}
-            className={`w-[3px] rounded-[1px] ${colorClass} ${heightClass}`}
+            className={`w-[3px] rounded-[1px] ${colorClass}`}
+            style={{ height, opacity }}
           />
         );
       })}

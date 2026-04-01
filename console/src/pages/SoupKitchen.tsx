@@ -149,17 +149,20 @@ const SoupKitchen: FC = () => {
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
+    <div className="flex flex-col flex-1 min-h-0" style={{ padding: "16px", gap: "12px" }}>
       {/* KPI Strip — Grafana-style stat cards with sparklines */}
       <motion.div
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease }}
-        className="flex flex-shrink-0"
+        className="flex-shrink-0"
         style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(6, 1fr)",
           gap: "1px",
-          backgroundColor: "var(--color-d5)",
-          borderBottom: "1px solid var(--b1)",
+          background: "var(--b1)",
+          borderRadius: "10px",
+          overflow: "hidden",
         }}
       >
         <KpiCard
@@ -218,11 +221,18 @@ const SoupKitchen: FC = () => {
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5, delay: 0.1, ease }}
         className="flex flex-1 min-h-0"
+        style={{ gap: "12px" }}
       >
         {/* Connection Table */}
         <div
           className="flex flex-col min-h-0"
-          style={{ flex: 3, borderRight: "1px solid var(--b1)" }}
+          style={{
+            flex: 3,
+            background: "var(--color-d2)",
+            border: "1px solid var(--b1)",
+            borderRadius: "10px",
+            overflow: "hidden",
+          }}
         >
           {/* Toolbar */}
           <div
@@ -260,8 +270,10 @@ const SoupKitchen: FC = () => {
                         }
                       `}
                       style={{
-                        fontSize: "0.7rem",
-                        padding: "4px 12px",
+                        fontSize: "0.6rem",
+                        letterSpacing: "0.02em",
+                        padding: "3px 10px",
+                        borderRadius: "4px",
                         border: isActive
                           ? `1px solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
                           : "1px solid var(--b2)",
@@ -318,10 +330,10 @@ const SoupKitchen: FC = () => {
                       key={h.label || "status"}
                       className="text-left font-mono text-t5 font-medium"
                       style={{
-                        fontSize: "0.65rem",
-                        letterSpacing: "0.12em",
+                        fontSize: "0.55rem",
+                        letterSpacing: "0.1em",
                         textTransform: "uppercase",
-                        padding: "10px 16px",
+                        padding: "7px 16px",
                         width: h.w,
                       }}
                     >
@@ -343,7 +355,7 @@ const SoupKitchen: FC = () => {
                         <td
                           colSpan={7}
                           className="font-mono text-t4 font-semibold"
-                          style={{ fontSize: '0.75rem', padding: '8px 16px', letterSpacing: '0.04em', textTransform: 'uppercase' }}
+                          style={{ fontSize: '0.55rem', padding: '6px 16px', letterSpacing: '0.1em', textTransform: 'uppercase' }}
                         >
                           <span className="text-t5 mr-2">{isCollapsed ? '▶' : '▼'}</span>
                           {group.name} ({group.lines.length} lines)
@@ -456,8 +468,15 @@ const SoupKitchen: FC = () => {
 
         {/* Activity Feed */}
         <div
-          className="bg-d1 flex flex-col min-h-0"
-          style={{ flex: 1.2, minWidth: "280px" }}
+          className="flex flex-col min-h-0"
+          style={{
+            flex: 1.2,
+            minWidth: "280px",
+            background: "var(--color-d1)",
+            border: "1px solid var(--b1)",
+            borderRadius: "10px",
+            overflow: "hidden",
+          }}
         >
           <ActivityFeed events={feed} />
         </div>

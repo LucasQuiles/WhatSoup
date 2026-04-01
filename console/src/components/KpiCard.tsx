@@ -28,13 +28,14 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
       type="button"
       onClick={onClick}
       className={`
-        bg-d0 hover:bg-d2 cursor-pointer select-none
-        transition-all duration-[250ms] flex-1 rounded-md
-        hover:-translate-y-px relative overflow-hidden
+        cursor-pointer select-none
+        transition-all duration-[250ms]
+        relative overflow-hidden
         ${active ? "border-b-2" : "border-b-2 border-transparent"}
       `}
       style={{
         padding: "16px 20px",
+        background: "var(--color-d2)",
         ...(active ? { borderBottomColor: strokeColor } : {}),
       }}
     >
@@ -56,8 +57,8 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
       <div
         className="font-mono uppercase text-t4"
         style={{
-          fontSize: "0.65rem",
-          letterSpacing: "0.06em",
+          fontSize: "0.55rem",
+          letterSpacing: "0.1em",
           marginTop: "6px",
         }}
       >

@@ -23,11 +23,17 @@ export default function Inbox() {
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
 
   return (
-    <div className="flex-1 flex" style={{ height: 'calc(100vh - 52px)' }}>
+    <div className="flex-1 flex" style={{ height: 'calc(100vh - 52px)', padding: '12px', gap: '8px' }}>
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
         className="flex-shrink-0 flex flex-col"
-        style={{ width: '288px', borderRight: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+        style={{
+          width: '288px',
+          background: 'var(--color-d1)',
+          border: '1px solid var(--b1)',
+          borderRadius: '10px',
+          overflow: 'hidden',
+        }}
       >
         {/* Line picker */}
         <div className="relative">
@@ -129,7 +135,15 @@ export default function Inbox() {
       </div>
 
       {/* ═══ Center: Messages — c-msg pattern ═══ */}
-      <div className="flex-1 flex flex-col" style={{ background: 'var(--color-d0)' }}>
+      <div
+        className="flex-1 flex flex-col"
+        style={{
+          background: 'var(--color-d0)',
+          border: '1px solid var(--b1)',
+          borderRadius: '10px',
+          overflow: 'hidden',
+        }}
+      >
         {selectedChat && currentChat ? (
           <>
             {/* Chat header */}
@@ -232,7 +246,13 @@ export default function Inbox() {
       {/* ═══ Right: Contact details ═══ */}
       <div
         className="flex-shrink-0 p-4 space-y-4"
-        style={{ width: '256px', borderLeft: '1px solid var(--b1)', background: 'var(--color-d1)' }}
+        style={{
+          width: '256px',
+          background: 'var(--color-d1)',
+          border: '1px solid var(--b1)',
+          borderRadius: '10px',
+          overflow: 'hidden',
+        }}
       >
         {currentChat ? (
           <>

@@ -29,10 +29,12 @@
 }
 
 :root {
-  --b1: rgba(255,255,255, 0.05);
-  --b2: rgba(255,255,255, 0.09);
+  --b1: rgba(255,255,255, 0.06);
+  --b2: rgba(255,255,255, 0.10);
   --b3: rgba(255,255,255, 0.16);
   --b4: rgba(255,255,255, 0.24);
+  /* Card elevation — subtle depth for dark containers */
+  --card-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
   --m-pas-soft: rgba(45,212,168, 0.19);
   --m-pas-wash: rgba(45,212,168, 0.06);
   --m-cht-soft: rgba(56,189,248, 0.19);
@@ -75,10 +77,20 @@ body::before {
 ::-webkit-scrollbar-thumb { background: var(--b2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--b3); }
 
-/* Status dot breathe animation */
+/* Status dot expanding ring animation */
+@keyframes breathe-ring {
+  0% { transform: scale(1); opacity: 0.4; }
+  100% { transform: scale(1.3); opacity: 0; }
+}
+
+@utility animate-breathe-ring {
+  animation: breathe-ring 3s ease-out infinite;
+}
+
+/* Legacy breathe (kept for line header dot) */
 @keyframes breathe {
   0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.6; transform: scale(0.85); }
+  50% { opacity: 0.6; transform: scale(0.95); }
 }
 
 @utility animate-breathe {

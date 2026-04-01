@@ -34,9 +34,10 @@ const ModeBadge: FC<ModeBadgeProps> = ({ mode }) => {
     <span
       className={`inline-flex items-center gap-1.5 font-mono font-medium ${textClass}`}
       style={{
-        fontSize: "0.7rem",
-        padding: "3px 10px 3px 8px",
-        borderRadius: "4px",
+        fontSize: "0.65rem",
+        letterSpacing: "0.03em",
+        padding: "2px 10px 2px 8px",
+        borderRadius: "3px",
         backgroundColor: washVar,
       }}
     >
