@@ -230,7 +230,7 @@ const SoupKitchen: FC = () => {
                       type="button"
                       onClick={() => setModeFilter(m)}
                       className={`
-                        font-mono cursor-pointer transition-all duration-200
+                        font-mono cursor-pointer c-hover
                         inline-flex items-center
                         ${
                           isActive

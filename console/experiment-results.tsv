@@ -3,3 +3,4 @@ commit	metric	status	description
 7f89d26	0 problems	keep	stable keys on filtered lists (Ops, LineDetail, AlertBanner)
 49564bb	0 problems	keep	ban inline fontWeight — 6 fixes + lint rule
 22031ca	0 problems	keep	ban inline lineHeight — 3 fixes + lint rule
+19e91b0	0 problems	keep	tokenize dropdown min-width + --dropdown-min-w token
