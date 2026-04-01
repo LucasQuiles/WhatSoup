@@ -981,16 +981,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
         />
         <button
-          className="flex-shrink-0 cursor-pointer flex items-center justify-center rounded-md"
-          style={{
-            width: '38px',
-            height: '38px',
-            background: 'var(--color-m-cht)',
-            color: 'var(--color-d0)',
-            border: '1px solid var(--color-m-cht)',
-            opacity: (!msgText.trim() || isSending) ? 0.4 : 1,
-            transition: 'opacity 0.15s ease',
-          }}
+          className="c-btn c-btn-primary c-btn-send flex-shrink-0"
           onClick={handleSend}
           disabled={isSending || !msgText.trim()}
         >

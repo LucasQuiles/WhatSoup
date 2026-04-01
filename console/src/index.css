@@ -306,6 +306,7 @@ body::before {
 .c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
 .c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
 .c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
+.c-btn-send    { padding: 10.5px 12px; gap: 0; min-width: 0; }
 
 /* ═══ Toggle switch — c-toggle from design system ═══ */
 .c-toggle {
