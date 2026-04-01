@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useLines, useChats, useMessages } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
+import type { Message } from '../mock-data'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import EmptyState from '../components/EmptyState'
@@ -31,14 +32,36 @@ export default function Inbox() {
   const currentLine = lines?.find(l => l.name === activeLine)
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
 
+  // Track optimistic PKs for slide-in animation
+  const [animatedPks, setAnimatedPks] = useState<Set<number>>(new Set())
+
   const handleSend = async () => {
     if (!msgText.trim() || !selectedChat || isSending) return
+    const text = msgText.trim()
     setIsSending(true)
+    setMsgText('')
+
+    // Optimistic: inject message into cache immediately
+    const optimisticPk = -Date.now()
+    const optimisticMsg: Message = {
+      pk: optimisticPk,
+      conversationKey: selectedChat,
+      senderName: 'You',
+      senderJid: '',
+      content: text,
+      timestamp: new Date().toISOString(),
+      fromMe: true,
+      type: 'text',
+    }
+    const queryKey = ['messages', activeLine, selectedChat]
+    queryClient.setQueryData<Message[]>(queryKey, (old) => [optimisticMsg, ...(old ?? [])])
+    setAnimatedPks(prev => new Set(prev).add(optimisticPk))
+
     try {
-      await api.sendMessage(activeLine, selectedChat, msgText.trim())
-      setMsgText('')
-      queryClient.invalidateQueries({ queryKey: ['messages', activeLine, selectedChat] })
+      await api.sendMessage(activeLine, selectedChat, text)
+      queryClient.invalidateQueries({ queryKey })
     } catch (e) {
+      queryClient.setQueryData<Message[]>(queryKey, (old) => (old ?? []).filter(m => m.pk !== optimisticPk))
       toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setIsSending(false)
@@ -161,7 +184,7 @@ export default function Inbox() {
               )}
               <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
                 {[...(messages ?? [])].reverse().map(msg => (
-                  <MessageBubble key={msg.pk} msg={msg} />
+                  <MessageBubble key={msg.pk} msg={msg} animate={animatedPks.has(msg.pk)} />
                 ))}
               </div>
               {(!messages || messages.length === 0) && (

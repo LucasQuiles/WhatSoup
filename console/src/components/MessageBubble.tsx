@@ -1,5 +1,5 @@
 import { type FC, useState } from 'react'
-import { UserPlus } from 'lucide-react'
+import { UserPlus, Check } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatTime } from '../lib/format-time'
 import MessageContent from './MessageContent'
@@ -9,11 +9,13 @@ interface MessageBubbleProps {
   msg: Message
   outgoingBg?: string
   onCreateContact?: (senderName: string) => void
+  /** When true, plays the slide-in entrance animation. */
+  animate?: boolean
 }
 
 const isRawJid = (name: string) => /^\d{5,}$/.test(name)
 
-/** Styled hover detail card — shown on long-press or hover. */
+/** Styled hover detail card — shown on hover. */
 const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
   const ts = new Date(msg.timestamp)
   const fullTime = ts.toLocaleString('en-US', {
@@ -66,20 +68,39 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
         </div>
         <div className="flex justify-between" style={{ borderTop: '1px solid var(--b1)', paddingTop: 'var(--sp-1)', marginTop: 'var(--sp-1)' }}>
           <span className="c-label">ID</span>
-          <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>pk:{msg.pk}</span>
+          <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
+            {msg.pk < 0 ? 'pending' : `pk:${msg.pk}`}
+          </span>
         </div>
       </div>
     </div>
   )
 }
 
-const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact }) => {
+/** Delivery status indicator for outgoing messages. */
+const DeliveryStatus: FC<{ msg: Message }> = ({ msg }) => {
+  if (!msg.fromMe) return null
+
+  // Optimistic messages (negative pk) show single check in muted color
+  const isPending = msg.pk < 0
+  if (isPending) {
+    return <Check size={12} strokeWidth={2} className="text-t5" style={{ opacity: 0.5 }} />
+  }
+
+  // Persisted messages — confirmed sent (single check in accent color)
+  return <Check size={12} strokeWidth={2} className="text-m-cht" />
+}
+
+const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, animate }) => {
   const isMedia = msg.type !== 'text'
   const [showDetail, setShowDetail] = useState(false)
 
   return (
     <div
       className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
+      style={animate ? {
+        animation: 'msg-slide-in 0.25s ease-out both',
+      } : undefined}
     >
       {/* Sender label (incoming only) */}
       {!msg.fromMe && (
@@ -122,10 +143,10 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
         </div>
       </div>
 
-      {/* Timestamp + type badge */}
+      {/* Timestamp + delivery status + type badge */}
       <div
         className={`flex items-center font-mono text-t5 ${msg.fromMe ? 'justify-end' : ''}`}
-        style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)', gap: 'var(--sp-1)' }}
+        style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)', gap: 'var(--sp-2)' }}
       >
         {isMedia && (
           <span className="text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
@@ -133,6 +154,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
           </span>
         )}
         <span>{formatTime(msg.timestamp)}</span>
+        <DeliveryStatus msg={msg} />
       </div>
     </div>
   )

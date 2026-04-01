@@ -801,14 +801,38 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   // Clear message input when switching conversations
   React.useEffect(() => { setMsgText('') }, [selectedChat])
 
+  // Track which message PKs were just added optimistically so we can animate them
+  const [animatedPks, setAnimatedPks] = React.useState<Set<number>>(new Set())
+
   const handleSend = async () => {
     if (!msgText.trim() || !selectedChat || isSending) return
+    const text = msgText.trim()
     setIsSending(true)
+    setMsgText('')
+
+    // Optimistic: inject message into cache immediately with a negative pk
+    const optimisticPk = -Date.now()
+    const optimisticMsg: Message = {
+      pk: optimisticPk,
+      conversationKey: selectedChat,
+      senderName: 'You',
+      senderJid: '',
+      content: text,
+      timestamp: new Date().toISOString(),
+      fromMe: true,
+      type: 'text',
+    }
+    const queryKey = ['messages', lineName, selectedChat]
+    queryClient.setQueryData<Message[]>(queryKey, (old) => [optimisticMsg, ...(old ?? [])])
+    setAnimatedPks(prev => new Set(prev).add(optimisticPk))
+
     try {
-      await api.sendMessage(lineName, selectedChat, msgText.trim())
-      setMsgText('')
-      queryClient.invalidateQueries({ queryKey: ['messages', lineName, selectedChat] })
+      await api.sendMessage(lineName, selectedChat, text)
+      // Refetch to get the real persisted message (replaces the optimistic one)
+      queryClient.invalidateQueries({ queryKey })
     } catch (e) {
+      // Remove optimistic message on failure
+      queryClient.setQueryData<Message[]>(queryKey, (old) => (old ?? []).filter(m => m.pk !== optimisticPk))
       toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
     } finally {
       setIsSending(false)
@@ -862,6 +886,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
               msg={msg}
               outgoingBg={outgoingBg}
               onCreateContact={(name) => toast.info(`Save contact: ${name}`)}
+              animate={animatedPks.has(msg.pk)}
             />
           ))}
         </div>

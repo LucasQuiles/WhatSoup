@@ -27,6 +27,10 @@ export function stripMarkdown(text: string): string {
 /** Resolve a chat display name — format raw JIDs as phone numbers. */
 export function resolveDisplayName(name: string | null | undefined): string {
   if (!name) return '—'
+  // LID format (WhatsApp Linked IDs) — very long digit strings that aren't phone numbers
+  if (/^\d{15,}$/.test(name)) return `Contact ${name.slice(-4)}`
+  // If it ends with @lid, it's a Linked ID JID
+  if (name.endsWith('@lid')) return `Contact ${name.split('@')[0].slice(-4)}`
   // If it's all digits (raw JID), format as phone
   if (/^\d{5,}$/.test(name)) return formatPhone(name)
   // If it ends with @g.us or @s.whatsapp.net, extract and format

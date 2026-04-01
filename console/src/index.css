@@ -186,6 +186,12 @@ body::before {
   animation: breathe 3s ease-in-out infinite;
 }
 
+/* Message slide-in animation */
+@keyframes msg-slide-in {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
 /* Shimmer animation for loading skeletons */
 @keyframes shimmer {
   0% { background-position: -400px 0; }
