@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useLines, useChats, useMessages } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
@@ -20,10 +20,18 @@ export default function Inbox() {
   const [linePickerOpen, setLinePickerOpen] = useState(false)
   const [msgText, setMsgText] = useState('')
   const [isSending, setIsSending] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
 
   // Clear message input when switching chats or lines
   useEffect(() => { setMsgText('') }, [selectedChat, selectedLine])
+
+  // Reset textarea height when text is cleared
+  useEffect(() => {
+    if (!msgText && textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }, [msgText])
 
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
   const { data: chats } = useChats(activeLine)
@@ -204,6 +212,7 @@ export default function Inbox() {
               style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
             >
               <textarea
+                ref={textareaRef}
                 className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
                 rows={1}
                 style={{

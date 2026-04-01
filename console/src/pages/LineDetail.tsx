@@ -794,9 +794,17 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   const queryClient = useQueryClient()
   const scrollRef = React.useRef<HTMLDivElement>(null)
   const bottomRef = React.useRef<HTMLDivElement>(null)
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null)
   const [showJumpToBottom, setShowJumpToBottom] = React.useState(false)
   const [msgText, setMsgText] = React.useState('')
   const [isSending, setIsSending] = React.useState(false)
+
+  // Reset textarea height when text is cleared
+  React.useEffect(() => {
+    if (!msgText && textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }, [msgText])
 
   // Clear message input when switching conversations
   React.useEffect(() => { setMsgText('') }, [selectedChat])
@@ -946,6 +954,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: '1px solid var(--b1)', background: 'var(--color-d2)' }}
       >
         <textarea
+          ref={textareaRef}
           className="flex-1 text-t2 font-sans placeholder-t5 outline-none"
           rows={1}
           style={{
