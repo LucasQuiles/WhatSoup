@@ -130,6 +130,8 @@ export class ChatRuntime implements Runtime {
       details: {
         queue,
         enrichmentLastRunAt,
+        queueDepth: queue?.queuedChats ?? 0,
+        enrichmentUnprocessed: this.enrichmentPoller?.unprocessedCount ?? 0,
       },
     };
   }

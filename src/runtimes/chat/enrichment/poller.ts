@@ -20,6 +20,17 @@ export class EnrichmentPoller {
   private stopped = false;
   public lastRunAt: string | null = null;
 
+  /** Count of messages pending enrichment (not yet processed). */
+  get unprocessedCount(): number {
+    const row = this.db.raw
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM messages
+         WHERE enrichment_processed_at IS NULL AND is_from_me = 0`,
+      )
+      .get() as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  }
+
   constructor(
     db: Database,
     pinecone: PineconeMemory,
