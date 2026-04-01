@@ -198,6 +198,29 @@ export default defineConfig([
 
         // ═══ BORDER WIDTH ═══
 
+        // ═══ Z-INDEX ═══
+        // Use Tailwind z-* utilities (z-10, z-20, z-50) or design token
+        {
+          selector: 'Property[key.name="zIndex"][value.value=/^[0-9]+$/]',
+          message: '⛔ Hardcoded zIndex — use Tailwind z-10/z-20/z-50 class or var(--z-*).',
+        },
+
+        // ═══ FONT FAMILY ═══
+        // Must use var(--font-sans) or var(--font-mono), never raw font stacks
+        {
+          selector: 'Property[key.name="fontFamily"]',
+          message: '⛔ Inline fontFamily — use var(--font-sans) or var(--font-mono), or font-sans/font-mono class.',
+        },
+
+        // ═══ MAX-WIDTH SIZING ═══
+        // Large maxWidth should use tokens
+        {
+          selector: 'Property[key.name="maxWidth"][value.value=/^\\d{3,}px$/]',
+          message: '⛔ Hardcoded maxWidth ≥100px — use a sizing token (--empty-max-w, --chat-name-max, etc.).',
+        },
+
+        // ═══ BORDER WIDTH ═══
+
         // Hardcoded border with px width — use var(--bw) or var(--bw-accent)
         {
           selector: 'Property[key.name="border"][value.value=/^[0-9]+px solid/]',

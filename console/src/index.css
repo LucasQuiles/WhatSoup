@@ -120,6 +120,8 @@
   --empty-max-w: 320px;      /* empty state description max */
   --panel-confirm: 420px;    /* confirm dialog width */
   --tooltip-min-w: 220px;    /* message tooltip min width */
+  --tooltip-val-max: 160px;  /* tooltip value truncation */
+  --toast-max-w: 360px;      /* toast notification max width */
   --feed-min-w: 240px;       /* activity feed min width */
   /* ═══ Off-grid half-steps ═══ */
   --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */

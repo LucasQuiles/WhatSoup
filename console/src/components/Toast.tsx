@@ -46,7 +46,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
         border: `var(--bw) solid ${borderColor[variant]}`,
         background: 'var(--color-d3)',
         boxShadow: 'var(--shadow-md)',
-        maxWidth: '360px',
+        maxWidth: 'var(--toast-max-w)',
       }}
     >
       <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${iconColor[variant]}`} />

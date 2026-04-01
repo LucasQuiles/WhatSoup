@@ -48,14 +48,14 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
         </div>
         <div className="flex justify-between">
           <span className="c-label">Sender</span>
-          <span className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)', maxWidth: '160px' }}>
+          <span className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)', maxWidth: 'var(--tooltip-val-max)' }}>
             {resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—')}
           </span>
         </div>
         {msg.senderJid && (
           <div className="flex justify-between">
             <span className="c-label">JID</span>
-            <span className="font-mono text-t4 truncate" style={{ fontSize: 'var(--font-size-xs)', maxWidth: '160px' }}>
+            <span className="font-mono text-t4 truncate" style={{ fontSize: 'var(--font-size-xs)', maxWidth: 'var(--tooltip-val-max)' }}>
               {msg.senderJid}
             </span>
           </div>

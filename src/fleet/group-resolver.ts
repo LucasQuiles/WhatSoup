@@ -14,9 +14,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mcpCall } from './mcp-client.ts';
 import { proxyToInstance } from './http-proxy.ts';
 import type { DiscoveredInstance } from './discovery.ts';
-import { pino } from 'pino';
+import { createChildLogger } from '../logger.ts';
 
-const log = pino({ name: 'fleet:group-resolver' });
+const log = createChildLogger('fleet:group-resolver');
 
 /** Track which groups we've already attempted (avoid repeated failures). */
 const attemptedCache = new Map<string, number>();
