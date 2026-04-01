@@ -306,7 +306,28 @@ body::before {
 .c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
 .c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
 .c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
-.c-btn-send    { padding: 10.5px 12px; gap: 0; min-width: 0; }
+.c-btn-send {
+  padding: 6px 10px;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: padding 0.2s ease, gap 0.2s ease;
+}
+.c-btn-send .c-btn-send-label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.2s ease, opacity 0.15s ease;
+}
+.c-btn-send:hover {
+  padding: 6px 12px;
+  gap: var(--sp-2);
+}
+.c-btn-send:hover .c-btn-send-label {
+  max-width: 50px;
+  opacity: 1;
+}
 
 /* ═══ Toggle switch — c-toggle from design system ═══ */
 .c-toggle {

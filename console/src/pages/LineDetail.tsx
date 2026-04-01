@@ -986,6 +986,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           disabled={isSending || !msgText.trim()}
         >
           <Send size={16} strokeWidth={2} />
+          <span className="c-btn-send-label">Send</span>
         </button>
       </div>
     </>

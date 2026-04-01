@@ -244,6 +244,7 @@ export default function Inbox() {
                 disabled={isSending || !msgText.trim()}
               >
                 <Send size={16} strokeWidth={2} />
+                <span className="c-btn-send-label">Send</span>
               </button>
             </div>
           </>
