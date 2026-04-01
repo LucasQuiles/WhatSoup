@@ -20,6 +20,7 @@ export interface HealthDeps {
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
   runtime?: Runtime;
+  handleAccessDecision?: (action: 'allow' | 'block', subjectType: 'phone' | 'group', subjectId: string) => Promise<void>;
 }
 
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
@@ -87,6 +88,83 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             });
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+        }
+      });
+      return;
+    }
+
+    // ── POST /access — allow or block a subject via the console ──
+    if (req.url === '/access' && req.method === 'POST') {
+      const jsonHeaders = { 'Content-Type': 'application/json' };
+
+      // Auth check — same pattern as /send
+      const accessAuthHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+      const accessExpectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
+      if (!accessExpectedToken || accessAuthHeader !== `Bearer ${accessExpectedToken}`) {
+        res.writeHead(401, jsonHeaders);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+
+      if (!deps.handleAccessDecision) {
+        res.writeHead(501, jsonHeaders);
+        res.end(JSON.stringify({ error: 'access decision handler not configured' }));
+        return;
+      }
+
+      const MAX_ACCESS_BODY = 4 * 1024; // 4 KB
+      let accessBody = '';
+      let accessBytes = 0;
+      let accessDestroyed = false;
+      req.on('data', (chunk) => {
+        if (accessDestroyed) return;
+        accessBytes += Buffer.byteLength(chunk);
+        if (accessBytes > MAX_ACCESS_BODY) {
+          accessDestroyed = true;
+          res.writeHead(413, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'request body too large' }));
+          req.destroy();
+          return;
+        }
+        accessBody += chunk;
+      });
+      req.on('end', () => {
+        if (accessDestroyed) return;
+        try {
+          const data = JSON.parse(accessBody) as Record<string, unknown>;
+          const action = data['action'] as string | undefined;
+          const subjectType = data['subjectType'] as string | undefined;
+          const subjectId = data['subjectId'] as string | undefined;
+
+          if (!action || !subjectType || !subjectId) {
+            res.writeHead(400, jsonHeaders);
+            res.end(JSON.stringify({ ok: false, error: 'action, subjectType, and subjectId are required' }));
+            return;
+          }
+          if (action !== 'allow' && action !== 'block') {
+            res.writeHead(400, jsonHeaders);
+            res.end(JSON.stringify({ ok: false, error: "action must be 'allow' or 'block'" }));
+            return;
+          }
+          if (subjectType !== 'phone' && subjectType !== 'group') {
+            res.writeHead(400, jsonHeaders);
+            res.end(JSON.stringify({ ok: false, error: "subjectType must be 'phone' or 'group'" }));
+            return;
+          }
+
+          deps.handleAccessDecision!(action, subjectType, subjectId)
+            .then(() => {
+              res.writeHead(200, jsonHeaders);
+              res.end(JSON.stringify({ ok: true, action, subjectType, subjectId }));
+            })
+            .catch((err) => {
+              log.error({ err, action, subjectType, subjectId }, 'POST /access failed');
+              res.writeHead(500, jsonHeaders);
+              res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+            });
+        } catch {
+          res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
         }
       });
