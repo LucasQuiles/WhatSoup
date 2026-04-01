@@ -199,8 +199,8 @@ export default function Ops() {
 
               {linePickerOpen && (
                 <div
-                  className="absolute top-full left-0 mt-1 z-20 min-w-[200px] max-h-64 overflow-auto"
-                  style={{ background: 'var(--color-d6)', border: '1px solid var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
+                  className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto"
+                  style={{ minWidth: 'var(--dropdown-min-w)', background: 'var(--color-d6)', border: '1px solid var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
                 >
                   {lines.map(line => (
                     <button

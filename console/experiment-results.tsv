@@ -2,3 +2,4 @@ commit	metric	status	description
 1f9de09	0 problems	keep	baseline — 26 rules, 0 violations
 7f89d26	0 problems	keep	stable keys on filtered lists (Ops, LineDetail, AlertBanner)
 49564bb	0 problems	keep	ban inline fontWeight — 6 fixes + lint rule
+22031ca	0 problems	keep	ban inline lineHeight — 3 fixes + lint rule

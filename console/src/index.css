@@ -105,6 +105,7 @@
   --log-col-time: 90px;      /* timestamp column */
   --log-col-level: 56px;     /* level badge column */
   --log-col-source: 100px;   /* source module column */
+  --dropdown-min-w: 200px;   /* dropdown minimum width */
   /* ═══ Text constraints ═══ */
   --chat-name-max: 140px;    /* chat list name truncation */
   --empty-max-w: 320px;      /* empty state description max */
