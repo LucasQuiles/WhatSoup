@@ -63,6 +63,14 @@ else
   if [ -n "$OPENAI_API_KEY" ]; then
     export OPENAI_API_KEY
   fi
+
+  # PINECONE_API_KEY is needed by agent instances with pineconeAllowedIndexes for
+  # the knowledge_search MCP tool. The tool runs in the WhatSoup process (not the
+  # Claude Code subprocess), so the key must be in this parent process.
+  PINECONE_API_KEY="$(secret-tool lookup service pinecone)" || true
+  if [ -n "$PINECONE_API_KEY" ]; then
+    export PINECONE_API_KEY
+  fi
 fi
 
 # Health server auth token — used by POST /heal and POST /send on all instances.

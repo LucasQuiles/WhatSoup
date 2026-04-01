@@ -298,6 +298,13 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
       if (toolName.startsWith('mcp__')) {
         const parts = toolName.split('__');
         const rawTool = parts[parts.length - 1] ?? toolName;
+
+        // Friendly labels for tools that shouldn't expose internals to users
+        if (rawTool === 'knowledge_search') {
+          const query = trunc(str('query') || '');
+          return { category: 'searching', detail: query ? `Checking my notes on ${query}` : 'Checking my notes' };
+        }
+
         const tool = rawTool.replace(/[-_]/g, ' ');
         return { category: 'other', detail: `\`${trunc(tool)}\`` };
       }
@@ -512,6 +519,14 @@ export class AgentRuntime implements Runtime {
     registerAllTools(this.registry, this.messenger as ConnectionManager, this.db);
   }
 
+  /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */
+  private createOutboundQueue(chatJid: string): OutboundQueue {
+    const q = new OutboundQueue(this.messenger, chatJid);
+    if (this.durability) q.setDurability(this.durability);
+    q.setToolUpdateMode(config.toolUpdateMode);
+    return q;
+  }
+
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
     this.registry.setDurability(engine);
@@ -686,8 +701,7 @@ export class AgentRuntime implements Runtime {
           },
         });
         this.chatSessions.set(chatJid, session);
-        const perChatQ = new OutboundQueue(this.messenger, chatJid);
-        if (this.durability) perChatQ.setDurability(this.durability);
+        const perChatQ = this.createOutboundQueue(chatJid);
         this.chatQueues.set(chatJid, perChatQ);
 
         // Attempt resume, then send a continuation turn so the agent picks up
@@ -753,12 +767,10 @@ export class AgentRuntime implements Runtime {
       });
 
       if (this.shared) {
-        const q = new OutboundQueue(this.messenger, resumeChatJid);
-        if (this.durability) q.setDurability(this.durability);
+        const q = this.createOutboundQueue(resumeChatJid);
         this.outboundQueues.set(resumeChatJid, q);
       } else {
-        const q = new OutboundQueue(this.messenger, resumeChatJid);
-        if (this.durability) q.setDurability(this.durability);
+        const q = this.createOutboundQueue(resumeChatJid);
         this.queue = q;
       }
 
@@ -952,22 +964,18 @@ export class AgentRuntime implements Runtime {
             // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
             const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
             this.chatSessions.delete(workspaceKey);
-            const q1 = new OutboundQueue(this.messenger, chatJid);
-            if (this.durability) q1.setDurability(this.durability);
+            const q1 = this.createOutboundQueue(chatJid);
             this.chatQueues.set(workspaceKey, q1);
           } else if (this.shared) {
-            const q2 = new OutboundQueue(this.messenger, chatJid);
-            if (this.durability) q2.setDurability(this.durability);
+            const q2 = this.createOutboundQueue(chatJid);
             this.outboundQueues.set(chatJid, q2);
           } else if (this.sessionScope === 'per_chat') {
             // non-sandboxPerChat per_chat: keyed by raw chatJid
             this.chatSessions.delete(chatJid);
-            const q3 = new OutboundQueue(this.messenger, chatJid);
-            if (this.durability) q3.setDurability(this.durability);
+            const q3 = this.createOutboundQueue(chatJid);
             this.chatQueues.set(chatJid, q3);
           } else {
-            const q4 = new OutboundQueue(this.messenger, chatJid);
-            if (this.durability) q4.setDurability(this.durability);
+            const q4 = this.createOutboundQueue(chatJid);
             this.queue = q4;
           }
           // NOTE: sessionForNew was captured before the map delete above. handleNew()
@@ -1158,6 +1166,11 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    // Assert typing immediately so the user sees the indicator while the agent thinks.
+    // Without this, there's a visible gap between message receipt and first tool call.
+    const queue = this.getQueueForChat(chatJid);
+    if (queue) queue.indicateTyping();
+
     try {
       await session.sendTurn(text);
     } catch (err) {
@@ -1286,7 +1299,7 @@ export class AgentRuntime implements Runtime {
         session?.clearTurnWatchdog();
         this.activeToolNames.clear();
         if (event.text) {
-          queue.enqueueText(event.text);
+          queue.enqueueResultText(event.text);
         }
         if (this.durability && conversationKey) {
           this.durability.upsertSessionCheckpoint(conversationKey, {
@@ -1710,8 +1723,7 @@ export class AgentRuntime implements Runtime {
         onResumeFailed: () => this.handleResumeFailed(chatJid),
       });
       this.chatSessions.set(workspaceKey, session);
-      const chatQ = new OutboundQueue(this.messenger, chatJid);
-      if (this.durability) chatQ.setDurability(this.durability);
+      const chatQ = this.createOutboundQueue(chatJid);
       this.chatQueues.set(workspaceKey, chatQ);
 
       // Spawn with resume if available — fall back to fresh session if resume fails
@@ -1768,8 +1780,7 @@ export class AgentRuntime implements Runtime {
           },
         });
         this.chatSessions.set(chatJid, session);
-        const perChatQ = new OutboundQueue(this.messenger, chatJid);
-        if (this.durability) perChatQ.setDurability(this.durability);
+        const perChatQ = this.createOutboundQueue(chatJid);
         this.chatQueues.set(chatJid, perChatQ);
       }
       // per_chat mode: do NOT set this.session/this.queue shared fields.
@@ -1811,8 +1822,7 @@ export class AgentRuntime implements Runtime {
       if (this.shared) {
         this.ensureOutboundQueue(chatJid);
       } else {
-        const singletonQ = new OutboundQueue(this.messenger, chatJid);
-        if (this.durability) singletonQ.setDurability(this.durability);
+        const singletonQ = this.createOutboundQueue(chatJid);
         this.queue = singletonQ;
       }
     } else if (this.shared) {
@@ -1826,8 +1836,7 @@ export class AgentRuntime implements Runtime {
    */
   private ensureOutboundQueue(chatJid: string): void {
     if (!this.outboundQueues.has(chatJid)) {
-      const q = new OutboundQueue(this.messenger, chatJid);
-      if (this.durability) q.setDurability(this.durability);
+      const q = this.createOutboundQueue(chatJid);
       this.outboundQueues.set(chatJid, q);
     }
   }
@@ -2081,7 +2090,7 @@ export class AgentRuntime implements Runtime {
         this.activeToolNames.clear();
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
-          queue.enqueueText(event.text);
+          queue.enqueueResultText(event.text);
           this.turnHadVisibleOutput = true;
         }
         // If nothing visible was emitted this turn, send an explicit fallback

@@ -37,6 +37,7 @@ const { mockSession, mockQueue, callOrder } = vi.hoisted(() => {
 
   const mockQueue = {
     enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
@@ -45,6 +46,7 @@ const { mockSession, mockQueue, callOrder } = vi.hoisted(() => {
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    setToolUpdateMode: vi.fn(),
   };
 
   return { mockSession, mockQueue, callOrder };
@@ -109,6 +111,8 @@ vi.mock('../../../src/config.ts', () => ({
   config: {
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
+    toolUpdateMode: 'full',
+    pineconeAllowedIndexes: [],
   },
 }));
 

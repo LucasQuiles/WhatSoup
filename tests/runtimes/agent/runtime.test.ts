@@ -29,6 +29,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
   // method that isn't reflected here — the mock cannot silently diverge.
   const mockQueue = {
     enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
@@ -37,6 +38,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    setToolUpdateMode: vi.fn(),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef };
@@ -116,6 +118,8 @@ vi.mock('../../../src/config.ts', () => ({
   config: {
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
+    toolUpdateMode: 'full',
+    pineconeAllowedIndexes: [],
   },
 }));
 
@@ -685,7 +689,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'result', text: 'Context limit reached' });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    const calls = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+    const calls = mockQueue.enqueueResultText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('Context limit reached');
     expect(mockQueue.flush).toHaveBeenCalled();
   });

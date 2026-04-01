@@ -34,6 +34,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
 
   const mockQueue = {
     enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
@@ -42,6 +43,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    setToolUpdateMode: vi.fn(),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef };
@@ -95,6 +97,7 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 const { mockControlQueueInstance } = vi.hoisted(() => {
   const mockControlQueueInstance = {
     enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
@@ -208,6 +211,8 @@ vi.mock('../../../src/config.ts', () => ({
       ['q', '15559990002'],
     ]),
     adminPhones: new Set<string>(['15550100001']),
+    toolUpdateMode: 'full',
+    pineconeAllowedIndexes: [],
   },
 }));
 

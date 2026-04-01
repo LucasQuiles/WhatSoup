@@ -24,8 +24,17 @@ export class ControlQueue implements IOutboundQueue {
     this.log.push(text);
   }
 
+  enqueueResultText(text: string): void {
+    this.log.push(text);
+  }
+
   enqueueToolUpdate(update: ToolUpdate): void {
     this.log.push(`[${update.category}] ${update.detail}`);
+  }
+
+  /** No-op — control sessions don't surface tool updates to users. */
+  setToolUpdateMode(_mode: 'full' | 'minimal'): void {
+    // intentional no-op
   }
 
   /** No-op — control sessions do not send typing indicators to WhatsApp. */

@@ -34,6 +34,7 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
 
   const mockQueue = {
     enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
@@ -42,6 +43,7 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    setToolUpdateMode: vi.fn(),
   };
 
   return { mockSession, mockQueue };
@@ -135,6 +137,8 @@ vi.mock('../../../src/config.ts', () => ({
       ['loops', '15559990001'],
       ['q', '15559990002'],
     ]),
+    toolUpdateMode: 'full',
+    pineconeAllowedIndexes: [],
   },
 }));
 
