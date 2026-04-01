@@ -240,12 +240,11 @@ export default function Inbox() {
               />
               <button
                 className="c-btn c-btn-primary flex-shrink-0"
-                style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', lineHeight: '1.25', alignSelf: 'flex-end' }}
+                style={{ padding: 'var(--sp-2) var(--sp-4)', fontSize: 'var(--font-size-body)', lineHeight: '1.25', alignSelf: 'flex-end' }}
                 onClick={handleSend}
                 disabled={isSending || !msgText.trim()}
               >
-                <Send size={15} strokeWidth={2} />
-                Send
+                <Send size={14} strokeWidth={2} />
               </button>
             </div>
           </>
