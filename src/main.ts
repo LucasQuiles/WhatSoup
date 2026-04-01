@@ -467,6 +467,9 @@ const healthServer = startHealthServer({
   startedAt,
   durability,
   runtime,
+  instanceName: config.botName,
+  instanceType: instanceType,
+  accessMode: config.accessMode,
   getEnrichmentStats: () => {
     const snap = runtime.getHealthSnapshot();
     const lastRun = (snap.details as Record<string, unknown>)?.enrichmentLastRunAt as string | null ?? null;
@@ -559,7 +562,9 @@ async function start(): Promise<void> {
 
   // Agent instances notify the user on startup (resume or fresh start).
   // Delay 3 s to allow the WA connection to fully stabilise before sending.
-  if (instanceType === 'agent' && runtime instanceof AgentRuntime) {
+  // In minimal toolUpdateMode, suppress startup notifications — non-technical users
+  // don't need to know about agent lifecycle events.
+  if (instanceType === 'agent' && runtime instanceof AgentRuntime && config.toolUpdateMode !== 'minimal') {
     const pending = runtime.popStartupMessage();
     const notifyTarget = pending
       ? { chatJid: pending.chatJid, text: pending.text, isResume: true }

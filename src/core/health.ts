@@ -20,6 +20,10 @@ export interface HealthDeps {
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
   runtime?: Runtime;
+  // Phase 1: instance identity for control-plane fleet discovery
+  instanceName: string;
+  instanceType: string;  // 'chat' | 'agent' | 'passive'
+  accessMode: string;
 }
 
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
@@ -210,6 +214,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const body = JSON.stringify({
         status,
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
+        instance: {
+          name: deps.instanceName,
+          mode: deps.instanceType,
+          accessMode: deps.accessMode,
+        },
         whatsapp: {
           connected: isConnected,
           account_jid: deps.connectionManager.botJid ?? 'not connected',
