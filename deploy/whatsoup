@@ -54,6 +54,12 @@ else
   fi
 fi
 
+# Health server auth token — used by POST /heal and POST /send on all instances.
+WHATSOUP_HEALTH_TOKEN="$(secret-tool lookup service whatsoup_health)" || true
+if [ -n "$WHATSOUP_HEALTH_TOKEN" ]; then
+  export WHATSOUP_HEALTH_TOKEN
+fi
+
 exec "$NODE" \
   --disable-warning=ExperimentalWarning \
   --experimental-strip-types \
