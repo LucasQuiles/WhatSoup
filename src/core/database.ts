@@ -311,6 +311,48 @@ CREATE INDEX IF NOT EXISTS idx_df_unresolved ON decryption_failures (resolved, c
 CREATE INDEX IF NOT EXISTS idx_df_conversation ON decryption_failures (conversation_key, created_at);
 `;
 
+// ─── Migration 10: self-healing control plane tables ────────────────────────
+
+const MIGRATION_10 = `
+CREATE TABLE IF NOT EXISTS control_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT UNIQUE,
+  direction TEXT NOT NULL,
+  peer_jid TEXT NOT NULL,
+  protocol TEXT NOT NULL,
+  report_id TEXT,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS heal_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id TEXT NOT NULL UNIQUE,
+  error_class TEXT NOT NULL,
+  error_type TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'attempt_1',
+  attempt_count INTEGER DEFAULT 0,
+  cooldown_until TEXT,
+  origin_chat_jid TEXT,
+  context TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hr_active_class ON heal_reports (error_class)
+  WHERE state NOT IN ('resolved');
+
+CREATE TABLE IF NOT EXISTS pending_heal_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id TEXT NOT NULL UNIQUE,
+  error_class TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'attempt_1',
+  context TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_phr_active_class ON pending_heal_reports (error_class)
+  WHERE state != 'resolved';
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -338,6 +380,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
     }
   }],
   [9, (db: DatabaseSync) => { db.exec(MIGRATION_9); }],
+  [10, (db: DatabaseSync) => { db.exec(MIGRATION_10); }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
