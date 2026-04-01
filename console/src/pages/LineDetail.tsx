@@ -850,43 +850,61 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
   const reversed = React.useMemo(() => [...messages].reverse(), [messages])
 
-  // Auto-scroll: pinned to bottom unless user scrolls up
-  const userScrolledUp = React.useRef(false)
-  const prevChat2 = React.useRef(selectedChat)
+  // ── Auto-scroll logic ──
+  // Sticky: stays pinned to bottom. Breaks away on scroll up. Re-attaches on scroll to bottom.
+  const stickyRef = React.useRef(true)        // true = pinned to bottom
+  const prevChatRef = React.useRef(selectedChat)
+  const prevLenRef = React.useRef(0)
 
-  // Single scroll effect: handles chat switch AND new messages
+  // Helper: scroll to absolute bottom
+  const scrollToBottom = React.useCallback((instant?: boolean) => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: instant ? 'instant' : 'smooth' })
+  }, [])
+
+  // On chat switch: always snap to bottom instantly
   React.useEffect(() => {
-    const chatChanged = prevChat2.current !== selectedChat
-    if (chatChanged) {
-      prevChat2.current = selectedChat
-      userScrolledUp.current = false
+    if (prevChatRef.current !== selectedChat) {
+      prevChatRef.current = selectedChat
+      stickyRef.current = true
       setShowJumpToBottom(false)
+      prevLenRef.current = 0
+      // Double rAF ensures DOM has painted the new message list
+      requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom(true)))
     }
+  }, [selectedChat, scrollToBottom])
 
-    // Scroll to bottom if: chat just switched, OR user hasn't scrolled up
-    if (chatChanged || !userScrolledUp.current) {
-      requestAnimationFrame(() => {
-        const el = scrollRef.current
-        if (el) el.scrollTop = el.scrollHeight
-      })
+  // On message count change: auto-scroll if sticky
+  React.useEffect(() => {
+    if (reversed.length !== prevLenRef.current) {
+      prevLenRef.current = reversed.length
+      if (stickyRef.current) {
+        requestAnimationFrame(() => scrollToBottom())
+      }
     }
-  }, [selectedChat, messages.length])
+  }, [reversed.length, scrollToBottom])
 
+  // Scroll handler: detect sticky state
   const handleScroll = React.useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    // User is "scrolled up" if more than 150px from the bottom
-    userScrolledUp.current = distFromBottom > 150
-    setShowJumpToBottom(distFromBottom > 150)
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    // Re-attach when within 50px of bottom; detach when >150px away
+    if (gap <= 50) {
+      stickyRef.current = true
+      setShowJumpToBottom(false)
+    } else if (gap > 150) {
+      stickyRef.current = false
+      setShowJumpToBottom(true)
+    }
   }, [])
 
-  const jumpToBottom = () => {
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-    userScrolledUp.current = false
+  const jumpToBottom = React.useCallback(() => {
+    stickyRef.current = true
     setShowJumpToBottom(false)
-  }
+    scrollToBottom()
+  }, [scrollToBottom])
 
   return (
     <>
@@ -894,7 +912,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto scrollbar-hide flex flex-col"
+        className="flex-1 overflow-y-auto scrollbar-hide"
         style={{ padding: 'var(--sp-4) var(--sp-5)' }}
       >
         {/* Load older messages */}
