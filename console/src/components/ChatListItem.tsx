@@ -10,6 +10,8 @@ interface ChatListItemProps {
 }
 
 const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick }) => {
+  const displayName = resolveDisplayName(chat.name)
+
   return (
     <div
       onClick={onClick}
@@ -21,32 +23,58 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick }) => {
         ...(isSelected ? { borderLeft: '2px solid var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : {}),
       }}
     >
-      {/* Avatar */}
+      {/* Avatar — fixed size */}
       <div
         className="rounded-full flex items-center justify-center flex-shrink-0 font-mono text-t3 font-semibold"
         style={{ width: 'var(--avatar-md)', height: 'var(--avatar-md)', background: 'var(--color-d5)', fontSize: 'var(--font-size-sm)' }}
       >
-        {getInitials(resolveDisplayName(chat.name))}
+        {getInitials(displayName)}
       </div>
 
-      {/* Body */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between" style={{ marginBottom: '2px' }}>
-          <span className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--chat-name-max)' }}>
-            {resolveDisplayName(chat.name)}
+      {/* Body — fixed layout with overflow control */}
+      <div className="flex-1" style={{ minWidth: 0, overflow: 'hidden' }}>
+        {/* Row 1: Name + Time */}
+        <div className="flex items-baseline" style={{ marginBottom: '2px', gap: 'var(--sp-2)' }}>
+          <span
+            className="text-t1 font-medium"
+            style={{
+              fontSize: 'var(--font-size-body)',
+              flex: '1 1 0',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {displayName}
           </span>
-          <span className="c-label flex-shrink-0" style={{ marginLeft: 'var(--sp-2)' }}>
+          <span
+            className="c-label flex-shrink-0"
+            style={{ whiteSpace: 'nowrap' }}
+          >
             {formatChatTime(chat.lastMessageAt)}
           </span>
         </div>
-        <div className="flex items-center justify-between">
-          <div className="text-t4 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
+
+        {/* Row 2: Preview + Unread badge */}
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+          <span
+            className="text-t4"
+            style={{
+              fontSize: 'var(--font-size-data)',
+              flex: '1 1 0',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
             {stripMarkdown(chat.lastMessagePreview ?? '')}
-          </div>
+          </span>
           {chat.unreadCount > 0 && (
             <span
               className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0"
-              style={{ fontSize: 'var(--font-size-xs)', width: 'var(--badge-unread)', height: 'var(--badge-unread)', marginLeft: 'var(--sp-2)' }}
+              style={{ fontSize: 'var(--font-size-xs)', width: 'var(--badge-unread)', height: 'var(--badge-unread)' }}
             >
               {chat.unreadCount}
             </span>
