@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
@@ -7,6 +8,8 @@ import { getPendingCount } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
+import { normalizeErrorClass } from './heal-protocol.ts';
+import type { Runtime } from '../runtimes/types.ts';
 
 const log = createChildLogger('health');
 
@@ -16,6 +19,7 @@ export interface HealthDeps {
   startedAt: number;
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
+  runtime?: Runtime;
 }
 
 function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
@@ -85,6 +89,82 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
         }
+      });
+      return;
+    }
+
+    // ── POST /heal — inject a Type 3 service-crash repair report ──
+    if (req.url === '/heal' && req.method === 'POST') {
+      (async () => {
+        const jsonHeaders = { 'Content-Type': 'application/json' };
+
+        // Auth check — same pattern as /send
+        const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+        const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
+        if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+          res.writeHead(401, jsonHeaders);
+          res.end(JSON.stringify({ error: 'unauthorized' }));
+          return;
+        }
+
+        // Parse body
+        let rawBody = '';
+        for await (const chunk of req) rawBody += chunk;
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(rawBody) as Record<string, unknown>;
+        } catch {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'invalid JSON' }));
+          return;
+        }
+
+        if (!data['type']) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'missing type field' }));
+          return;
+        }
+
+        const reportId = (data['reportId'] as string | undefined) ?? randomUUID();
+        const errorClass = normalizeErrorClass(
+          data['type'] as string,
+          (data['errorHint'] as string | undefined) ?? (data['context'] as string | undefined) ?? 'unknown',
+        );
+
+        // Dedupe: reject if an unresolved report for the same error_class already exists
+        const existing = deps.db.raw
+          .prepare("SELECT report_id FROM pending_heal_reports WHERE error_class = ? AND state != 'resolved'")
+          .get(errorClass) as { report_id: string } | undefined;
+
+        if (existing) {
+          res.writeHead(409, jsonHeaders);
+          res.end(JSON.stringify({ error: 'duplicate', existingReportId: existing.report_id }));
+          return;
+        }
+
+        // Store pending report
+        deps.db.raw
+          .prepare('INSERT INTO pending_heal_reports (report_id, error_class, context) VALUES (?, ?, ?)')
+          .run(reportId, errorClass, JSON.stringify(data));
+
+        // Dispatch to runtime
+        if (deps.runtime?.handleControlTurn) {
+          const payload = JSON.stringify({ ...data, reportId, errorClass });
+          try {
+            await deps.runtime.handleControlTurn(reportId, payload);
+          } catch (err) {
+            log.error({ err, reportId }, '/heal: handleControlTurn failed');
+          }
+        }
+
+        res.writeHead(202, jsonHeaders);
+        res.end(JSON.stringify({ reportId, errorClass }));
+      })().catch((err) => {
+        log.error({ err }, 'POST /heal: unhandled error');
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internal error' }));
+        } catch { /* response already started */ }
       });
       return;
     }
