@@ -690,8 +690,19 @@ export class AgentRuntime implements Runtime {
         if (this.durability) perChatQ.setDurability(this.durability);
         this.chatQueues.set(chatJid, perChatQ);
 
-        // Attempt resume — fire and forget, errors are handled by onResumeFailed/onCrash
-        session.spawnSession(full.session_id).catch((err) => {
+        // Attempt resume, then send a continuation turn so the agent picks up
+        // where it left off without requiring the user to send "proceed".
+        session.spawnSession(full.session_id).then(async () => {
+          // Small delay to let the init event propagate (confirms resume succeeded)
+          await new Promise(r => setTimeout(r, 1_000));
+          if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
+          try {
+            await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
+            log.info({ chatJid }, 'sent continuation turn after proactive resume');
+          } catch (err) {
+            log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
+          }
+        }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
         });
       }
@@ -1858,7 +1869,16 @@ export class AgentRuntime implements Runtime {
           if (!current || current !== session || current.getStatus().active) return;
 
           log.info({ mapKey, sessionId }, 'auto-respawn: attempting resume');
-          session.spawnSession(sessionId, dbRowId ?? undefined).catch((err) => {
+          session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
+            await new Promise(r => setTimeout(r, 1_000));
+            if (!session.getStatus().active) return;
+            try {
+              await session.sendTurn('[System: session resumed after crash — continue where you left off]');
+              log.info({ mapKey }, 'sent continuation turn after auto-respawn');
+            } catch (err) {
+              log.warn({ err, mapKey }, 'failed to send continuation turn after auto-respawn');
+            }
+          }).catch((err) => {
             log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
           });
         }, AUTO_RESPAWN_DELAY_MS);
