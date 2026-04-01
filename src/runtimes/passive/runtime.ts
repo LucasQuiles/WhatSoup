@@ -68,7 +68,20 @@ export class PassiveRuntime implements Runtime {
   }
 
   getHealthSnapshot(): RuntimeHealth {
-    return { status: 'healthy', details: {} };
+    let unreadCount = 0;
+    let lastActivityAt: string | null = null;
+    try {
+      const row = this.db.raw
+        .prepare('SELECT COALESCE(SUM(unread_count), 0) as total, MAX(updated_at) as last_at FROM chats')
+        .get() as { total: number; last_at: string | null } | undefined;
+      if (row) {
+        unreadCount = row.total;
+        lastActivityAt = row.last_at;
+      }
+    } catch {
+      // DB error — fall back to safe defaults
+    }
+    return { status: 'healthy', details: { unreadCount, lastActivityAt } };
   }
 
   async shutdown(): Promise<void> {
