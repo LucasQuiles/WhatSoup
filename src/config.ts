@@ -177,6 +177,11 @@ export const config = {
   pineconeRerank: (instance?.pineconeRerank as boolean | undefined) ?? false,
   pineconeTopK: (instance?.pineconeTopK as number | undefined) ?? 20,
   pineconeRerankTopN: (instance?.pineconeRerankTopN as number | undefined) ?? 6,
+  pineconeAllowedIndexes: (Array.isArray(instance?.pineconeAllowedIndexes) ? instance.pineconeAllowedIndexes : []) as string[],
+
+  // Tool update verbosity: 'full' (default — all updates shown to user),
+  // 'minimal' (suppress technical noise — only friendly status updates)
+  toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'minimal',
 
   // Health
   healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),

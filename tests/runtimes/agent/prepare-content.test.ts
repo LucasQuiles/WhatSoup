@@ -90,6 +90,8 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 vi.mock('../../../src/config.ts', () => ({
   config: {
     adminPhones: new Set<string>(),
+    toolUpdateMode: 'full',
+    pineconeAllowedIndexes: [],
   },
 }));
 

@@ -2,6 +2,7 @@
 // Standalone function that registers all 13 tool modules onto a ToolRegistry.
 // Used by AgentRuntime and PassiveRuntime so both get the same 116 tools.
 
+import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
 import type { ToolDeclaration } from './types.ts';
@@ -20,6 +21,7 @@ import { registerAdvancedTools } from './tools/advanced.ts';
 import { registerCallTools } from './tools/calls.ts';
 import { registerPresenceTools } from './tools/presence.ts';
 import { registerProfileTools } from './tools/profile.ts';
+import { registerKnowledgeTools } from './tools/knowledge.ts';
 
 const log = createChildLogger('register-all');
 
@@ -65,6 +67,12 @@ export function registerAllTools(
 
   // Presence needs the shared presenceCache from ConnectionManager
   try { registerPresenceTools(getSock, connection.presenceCache, register); } catch (err) { log.error({ err }, 'registerPresenceTools failed'); }
+
+  // Knowledge search — only when instance config specifies allowed indexes
+  const allowedIndexes: string[] = Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
+  if (allowedIndexes.length > 0) {
+    try { registerKnowledgeTools(allowedIndexes, register); } catch (err) { log.error({ err }, 'registerKnowledgeTools failed'); }
+  }
 
   log.info({ toolCount: registry.listTools({ tier: 'global' }).length }, 'all tools registered');
 }

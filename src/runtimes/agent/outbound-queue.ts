@@ -103,7 +103,11 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
  */
 export interface IOutboundQueue {
   enqueueText(text: string): void;
+  /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
+  enqueueResultText(text: string): void;
   enqueueToolUpdate(update: ToolUpdate): void;
+  /** Set the tool update display mode. 'minimal' hides technical details from non-technical users. */
+  setToolUpdateMode(mode: 'full' | 'minimal'): void;
   /** Start the composing indicator immediately without adding any content to the queue. */
   indicateTyping(): void;
   flush(): Promise<void>;
@@ -158,10 +162,70 @@ export class OutboundQueue implements IOutboundQueue {
   /** Promise chain used to serialize sends. */
   private chain: Promise<void> = Promise.resolve();
 
+  /** Controls tool update verbosity. 'minimal' suppresses technical noise. */
+  private toolUpdateMode: 'full' | 'minimal' = 'full';
+
+  /** In minimal mode: detail strings already sent this turn (dedup across batches). */
+  private minimalSentDetails = new Set<string>();
+  /** In minimal mode: timestamp of the last message (text or status) sent to user. Initialized to now to prevent premature heartbeat. */
+  private minimalLastSentAt = Date.now();
+  /** In minimal mode: timer for "still working" heartbeat when silence exceeds threshold. */
+  private minimalHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(messenger: Messenger, chatJid: string) {
     this.messenger = messenger;
     this.chatJid = chatJid;
     this.cachedConversationKey = toConversationKey(chatJid);
+  }
+
+  /** Set the tool update display mode. 'minimal' hides technical details from non-technical users. */
+  setToolUpdateMode(mode: 'full' | 'minimal'): void {
+    this.toolUpdateMode = mode;
+  }
+
+  /**
+   * In minimal mode, decide whether a tool update should be shown to the user.
+   * Only friendly, non-technical updates pass through. Everything else is suppressed
+   * but the typing indicator stays active so the user knows work is happening.
+   */
+  private shouldShowMinimal(update: ToolUpdate): boolean {
+    // Always suppress technical noise
+    switch (update.category) {
+      case 'skill':      // ToolSearch/Skill lookups — pure internal mechanics
+      case 'planning':   // TaskCreate/TodoWrite — internal work tracking
+      case 'blocked':    // Hook denials — internal safety system
+      case 'cancelled':  // Cancelled tool calls
+      case 'reading':    // File reads — internal
+      case 'modifying':  // File writes — internal
+        return false;
+
+      case 'error':
+        // Only show errors that are genuinely user-facing (not retries or hook blocks)
+        return false;
+
+      case 'searching':
+        // Show if it's a friendly knowledge search or web search
+        if (update.detail.startsWith('Checking my notes')) return true;
+        return false;
+
+      case 'fetching':
+        // Web searches/fetches get a friendly label
+        return true;
+
+      case 'agent':
+        // Subagent dispatches — suppress
+        return false;
+
+      case 'running':
+        // Bash commands — suppress
+        return false;
+
+      case 'other':
+        // MCP tools — suppress raw tool names
+        return false;
+    }
+
+    return false;
   }
 
   /** Attach an optional DurabilityEngine to track outbound ops. */
@@ -186,9 +250,17 @@ export class OutboundQueue implements IOutboundQueue {
     }
   }
 
+  /** Track whether the current turn has already sent visible text to the user. */
+  private turnHasVisibleText = false;
+
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string): void {
     if (!text || text.trim() === '') return;
+    if (this.toolUpdateMode === 'minimal') {
+      this.minimalLastSentAt = Date.now();
+      this.clearMinimalHeartbeat();
+    }
+    this.turnHasVisibleText = true;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
@@ -196,17 +268,63 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /**
+   * Enqueue the result/summary text from a completed turn.
+   * In minimal mode, suppresses the text if the turn already produced visible
+   * output — Claude Code often appends an internal task summary ("Done — I sent
+   * the message and asked for...") that shouldn't reach non-technical users.
+   */
+  enqueueResultText(text: string): void {
+    if (!text || text.trim() === '') return;
+    if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
+      // Suppress — the user already got the real response during the turn
+      return;
+    }
+    this.enqueueText(text);
+  }
+
+  /**
    * Buffer a tool progress update. Updates are sent either when there is a
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
+   *
+   * In minimal mode, most updates are suppressed to keep the user experience
+   * clean for non-technical users. Only curated friendly updates pass through.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
+    if (this.toolUpdateMode === 'minimal') {
+      // Only pass through updates that are meaningful to a non-technical user
+      const pass = this.shouldShowMinimal(update);
+      if (!pass) {
+        this.startTyping();
+        this.scheduleMinimalHeartbeat();
+        return;
+      }
+      // Deduplicate: if we've already sent this exact detail string, suppress
+      if (this.minimalSentDetails.has(update.detail)) {
+        this.startTyping();
+        this.scheduleMinimalHeartbeat();
+        return;
+      }
+      // If we've sent any status this turn, only allow through if it's been >15s
+      // since the last message (avoid rapid-fire status spam, but prevent dead silence)
+      if (this.minimalSentDetails.size > 0) {
+        const elapsed = Date.now() - this.minimalLastSentAt;
+        if (elapsed < 15_000) {
+          this.startTyping();
+          this.scheduleMinimalHeartbeat();
+          return;
+        }
+      }
+    }
     this.toolBuffer.push(update);
     this.startTyping();
 
-    // Idle timer: reset on each new tool call, fires after 5s of silence
+    // Idle timer: reset on each new tool call, fires after a pause in tool activity.
+    // Minimal mode uses a shorter delay (1.5s) so the first status reaches the user
+    // before the answer — avoids status arriving after/alongside the answer text.
+    const delay = this.toolUpdateMode === 'minimal' ? 1_500 : TOOL_BATCH_DELAY_MS;
     if (this.toolTimer !== null) clearTimeout(this.toolTimer);
-    this.toolTimer = setTimeout(() => this.flushToolBuffer(), TOOL_BATCH_DELAY_MS);
+    this.toolTimer = setTimeout(() => this.flushToolBuffer(), delay);
 
     // Max-age timer: set once when the buffer first fills, never reset
     if (this.toolMaxAgeTimer === null) {
@@ -234,6 +352,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush pending messages and clear all timers. */
   async shutdown(): Promise<void> {
     await this.flush();
+    this.clearMinimalHeartbeat();
     if (this.toolTimer !== null) {
       clearTimeout(this.toolTimer);
       this.toolTimer = null;
@@ -250,6 +369,10 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     this.toolBuffer = [];
+    this.minimalSentDetails.clear();
+    this.minimalLastSentAt = Date.now();
+    this.turnHasVisibleText = false;
+    this.clearMinimalHeartbeat();
     this.abortTyping();
   }
 
@@ -286,6 +409,44 @@ export class OutboundQueue implements IOutboundQueue {
     this.messenger.setTyping?.(this.chatJid, false).catch(() => {});
   }
 
+  /**
+   * In minimal mode, schedule a heartbeat message if the user has been in silence
+   * for too long. Fires 20s after the last message sent. Keeps the user aware
+   * that work is happening without spamming tool-level detail.
+   */
+  /**
+   * In minimal mode, schedule a heartbeat if the user has been in silence too long.
+   * Fires once, 20s after the last message. Does not reschedule — subsequent tool
+   * calls just maintain the typing indicator without additional text.
+   */
+  private scheduleMinimalHeartbeat(): void {
+    if (this.toolUpdateMode !== 'minimal') return;
+    if (this.minimalHeartbeatTimer !== null) return; // already scheduled
+
+    // Only schedule if we've already sent at least one status — the first status
+    // message is the primary feedback; heartbeat is for extended silence after that.
+    if (this.minimalSentDetails.size === 0) return;
+
+    const sinceLastSent = Date.now() - this.minimalLastSentAt;
+    const delay = Math.max(0, 20_000 - sinceLastSent);
+
+    this.minimalHeartbeatTimer = setTimeout(() => {
+      this.minimalHeartbeatTimer = null;
+      const elapsed = Date.now() - this.minimalLastSentAt;
+      if (elapsed >= 18_000 && this.isTyping) {
+        this.minimalLastSentAt = Date.now();
+        this.enqueue('_still working on it..._');
+      }
+    }, delay);
+  }
+
+  private clearMinimalHeartbeat(): void {
+    if (this.minimalHeartbeatTimer !== null) {
+      clearTimeout(this.minimalHeartbeatTimer);
+      this.minimalHeartbeatTimer = null;
+    }
+  }
+
   /** Abort — clear the refresh interval without sending 'paused'. */
   private abortTyping(): void {
     this.isTyping = false;
@@ -301,6 +462,7 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.toolBuffer.length === 0) return;
 
     // Group updates by category, preserving first-appearance order of categories.
+    // Deduplicate detail strings within each category to avoid "Checking my notes on X" x2.
     const categoryOrder: ToolCategory[] = [];
     const groups = new Map<ToolCategory, string[]>();
     for (const { category, detail } of this.toolBuffer) {
@@ -308,7 +470,21 @@ export class OutboundQueue implements IOutboundQueue {
         categoryOrder.push(category);
         groups.set(category, []);
       }
-      groups.get(category)!.push(detail);
+      const existing = groups.get(category)!;
+      if (!existing.includes(detail)) {
+        existing.push(detail);
+      }
+    }
+
+    // Track sent details for minimal mode dedup and update sent timestamp
+    if (this.toolUpdateMode === 'minimal') {
+      for (const details of groups.values()) {
+        for (const d of details) {
+          this.minimalSentDetails.add(d);
+        }
+      }
+      this.minimalLastSentAt = Date.now();
+      this.clearMinimalHeartbeat();
     }
 
     // Render each group as "{emoji} {Label}:\n  • detail\n  • detail"
