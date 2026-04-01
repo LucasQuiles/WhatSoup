@@ -81,6 +81,10 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getResumableSessionForChat: mockGetResumableSessionForChat,
 }));
 
+vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
+  classifyActiveSessions: vi.fn(() => []),
+}));
+
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   // eslint-disable-next-line prefer-arrow-callback
   SessionManager: vi.fn().mockImplementation(function (
@@ -1307,7 +1311,7 @@ describe('AgentRuntime', () => {
     expect(updateDeliveryJidCalls).toContain('18459780919@lid');
   });
 
-  it('sandboxPerChat: start() calls backfillWorkspaceKeys and sweepOrphanedSessions', async () => {
+  it('sandboxPerChat: start() calls backfillWorkspaceKeys and classifyActiveSessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -1321,16 +1325,22 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(mockBackfillWorkspaceKeys).toHaveBeenCalledWith(db, tmpdir());
-    expect(mockSweepOrphanedSessions).toHaveBeenCalledWith(db);
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    expect(classifyActiveSessions).toHaveBeenCalled();
   });
 
-  it('sandboxPerChat: orphaned sessions are marked during start()', async () => {
+  it('sandboxPerChat: stale_dead sessions are marked orphaned during start()', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
 
-    // Simulate a session whose PID is dead (process.kill throws)
-    mockSweepOrphanedSessions.mockReturnValue([{ id: 42, claude_pid: 99999999 }]);
+    // Simulate classifier finding a stale_dead session
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 42, sessionId: 'ses-old', claudePid: 99999999,
+      chatJid: 'test@s.whatsapp.net', conversationKey: 'test',
+      status: 'active', classification: 'stale_dead', reason: 'PID dead',
+    }]);
 
     const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
     const runtime = new AgentRuntime(db, messenger, 'test', {

@@ -19,6 +19,7 @@ import {
   getResumableSessionForChat,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
+import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
@@ -473,12 +474,41 @@ export class AgentRuntime implements Runtime {
       log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
     }
 
-    // sandboxPerChat: backfill workspace keys for legacy rows and sweep orphaned sessions
+    // sandboxPerChat: backfill workspace keys for legacy rows
     if (this.sandboxPerChat) {
       backfillWorkspaceKeys(this.db, this.cwd ?? homedir());
-      const activeSessions = sweepOrphanedSessions(this.db);
-      for (const { id, claude_pid } of activeSessions) {
-        try { process.kill(claude_pid, 0); } catch { markOrphaned(this.db, id); }
+    }
+
+    // Sweep stale sessions for all per_chat modes (including Q's non-sandboxed per_chat).
+    // Cross-references agent_sessions with session_checkpoints to safely identify which
+    // processes to keep and which to reap. Only kills PIDs verified as owned children.
+    if (this.sessionScope === 'per_chat' || this.sandboxPerChat) {
+      const classified = classifyActiveSessions(this.db, this.durability!);
+      for (const session of classified) {
+        switch (session.classification) {
+          case 'stale_dead':
+            markOrphaned(this.db, session.id);
+            break;
+          case 'stale_live':
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'reaping stale session');
+            try { process.kill(session.claudePid, 'SIGTERM'); } catch { /* already gone */ }
+            markOrphaned(this.db, session.id);
+            break;
+          case 'ambiguous':
+            log.warn({
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+              reason: session.reason,
+            }, 'ambiguous session — not touching');
+            break;
+          // authoritative_live: leave alone
+        }
       }
     }
 
