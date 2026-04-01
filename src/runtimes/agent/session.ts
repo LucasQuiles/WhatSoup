@@ -30,6 +30,10 @@ export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 export interface SessionCrashInfo {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  /** The Claude session ID at the time of crash — useful for attempting --resume recovery. */
+  sessionId: string | null;
+  /** The agent_sessions DB row ID — useful for resume with existing row. */
+  dbRowId: number | null;
 }
 
 export interface SessionManagerOptions {
@@ -197,11 +201,13 @@ export class SessionManager {
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
     child.on('error', (err) => {
       log.error({ err, chatJid: this.chatJid }, 'claude process spawn error');
-      // Clean up session state as if the process crashed
       this.clearTurnWatchdog();
       this.active = false;
       this.child = null;
       this.sessionId = null;
+      // Notify user — without this, spawn failures are silent and the chat goes dead
+      this.notifyUser?.('_Agent failed to start — will retry on your next message._');
+      this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
     });
 
     // Pipe stdout through line parser
@@ -301,6 +307,10 @@ export class SessionManager {
         }
       }
 
+      // Capture before clearing — onCrash handlers need these for auto-resume
+      const crashedSessionId = this.sessionId;
+      const crashedDbRowId = this.dbRowId;
+
       this.clearTurnWatchdog();
       this.active = false;
       this.child = null;
@@ -313,7 +323,7 @@ export class SessionManager {
         // Allow the runtime to clean up the outbound queue (clears typing heartbeat).
         // onCrash does NOT send 'paused' — the composing indicator times out naturally,
         // acting as a soft signal to the user that the session is in trouble.
-        this.onCrash?.({ exitCode: code, signal });
+        this.onCrash?.({ exitCode: code, signal, sessionId: crashedSessionId, dbRowId: crashedDbRowId });
 
         // Notify user of unexpected crash (rate-limited to avoid flood on rapid restarts).
         // Deferred via setImmediate so any synchronous onCrash cleanup runs first.
@@ -397,6 +407,10 @@ export class SessionManager {
     this.watchdogHard = null;
     if (!this.active || this.child === null) return;
     log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
+    // Notify user with a specific message before the kill — the generic crash
+    // notice ("Agent session crashed") follows via the exit handler, but this
+    // message explains WHY it was terminated.
+    this.notifyUser?.('_Session terminated after 30 minutes of inactivity — restarting._');
     this.child?.kill('SIGKILL');
   }
 

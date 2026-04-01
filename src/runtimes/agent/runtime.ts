@@ -53,6 +53,11 @@ const createdMediaDirs = new Set<string>();
 /** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
 const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
 
+/** Max consecutive crashes before auto-respawn gives up and waits for user action. */
+const AUTO_RESPAWN_MAX_CRASHES = 3;
+/** Delay (ms) before attempting auto-respawn after a crash. */
+const AUTO_RESPAWN_DELAY_MS = 2_000;
+
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
  *
@@ -645,12 +650,13 @@ export class AgentRuntime implements Runtime {
       }
     }
 
-    // per_chat (non-sandboxed): proactively resume sessions that were active when we shut down.
-    // This allows agents to pick up mid-conversation instead of waiting for the user to send a message.
+    // per_chat (non-sandboxed): proactively resume sessions that were active or suspended
+    // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
+    // of waiting for the user to send a message after a service restart.
     // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
     if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability) {
-      const activeCheckpoints = this.durability.getAllActiveCheckpoints();
-      for (const cp of activeCheckpoints) {
+      const resumableCheckpoints = this.durability.getResumableCheckpoints();
+      for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
 
@@ -1834,6 +1840,28 @@ export class AgentRuntime implements Runtime {
         }, this.activeControlReportId);
       } catch (err) {
         log.warn({ err }, 'failed to emit heal report for session crash');
+      }
+    }
+
+    // Auto-respawn: if we haven't hit the crash limit, try to resume the session
+    // after a short delay. This lets the agent continue mid-conversation without
+    // requiring the user to send a new message.
+    if (this.recentCrashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
+      const session = this.chatSessions.get(mapKey);
+      if (session) {
+        const sessionId = info.sessionId;
+        const dbRowId = info.dbRowId;
+        log.info({ mapKey, sessionId, attempt: this.recentCrashCount }, 'scheduling auto-respawn');
+        setTimeout(() => {
+          // Verify the session is still in the map and still inactive
+          const current = this.chatSessions.get(mapKey);
+          if (!current || current !== session || current.getStatus().active) return;
+
+          log.info({ mapKey, sessionId }, 'auto-respawn: attempting resume');
+          session.spawnSession(sessionId, dbRowId ?? undefined).catch((err) => {
+            log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
+          });
+        }, AUTO_RESPAWN_DELAY_MS);
       }
     }
   }
