@@ -99,6 +99,7 @@ export class FleetDbReader {
           CASE WHEN m.conversation_key LIKE '%_at_g.us' OR m.conversation_key LIKE '%@g.us' THEN 1 ELSE 0 END as is_group
         FROM messages m
         WHERE m.deleted_at IS NULL
+          AND length(m.conversation_key) >= 5
         GROUP BY m.conversation_key
         ORDER BY last_message_at DESC
         LIMIT ? OFFSET ?
