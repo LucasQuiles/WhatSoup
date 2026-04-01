@@ -64,7 +64,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
 
         {/* Body */}
         <div style={{ padding: 'var(--sp-5)' }}>
-          <div className="text-t2" style={{ fontSize: 'var(--font-size-body)', lineHeight: 1.7 }}>
+          <div className="text-t2 leading-relaxed" style={{ fontSize: 'var(--font-size-body)' }}>
             {children}
           </div>
         </div>

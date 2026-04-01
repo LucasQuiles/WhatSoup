@@ -23,8 +23,8 @@ const EmptyState: FC<EmptyStateProps> = ({ icon, title, description }) => {
       </div>
       {description && (
         <div
-          className="text-t4"
-          style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--empty-max-w)', lineHeight: 1.6 }}
+          className="text-t4 leading-relaxed"
+          style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--empty-max-w)' }}
         >
           {description}
         </div>

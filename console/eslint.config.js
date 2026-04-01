@@ -158,6 +158,13 @@ export default defineConfig([
           message: '⛔ Direct style.color mutation — use CSS :hover or React state.',
         },
 
+        // ═══ LINE HEIGHT ═══
+        // Use Tailwind leading-* classes (leading-none/tight/snug/normal/relaxed/loose)
+        {
+          selector: 'Property[key.value="lineHeight"]',
+          message: '⛔ Inline lineHeight — use Tailwind leading-none/tight/snug/normal/relaxed/loose class.',
+        },
+
         // ═══ FONT WEIGHT ═══
         // Use Tailwind font-* classes (font-normal/medium/semibold/bold/extrabold/black)
         {

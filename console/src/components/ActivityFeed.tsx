@@ -156,8 +156,8 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
               {/* Text */}
               <span
-                className={`font-mono ${isErr ? "text-s-crit" : "text-t3"}`}
-                style={{ fontSize: "var(--font-size-sm)", lineHeight: "1.5" }}
+                className={`font-mono leading-normal ${isErr ? "text-s-crit" : "text-t3"}`}
+                style={{ fontSize: "var(--font-size-sm)" }}
               >
                 {event.text}
               </span>
