@@ -869,10 +869,11 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
   return (
     <>
+      <div className="relative flex-1 min-h-0">
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative"
+        className="absolute inset-0 overflow-auto scrollbar-hide flex flex-col"
         style={{ padding: 'var(--sp-4) var(--sp-5)' }}
       >
         {/* Load older messages */}
@@ -904,16 +905,19 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         <div ref={bottomRef} />
       </div>
 
-      {/* Jump to newest — mirrors "Load older messages" style */}
+      {/* Jump to newest — floats above the input bar, inside the positioned wrapper */}
       {showJumpToBottom && (
         <div
           className="absolute flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
           style={{
             left: '50%',
             transform: 'translateX(-50%)',
-            bottom: '72px',
-            padding: 'var(--sp-3) 0 var(--sp-4)',
+            bottom: 'var(--sp-4)',
+            padding: 'var(--sp-2) var(--sp-5)',
             gap: 'var(--sp-2)',
+            background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
+            borderRadius: 'var(--radius-md)',
+            backdropFilter: 'blur(4px)',
             zIndex: 10,
           }}
           onClick={jumpToBottom}
@@ -922,6 +926,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           <span style={{ fontSize: 'var(--font-size-sm)' }}>Jump to newest</span>
         </div>
       )}
+      </div>
 
       {/* Input bar */}
       <div
