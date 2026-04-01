@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useLines, useChats, useMessages } from '../hooks/use-fleet'
+import { api } from '../lib/api'
 import { formatChatTime, formatTime } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
@@ -12,6 +14,8 @@ export default function Inbox() {
   const [selectedLine, setSelectedLine] = useState<string>('')
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
   const [linePickerOpen, setLinePickerOpen] = useState(false)
+  const [msgText, setMsgText] = useState('')
+  const queryClient = useQueryClient()
 
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
   const { data: chats } = useChats(activeLine)
@@ -19,6 +23,17 @@ export default function Inbox() {
 
   const currentLine = lines?.find(l => l.name === activeLine)
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
+
+  const handleSend = async () => {
+    if (!msgText.trim() || !selectedChat) return
+    try {
+      await api.sendMessage(activeLine, selectedChat, msgText.trim())
+      setMsgText('')
+      queryClient.invalidateQueries({ queryKey: ['messages', activeLine, selectedChat] })
+    } catch (e) {
+      console.error('Send failed:', e instanceof Error ? e.message : e)
+    }
+  }
 
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
@@ -237,10 +252,14 @@ export default function Inbox() {
                   transition: 'border-color 0.2s var(--ease)',
                 }}
                 placeholder="Type a message..."
+                value={msgText}
+                onChange={e => setMsgText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSend()}
               />
               <button
                 className="c-btn c-btn-primary flex-shrink-0"
                 style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
+                onClick={handleSend}
               >
                 <Send size={15} strokeWidth={2} />
                 Send

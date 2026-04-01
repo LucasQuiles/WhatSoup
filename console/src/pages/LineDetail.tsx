@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs } from '../hooks/use-fleet'
 import { formatRelative, formatTime, formatChatTime } from '../lib/format-time'
@@ -224,6 +225,7 @@ export default function LineDetail() {
                 selectedChat={selectedChat}
                 onSelectChat={setSelectedChat}
                 mode={line.mode}
+                lineName={name || ''}
               />
             )}
             {activeTab === 'logs' && <LogsTab logs={logs || []} filter={logFilter} onFilterChange={setLogFilter} />}
@@ -775,13 +777,26 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
 }
 
 /* ═══ History Messages — scroll-to-bottom + load older + create contact ═══ */
-function HistoryMessages({ messages, outgoingBg, selectedChat }: {
-  messages: Message[]; outgoingBg: string; selectedChat: string;
+function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
+  messages: Message[]; outgoingBg: string; selectedChat: string; lineName: string;
 }) {
   const toast = useToast()
+  const queryClient = useQueryClient()
   const scrollRef = React.useRef<HTMLDivElement>(null)
   const bottomRef = React.useRef<HTMLDivElement>(null)
   const [showJumpToBottom, setShowJumpToBottom] = React.useState(false)
+  const [msgText, setMsgText] = React.useState('')
+
+  const handleSend = async () => {
+    if (!msgText.trim() || !selectedChat) return
+    try {
+      await api.sendMessage(lineName, selectedChat, msgText.trim())
+      setMsgText('')
+      queryClient.invalidateQueries({ queryKey: ['messages', lineName, selectedChat] })
+    } catch (e) {
+      toast.error(`Send failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }
 
   const reversed = React.useMemo(() => [...messages].reverse(), [messages])
 
@@ -908,10 +923,14 @@ function HistoryMessages({ messages, outgoingBg, selectedChat }: {
             borderRadius: 'var(--radius-md)',
           }}
           placeholder="Type a reply..."
+          value={msgText}
+          onChange={e => setMsgText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && handleSend()}
         />
         <button
           className="c-btn c-btn-primary flex-shrink-0"
           style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)' }}
+          onClick={handleSend}
         >
           <Send size={15} strokeWidth={2} />
           Send
@@ -923,8 +942,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat }: {
 
 /* ═══ History Tab — matches chat component patterns ═══ */
 
-function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
-  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode
+function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineName }: {
+  chats: ChatItem[]; messages: Message[]; selectedChat: string | null; onSelectChat: (key: string) => void; mode: Mode; lineName: string;
 }) {
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
@@ -1003,6 +1022,7 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode }: {
             messages={messages}
             outgoingBg={outgoingBg}
             selectedChat={selectedChat}
+            lineName={lineName}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center">
