@@ -6,6 +6,7 @@ import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 
 import { findLatestLogFile } from '../log-utils.ts';
+import { resolveGroupNames } from '../group-resolver.ts';
 
 export interface DataDeps {
   discovery: FleetDiscovery;
@@ -81,6 +82,7 @@ export function handleGetChats(
 
       // Resolve display name
       let displayName: string;
+      let needsBackfill = false;
       if (isGroup) {
         // Convert _at_g.us back to @g.us for the groups table lookup
         const groupJid = chat.conversationKey.replace('_at_g.us', '@g.us');
@@ -91,9 +93,10 @@ export function handleGetChats(
         } else if (chatName) {
           displayName = chatName;
         } else {
-          // No metadata — build from participant names
+          // No metadata — build from participant names (temporary fallback)
           const parts = (participantsStmt.all(chat.conversationKey) as any[]).map(p => p.sender_name);
           displayName = parts.length > 0 ? parts.join(', ') : chat.conversationKey;
+          needsBackfill = true;
         }
       } else {
         // DM: prefer the other person's name
@@ -120,6 +123,7 @@ export function handleGetChats(
           : null,
         unreadCount: unread,
         isGroup,
+        _needsBackfill: needsBackfill,
       };
     });
   });
@@ -128,7 +132,20 @@ export function handleGetChats(
     jsonResponse(res, 500, { error: enriched.error });
     return;
   }
-  jsonResponse(res, 200, enriched.data);
+
+  // Strip internal flags before sending, trigger backfill for groups missing names
+  const groupsNeedingBackfill: string[] = [];
+  const response = enriched.data.map(({ _needsBackfill, ...chat }) => {
+    if (_needsBackfill) groupsNeedingBackfill.push(chat.conversationKey);
+    return chat;
+  });
+
+  jsonResponse(res, 200, response);
+
+  // Fire-and-forget: resolve missing group names via this instance's connection
+  if (groupsNeedingBackfill.length > 0) {
+    resolveGroupNames(instance, groupsNeedingBackfill);
+  }
 }
 
 /** GET /api/lines/:name/messages — paginated messages for a conversation. */
