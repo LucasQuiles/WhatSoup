@@ -13,6 +13,8 @@ export interface ChatSummary {
   messageCount: number;
   lastMessageAt: number | null;
   isGroup: boolean;
+  lastMessagePreview: string | null;
+  lastMessageSender: string | null;
 }
 
 export interface MessageRow {
@@ -108,6 +110,8 @@ export class FleetDbReader {
         messageCount: r.message_count,
         lastMessageAt: r.last_message_at,
         isGroup: !!r.is_group,
+        lastMessagePreview: null,
+        lastMessageSender: null,
       }));
     });
   }

@@ -1,5 +1,5 @@
 import { type FC, useState } from 'react'
-import { UserPlus, Check } from 'lucide-react'
+import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatTime } from '../lib/format-time'
 import MessageContent from './MessageContent'
@@ -11,6 +11,8 @@ interface MessageBubbleProps {
   onCreateContact?: (senderName: string) => void
   /** When true, plays the slide-in entrance animation. */
   animate?: boolean
+  /** Called when user clicks retry on a failed message. */
+  onRetry?: (msg: Message) => void
 }
 
 const isRawJid = (name: string) => /^\d{5,}$/.test(name)
@@ -78,20 +80,38 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
 }
 
 /** Delivery status indicator for outgoing messages. */
-const DeliveryStatus: FC<{ msg: Message }> = ({ msg }) => {
+const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = ({ msg, onRetry }) => {
   if (!msg.fromMe) return null
 
-  // Optimistic messages (negative pk) show single check in muted color
-  const isPending = msg.pk < 0
-  if (isPending) {
+  // Failed messages (pk === -1 sentinel) — red X with retry button
+  if (msg.pk === -1) {
+    return (
+      <span className="flex items-center" style={{ gap: '2px' }}>
+        <X size={12} strokeWidth={2.5} className="text-s-crit" />
+        {onRetry && (
+          <button
+            onClick={() => onRetry(msg)}
+            className="cursor-pointer hover:opacity-80"
+            style={{ padding: 0, background: 'none', border: 'none' }}
+            title="Retry send"
+          >
+            <RotateCw size={10} strokeWidth={2.5} className="text-t1" />
+          </button>
+        )}
+      </span>
+    )
+  }
+
+  // Optimistic messages (negative pk) — pending, muted check
+  if (msg.pk < 0) {
     return <Check size={12} strokeWidth={2} className="text-t5" style={{ opacity: 0.5 }} />
   }
 
-  // Persisted messages — confirmed sent (single check in accent color)
-  return <Check size={12} strokeWidth={2} className="text-m-cht" />
+  // Persisted messages — confirmed sent, green check
+  return <Check size={12} strokeWidth={2} className="text-s-ok" />
 }
 
-const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, animate }) => {
+const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, animate, onRetry }) => {
   const isMedia = msg.type !== 'text'
   const [showDetail, setShowDetail] = useState(false)
 
@@ -154,7 +174,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
           </span>
         )}
         <span>{formatTime(msg.timestamp)}</span>
-        <DeliveryStatus msg={msg} />
+        <DeliveryStatus msg={msg} onRetry={onRetry} />
       </div>
     </div>
   )

@@ -69,7 +69,9 @@ export function handleGetChats(
         conversationKey: chat.conversationKey,
         name: displayName,
         lastMessagePreview: preview,
-        lastMessageAt: chat.lastMessageAt != null ? new Date(chat.lastMessageAt).toISOString() : null,
+        lastMessageAt: chat.lastMessageAt != null
+          ? new Date((chat.lastMessageAt > 1e12 ? chat.lastMessageAt : chat.lastMessageAt * 1000)).toISOString()
+          : null,
         unreadCount: unread,
         isGroup: chat.isGroup,
       };

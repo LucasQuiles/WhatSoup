@@ -27,20 +27,22 @@ export function useLine(name: string) {
   });
 }
 
-/** Chat list for a given line. */
+/** Chat list for a given line — refreshes every 5 s to show new messages/previews. */
 export function useChats(name: string) {
   return useQuery({
     queryKey: ['chats', name],
     queryFn: () => api.getChats(name),
+    refetchInterval: 5000,
     enabled: !!name,
   });
 }
 
-/** Messages in a specific conversation. Disabled until conversationKey is set. */
+/** Messages in a specific conversation — refreshes every 3 s for live updates. */
 export function useMessages(name: string, conversationKey: string) {
   return useQuery({
     queryKey: ['messages', name, conversationKey],
     queryFn: () => api.getMessages(name, conversationKey),
+    refetchInterval: 3000,
     enabled: !!name && !!conversationKey,
   });
 }
