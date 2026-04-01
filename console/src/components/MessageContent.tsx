@@ -11,6 +11,9 @@ interface MessageContentProps {
   msg: Message
 }
 
+/** Hoisted regex source — compiled per-call since /g flag is stateful. */
+const WA_FORMAT_PATTERN = '```([\\s\\S]*?)```|`([^`]+)`|\\*\\*(.+?)\\*\\*|\\*(.+?)\\*|_(.+?)_|~(.+?)~|(https?:\\/\\/[^\\s<]+)'
+
 /** Parse WhatsApp text formatting into React elements. */
 function formatWhatsAppText(text: string): (string | JSX.Element)[] {
   const parts: (string | JSX.Element)[] = []
@@ -22,8 +25,8 @@ function formatWhatsAppText(text: string): (string | JSX.Element)[] {
     if (li > 0) parts.push(<br key={`br-${key++}`} />)
     const line = lines[li]
 
-    // Regex for WhatsApp formatting patterns
-    const pattern = /```([\s\S]*?)```|`([^`]+)`|\*\*(.+?)\*\*|\*(.+?)\*|_(.+?)_|~(.+?)~|(https?:\/\/[^\s<]+)/g
+    // Regex for WhatsApp formatting patterns (must create new instance per line — /g is stateful)
+    const pattern = new RegExp(WA_FORMAT_PATTERN, 'g')
 
     let lastIndex = 0
     let match: RegExpExecArray | null

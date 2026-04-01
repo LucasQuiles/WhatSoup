@@ -125,12 +125,19 @@ export class FleetDbReader {
       params.push(opts.limit);
 
       return db.prepare(`
-        SELECT MIN(pk) AS pk, conversation_key, sender_jid, sender_name,
+        SELECT pk, conversation_key, sender_jid, sender_name,
                content, content_type, timestamp, is_from_me
         FROM messages m
         WHERE m.conversation_key = ? AND m.deleted_at IS NULL ${wherePk}
-        GROUP BY content, timestamp, is_from_me
-        ORDER BY pk DESC
+          AND m.pk = (
+            SELECT MIN(m2.pk) FROM messages m2
+            WHERE m2.conversation_key = m.conversation_key
+              AND m2.content IS m.content
+              AND m2.timestamp = m.timestamp
+              AND m2.is_from_me = m.is_from_me
+              AND m2.deleted_at IS NULL
+          )
+        ORDER BY m.pk DESC
         LIMIT ?
       `).all(...params) as unknown as MessageRow[];
     });
