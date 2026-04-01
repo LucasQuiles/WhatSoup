@@ -30,6 +30,14 @@ export class PresenceCache {
     });
   }
 
+  /** Iterate all entries with their JID, updatedAt, and stale flag. */
+  *getAll(): IterableIterator<[string, PresenceEntry & { stale: boolean }]> {
+    const now = Date.now();
+    for (const [jid, entry] of this.entries) {
+      yield [jid, { ...entry, stale: now - entry.updatedAt > STALE_THRESHOLD_MS }];
+    }
+  }
+
   /**
    * Retrieve the presence status for a JID.
    * Returns undefined if the JID has never been seen.

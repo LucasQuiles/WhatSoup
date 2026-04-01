@@ -265,6 +265,21 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
+    // ── GET /typing — return JIDs currently composing from presence cache ──
+    if (req.url === '/typing' && req.method === 'GET') {
+      const cache = deps.connectionManager.presenceCache;
+      const composing: { jid: string; since: number }[] = [];
+      // presenceCache.entries is private — expose via a method
+      for (const [jid, result] of cache.getAll()) {
+        if (result.status === 'composing') {
+          composing.push({ jid, since: result.updatedAt });
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ composing }));
+      return;
+    }
+
     if (req.url !== '/health' || req.method !== 'GET') {
       res.writeHead(404);
       res.end();
