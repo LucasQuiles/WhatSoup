@@ -851,44 +851,50 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   const reversed = React.useMemo(() => [...messages].reverse(), [messages])
 
   // ── Auto-scroll logic ──
-  // Sticky = pinned to bottom. Detach on scroll up. Re-attach on scroll to bottom.
-  const stickyRef = React.useRef(true)
+  // Pinned to bottom by default. Detach on scroll up. Re-attach on scroll to bottom.
+  const forcePinRef = React.useRef(true) // true on mount + chat switch
   const prevChatRef = React.useRef(selectedChat)
 
-  // On chat switch: reset sticky, snap after DOM paints
+  // On chat switch: force pin
   if (prevChatRef.current !== selectedChat) {
     prevChatRef.current = selectedChat
-    stickyRef.current = true
+    forcePinRef.current = true
   }
 
-  // After every render where messages changed: scroll to bottom if sticky.
-  // useLayoutEffect fires synchronously after DOM mutation, before paint.
+  // After every render where messages changed: scroll to bottom if pinned.
+  // Check ACTUAL scroll position, not a stale ref — this is the source of truth.
   React.useLayoutEffect(() => {
-    if (stickyRef.current) {
-      const el = scrollRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    }
-  }, [reversed]) // reversed is a new array ref every time messages change
+    const el = scrollRef.current
+    if (!el) return
 
-  // Scroll handler: detect sticky state with hysteresis
+    if (forcePinRef.current) {
+      // Forced pin (chat switch / mount) — always scroll
+      el.scrollTop = el.scrollHeight
+      forcePinRef.current = false
+      return
+    }
+
+    // Check if user is at the bottom RIGHT NOW (before we scroll)
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (gap <= 150) {
+      // User is near bottom — keep them there
+      el.scrollTop = el.scrollHeight
+    }
+  }, [reversed]) // new array ref on every messages change
+
+  // Scroll handler: only controls the "Jump to newest" button visibility
   const handleScroll = React.useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-    if (gap <= 50) {
-      stickyRef.current = true
-      setShowJumpToBottom(false)
-    } else if (gap > 150) {
-      stickyRef.current = false
-      setShowJumpToBottom(true)
-    }
+    setShowJumpToBottom(gap > 200)
   }, [])
 
   const jumpToBottom = React.useCallback(() => {
-    stickyRef.current = true
-    setShowJumpToBottom(false)
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    setShowJumpToBottom(false)
   }, [])
 
   return (
