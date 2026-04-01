@@ -802,7 +802,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   // Reset textarea height when text is cleared
   React.useEffect(() => {
     if (!msgText && textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
+      textareaRef.current.style.height = ''
+      textareaRef.current.style.overflow = 'hidden'
     }
   }, [msgText])
 
@@ -963,26 +964,25 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             background: 'var(--color-d1)',
             border: '1px solid var(--b2)',
             borderRadius: 'var(--radius-md)',
-            minHeight: '38px',
             maxHeight: '120px',
             resize: 'none',
-            overflow: 'auto',
-            lineHeight: '1.4',
-            boxSizing: 'border-box',
+            overflow: 'hidden',
+            lineHeight: '1.25',
           }}
           placeholder="Type a reply..."
           value={msgText}
           onChange={e => {
             setMsgText(e.target.value)
-            // Auto-grow
-            e.target.style.height = 'auto'
-            e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+            const el = e.target
+            el.style.height = '0'
+            el.style.height = Math.min(el.scrollHeight, 120) + 'px'
+            el.style.overflow = el.scrollHeight > 120 ? 'auto' : 'hidden'
           }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
         />
         <button
           className="c-btn c-btn-primary flex-shrink-0"
-          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', height: '38px', boxSizing: 'border-box' }}
+          style={{ padding: 'var(--sp-2h) var(--sp-5)', fontSize: 'var(--font-size-body)', lineHeight: '1.25', alignSelf: 'flex-end' }}
           onClick={handleSend}
           disabled={isSending || !msgText.trim()}
         >
