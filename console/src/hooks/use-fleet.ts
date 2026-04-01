@@ -1,21 +1,18 @@
 // ---------------------------------------------------------------------------
 //  WhatSoup Console — Fleet Data Hooks
-//  Uses TanStack Query with mock data (simulated async delay).
-//  When the real API is ready, swap `delay(mock.fn())` for `fetch(...)`.
+//  Uses TanStack Query with real fleet API calls.
 // ---------------------------------------------------------------------------
 
 import { useQuery } from '@tanstack/react-query';
-import * as mock from '../mock-data';
-
-function delay<T>(data: T, ms = 200): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(data), ms));
-}
+import { api } from '../lib/api';
+import { computeKpis } from '../mock-data'; // Keep KPI computation (pure function)
+export { computeKpis };
 
 /** All line instances — refreshes every 5 s. */
 export function useLines() {
   return useQuery({
     queryKey: ['lines'],
-    queryFn: () => delay(mock.getLines()),
+    queryFn: () => api.getLines(),
     refetchInterval: 5000,
   });
 }
@@ -24,8 +21,9 @@ export function useLines() {
 export function useLine(name: string) {
   return useQuery({
     queryKey: ['lines', name],
-    queryFn: () => delay(mock.getLine(name)),
+    queryFn: () => api.getLine(name),
     refetchInterval: 5000,
+    enabled: !!name,
   });
 }
 
@@ -33,7 +31,8 @@ export function useLine(name: string) {
 export function useChats(name: string) {
   return useQuery({
     queryKey: ['chats', name],
-    queryFn: () => delay(mock.getChats(name)),
+    queryFn: () => api.getChats(name),
+    enabled: !!name,
   });
 }
 
@@ -41,8 +40,8 @@ export function useChats(name: string) {
 export function useMessages(name: string, conversationKey: string) {
   return useQuery({
     queryKey: ['messages', name, conversationKey],
-    queryFn: () => delay(mock.getMessages(name, conversationKey)),
-    enabled: !!conversationKey,
+    queryFn: () => api.getMessages(name, conversationKey),
+    enabled: !!name && !!conversationKey,
   });
 }
 
@@ -50,7 +49,8 @@ export function useMessages(name: string, conversationKey: string) {
 export function useAccess(name: string) {
   return useQuery({
     queryKey: ['access', name],
-    queryFn: () => delay(mock.getAccess(name)),
+    queryFn: () => api.getAccess(name),
+    enabled: !!name,
   });
 }
 
@@ -58,8 +58,9 @@ export function useAccess(name: string) {
 export function useLogs(name: string) {
   return useQuery({
     queryKey: ['logs', name],
-    queryFn: () => delay(mock.getLogs(name)),
+    queryFn: () => api.getLogs(name),
     refetchInterval: 3000,
+    enabled: !!name,
   });
 }
 
@@ -67,7 +68,7 @@ export function useLogs(name: string) {
 export function useFeed() {
   return useQuery({
     queryKey: ['feed'],
-    queryFn: () => delay(mock.getFeed()),
+    queryFn: () => api.getFeed(),
     refetchInterval: 5000,
   });
 }
