@@ -17,7 +17,12 @@ import {
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
 import { SessionManager, formatAge } from './session.ts';
-import { OutboundQueue, type ToolUpdate, type ToolCategory } from './outbound-queue.ts';
+import {
+  OutboundQueue,
+  type IOutboundQueue,
+  type ToolUpdate,
+  type ToolCategory,
+} from './outbound-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -282,16 +287,16 @@ export class AgentRuntime implements Runtime {
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
-  private queue: OutboundQueue | null = null;
+  private queue: IOutboundQueue | null = null;
   private activeChatJid: string | null = null;
 
   // shared mode: single session, per-chat outbound queues + global turn queue
-  private outboundQueues: Map<string, OutboundQueue> = new Map();
+  private outboundQueues: Map<string, IOutboundQueue> = new Map();
 
   // per_chat mode: independent session + queue per chatJid
   // When sandboxPerChat=true, maps are keyed by workspaceKey; when false, keyed by raw chatJid.
   private chatSessions: Map<string, SessionManager> = new Map();
-  private chatQueues: Map<string, OutboundQueue> = new Map();
+  private chatQueues: Map<string, IOutboundQueue> = new Map();
   private workspaceResources: Map<string, { socketPath: string; workspacePath: string; socketServer: WhatSoupSocketServer | null; mediaBridge: MediaBridge | null }> = new Map();
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
@@ -894,7 +899,7 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: OutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number): void {
+  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number): void {
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -1071,7 +1076,7 @@ export class AgentRuntime implements Runtime {
    * In shared mode: the queue for the current turn's chat (or null if no turn in flight).
    * In non-shared mode: the single queue.
    */
-  private getActiveQueue(): OutboundQueue | null {
+  private getActiveQueue(): IOutboundQueue | null {
     if (this.sessionScope === 'per_chat') {
       // per_chat mode: this.queue is NOT set (shared field removed to fix race).
       // Callers in per_chat mode should use getQueueForChat(chatJid) instead.
@@ -1088,7 +1093,7 @@ export class AgentRuntime implements Runtime {
    * Get the outbound queue for a specific chatJid (shared mode).
    * Falls back to single queue (non-shared mode).
    */
-  private getQueueForChat(chatJid: string): OutboundQueue | null {
+  private getQueueForChat(chatJid: string): IOutboundQueue | null {
     if (this.sessionScope === 'per_chat') {
       if (this.sandboxPerChat) {
         const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
