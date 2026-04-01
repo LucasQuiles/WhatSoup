@@ -350,7 +350,7 @@ select:focus-visible,
 textarea:focus-visible,
 a:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--m-cht-wash), 0 0 0 3px var(--m-cht-soft);
+  box-shadow: 0 0 0 1px var(--m-cht-wash), 0 0 0 1.5px var(--m-cht-soft);
   border-color: var(--color-m-cht) !important;
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }

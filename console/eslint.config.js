@@ -182,6 +182,19 @@ export default defineConfig([
           selector: 'Property[key.value="boxShadow"][value.value=/^[0-9]/]',
           message: '⛔ Hardcoded boxShadow — use var(--card-shadow), var(--shadow-inset/md/lg).',
         },
+
+        // ═══ FOCUS RINGS ═══
+
+        // Inline outline styles — focus rings must use the global :focus-visible rule in index.css
+        {
+          selector: 'Property[key.value="outline"][value.value=/[0-9]+px/]',
+          message: '⛔ Inline outline — focus rings are set globally via :focus-visible in index.css.',
+        },
+        // Inline outlineWidth — same reason
+        {
+          selector: 'Property[key.value="outlineWidth"]',
+          message: '⛔ Inline outlineWidth — focus ring width is set globally in index.css (1px/1.5px).',
+        },
       ],
     },
   },
