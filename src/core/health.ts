@@ -189,9 +189,29 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
 
-        // Parse body
+        // Parse body (with size limit matching /send)
+        const MAX_BODY_BYTES = 64 * 1024;
         let rawBody = '';
-        for await (const chunk of req) rawBody += chunk;
+        let byteCount = 0;
+        let destroyed = false;
+        await new Promise<void>((resolve) => {
+          req.on('data', (chunk: Buffer) => {
+            if (destroyed) return;
+            byteCount += chunk.byteLength;
+            if (byteCount > MAX_BODY_BYTES) {
+              destroyed = true;
+              res.writeHead(413, jsonHeaders);
+              res.end(JSON.stringify({ error: 'request body too large' }));
+              req.destroy();
+              resolve();
+              return;
+            }
+            rawBody += chunk;
+          });
+          req.once('end', resolve);
+        });
+        if (destroyed) return;
+
         let data: Record<string, unknown>;
         try {
           data = JSON.parse(rawBody) as Record<string, unknown>;
@@ -210,6 +230,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.end(JSON.stringify({ error: 'subjectType, subjectId, and action are required' }));
           return;
         }
+        if (subjectType !== 'phone' && subjectType !== 'group') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'subjectType must be "phone" or "group"' }));
+          return;
+        }
         if (action !== 'allow' && action !== 'block') {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'action must be "allow" or "block"' }));
@@ -217,7 +242,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
 
         const status = action === 'allow' ? 'allowed' as const : 'blocked' as const;
-        const result = upsertAccess(deps.db, subjectType as SubjectType, subjectId, status);
+        const result = upsertAccess(deps.db, subjectType, subjectId, status);
 
         // Invoke runtime callback (allow triggers queued-message replay)
         if (deps.handleAccessDecision) {

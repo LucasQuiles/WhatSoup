@@ -18,7 +18,8 @@ import { startHealthServer } from './core/health.ts';
 import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
+import { getMessagesBySender } from './core/messages.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
@@ -471,8 +472,31 @@ const healthServer = startHealthServer({
   instanceType: instanceType,
   accessMode: config.accessMode,
   handleAccessDecision: async (subjectType, subjectId, action) => {
-    if (action === 'allow') {
-      log.info({ subjectType, subjectId }, 'access: allowed via POST /access');
+    if (action === 'allow' && subjectType === 'phone') {
+      // Replay queued messages — mirrors admin.ts allow path
+      log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
+      const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
+      for (const senderJid of jidFormats) {
+        const stored = getMessagesBySender(db, senderJid);
+        for (const msg of stored) {
+          await runtime.handleMessage({
+            messageId: msg.messageId,
+            chatJid: msg.chatJid,
+            senderJid: msg.senderJid,
+            senderName: msg.senderName,
+            content: msg.content,
+            contentType: msg.contentType,
+            isFromMe: false,
+            isGroup: false,
+            mentionedJids: [],
+            timestamp: msg.timestamp,
+            quotedMessageId: msg.quotedMessageId,
+            isResponseWorthy: true,
+          });
+        }
+      }
+    } else if (action === 'allow' && subjectType === 'group') {
+      log.info({ subjectType, subjectId }, 'access: group allowed via POST /access');
     }
     // Block requires no additional action beyond the DB update
   },
