@@ -841,41 +841,63 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
   const reversed = React.useMemo(() => [...messages].reverse(), [messages])
 
-  // Track whether user is near the bottom
-  const isNearBottom = React.useRef(true)
+  // Auto-scroll: pinned to bottom unless user scrolls up
+  const userScrolledUp = React.useRef(false)
+  const prevMsgCount = React.useRef(messages.length)
+  const prevChat2 = React.useRef(selectedChat)
 
-  // Auto-scroll to bottom on new messages — only if already at bottom or switching chats
-  const prevChat = React.useRef(selectedChat)
+  // On chat switch: always snap to bottom
   React.useEffect(() => {
-    const chatChanged = prevChat.current !== selectedChat
-    prevChat.current = selectedChat
-    if (chatChanged || isNearBottom.current) {
-      bottomRef.current?.scrollIntoView({ behavior: chatChanged ? 'auto' : 'smooth' })
+    userScrolledUp.current = false
+    setShowJumpToBottom(false)
+    // Use requestAnimationFrame so DOM has rendered the new messages
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  }, [selectedChat])
+
+  // On new messages arriving: auto-scroll only if pinned
+  React.useEffect(() => {
+    if (prevChat2.current !== selectedChat) {
+      prevChat2.current = selectedChat
+      prevMsgCount.current = messages.length
+      return
+    }
+    if (messages.length !== prevMsgCount.current) {
+      prevMsgCount.current = messages.length
+      if (!userScrolledUp.current) {
+        requestAnimationFrame(() => {
+          const el = scrollRef.current
+          if (el) el.scrollTop = el.scrollHeight
+        })
+      }
     }
   }, [selectedChat, messages.length])
 
-  // Show/hide jump-to-bottom FAB based on scroll position
   const handleScroll = React.useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    isNearBottom.current = distFromBottom < 200
-    setShowJumpToBottom(distFromBottom > 300)
+    // User is "scrolled up" if more than 150px from the bottom
+    userScrolledUp.current = distFromBottom > 150
+    setShowJumpToBottom(distFromBottom > 150)
   }, [])
 
   const jumpToBottom = () => {
-    isNearBottom.current = true
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    userScrolledUp.current = false
     setShowJumpToBottom(false)
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
   return (
     <>
-      <div className="relative flex-1 min-h-0">
+      <div className="relative flex-1 min-h-0 flex flex-col">
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="absolute inset-0 overflow-auto scrollbar-hide flex flex-col"
+        className="flex-1 overflow-y-auto scrollbar-hide flex flex-col"
         style={{ padding: 'var(--sp-4) var(--sp-5)' }}
       >
         {/* Load older messages */}
