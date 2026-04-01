@@ -27,8 +27,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
       {/* Left cluster: logo + nav items */}
       <div className="flex items-center" style={{ gap: "var(--sp-6)" }}>
         <span
-          className="font-sans select-none"
-          style={{ fontSize: "var(--font-size-xl)", fontWeight: 900, letterSpacing: "var(--tracking-tighter)" }}
+          className="font-sans font-black select-none"
+          style={{ fontSize: "var(--font-size-xl)", letterSpacing: "var(--tracking-tighter)" }}
         >
           <span className="text-t2">What</span>
           <span className="text-s-ok">Soup</span>
@@ -38,13 +38,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
           to="/"
           end
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans c-nav-link relative ${
+            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", fontWeight: 500, borderRadius: "var(--radius-sm)" }}
+          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -70,13 +70,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
         <NavLink
           to="/inbox"
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans c-nav-link relative ${
+            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", fontWeight: 500, borderRadius: "var(--radius-sm)" }}
+          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -119,13 +119,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
         <NavLink
           to="/ops"
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans c-nav-link relative ${
+            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", fontWeight: 500, borderRadius: "var(--radius-sm)" }}
+          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>

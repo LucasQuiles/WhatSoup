@@ -158,6 +158,13 @@ export default defineConfig([
           message: '⛔ Direct style.color mutation — use CSS :hover or React state.',
         },
 
+        // ═══ FONT WEIGHT ═══
+        // Use Tailwind font-* classes (font-normal/medium/semibold/bold/extrabold/black)
+        {
+          selector: 'Property[key.value="fontWeight"]',
+          message: '⛔ Inline fontWeight — use Tailwind font-normal/medium/semibold/bold/extrabold/black class.',
+        },
+
         // ═══ REACT ANTI-PATTERNS ═══
 
         // Inline objects in style that recreate on every render

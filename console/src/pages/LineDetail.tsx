@@ -172,14 +172,14 @@ export default function LineDetail() {
             <button
               key={tab.id}
               onClick={() => !isDeferred && setActiveTab(tab.id)}
-              className={`flex items-center gap-2 font-sans c-hover relative ${
+              className={`flex items-center gap-2 font-sans font-medium c-hover relative ${
                 isDeferred
                   ? 'text-t5 cursor-default'
                   : isActive
                   ? 'text-t1 cursor-pointer'
                   : 'text-t4 hover:text-t3 cursor-pointer'
               }`}
-              style={{ padding: '10px var(--sp-4)', fontSize: 'var(--font-size-data)', fontWeight: 500 }}
+              style={{ padding: '10px var(--sp-4)', fontSize: 'var(--font-size-data)' }}
               title={isDeferred ? 'Coming in Phase 2' : undefined}
             >
               <Icon size={15} strokeWidth={1.75} />

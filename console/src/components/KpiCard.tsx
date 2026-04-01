@@ -46,7 +46,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
       >
         {value}
         {suffix && (
-          <span style={{ fontSize: "var(--font-size-data)", fontWeight: 400, marginLeft: "2px" }}>
+          <span className="font-normal" style={{ fontSize: "var(--font-size-data)", marginLeft: "2px" }}>
             {suffix}
           </span>
         )}
