@@ -1,0 +1,6 @@
+[Unit]
+Description=Notify Q of WhatSoup %i failure
+
+[Service]
+Type=oneshot
+ExecStart=/home/q/LAB/WhatSoup/deploy/scripts/heal-notify.sh %i

@@ -5,6 +5,7 @@ After=graphical-session.target network-online.target
 # 10 crashes in 5 minutes before systemd gives up (was 5 in 2 minutes).
 StartLimitIntervalSec=300
 StartLimitBurst=10
+OnFailure=whatsoup-heal-notify@%i.service
 
 [Service]
 Type=simple
