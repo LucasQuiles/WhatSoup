@@ -30,7 +30,7 @@ export default defineConfig([
       // Severity: "warn" for ratcheting. Change to "error" to hard-block.
       // ═══════════════════════════════════════════════════════════════
 
-      'no-restricted-syntax': ['warn',
+      'no-restricted-syntax': ['error',
 
         // ═══ TYPOGRAPHY ═══
 
