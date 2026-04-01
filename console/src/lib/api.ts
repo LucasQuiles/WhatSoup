@@ -11,19 +11,31 @@ import * as mock from '../mock-data';
 
 const API_BASE = '';
 
-let fleetAvailable: boolean | null = null; // null = unknown, true/false = cached result
+let fleetAvailable: boolean | null = null;
+let checkInFlight: Promise<boolean> | null = null;
 
 async function checkFleetAvailable(): Promise<boolean> {
   if (fleetAvailable !== null) return fleetAvailable;
-  try {
-    const res = await fetch(`${API_BASE}/api/lines`, { signal: AbortSignal.timeout(2000) });
-    fleetAvailable = res.ok;
-  } catch {
-    fleetAvailable = false;
-  }
-  // Re-check every 30s in case fleet server starts later
-  setTimeout(() => { fleetAvailable = null; }, 30_000);
-  return fleetAvailable;
+  // Deduplicate concurrent checks
+  if (checkInFlight) return checkInFlight;
+  checkInFlight = (async () => {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      const res = await fetch(`${API_BASE}/api/lines`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      fleetAvailable = res.ok;
+    } catch {
+      fleetAvailable = false;
+    }
+    checkInFlight = null;
+    // Re-check periodically in case fleet server starts later
+    setTimeout(() => { fleetAvailable = null; }, 60_000);
+    return fleetAvailable;
+  })();
+  return checkInFlight;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
