@@ -1,0 +1,213 @@
+import { type FC } from 'react'
+import { Pencil, Loader2, AlertCircle } from 'lucide-react'
+import ModeBadge from '../ModeBadge'
+
+interface ReviewStepProps {
+  data: Record<string, unknown>
+  onEditPhase: (phase: number) => void
+  onCreateLine: () => Promise<void>
+  creating: boolean
+  error: string | null
+}
+
+/* ── Shared styles ── */
+
+const cardStyle: React.CSSProperties = {
+  background: 'var(--color-d1)',
+  border: 'var(--bw) solid var(--b2)',
+  borderRadius: 'var(--radius-md)',
+  padding: 'var(--sp-4)',
+}
+
+const cardHeaderStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  marginBottom: 'var(--sp-3)',
+}
+
+const headingStyle: React.CSSProperties = {
+  fontSize: 'var(--font-size-data)',
+  letterSpacing: 'var(--tracking-label)',
+  color: 'var(--color-t2)',
+}
+
+const kvRowStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  padding: 'var(--sp-1) 0',
+}
+
+const kvLabelStyle: React.CSSProperties = {
+  fontSize: 'var(--font-size-label)',
+  color: 'var(--color-t4)',
+}
+
+const kvValueStyle: React.CSSProperties = {
+  fontSize: 'var(--font-size-data)',
+  color: 'var(--color-t1)',
+}
+
+/* ── Edit button ── */
+
+const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
+  <button
+    type="button"
+    className="c-btn c-btn-ghost flex items-center"
+    style={{ gap: 'var(--sp-1)', padding: 'var(--sp-1) var(--sp-2)' }}
+    onClick={onClick}
+  >
+    <Pencil size={12} />
+    <span style={{ fontSize: 'var(--font-size-xs)' }}>Edit</span>
+  </button>
+)
+
+/* ── Key-value row ── */
+
+const KV: FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <div style={kvRowStyle}>
+    <span style={kvLabelStyle}>{label}</span>
+    <span className="font-mono" style={kvValueStyle}>{value}</span>
+  </div>
+)
+
+/* ── Truncate helper ── */
+
+function truncate(text: string, max: number): string {
+  const firstLine = text.split('\n')[0] ?? ''
+  if (firstLine.length <= max) return firstLine
+  return firstLine.slice(0, max) + '...'
+}
+
+/* ── Main component ── */
+
+const ReviewStep: FC<ReviewStepProps> = ({
+  data,
+  onEditPhase,
+  onCreateLine,
+  creating,
+  error,
+}) => {
+  const name = (data.name as string) ?? ''
+  const description = (data.description as string) ?? ''
+  const type = (data.type as string) ?? 'chat'
+  const adminPhones = (data.adminPhones as string[]) ?? []
+  const models = data.models as Record<string, string> | undefined
+  const authMethod = (data.authMethod as string) ?? 'api_key'
+  const accessMode = (data.accessMode as string) ?? 'self_only'
+  const systemPrompt = (data.systemPrompt as string) ?? ''
+  const rateLimit = (data.rateLimit as number) ?? 60
+  const tokenBudget = (data.tokenBudget as number) ?? 50000
+  const agentOptions = (data.agentOptions as { cwd?: string; sessionScope?: string }) ?? {}
+  const pineconeIndex = (data.pineconeIndex as string) ?? ''
+
+  const accessLabels: Record<string, string> = {
+    self_only: 'Admin Only',
+    allowlist: 'Allowlist',
+    open_dm: 'Open DMs',
+    groups_only: 'Groups Only',
+  }
+
+  return (
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+      {/* Identity card */}
+      <div style={cardStyle}>
+        <div style={cardHeaderStyle}>
+          <span className="font-medium" style={headingStyle}>Identity</span>
+          <EditBtn onClick={() => onEditPhase(0)} />
+        </div>
+        <KV label="Name" value={name || '-'} />
+        {description && <KV label="Description" value={description} />}
+        <KV
+          label="Type"
+          value={<ModeBadge mode={type as 'passive' | 'chat' | 'agent'} />}
+        />
+        <KV label="Admin phones" value={`${adminPhones.length} configured`} />
+      </div>
+
+      {/* Model card */}
+      <div style={cardStyle}>
+        <div style={cardHeaderStyle}>
+          <span className="font-medium" style={headingStyle}>Model &amp; Auth</span>
+          <EditBtn onClick={() => onEditPhase(1)} />
+        </div>
+        {type === 'passive' ? (
+          <KV label="Models" value="None (passive)" />
+        ) : (
+          <>
+            <KV
+              label="Conversation"
+              value={models?.conversation ?? 'claude-sonnet-4-6'}
+            />
+            <KV
+              label="Extraction"
+              value={models?.extraction ?? 'claude-haiku-4-5-20251001'}
+            />
+            <KV
+              label="Auth"
+              value={authMethod === 'oauth' ? 'OAuth session' : 'API key'}
+            />
+          </>
+        )}
+      </div>
+
+      {/* Config card */}
+      <div style={cardStyle}>
+        <div style={cardHeaderStyle}>
+          <span className="font-medium" style={headingStyle}>Config</span>
+          <EditBtn onClick={() => onEditPhase(2)} />
+        </div>
+        <KV label="Access mode" value={accessLabels[accessMode] ?? accessMode} />
+        {type !== 'passive' && systemPrompt && (
+          <KV label="System prompt" value={truncate(systemPrompt, 60)} />
+        )}
+        <KV label="Rate limit" value={`${rateLimit}/hr`} />
+        <KV label="Token budget" value={tokenBudget.toLocaleString()} />
+        {type === 'agent' && (
+          <>
+            <KV label="CWD" value={agentOptions.cwd || 'Not set'} />
+            <KV label="Session scope" value={agentOptions.sessionScope ?? 'single'} />
+          </>
+        )}
+        <KV
+          label="RAG"
+          value={pineconeIndex || 'Not configured'}
+        />
+      </div>
+
+      {/* Error message */}
+      {error && (
+        <div
+          className="flex items-center"
+          style={{
+            gap: 'var(--sp-2)',
+            padding: 'var(--sp-3)',
+            background: 'var(--color-d3)',
+            borderRadius: 'var(--radius-sm)',
+            border: 'var(--bw) solid var(--color-s-crit)',
+          }}
+        >
+          <AlertCircle size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
+          <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-s-crit)' }}>
+            {error}
+          </span>
+        </div>
+      )}
+
+      {/* Create button */}
+      <button
+        type="button"
+        className="c-btn c-btn-primary flex items-center justify-center self-stretch"
+        style={{ gap: 'var(--sp-2)', padding: 'var(--sp-3)' }}
+        onClick={onCreateLine}
+        disabled={creating}
+      >
+        {creating && <Loader2 size={16} className="animate-spin" />}
+        {creating ? 'Creating...' : 'Create Line'}
+      </button>
+    </div>
+  )
+}
+
+export default ReviewStep
