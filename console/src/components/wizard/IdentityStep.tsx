@@ -43,7 +43,7 @@ function slugify(input: string): string {
 
 function validatePhone(value: string): boolean {
   const digits = value.replace(/\D/g, '')
-  return digits.length >= 10 && digits.length <= 15 && /^\d+$/.test(value)
+  return digits.length >= 10 && digits.length <= 15
 }
 
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
@@ -192,7 +192,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
         </label>
         <TagInput
           values={adminPhones}
-          onChange={(values) => onChange({ adminPhones: values })}
+          onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
           placeholder="Enter phone number"
           validate={validatePhone}
         />

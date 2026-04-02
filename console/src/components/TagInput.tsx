@@ -42,7 +42,8 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate }
         value={input}
         onChange={e => setInput(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder={placeholder}
+        onBlur={() => addTag(input)}
+        placeholder={placeholder ? `${placeholder} (press Enter to add)` : 'Press Enter to add'}
         className="w-full font-mono"
         style={{
           background: 'var(--color-d1)',
