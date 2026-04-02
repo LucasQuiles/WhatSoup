@@ -495,8 +495,9 @@ export class Database {
       .get(table) as { name: string } | undefined;
     if (!tableRow) return { exists: false, hasColumns: false, columns: [] };
 
+    const verifiedName = tableRow.name; // from sqlite_master, not raw input
     const cols = this.db
-      .prepare(`PRAGMA ${schema}.table_info('${table}')`)
+      .prepare(`PRAGMA ${schema}.table_info('${verifiedName}')`)
       .all() as Array<{ name: string }>;
     const colNames = cols.map((c) => c.name);
 
@@ -576,16 +577,21 @@ export class Database {
           log.info('legacy DB has no agent_sessions table, skipping');
           counts['agent_sessions'] = 0;
         } else {
-          this.db.exec(`
-            INSERT OR IGNORE INTO main.agent_sessions
-              (id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
-               transcript_path, message_count, started_at, last_message_at, status)
-            SELECT id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
-                   transcript_path, message_count, started_at, last_message_at, status
-            FROM old.agent_sessions
-          `);
-          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-          counts['agent_sessions'] = row.n;
+          try {
+            this.db.exec(`
+              INSERT OR IGNORE INTO main.agent_sessions
+                (id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+                 transcript_path, message_count, started_at, last_message_at, status)
+              SELECT id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+                     transcript_path, message_count, started_at, last_message_at, status
+              FROM old.agent_sessions
+            `);
+            const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+            counts['agent_sessions'] = row.n;
+          } catch (err) {
+            log.info({ err, table: 'agent_sessions' }, 'legacy agent_sessions schema mismatch, skipping');
+            counts['agent_sessions'] = 0;
+          }
         }
       }
 
@@ -596,13 +602,18 @@ export class Database {
           log.info('legacy DB has no rate_limits table, skipping');
           counts['rate_limits'] = 0;
         } else {
-          this.db.exec(`
-            INSERT INTO main.rate_limits (sender_jid, response_at)
-            SELECT sender_jid, response_at FROM old.rate_limits
-            GROUP BY sender_jid, response_at
-          `);
-          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-          counts['rate_limits'] = row.n;
+          try {
+            this.db.exec(`
+              INSERT INTO main.rate_limits (sender_jid, response_at)
+              SELECT sender_jid, response_at FROM old.rate_limits
+              GROUP BY sender_jid, response_at
+            `);
+            const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+            counts['rate_limits'] = row.n;
+          } catch (err) {
+            log.info({ err, table: 'rate_limits' }, 'legacy rate_limits schema mismatch, skipping');
+            counts['rate_limits'] = 0;
+          }
         }
       }
 
@@ -613,16 +624,21 @@ export class Database {
           log.info('legacy DB has no enrichment_runs table, skipping');
           counts['enrichment_runs'] = 0;
         } else {
-          this.db.exec(`
-            INSERT OR IGNORE INTO main.enrichment_runs
-              (run_id, started_at, completed_at, messages_processed,
-               facts_extracted, facts_upserted, error)
-            SELECT run_id, started_at, completed_at, messages_processed,
-                   facts_extracted, facts_upserted, error
-            FROM old.enrichment_runs
-          `);
-          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-          counts['enrichment_runs'] = row.n;
+          try {
+            this.db.exec(`
+              INSERT OR IGNORE INTO main.enrichment_runs
+                (run_id, started_at, completed_at, messages_processed,
+                 facts_extracted, facts_upserted, error)
+              SELECT run_id, started_at, completed_at, messages_processed,
+                     facts_extracted, facts_upserted, error
+              FROM old.enrichment_runs
+            `);
+            const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+            counts['enrichment_runs'] = row.n;
+          } catch (err) {
+            log.info({ err, table: 'enrichment_runs' }, 'legacy enrichment_runs schema mismatch, skipping');
+            counts['enrichment_runs'] = 0;
+          }
         }
       }
 
