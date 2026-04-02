@@ -94,6 +94,19 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+      {/* Type — first so it drives the rest of the wizard */}
+      <div>
+        <label className="c-label" style={labelStyle}>
+          Type
+        </label>
+        <CardSelector
+          options={TYPE_OPTIONS}
+          selected={type}
+          onChange={(value) => onChange({ type: value })}
+        />
+        {errors.type && <div style={errorStyle}>{errors.type}</div>}
+      </div>
+
       {/* Name */}
       <div>
         <label className="c-label" style={labelStyle}>
@@ -146,19 +159,6 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           placeholder="What this line is for"
           style={inputStyle}
         />
-      </div>
-
-      {/* Type */}
-      <div>
-        <label className="c-label" style={labelStyle}>
-          Type
-        </label>
-        <CardSelector
-          options={TYPE_OPTIONS}
-          selected={type}
-          onChange={(value) => onChange({ type: value })}
-        />
-        {errors.type && <div style={errorStyle}>{errors.type}</div>}
       </div>
 
       {/* Admin Phones */}
