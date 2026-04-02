@@ -202,7 +202,10 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         style={{
           '--wizard-accent': TYPE_ACCENT[(formData.type as string) ?? 'chat'],
           width: 'var(--panel-wizard)',
+          minWidth: 'var(--panel-wizard)',
           maxWidth: '90%',
+          minHeight: '500px',
+          height: 'var(--modal-max-h)',
           maxHeight: 'var(--modal-max-h)',
           background: 'var(--color-d2)',
           borderWidth: 'var(--bw)',

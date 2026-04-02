@@ -28,6 +28,8 @@ const MODEL_DEFAULTS = {
   extraction: 'claude-haiku-4-5-20251001',
   validation: 'claude-haiku-4-5-20251001',
   fallback: 'gpt-4.1',
+  openaiExtraction: 'gpt-4.1-mini',
+  openaiValidation: 'gpt-4.1-nano',
 } as const
 
 type ModelRole = keyof typeof MODEL_DEFAULTS
@@ -36,6 +38,12 @@ const ANTHROPIC_ROLES: { key: ModelRole; label: string }[] = [
   { key: 'conversation', label: 'Conversation' },
   { key: 'extraction', label: 'Extraction' },
   { key: 'validation', label: 'Validation' },
+]
+
+const OPENAI_ROLES: { key: ModelRole; label: string }[] = [
+  { key: 'fallback', label: 'Fallback / Conversation' },
+  { key: 'openaiExtraction', label: 'Extraction' },
+  { key: 'openaiValidation', label: 'Validation' },
 ]
 
 const passwordInputStyle: React.CSSProperties = {
@@ -67,7 +75,7 @@ const ModelAndKeyTabs: FC<{
   errors: Record<string, string>
   hideAnthropicKey?: boolean
 }> = ({ models, onModelChange, apiKey, openaiKey, onApiKeyChange, onOpenaiKeyChange, errors, hideAnthropicKey }) => {
-  const [activeTab, setActiveTab] = useState<'anthropic' | 'openai'>('anthropic')
+  const [activeTab, setActiveTab] = useState<'anthropic' | 'openai' | 'local'>('anthropic')
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
@@ -78,6 +86,14 @@ const ModelAndKeyTabs: FC<{
         </button>
         <button type="button" style={tabStyle(activeTab === 'openai')} onClick={() => setActiveTab('openai')}>
           OpenAI
+        </button>
+        <button
+          type="button"
+          style={{ ...tabStyle(false), opacity: 0.4, cursor: 'not-allowed' }}
+          title="Coming soon"
+          disabled
+        >
+          Local
         </button>
       </div>
 
@@ -118,23 +134,25 @@ const ModelAndKeyTabs: FC<{
       {/* OpenAI tab */}
       {activeTab === 'openai' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-          <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-            <label className="c-label" style={labelStyle}>Fallback Model</label>
-            <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <SelectInput
-                  value={models.fallback}
-                  onChange={(e) => onModelChange('fallback', e.target.value)}
-                  confirmed
-                >
-                  {OPENAI_MODELS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </SelectInput>
+          {OPENAI_ROLES.map(({ key, label }) => (
+            <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
+              <label className="c-label" style={labelStyle}>{label}</label>
+              <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <SelectInput
+                    value={models[key]}
+                    onChange={(e) => onModelChange(key, e.target.value)}
+                    confirmed
+                  >
+                    {OPENAI_MODELS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </SelectInput>
+                </div>
+                <Check size={16} className="wizard-check" style={confirmCheckStyle} />
               </div>
-              <Check size={16} className="wizard-check" style={confirmCheckStyle} />
             </div>
-          </div>
+          ))}
           <ApiKeyInput
             label="API Key"
             value={openaiKey}
