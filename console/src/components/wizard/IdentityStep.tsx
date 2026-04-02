@@ -50,26 +50,28 @@ function validatePhone(value: string): boolean {
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 
 const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
-  const initialName = useRef((data.name as string) ?? '')
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
+  const [showConfirmed, setShowConfirmed] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+
+  // Delay all confirmation indicators on mount so they animate in together
+  useEffect(() => {
+    const timer = setTimeout(() => setShowConfirmed(true), 300)
+    return () => clearTimeout(timer)
+  }, [])
 
   const name = (data.name as string) ?? ''
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
   const adminPhones = (data.adminPhones as string[]) ?? []
 
-  /* Debounced uniqueness check — runs immediately on mount if name already set */
+  /* Debounced uniqueness check */
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     if (abortRef.current) abortRef.current.abort()
 
     const slug = slugify(name)
-    // Skip debounce on mount when returning to this step with an existing name
-    const isRemount = initialName.current === name && slug.length >= 2
-    const delay = isRemount ? 0 : 500
-    initialName.current = '' // clear so subsequent edits debounce normally
 
     debounceRef.current = setTimeout(() => {
       if (!slug) {
@@ -89,7 +91,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           if (controller.signal.aborted) return
           setNameStatus('error')
         })
-    }, slug ? delay : 0)
+    }, slug ? 500 : 0)
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -160,10 +162,10 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           placeholder="What this line is for"
           style={{
             ...inputStyle,
-            borderColor: description.trim() ? 'var(--wizard-accent)' : 'var(--b2)',
+            borderColor: showConfirmed && description.trim() ? 'var(--wizard-accent)' : 'var(--b2)',
           }}
         />
-        {description.trim() && (
+        {showConfirmed && description.trim() && (
           <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
         )}
         </div>
@@ -186,10 +188,10 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
               onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
               placeholder="Enter phone number"
               validate={validatePhone}
-              accentColor={adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
+              accentColor={showConfirmed && adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
             />
           </div>
-          {!errors.adminPhones && adminPhones.length > 0 && (
+          {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
             <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0, marginTop: 'var(--sp-2)' }} />
           )}
         </div>
