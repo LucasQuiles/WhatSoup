@@ -48,7 +48,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
                 height: 20,
                 borderRadius: '50%',
                 background: completed || active ? 'var(--color-s-ok)' : 'transparent',
-                border: `var(--bw) solid ${completed || active ? 'var(--color-s-ok)' : 'var(--color-t5)'}`,
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: completed || active ? 'var(--color-s-ok)' : 'var(--color-t5)',
                 transition: 'all 0.2s ease',
               }}
             >
@@ -141,7 +141,9 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       conversation: 'claude-sonnet-4-6',
       extraction: 'claude-haiku-4-5-20251001',
       validation: 'claude-haiku-4-5-20251001',
-      fallback: 'gpt-4.1',
+      fallback: '',
+      openaiExtraction: '',
+      openaiValidation: '',
     },
     rateLimitPerHour: 60,
     maxTokens: 4096,

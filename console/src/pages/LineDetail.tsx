@@ -659,7 +659,7 @@ function ModeSwitchDialog({
               style={{
                 padding: 'var(--sp-3) var(--sp-4)',
                 borderRadius: 'var(--radius-md)',
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: ` ${isSelected ? `var(--m-${mk}-soft)` : 'var(--b1)'}`,
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: isSelected ? `var(--m-${mk}-soft)` : 'var(--b1)',
                 background: isSelected ? `var(--m-${mk}-wash)` : 'var(--color-d1)',
                 opacity: switching ? 0.6 : 1,
               }}
@@ -671,7 +671,7 @@ function ModeSwitchDialog({
                   width: 16,
                   height: 16,
                   marginTop: 2,
-                  border: `2px solid ${isSelected ? `var(--color-m-${mk})` : 'var(--b3)'}`,
+                  borderWidth: 'var(--bw-accent)', borderStyle: 'solid', borderColor: isSelected ? `var(--color-m-${mk})` : 'var(--b3)',
                   background: isSelected ? `var(--color-m-${mk})` : 'transparent',
                   boxShadow: isSelected ? `inset 0 0 0 3px var(--color-d2)` : 'none',
                 }}
