@@ -335,13 +335,49 @@ export async function handleCreateLine(
     healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
   }
 
+  // --- Validate accessMode ---
+  const VALID_ACCESS_MODES = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
+  const accessMode = type === 'passive' ? 'self_only' : (body.accessMode ?? 'self_only') as string;
+  if (!VALID_ACCESS_MODES.has(accessMode)) {
+    jsonResponse(res, 400, { error: 'accessMode must be one of: self_only, allowlist, open_dm, groups_only' });
+    return;
+  }
+
+  // --- Validate agent-specific options ---
+  if (type === 'agent') {
+    const ao = body.agentOptions as Record<string, unknown> | undefined;
+    if (!ao || typeof ao !== 'object') {
+      jsonResponse(res, 400, { error: 'agent instances require agentOptions with cwd and sessionScope' });
+      return;
+    }
+    const VALID_SCOPES = new Set(['single', 'shared', 'per_chat']);
+    if (!VALID_SCOPES.has(ao.sessionScope as string)) {
+      jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
+      return;
+    }
+    if (typeof ao.cwd !== 'string' || !(ao.cwd as string).trim()) {
+      jsonResponse(res, 400, { error: 'agentOptions.cwd is required for agent instances' });
+      return;
+    }
+    if (ao.sessionScope === 'single' && accessMode !== 'self_only') {
+      jsonResponse(res, 400, { error: 'agent with sessionScope "single" requires accessMode "self_only"' });
+      return;
+    }
+    // Confine cwd to user home directory
+    const safeCwd = path.resolve(ao.cwd as string);
+    if (!safeCwd.startsWith(os.homedir() + path.sep)) {
+      jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
+      return;
+    }
+  }
+
   // --- Build config object (claudeMd excluded — it goes to a file) ---
   const config: Record<string, unknown> = {
     name,
     type,
     adminPhones,
     healthPort,
-    accessMode: type === 'passive' ? 'self_only' : (body.accessMode ?? 'self_only'),
+    accessMode,
   };
 
   if (body.description != null)        config.description = body.description;
@@ -436,6 +472,8 @@ export async function handleAuth(
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
+        const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
+        if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
         res.write(`event: ${evt.event}\ndata: ${JSON.stringify(evt.data ?? {})}\n\n`);
         if (evt.event === 'connected') {
           // Start the instance
@@ -462,5 +500,6 @@ export async function handleAuth(
   // Cleanup on client disconnect
   req.on('close', () => {
     child.kill('SIGTERM');
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);
   });
 }

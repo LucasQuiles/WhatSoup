@@ -134,8 +134,10 @@ export function createFleetServer(deps: FleetDeps) {
     // API routes require auth
     if (pathname.startsWith('/api/')) {
       // Accept Bearer header or ?token= query param (EventSource can't set headers)
-      const queryToken = parseQueryString(url).token;
-      if (!checkBearerAuth(req, deps.fleetToken) && queryToken !== deps.fleetToken) {
+      const queryToken = parseQueryString(url).token ?? '';
+      const tokenMatch = queryToken.length === deps.fleetToken.length &&
+        crypto.timingSafeEqual(Buffer.from(queryToken), Buffer.from(deps.fleetToken));
+      if (!checkBearerAuth(req, deps.fleetToken) && !tokenMatch) {
         jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
