@@ -7,7 +7,7 @@
 export function formatRelative(iso: string): string {
   const now = Date.now();
   const then = new Date(iso).getTime();
-  if (isNaN(then)) return "—";
+  if (isNaN(then)) return "\u2014";
   const diffS = Math.floor((now - then) / 1000);
   if (diffS < 60) return "just now";
   const diffM = Math.floor(diffS / 60);
@@ -18,17 +18,17 @@ export function formatRelative(iso: string): string {
   return `${diffD}d ago`;
 }
 
-/** "04:02", "16:45" — 24h clock for feeds/logs */
+/** "4:02 PM", "10:45 AM" — 12h clock for message bubbles */
 export function formatTime(iso: string): string {
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  if (isNaN(d.getTime())) return "\u2014";
+  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-/** "04:02:15" — with seconds for log entries */
+/** "04:02:15" — 24h with seconds for log entries (technical context) */
 export function formatTimeWithSeconds(iso: string): string {
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
+  if (isNaN(d.getTime())) return "\u2014";
   return d.toLocaleTimeString("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
@@ -36,18 +36,19 @@ export function formatTimeWithSeconds(iso: string): string {
   });
 }
 
-/** "Today 04:02" / "Yesterday 16:45" / "Mar 29 16:45" — for chat lists */
+/** "4:02 PM" / "Yesterday" / "Mar 29" — for chat lists */
 export function formatChatTime(iso: string): string {
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
+  if (isNaN(d.getTime())) return "\u2014";
   const now = new Date();
-  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
-  if (d.toDateString() === now.toDateString()) return time;
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  }
 
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return `Yesterday`;
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
 
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
