@@ -22,7 +22,7 @@ import {
   User, Users, UserPlus, UserX,
   RotateCw, MessageSquareOff, Bot, ChevronsUp, Power,
 } from 'lucide-react'
-import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../mock-data'
+import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../types'
 
 const TABS = [
   { id: 'summary', label: 'Summary', icon: Info },
@@ -472,10 +472,9 @@ function SummaryTab({ line }: { line: LineInstance }) {
             </button>
             <div style={{ borderTop: 'var(--bw) solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
               <button
-                disabled
-                className="c-btn c-btn-danger w-full justify-center opacity-50 cursor-not-allowed"
+                onClick={() => setConfirmAction('stop')}
+                className="c-btn c-btn-danger w-full justify-center"
                 style={{ fontSize: 'var(--font-size-label)' }}
-                title="Stop endpoint coming in Phase 2"
               >
                 <Power size={13} strokeWidth={1.75} /> Stop Instance
               </button>
@@ -509,7 +508,28 @@ function SummaryTab({ line }: { line: LineInstance }) {
         </ul>
       </ConfirmDialog>
 
-      {/* Stop dialog deferred to Phase 2 — no stop endpoint yet */}
+      <ConfirmDialog
+        open={confirmAction === 'stop'}
+        title={`Stop ${line.name}?`}
+        confirmLabel="Stop"
+        confirmVariant="danger"
+        confirmIcon={<Power size={14} strokeWidth={1.75} />}
+        onConfirm={() => {
+          setConfirmAction(null)
+          toast.info(`Stopping ${line.name}...`)
+          api.stopInstance(line.name)
+            .then(() => toast.success(`${line.name} stop requested`))
+            .catch(e => toast.error(`Stop failed: ${e.message}`))
+        }}
+        onCancel={() => setConfirmAction(null)}
+      >
+        <p>Stopping will disconnect <strong>{line.name}</strong> from WhatsApp.</p>
+        <ul style={{ marginTop: 'var(--sp-2)', paddingLeft: 'var(--sp-5)' }}>
+          <li>All active chat and agent sessions will be terminated</li>
+          <li>The instance will not reconnect until manually started</li>
+          <li>Messages received while stopped will not be delivered</li>
+        </ul>
+      </ConfirmDialog>
     </div>
   )
 }
@@ -813,6 +833,35 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   // Clear message input when switching conversations
   React.useEffect(() => { setMsgText('') }, [selectedChat])
 
+  // ── Cursor pagination state ──
+  const [olderMessages, setOlderMessages] = React.useState<Message[]>([])
+  const [loadingOlder, setLoadingOlder] = React.useState(false)
+  const [hasMore, setHasMore] = React.useState(true)
+
+  // Reset pagination when conversation changes
+  React.useEffect(() => { setOlderMessages([]); setHasMore(true) }, [selectedChat])
+
+  const loadOlder = async () => {
+    if (loadingOlder || !hasMore) return
+    const allMsgs = [...(messages || []), ...olderMessages]
+    const oldestPk = allMsgs.length > 0 ? Math.min(...allMsgs.map(m => m.pk).filter(pk => pk > 0)) : undefined
+    if (!oldestPk) return
+
+    setLoadingOlder(true)
+    try {
+      const older = await api.getMessages(lineName, selectedChat, oldestPk)
+      if (older.length === 0) {
+        setHasMore(false)
+      } else {
+        setOlderMessages(prev => [...prev, ...older])
+      }
+    } catch (e) {
+      toast.error(`Failed to load older messages: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
   // Track which message PKs were just added optimistically so we can animate them
   const [animatedPks, setAnimatedPks] = React.useState<Set<number>>(new Set())
 
@@ -851,7 +900,14 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
     }
   }
 
-  const reversed = React.useMemo(() => [...messages].reverse(), [messages])
+  // Combine live + older messages, deduplicate by pk
+  const allMessages = React.useMemo(() => {
+    const combined = [...(messages || []), ...olderMessages]
+    const seen = new Set<number>()
+    return combined.filter(m => { if (seen.has(m.pk)) return false; seen.add(m.pk); return true })
+  }, [messages, olderMessages])
+
+  const reversed = React.useMemo(() => [...allMessages].reverse(), [allMessages])
 
   // Shared auto-scroll hook
   const { scrollRef: stickyScrollRef, showJump: showJumpToBottom, handleScroll, jumpToBottom } = useStickyScroll(reversed, selectedChat)
@@ -867,14 +923,29 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       >
         {/* Load older messages */}
         {reversed.length > 0 && (
-          <div
-            className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
-            style={{ padding: 'var(--sp-3) 0 var(--sp-4)', gap: 'var(--sp-2)' }}
-            onClick={() => toast.info('Cursor pagination coming in Phase 2')}
-          >
-            <ChevronsUp size={14} strokeWidth={1.75} />
-            <span style={{ fontSize: 'var(--font-size-sm)' }}>Load older messages</span>
-          </div>
+          hasMore ? (
+            <div
+              className={`flex items-center justify-center c-hover text-t5 ${loadingOlder ? '' : 'cursor-pointer hover:text-t2'}`}
+              style={{ padding: 'var(--sp-3) 0 var(--sp-4)', gap: 'var(--sp-2)' }}
+              onClick={loadOlder}
+            >
+              {loadingOlder ? (
+                <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
+              ) : (
+                <ChevronsUp size={14} strokeWidth={1.75} />
+              )}
+              <span style={{ fontSize: 'var(--font-size-sm)' }}>
+                {loadingOlder ? 'Loading...' : 'Load older messages'}
+              </span>
+            </div>
+          ) : (
+            <div
+              className="flex items-center justify-center text-t5"
+              style={{ padding: 'var(--sp-3) 0 var(--sp-4)', gap: 'var(--sp-2)' }}
+            >
+              <span style={{ fontSize: 'var(--font-size-sm)' }}>No more messages</span>
+            </div>
+          )
         )}
 
         {/* Message list */}

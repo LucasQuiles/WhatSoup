@@ -1,6 +1,6 @@
 import { type FC } from 'react'
 import { Image, FileAudio, FileText, HelpCircle } from 'lucide-react'
-import type { Message } from '../mock-data'
+import type { Message } from '../types'
 
 /**
  * Renders message content with WhatsApp-style formatting.

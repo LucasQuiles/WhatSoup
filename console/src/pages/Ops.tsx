@@ -5,7 +5,7 @@ import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import FilterPill from '../components/FilterPill'
-import type { LogEntry } from '../mock-data'
+import type { LogEntry } from '../types'
 import {
   Terminal, ChevronDown, Power,
   AlertTriangle, CheckCircle2,

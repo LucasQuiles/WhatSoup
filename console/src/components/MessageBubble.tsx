@@ -3,7 +3,7 @@ import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatTime } from '../lib/format-time'
 import MessageContent from './MessageContent'
-import type { Message } from '../mock-data'
+import type { Message } from '../types'
 
 interface MessageBubbleProps {
   msg: Message

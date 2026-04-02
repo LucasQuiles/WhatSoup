@@ -1,7 +1,7 @@
 import { type FC } from 'react'
 import { getInitials, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
 import { formatChatTime } from '../lib/format-time'
-import type { ChatItem } from '../mock-data'
+import type { ChatItem } from '../types'
 
 interface ChatListItemProps {
   chat: ChatItem

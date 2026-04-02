@@ -79,8 +79,10 @@ export const api = {
     () => apiFetch<mock.ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
     () => mock.getChats(name),
   ),
-  getMessages: (name: string, conversationKey: string) => withFallback(
-    () => apiFetch<mock.Message[]>(`/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}`),
+  getMessages: (name: string, conversationKey: string, beforePk?: number) => withFallback(
+    () => apiFetch<mock.Message[]>(
+      `/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`
+    ),
     () => mock.getMessages(name, conversationKey),
   ),
   getAccess: (name: string) => withFallback(
@@ -103,6 +105,9 @@ export const api = {
 
   restart: (name: string) =>
     apiFetch<{ status: string; instance: string }>(`/api/lines/${encodeURIComponent(name)}/restart`, { method: 'POST' }),
+
+  stopInstance: (name: string) =>
+    apiFetch<{ status: string; instance: string }>(`/api/lines/${encodeURIComponent(name)}/stop`, { method: 'POST' }),
 
   sendMessage: (name: string, chatJid: string, text: string) =>
     apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
