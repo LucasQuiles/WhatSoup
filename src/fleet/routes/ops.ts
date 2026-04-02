@@ -276,14 +276,9 @@ export async function handleCreateLine(
   }
 
   // --- Type-specific validation ---
-  if (type === 'chat' && !body.systemPrompt) {
-    jsonResponse(res, 400, { error: 'chat instances require a systemPrompt' });
-    return;
-  }
-  if (type === 'agent' && !body.systemPrompt) {
-    jsonResponse(res, 400, { error: 'agent instances require a systemPrompt' });
-    return;
-  }
+  // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.
+  // At create time they may not be set yet (wizard sends them via PATCH after QR link).
+  // Only block passive instances from having a systemPrompt (hard constraint).
   if (type === 'passive' && body.systemPrompt) {
     jsonResponse(res, 400, { error: 'passive instances must not have a systemPrompt' });
     return;
@@ -304,34 +299,31 @@ export async function handleCreateLine(
     return;
   }
 
-  // --- Validate agent-specific options ---
-  if (type === 'agent') {
-    const ao = body.agentOptions as Record<string, unknown> | undefined;
-    if (!ao || typeof ao !== 'object') {
-      jsonResponse(res, 400, { error: 'agent instances require agentOptions with cwd and sessionScope' });
+  // --- Validate agent-specific options (only if provided — may come via PATCH later) ---
+  if (type === 'agent' && body.agentOptions) {
+    const ao = body.agentOptions as Record<string, unknown>;
+    if (typeof ao !== 'object') {
+      jsonResponse(res, 400, { error: 'agentOptions must be an object' });
       return;
     }
     const VALID_SCOPES = new Set(['single', 'shared', 'per_chat']);
-    if (!VALID_SCOPES.has(ao.sessionScope as string)) {
+    if (ao.sessionScope && !VALID_SCOPES.has(ao.sessionScope as string)) {
       jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
-      return;
-    }
-    if (typeof ao.cwd !== 'string' || !(ao.cwd as string).trim()) {
-      jsonResponse(res, 400, { error: 'agentOptions.cwd is required for agent instances' });
       return;
     }
     if (ao.sessionScope === 'single' && accessMode !== 'self_only') {
       jsonResponse(res, 400, { error: 'agent with sessionScope "single" requires accessMode "self_only"' });
       return;
     }
-    // Confine cwd to user home directory and store the resolved path
-    const safeCwd = path.resolve(ao.cwd as string);
-    if (!safeCwd.startsWith(os.homedir() + path.sep)) {
-      jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
-      return;
+    // Confine cwd to user home directory if provided
+    if (typeof ao.cwd === 'string' && ao.cwd.trim()) {
+      const safeCwd = path.resolve(ao.cwd as string);
+      if (!safeCwd.startsWith(os.homedir() + path.sep)) {
+        jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
+        return;
+      }
+      (body.agentOptions as Record<string, unknown>).cwd = safeCwd;
     }
-    // Store the resolved absolute path, not the raw input
-    (body.agentOptions as Record<string, unknown>).cwd = safeCwd;
   }
 
   // --- Build config — start with validated required fields, then merge optional fields ---
