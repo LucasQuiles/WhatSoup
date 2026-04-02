@@ -94,9 +94,23 @@ export interface LogEntry {
   component?: string;
 }
 
+export type FeedDetail =
+  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean }
+  | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
+  | { type: 'tool_use'; toolName: string; toolId?: string }
+  | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
+  | { type: 'health'; status: string; previousStatus?: string; error?: string }
+  | { type: 'import'; table?: string; count?: number; skipped?: boolean }
+  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string }
+  | { type: 'generic' };
+
 export interface FeedEvent {
   time: string;
   mode: Mode;
   text: string;
   isError?: boolean;
+  instance?: string;
+  component?: string;
+  level?: 'info' | 'warn' | 'error';
+  detail?: FeedDetail;
 }
