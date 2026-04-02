@@ -3,6 +3,8 @@ import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
 import { inputStyle, errorStyle, helperStyle, labelStyle } from './form-styles'
 
+const confirmCheckStyle: React.CSSProperties = { color: 'var(--wizard-accent)', flexShrink: 0 }
+
 interface ModelAuthStepProps {
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
@@ -47,10 +49,16 @@ const ModelSelectionSection: FC<{
     <span className="c-heading">Model Selection</span>
     {MODEL_ROLES.map(({ key, label }) => (
       <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-        <label className="c-label" style={labelStyle}>{label}</label>
+        <label className="c-label" style={labelStyle}>
+          <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+            {label}
+            <Check size={14} style={confirmCheckStyle} />
+          </span>
+        </label>
         <SelectInput
           value={models[key]}
           onChange={(e) => onModelChange(key, e.target.value)}
+          confirmed
         >
           {MODEL_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -69,10 +77,16 @@ const ApiKeyInput: FC<{
   error?: string
 }> = ({ value, onChange, error }) => {
   const [visible, setVisible] = useState(false)
+  const filled = value.trim().length > 0
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-      <label className="c-label" style={labelStyle}>Anthropic API Key</label>
+      <label className="c-label" style={labelStyle}>
+        <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+          Anthropic API Key
+          {!error && filled && <Check size={14} style={confirmCheckStyle} />}
+        </span>
+      </label>
       <div className="relative">
         <input
           type={visible ? 'text' : 'password'}
@@ -82,7 +96,7 @@ const ApiKeyInput: FC<{
           className="w-full font-mono"
           style={{
             ...passwordInputStyle,
-            borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)',
+            borderColor: error ? 'var(--color-s-crit)' : filled ? 'var(--wizard-accent)' : 'var(--b2)',
           }}
         />
         <button
@@ -165,7 +179,10 @@ const AgentView: FC<{
 
       {/* Auth Method */}
       <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-        <span className="c-heading">Auth Method</span>
+        <span className="c-heading inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+          Auth Method
+          <Check size={14} style={confirmCheckStyle} />
+        </span>
         <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
           <label
             className="flex items-center cursor-pointer"

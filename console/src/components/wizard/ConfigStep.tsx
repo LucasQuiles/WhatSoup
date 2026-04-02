@@ -1,5 +1,5 @@
 import { type FC, type ChangeEvent, useCallback, useMemo } from 'react'
-import { Lock, List, MessageCircle, Users } from 'lucide-react'
+import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CollapsibleSection from '../CollapsibleSection'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
@@ -164,7 +164,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <div>
             <label className="c-label" style={labelStyle}>
-              Access Mode
+              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+                Access Mode
+                <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+              </span>
             </label>
             <CardSelector
               options={ACCESS_OPTIONS}
@@ -180,12 +183,13 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           {/* System Prompt — hidden for passive lines */}
           {type !== 'passive' && (
-            <Field label="System Prompt" error={errors.systemPrompt}>
+            <Field label="System Prompt" error={errors.systemPrompt} confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}>
               <TextArea
                 value={systemPrompt}
                 onChange={(e) => onChange({ systemPrompt: e.target.value })}
                 placeholder="You are a helpful assistant..."
                 error={!!errors.systemPrompt}
+                confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}
                 minHeight={120}
               />
             </Field>
@@ -194,7 +198,12 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
           {/* CLAUDE.md */}
           <div>
             <label className="c-label" style={labelStyle}>
-              CLAUDE.md Instructions
+              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+                CLAUDE.md Instructions
+                {claudeMd.trim().length > 0 && (
+                  <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                )}
+              </span>
             </label>
             <div
               className="flex items-center justify-center cursor-pointer"
@@ -222,6 +231,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
               value={claudeMd}
               onChange={(e) => onChange({ claudeMd: e.target.value })}
               placeholder="Paste or edit CLAUDE.md contents..."
+              confirmed={claudeMd.trim().length > 0}
               minHeight={120}
             />
           </div>
@@ -232,18 +242,20 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
       {type === 'agent' && (
         <CollapsibleSection title="Permissions">
           <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-            <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist">
+            <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}>
               <TextInput
                 value={agentOptions.cwd ?? ''}
                 onChange={(e) => handleAgentOption('cwd', e.target.value)}
                 placeholder="/home/q/LAB/your-project"
                 error={!!errors.cwd}
+                confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}
               />
             </Field>
-            <Field label="Session Scope" helper={SESSION_SCOPE_DESCRIPTIONS[agentOptions.sessionScope ?? 'per_chat']}>
+            <Field label="Session Scope" helper={SESSION_SCOPE_DESCRIPTIONS[agentOptions.sessionScope ?? 'per_chat']} confirmed>
               <SelectInput
                 value={agentOptions.sessionScope ?? 'per_chat'}
                 onChange={(e) => handleAgentOption('sessionScope', e.target.value)}
+                confirmed
               >
                 <option value="single">single</option>
                 <option value="shared">shared</option>
@@ -266,11 +278,12 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
               onChange={(v) => handlePerUserDirs('enabled', v)}
             />
             {(agentOptions.perUserDirs?.enabled ?? false) && (
-              <Field label="Base path" helper="Create separate workspace folders per contact">
+              <Field label="Base path" helper="Create separate workspace folders per contact" confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}>
                 <TextInput
                   value={agentOptions.perUserDirs?.basePath ?? 'users'}
                   onChange={(e) => handlePerUserDirs('basePath', e.target.value)}
                   placeholder="users"
+                  confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}
                 />
               </Field>
             )}
@@ -305,33 +318,37 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
       {/* 4. Limits */}
       <CollapsibleSection title="Limits">
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-          <Field label="Messages per hour">
+          <Field label="Messages per hour" confirmed>
             <NumberInput
               value={rateLimitPerHour}
               onChange={(e) => onChange({ rateLimitPerHour: Number(e.target.value) })}
               min={1}
+              confirmed
             />
           </Field>
-          <Field label="Max tokens per response">
+          <Field label="Max tokens per response" confirmed>
             <NumberInput
               value={maxTokens}
               onChange={(e) => onChange({ maxTokens: Number(e.target.value) })}
               min={1}
+              confirmed
             />
           </Field>
-          <Field label="Token budget per session">
+          <Field label="Token budget per session" confirmed>
             <NumberInput
               value={tokenBudget}
               onChange={(e) => onChange({ tokenBudget: Number(e.target.value) })}
               min={1}
+              confirmed
             />
           </Field>
 
           {/* Tool update verbosity */}
-          <Field label="Tool update verbosity" helper="Minimal suppresses technical agent lifecycle messages">
+          <Field label="Tool update verbosity" helper="Minimal suppresses technical agent lifecycle messages" confirmed>
             <SelectInput
               value={toolUpdateMode}
               onChange={(e) => onChange({ toolUpdateMode: e.target.value })}
+              confirmed
             >
               <option value="full">Full</option>
               <option value="minimal">Minimal</option>
@@ -343,16 +360,20 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
       {/* 5. RAG (optional) */}
       <CollapsibleSection title="RAG" badge="optional">
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-          <Field label="Pinecone Index Name">
+          <Field label="Pinecone Index Name" confirmed={pineconeIndex.trim().length > 0}>
             <TextInput
               value={pineconeIndex}
               onChange={(e) => onChange({ pineconeIndex: e.target.value })}
               placeholder="my-index"
+              confirmed={pineconeIndex.trim().length > 0}
             />
           </Field>
           <div>
             <label className="c-label" style={labelStyle}>
-              Search Mode
+              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+                Search Mode
+                <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+              </span>
             </label>
             <div className="flex" style={{ gap: 0 }}>
               {SEARCH_MODES.map((mode) => (
@@ -387,14 +408,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
             checked={pineconeRerank}
             onChange={(v) => onChange({ pineconeRerank: v })}
           />
-          <Field label="TopK">
+          <Field label="TopK" confirmed>
             <NumberInput
               value={pineconeTopK}
               onChange={(e) => onChange({ pineconeTopK: Number(e.target.value) })}
               min={1}
+              confirmed
             />
           </Field>
-          <Field label="Allowed indexes" helper="Restrict which Pinecone indexes this instance can query">
+          <Field label="Allowed indexes" helper="Restrict which Pinecone indexes this instance can query" confirmed={pineconeAllowedIndexes.length > 0}>
             <TagInput
               values={pineconeAllowedIndexes}
               onChange={(values) => onChange({ pineconeAllowedIndexes: values })}

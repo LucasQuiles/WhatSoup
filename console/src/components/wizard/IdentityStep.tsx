@@ -121,14 +121,14 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             className="font-mono"
             style={{
               ...inputStyle,
-              borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' ? 'var(--color-s-ok)' : 'var(--b2)',
+              borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' ? 'var(--wizard-accent)' : 'var(--b2)',
             }}
           />
           {nameStatus === 'checking' && (
             <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
           )}
           {nameStatus === 'available' && (
-            <Check size={16} style={{ color: 'var(--color-s-ok)', flexShrink: 0 }} />
+            <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
           )}
           {nameStatus === 'taken' && (
             <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
@@ -145,21 +145,34 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
       {/* Description */}
       <div>
         <label className="c-heading" style={labelStyle}>
-          Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
+          <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+            Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
+            {description.trim() && (
+              <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+            )}
+          </span>
         </label>
         <input
           type="text"
           value={description}
           onChange={(e) => onChange({ description: e.target.value })}
           placeholder="What this line is for"
-          style={inputStyle}
+          style={{
+            ...inputStyle,
+            borderColor: description.trim() ? 'var(--wizard-accent)' : 'var(--b2)',
+          }}
         />
       </div>
 
       {/* Admin Phones */}
       <div>
         <label className="c-heading" style={labelStyle}>
-          Admin Phones
+          <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+            Admin Phones
+            {!errors.adminPhones && adminPhones.length > 0 && (
+              <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+            )}
+          </span>
         </label>
         <TagInput
           values={adminPhones}

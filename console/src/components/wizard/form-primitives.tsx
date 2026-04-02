@@ -1,4 +1,5 @@
 import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode } from 'react'
+import { Check } from 'lucide-react'
 import { inputStyle, selectStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle } from './form-styles'
 
 // ── Form field wrapper ──
@@ -7,12 +8,20 @@ interface FieldProps {
   label: string
   error?: string
   helper?: string
+  confirmed?: boolean
   children: ReactNode
 }
 
-export const Field: FC<FieldProps> = ({ label, error, helper, children }) => (
+export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, children }) => (
   <div>
-    <label className="c-label" style={labelStyle}>{label}</label>
+    <label className="c-label" style={labelStyle}>
+      <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+        {label}
+        {!error && confirmed && (
+          <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+        )}
+      </span>
+    </label>
     {children}
     {error && <div style={errorStyle}>{error}</div>}
     {!error && helper && <div style={helperStyle}>{helper}</div>}
@@ -23,38 +32,41 @@ export const Field: FC<FieldProps> = ({ label, error, helper, children }) => (
 
 interface TextInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'style'> {
   error?: boolean
+  confirmed?: boolean
 }
 
-export const TextInput: FC<TextInputProps> = ({ error, className, ...props }) => (
+export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ...props }) => (
   <input
     {...props}
     className={`font-mono ${className ?? ''}`}
-    style={{ ...inputStyle, borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)' }}
+    style={{ ...inputStyle, borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)' }}
   />
 )
 
 interface NumberInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'style' | 'type'> {
   error?: boolean
+  confirmed?: boolean
 }
 
-export const NumberInput: FC<NumberInputProps> = ({ error, className, ...props }) => (
+export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className, ...props }) => (
   <input
     type="number"
     {...props}
     className={`font-mono ${className ?? ''}`}
-    style={{ ...numberInputStyle, borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)' }}
+    style={{ ...numberInputStyle, borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)' }}
   />
 )
 
 interface SelectInputProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, 'style'> {
   error?: boolean
+  confirmed?: boolean
 }
 
-export const SelectInput: FC<SelectInputProps> = ({ error, children, className, ...props }) => (
+export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, className, ...props }) => (
   <select
     {...props}
     className={className ?? ''}
-    style={{ ...selectStyle, borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)' }}
+    style={{ ...selectStyle, borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)' }}
   >
     {children}
   </select>
@@ -62,10 +74,11 @@ export const SelectInput: FC<SelectInputProps> = ({ error, children, className, 
 
 interface TextAreaProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'style'> {
   error?: boolean
+  confirmed?: boolean
   minHeight?: number
 }
 
-export const TextArea: FC<TextAreaProps> = ({ error, minHeight, className, ...props }) => (
+export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, className, ...props }) => (
   <textarea
     {...props}
     className={`font-mono ${className ?? ''}`}
@@ -73,7 +86,7 @@ export const TextArea: FC<TextAreaProps> = ({ error, minHeight, className, ...pr
       ...inputStyle,
       minHeight: minHeight ?? 80,
       resize: 'vertical',
-      borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)',
+      borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)',
     }}
   />
 )
