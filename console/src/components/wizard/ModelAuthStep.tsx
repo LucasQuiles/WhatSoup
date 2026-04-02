@@ -27,9 +27,9 @@ const MODEL_DEFAULTS = {
   conversation: 'claude-sonnet-4-6',
   extraction: 'claude-haiku-4-5-20251001',
   validation: 'claude-haiku-4-5-20251001',
-  fallback: 'gpt-4.1',
-  openaiExtraction: 'gpt-4.1-mini',
-  openaiValidation: 'gpt-4.1-nano',
+  fallback: '',
+  openaiExtraction: '',
+  openaiValidation: '',
 } as const
 
 type ModelRole = keyof typeof MODEL_DEFAULTS
@@ -142,14 +142,15 @@ const ModelAndKeyTabs: FC<{
                   <SelectInput
                     value={models[key]}
                     onChange={(e) => onModelChange(key, e.target.value)}
-                    confirmed
+                    confirmed={!!models[key]}
                   >
+                    <option value="">None</option>
                     {OPENAI_MODELS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
                     ))}
                   </SelectInput>
                 </div>
-                <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+                {models[key] && <Check size={16} className="wizard-check" style={confirmCheckStyle} />}
               </div>
             </div>
           ))}
