@@ -1,5 +1,5 @@
-import { type FC, useState, useCallback, useRef } from 'react'
-import { X, Check, ChevronRight, ChevronLeft } from 'lucide-react'
+import { type FC, useState, useCallback, useEffect, useRef } from 'react'
+import { X, Check, ChevronRight, ChevronLeft, Loader2 } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import IdentityStep from './wizard/IdentityStep'
 import ModelAuthStep from './wizard/ModelAuthStep'
@@ -45,7 +45,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
                 height: 'var(--bw)',
                 background: completed ? 'var(--color-s-ok)' : 'var(--color-t5)',
                 opacity: completed ? 1 : 0.4,
-                transition: 'background 0.2s ease',
+                transition: 'background var(--dur-norm) var(--ease)',
               }}
             />
           )}
@@ -58,7 +58,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
                 borderRadius: '50%',
                 background: completed || active ? 'var(--color-s-ok)' : 'transparent',
                 borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: completed || active ? 'var(--color-s-ok)' : 'var(--color-t5)',
-                transition: 'all 0.2s ease',
+                transition: 'all var(--dur-norm) var(--ease)',
               }}
             >
               {completed ? (
@@ -81,7 +81,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
                 fontSize: 'var(--font-size-label)',
                 letterSpacing: 'var(--tracking-label)',
                 color: active ? 'var(--color-s-ok)' : completed ? 'var(--color-t2)' : 'var(--color-t5)',
-                transition: 'color 0.2s ease',
+                transition: 'color var(--dur-norm) var(--ease)',
               }}
             >
               {label}
@@ -101,22 +101,18 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
 const validateStep = (step: number, formData: Record<string, unknown>): Record<string, string> => {
   const errs: Record<string, string> = {}
   if (step === 0) {
+    if (!formData.type) errs.type = 'Choose a line type to continue'
     const raw = (formData.name as string) ?? ''
     const name = raw.toLowerCase().replace(/[^a-z0-9-]/g, '')
-    if (!name || name.length < 2) errs.name = 'Name must be at least 2 characters'
-    if (!formData.type) errs.type = 'Select a line type'
+    if (!name || name.length < 2) errs.name = 'Enter a name — at least 2 characters (letters, numbers, hyphens)'
     const phones = formData.adminPhones as string[]
-    if (!phones || phones.length === 0) errs.adminPhones = 'At least one admin phone is required'
-  }
-  if (step === 1 && formData.type !== 'passive') {
-    if (formData.type === 'chat' && !formData.apiKey) errs.apiKey = 'API key is required for chat instances'
-    if (formData.type === 'agent' && (formData.authMethod ?? 'api_key') === 'api_key' && !formData.apiKey) errs.apiKey = 'API key is required'
+    if (!phones || phones.length === 0) errs.adminPhones = 'Add at least one admin phone number, then press Enter'
   }
   if (step === 2) {
-    if (formData.type !== 'passive' && !formData.systemPrompt) errs.systemPrompt = 'System prompt is required'
+    if (formData.type !== 'passive' && !formData.systemPrompt) errs.systemPrompt = 'Add a system prompt — this defines how the AI responds'
     if (formData.type === 'agent') {
       const ao = formData.agentOptions as Record<string, unknown> | undefined
-      if (!ao?.cwd || !(ao.cwd as string).trim()) errs.cwd = 'Working directory is required for agent instances'
+      if (!ao?.cwd || !(ao.cwd as string).trim()) errs.cwd = 'Set a working directory — the agent needs a home folder for files and sessions'
     }
   }
   return errs
@@ -175,6 +171,20 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
 
   const [instanceCreated, setInstanceCreated] = useState(false)
 
+  // Warn user about tab close when instance is created but wizard incomplete
+  useEffect(() => {
+    if (!instanceCreated) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [instanceCreated])
+
+  // Lock the instance name after creation to prevent orphaned instances on back-nav
+  const [lockedName, setLockedName] = useState<string | null>(null)
+
   const handleNext = useCallback(async () => {
     const errs = validateStep(currentStep, formData)
     setErrors(errs)
@@ -188,6 +198,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       try {
         await api.createLine(formData)
         setInstanceCreated(true)
+        setLockedName(formData.name as string)
         setCurrentStep(1)
       } catch (err) {
         setCreateError(err instanceof Error ? err.message : String(err))
@@ -215,9 +226,10 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const handleConfirmDiscard = useCallback(async () => {
     if (instanceCreated && formData.name) {
       try {
-        await api.stopInstance(formData.name as string)
-      } catch { /* instance might not be running */ }
-      // TODO: add DELETE /api/lines/:name endpoint for full cleanup
+        await api.deleteLine(formData.name as string)
+      } catch (err) {
+        console.warn('deleteLine failed during discard:', err)
+      }
     }
     onClose()
   }, [instanceCreated, formData.name, onClose])
@@ -294,6 +306,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
                   data={formData}
                   onChange={patchForm}
                   errors={errors}
+                  nameLocked={!!lockedName}
                 />
               )}
               {currentStep === 1 && (
@@ -328,7 +341,20 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
             style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-2)' }}
           >
             {createError && (
-              <div style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-s-crit)' }}>{createError}</div>
+              <div
+                className="flex items-center"
+                style={{
+                  gap: 'var(--sp-2)',
+                  fontSize: 'var(--font-size-data)',
+                  color: 'var(--color-s-crit)',
+                  padding: 'var(--sp-2) var(--sp-3)',
+                  background: 'var(--color-d3)',
+                  borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                <X size={14} style={{ flexShrink: 0 }} />
+                <span>{createError}</span>
+              </div>
             )}
             <div className="flex items-center justify-end" style={{ gap: 'var(--sp-3)' }}>
             <button
@@ -336,6 +362,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
               onClick={() =>
                 currentStep > 0 ? setCurrentStep((s) => s - 1) : handleClose()
               }
+              disabled={creating}
             >
               {currentStep > 0 && <ChevronLeft size={16} />}
               <span className="c-btn-nav-label">{currentStep > 0 ? 'Back' : 'Cancel'}</span>
@@ -344,9 +371,19 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
             <button
               className="c-btn c-btn-primary c-btn-nav"
               onClick={handleNext}
+              disabled={creating}
             >
-              <span className="c-btn-nav-label">Next</span>
-              <ChevronRight size={16} />
+              {creating ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  <span className="c-btn-nav-label">Creating...</span>
+                </>
+              ) : (
+                <>
+                  <span className="c-btn-nav-label">Next</span>
+                  <ChevronRight size={16} />
+                </>
+              )}
             </button>
             </div>
           </div>
