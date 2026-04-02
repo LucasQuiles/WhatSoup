@@ -75,7 +75,9 @@ export async function loadOrCreateFleetToken(): Promise<string> {
   );
 
   try {
-    return fs.readFileSync(tokenPath, 'utf-8').trim();
+    const raw = fs.readFileSync(tokenPath, 'utf-8').trim();
+    if (!/^[0-9a-f]{64}$/.test(raw)) throw new Error('fleet-token file is corrupt — regenerating');
+    return raw;
   } catch {
     const token = crypto.randomBytes(32).toString('hex');
     fs.mkdirSync(path.dirname(tokenPath), { recursive: true });

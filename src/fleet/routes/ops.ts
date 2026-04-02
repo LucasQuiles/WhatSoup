@@ -468,6 +468,13 @@ export async function handleAuth(
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  // Guard against double res.end() — declared before any event handlers
+  let ended = false;
+  const endOnce = () => { if (!ended) { ended = true; res.end(); } };
+  const writeSSE = (event: string, data: unknown) => {
+    if (!ended) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
   // Parse stdout for JSON events
   let buffer = '';
   child.stdout!.on('data', (chunk: Buffer) => {
@@ -489,13 +496,6 @@ export async function handleAuth(
       } catch { /* skip non-JSON lines */ }
     }
   });
-
-  // Guard against double res.end()
-  let ended = false;
-  const endOnce = () => { if (!ended) { ended = true; res.end(); } };
-  const writeSSE = (event: string, data: unknown) => {
-    if (!ended) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
 
   // Log stderr from auth process for debugging
   child.stderr!.on('data', (chunk: Buffer) => {

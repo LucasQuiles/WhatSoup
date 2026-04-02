@@ -58,8 +58,9 @@ export function createStaticHandler(distDir: string, fleetToken?: string) {
 function serveHtmlWithToken(filePath: string, token: string, res: ServerResponse): boolean {
   try {
     let html = fs.readFileSync(filePath, 'utf-8');
-    // Inject fleet token meta tag before </head>
-    const meta = `<meta name="fleet-token" content="${token}">`;
+    // Inject fleet token meta tag before </head> — sanitize to prevent XSS
+    const safeToken = token.replace(/[^0-9a-zA-Z_\-]/g, '');
+    const meta = `<meta name="fleet-token" content="${safeToken}">`;
     html = html.replace('</head>', `${meta}\n</head>`);
     const buf = Buffer.from(html, 'utf-8');
     res.writeHead(200, {
