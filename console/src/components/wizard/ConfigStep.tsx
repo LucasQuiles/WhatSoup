@@ -217,7 +217,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange }) => {
                 Session Scope
               </label>
               <select
-                value={agentOptions.sessionScope ?? 'single'}
+                value={agentOptions.sessionScope ?? 'per_chat'}
                 onChange={(e) => handleAgentOption('sessionScope', e.target.value)}
                 style={inputStyle}
               >

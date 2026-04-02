@@ -90,6 +90,16 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     type: 'chat',
     accessMode: 'self_only',
     adminPhones: [],
+    agentOptions: { cwd: '', sessionScope: 'per_chat' },
+    models: {
+      conversation: 'claude-sonnet-4-6',
+      extraction: 'claude-haiku-4-5-20251001',
+      validation: 'claude-haiku-4-5-20251001',
+      fallback: 'gpt-4.1',
+    },
+    rateLimitPerHour: 60,
+    maxTokens: 4096,
+    tokenBudget: 50000,
   })
   const [errors] = useState<Record<string, string>>({})
   const [creating, setCreating] = useState(false)
