@@ -18,7 +18,7 @@ const MIME_TYPES: Record<string, string> = {
   '.map': 'application/json',
 };
 
-export function createStaticHandler(distDir: string) {
+export function createStaticHandler(distDir: string, fleetToken?: string) {
   return (req: IncomingMessage, res: ServerResponse): boolean => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
@@ -43,12 +43,35 @@ export function createStaticHandler(distDir: string) {
     if (!ext && !url.startsWith('/api/')) {
       const indexPath = path.join(distDir, 'index.html');
       if (fs.existsSync(indexPath)) {
+        // Inject fleet token meta tag for EventSource auth in production
+        if (fleetToken) {
+          return serveHtmlWithToken(indexPath, fleetToken, res);
+        }
         return serveFile(indexPath, res);
       }
     }
 
     return false; // not handled
   };
+}
+
+function serveHtmlWithToken(filePath: string, token: string, res: ServerResponse): boolean {
+  try {
+    let html = fs.readFileSync(filePath, 'utf-8');
+    // Inject fleet token meta tag before </head>
+    const meta = `<meta name="fleet-token" content="${token}">`;
+    html = html.replace('</head>', `${meta}\n</head>`);
+    const buf = Buffer.from(html, 'utf-8');
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': buf.byteLength,
+      'Cache-Control': 'no-cache',
+    });
+    res.end(buf);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function serveFile(filePath: string, res: ServerResponse): boolean {

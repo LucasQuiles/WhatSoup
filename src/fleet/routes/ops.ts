@@ -365,12 +365,14 @@ export async function handleCreateLine(
       jsonResponse(res, 400, { error: 'agent with sessionScope "single" requires accessMode "self_only"' });
       return;
     }
-    // Confine cwd to user home directory
+    // Confine cwd to user home directory and store the resolved path
     const safeCwd = path.resolve(ao.cwd as string);
     if (!safeCwd.startsWith(os.homedir() + path.sep)) {
       jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
       return;
     }
+    // Store the resolved absolute path, not the raw input
+    (body.agentOptions as Record<string, unknown>).cwd = safeCwd;
   }
 
   // --- Build config — start with validated required fields, then merge optional fields ---
@@ -478,16 +480,22 @@ export async function handleAuth(
         const evt = JSON.parse(line);
         const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
-        res.write(`event: ${evt.event}\ndata: ${JSON.stringify(evt.data ?? {})}\n\n`);
+        writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
-          // Start the instance
           execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], () => {});
           deps.discovery.scan();
-          setTimeout(() => { res.end(); }, 1000);
+          setTimeout(endOnce, 1000);
         }
       } catch { /* skip non-JSON lines */ }
     }
   });
+
+  // Guard against double res.end()
+  let ended = false;
+  const endOnce = () => { if (!ended) { ended = true; res.end(); } };
+  const writeSSE = (event: string, data: unknown) => {
+    if (!ended) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
 
   // Log stderr from auth process for debugging
   child.stderr!.on('data', (chunk: Buffer) => {
@@ -497,14 +505,14 @@ export async function handleAuth(
 
   // Forward errors
   child.on('error', (err) => {
-    res.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
-    res.end();
+    writeSSE('error', { message: err.message });
+    endOnce();
   });
   child.on('exit', (code) => {
     if (code !== 0) {
-      res.write(`event: error\ndata: ${JSON.stringify({ message: `auth exited with code ${code}` })}\n\n`);
+      writeSSE('error', { message: `auth exited with code ${code}` });
     }
-    res.end();
+    endOnce();
   });
 
   // Cleanup on client disconnect

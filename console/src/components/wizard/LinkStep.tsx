@@ -16,8 +16,19 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
   const [retryKey, setRetryKey] = useState(0)
 
   useEffect(() => {
-    // Use relative URL — Vite proxy (dev) or same-origin (prod) forwards to fleet server with auth
-    const url = `/api/lines/${encodeURIComponent(lineName)}/auth`
+    // Use relative URL — Vite proxy (dev) injects Bearer header automatically.
+    // In production (same-origin), we pass the fleet token as a query param
+    // since EventSource cannot set custom headers.
+    // Try to read token from the Vite proxy's injected header test, otherwise
+    // fetch it from the API. For now, append empty token (proxy handles auth in dev).
+    let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
+
+    // In production the fleet server injects the token into a meta tag at serve time
+    const tokenMeta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]')
+    if (tokenMeta?.content) {
+      url += `?token=${encodeURIComponent(tokenMeta.content)}`
+    }
+
     const es = new EventSource(url)
 
     es.addEventListener('qr', (e: MessageEvent) => {

@@ -124,7 +124,7 @@ export function createFleetServer(deps: FleetDeps) {
 
   // Determine dist directory for static files
   const distDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');
-  const staticHandler = createStaticHandler(distDir);
+  const staticHandler = createStaticHandler(distDir, deps.fleetToken);
 
   const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, log };
 
