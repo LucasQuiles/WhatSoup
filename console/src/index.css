@@ -367,7 +367,7 @@ body::before {
   transition: all 0.15s var(--ease);
 }
 .c-btn:hover         { filter: brightness(1.1); }
-.c-btn-primary       { background: var(--color-m-cht); border-color: var(--color-m-cht); color: var(--color-d0); }
+.c-btn-primary       { background: var(--color-s-ok); border-color: var(--color-s-ok); color: var(--color-d0); }
 .c-btn-primary:hover { filter: brightness(1.15); }
 .c-btn-danger        { background: transparent; border-color: var(--s-crit-ring); color: var(--color-s-crit); }
 .c-btn-danger:hover  { background: var(--s-crit-wash); }
