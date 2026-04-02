@@ -116,7 +116,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           <input
             type="text"
             value={name}
-            onChange={(e) => onChange({ name: e.target.value })}
+            onChange={(e) => onChange({ name: slugify(e.target.value) })}
             placeholder="my-line"
             className="font-mono"
             style={{
@@ -134,11 +134,6 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
           )}
         </div>
-        {name && slugify(name) !== name && (
-          <div className="font-mono" style={helperStyle}>
-            slug: {slugify(name)}
-          </div>
-        )}
         {nameStatus === 'taken' && (
           <div style={errorStyle}>Name already exists</div>
         )}
