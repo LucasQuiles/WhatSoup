@@ -13,7 +13,7 @@ interface AddLineWizardProps {
   onClose: () => void
 }
 
-const STEPS = ['Identity', 'Model', 'Config', 'Review', 'Link'] as const
+const STEPS = ['Identity', 'Link', 'Model', 'Config', 'Review'] as const
 
 /* ── Stepper sub-component ── */
 const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
@@ -123,7 +123,7 @@ const TYPE_ACCENT: Record<string, string> = {
 const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const [currentStep, setCurrentStep] = useState(0)
   const [formData, setFormData] = useState<Record<string, unknown>>({
-    type: 'chat',
+    type: '',
     accessMode: 'self_only',
     adminPhones: [],
     agentOptions: {
@@ -164,33 +164,69 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     [],
   )
 
-  const handleNext = useCallback(() => {
+  const [instanceCreated, setInstanceCreated] = useState(false)
+
+  const handleNext = useCallback(async () => {
     const errs = validateStep(currentStep, formData)
     setErrors(errs)
     if (Object.keys(errs).length > 0) return
+
+    // Create the instance when advancing from Identity to Link
+    // so the auth process has a config dir to write QR keys to
+    if (currentStep === 0 && !instanceCreated) {
+      setCreating(true)
+      setCreateError(null)
+      try {
+        await api.createLine(formData)
+        setInstanceCreated(true)
+        setCurrentStep(1)
+      } catch (err) {
+        setCreateError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setCreating(false)
+      }
+      return
+    }
+
     setCurrentStep((s) => s + 1)
-  }, [currentStep, formData])
+  }, [currentStep, formData, instanceCreated])
 
   const handleClose = useCallback(() => {
-    if (isDirtyRef.current) {
+    if (instanceCreated) {
+      // Instance was provisioned — confirm before abandoning
+      setShowConfirmExit(true)
+    } else if (isDirtyRef.current) {
       setShowConfirmExit(true)
     } else {
       onClose()
     }
-  }, [onClose])
+  }, [onClose, instanceCreated])
+
+  // Cleanup: if user confirms discard after instance was created, tear it down
+  const handleConfirmDiscard = useCallback(async () => {
+    if (instanceCreated && formData.name) {
+      try {
+        await api.stopInstance(formData.name as string)
+      } catch { /* instance might not be running */ }
+      // TODO: add DELETE /api/lines/:name endpoint for full cleanup
+    }
+    onClose()
+  }, [instanceCreated, formData.name, onClose])
 
   const handleCreateLine = useCallback(async () => {
     setCreating(true)
     setCreateError(null)
     try {
-      await api.createLine(formData)
-      setCurrentStep(4)
+      // Instance already created at step 0→1 transition. Update config with final settings.
+      await api.updateConfig(formData.name as string, formData)
+      // Instance already linked + running from step 1. Config saved. Done.
+      onClose()
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err))
     } finally {
       setCreating(false)
     }
-  }, [formData])
+  }, [formData, onClose])
 
   return (
     <div
@@ -202,7 +238,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         onClick={(e) => e.stopPropagation()}
         className="wizard-accent-scope"
         style={{
-          '--wizard-accent': TYPE_ACCENT[(formData.type as string) ?? 'chat'],
+          '--wizard-accent': TYPE_ACCENT[(formData.type as string)] ?? 'var(--color-s-ok)',
           width: 'var(--panel-wizard)',
           minWidth: 'var(--panel-wizard)',
           maxWidth: '90%',
@@ -252,12 +288,18 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
                 />
               )}
               {currentStep === 1 && (
-                <ModelAuthStep data={formData} onChange={patchForm} errors={errors} />
+                <LinkStep
+                  lineName={formData.name as string}
+                  onComplete={() => setCurrentStep(2)}
+                />
               )}
               {currentStep === 2 && (
-                <ConfigStep data={formData} onChange={patchForm} errors={errors} onSkip={handleNext} />
+                <ModelAuthStep data={formData} onChange={patchForm} errors={errors} />
               )}
               {currentStep === 3 && (
+                <ConfigStep data={formData} onChange={patchForm} errors={errors} onSkip={handleNext} />
+              )}
+              {currentStep === 4 && (
                 <ReviewStep
                   data={formData}
                   onEditPhase={(phase) => setCurrentStep(phase)}
@@ -266,18 +308,12 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
                   error={createError}
                 />
               )}
-              {currentStep === 4 && (
-                <LinkStep
-                  lineName={formData.name as string}
-                  onComplete={onClose}
-                />
-              )}
             </motion.div>
           </AnimatePresence>
         </div>
 
-        {/* Footer — hidden on Review (has own CTA) and Link (has own controls) */}
-        {currentStep < 3 && (
+        {/* Footer — hidden on Link (step 1, has own controls) and Review (step 4, has own CTA) */}
+        {currentStep !== 1 && currentStep !== 4 && (
           <div
             className="flex items-center justify-end c-toolbar"
             style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-3)' }}
@@ -306,13 +342,15 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       {/* Exit confirmation dialog */}
       <ConfirmDialog
         open={showConfirmExit}
-        title="Discard changes?"
-        confirmLabel="Discard"
+        title={instanceCreated ? 'Abandon new line?' : 'Discard changes?'}
+        confirmLabel={instanceCreated ? 'Abandon' : 'Discard'}
         confirmVariant="danger"
-        onConfirm={onClose}
+        onConfirm={handleConfirmDiscard}
         onCancel={() => setShowConfirmExit(false)}
       >
-        You have unsaved configuration. Closing the wizard will discard all changes.
+        {instanceCreated
+          ? `The instance "${formData.name}" has been created and linked. Abandoning will stop it. You can reconfigure it later from the dashboard.`
+          : 'You have unsaved configuration. Closing the wizard will discard all changes.'}
       </ConfirmDialog>
     </div>
   )
