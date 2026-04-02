@@ -421,6 +421,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
               values={pineconeAllowedIndexes}
               onChange={(values) => onChange({ pineconeAllowedIndexes: values })}
               placeholder="Index name"
+              accentColor={pineconeAllowedIndexes.length > 0 ? 'var(--wizard-accent)' : undefined}
             />
           </Field>
         </div>

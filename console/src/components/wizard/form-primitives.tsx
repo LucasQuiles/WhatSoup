@@ -14,15 +14,13 @@ interface FieldProps {
 
 export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, children }) => (
   <div>
-    <label className="c-label" style={labelStyle}>
-      <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
-        {label}
-        {!error && confirmed && (
-          <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
-        )}
-      </span>
-    </label>
-    {children}
+    <label className="c-heading" style={labelStyle}>{label}</label>
+    <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+      {!error && confirmed && (
+        <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+      )}
+    </div>
     {error && <div style={errorStyle}>{error}</div>}
     {!error && helper && <div style={helperStyle}>{helper}</div>}
   </div>

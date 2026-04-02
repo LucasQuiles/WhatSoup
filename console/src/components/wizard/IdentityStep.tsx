@@ -145,13 +145,9 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
       {/* Description */}
       <div>
         <label className="c-heading" style={labelStyle}>
-          <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
-            Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
-            {description.trim() && (
-              <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
-            )}
-          </span>
+          Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
         </label>
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
         <input
           type="text"
           value={description}
@@ -162,24 +158,29 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             borderColor: description.trim() ? 'var(--wizard-accent)' : 'var(--b2)',
           }}
         />
+        {description.trim() && (
+          <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+        )}
+        </div>
       </div>
 
       {/* Admin Phones */}
       <div>
-        <label className="c-heading" style={labelStyle}>
-          <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
-            Admin Phones
-            {!errors.adminPhones && adminPhones.length > 0 && (
-              <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
-            )}
-          </span>
-        </label>
-        <TagInput
-          values={adminPhones}
-          onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
-          placeholder="Enter phone number"
-          validate={validatePhone}
-        />
+        <label className="c-heading" style={labelStyle}>Admin Phones</label>
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <TagInput
+              values={adminPhones}
+              onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
+              placeholder="Enter phone number"
+              validate={validatePhone}
+              accentColor={adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
+            />
+          </div>
+          {!errors.adminPhones && adminPhones.length > 0 && (
+            <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+          )}
+        </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
         {!errors.adminPhones && <div style={helperStyle}>Phone numbers with full admin access to this line. Use international format without the +.</div>}
       </div>

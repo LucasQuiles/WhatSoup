@@ -6,9 +6,10 @@ interface TagInputProps {
   onChange: (values: string[]) => void
   placeholder?: string
   validate?: (value: string) => boolean
+  accentColor?: string  // CSS var for pill accent, e.g. 'var(--wizard-accent)'
 }
 
-const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate }) => {
+const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, accentColor }) => {
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -59,9 +60,14 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate }
           {values.map((tag, i) => (
             <span
               key={tag}
-              className="c-label inline-flex items-center"
+              className="inline-flex items-center font-mono font-medium"
               style={{
-                background: 'var(--color-d4)',
+                background: accentColor ? `color-mix(in srgb, ${accentColor} 15%, var(--color-d4))` : 'var(--color-d4)',
+                color: accentColor ?? 'var(--color-t4)',
+                fontSize: 'var(--font-size-label)',
+                borderWidth: 'var(--bw)',
+                borderStyle: 'solid',
+                borderColor: accentColor ?? 'var(--b2)',
                 borderRadius: 'var(--radius-sm)',
                 padding: 'var(--sp-1) var(--sp-2)',
                 gap: 'var(--sp-1)',
