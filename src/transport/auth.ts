@@ -64,10 +64,13 @@ async function startSocket(): Promise<void> {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      // Emit raw QR for fleet SSE consumers
+      // Emit raw QR for fleet SSE consumers (stdout = structured JSON only)
       process.stdout.write(JSON.stringify({ event: 'qr', data: qr }) + '\n');
+      // Terminal QR for interactive use — redirect to stderr so stdout stays clean
       console.error('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
-      qrcodeTerminal.generate(qr, { small: true });
+      qrcodeTerminal.generate(qr, { small: true }, (asciiArt: string) => {
+        process.stderr.write(asciiArt + '\n');
+      });
     }
 
     if (connection === 'open') {
