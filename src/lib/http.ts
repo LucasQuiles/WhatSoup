@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { FleetDiscovery, DiscoveredInstance } from '../fleet/discovery.ts';
 
 /** Stream request body with size guard. Rejects with 413 if exceeded. */
 export function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
@@ -56,6 +57,25 @@ export function parseQueryString(url: string | undefined): Record<string, string
     params[key] = value;
   }
   return params;
+}
+
+/** Look up an instance by name, sending 404 if not found. */
+export function requireInstance(
+  discovery: FleetDiscovery,
+  name: string,
+  res: ServerResponse,
+): DiscoveredInstance | null {
+  const instance = discovery.getInstance(name);
+  if (!instance) {
+    jsonResponse(res, 404, { error: `instance '${name}' not found` });
+    return null;
+  }
+  return instance;
+}
+
+/** Parse an integer query parameter with bounds clamping. */
+export function parseIntParam(qs: Record<string, string | undefined>, key: string, defaultVal: number, min: number, max: number): number {
+  return Math.min(Math.max(parseInt(qs[key] ?? String(defaultVal), 10) || defaultVal, min), max);
 }
 
 /** Wrap an async request handler, catching errors as 500. */

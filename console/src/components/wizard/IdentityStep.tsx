@@ -3,7 +3,7 @@ import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
-import { errorStyle, helperStyle, labelStyle, inputStyle } from './form-styles'
+import { errorStyle, helperStyle, labelStyle, inputStyle, confirmCheckStyle } from './form-styles'
 
 interface IdentityStepProps {
   data: Record<string, unknown>
@@ -135,7 +135,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
           )}
           {nameStatus === 'available' && (
-            <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+            <Check size={16} className="wizard-check" style={confirmCheckStyle} />
           )}
           {nameStatus === 'taken' && (
             <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
@@ -166,7 +166,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           }}
         />
         {showConfirmed && description.trim() && (
-          <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
         )}
         </div>
       </div>
@@ -192,7 +192,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             />
           </div>
           {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0, marginTop: 'var(--sp-2)' }} />
+            <Check size={16} className="wizard-check" style={{ ...confirmCheckStyle, marginTop: 'var(--sp-2)' }} />
           )}
         </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}

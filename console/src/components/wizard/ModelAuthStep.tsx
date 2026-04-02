@@ -1,9 +1,7 @@
 import { type FC, useState } from 'react'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
-import { inputStyle, errorStyle, helperStyle, labelStyle } from './form-styles'
-
-const confirmCheckStyle: React.CSSProperties = { color: 'var(--wizard-accent)', flexShrink: 0 }
+import { inputStyle, errorStyle, helperStyle, labelStyle, confirmCheckStyle } from './form-styles'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>

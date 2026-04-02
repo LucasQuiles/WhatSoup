@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
-import { readBody, jsonResponse } from '../../lib/http.ts';
+import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
@@ -22,11 +22,8 @@ export async function handleSend(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const body = await readBody(req);
 
@@ -78,11 +75,8 @@ export async function handleAccessUpdate(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const body = await readBody(req);
   const result = await proxyToInstance(
@@ -99,11 +93,8 @@ async function handleSystemctlAction(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   try {
     await execFileAsync('systemctl', ['--user', verb, `whatsoup@${params.name}`]);
@@ -143,11 +134,8 @@ export async function handleConfigUpdate(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const body = await readBody(req);
   let patch: Record<string, unknown>;
@@ -419,11 +407,8 @@ export async function handleAuth(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: 'not found' });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   // SSE headers
   res.writeHead(200, {

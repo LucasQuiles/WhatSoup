@@ -2,10 +2,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { jsonResponse, parseQueryString } from '../../lib/http.ts';
+import { jsonResponse, parseQueryString, requireInstance, parseIntParam } from '../../lib/http.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
+import { configRoot } from '../paths.ts';
 
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
@@ -23,14 +24,11 @@ export function handleGetChats(
   deps: DataDeps,
   params: { name: string },
 ): void {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const qs = parseQueryString(req.url);
-  const limit = Math.min(Math.max(parseInt(qs.limit ?? '50', 10) || 50, 1), 500);
+  const limit = parseIntParam(qs, 'limit', 50, 1, 500);
   const offset = Math.max(parseInt(qs.offset ?? '0', 10) || 0, 0);
 
   const result = deps.dbReader.getChats(instance.name, instance.dbPath, { limit, offset });
@@ -158,11 +156,8 @@ export function handleGetMessages(
   deps: DataDeps,
   params: { name: string },
 ): void {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const qs = parseQueryString(req.url);
   const conversationKey = qs.conversation_key;
@@ -171,7 +166,7 @@ export function handleGetMessages(
     return;
   }
 
-  const limit = Math.min(Math.max(parseInt(qs.limit ?? '50', 10) || 50, 1), 500);
+  const limit = parseIntParam(qs, 'limit', 50, 1, 500);
   const beforePk = qs.before_pk ? parseInt(qs.before_pk, 10) : undefined;
 
   const result = deps.dbReader.getMessages(instance.name, instance.dbPath, {
@@ -207,11 +202,8 @@ export function handleGetAccess(
   deps: DataDeps,
   params: { name: string },
 ): void {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const result = deps.dbReader.getAccessList(instance.name, instance.dbPath);
   if (!result.ok) {
@@ -238,15 +230,12 @@ export function handleGetLogs(
   deps: DataDeps,
   params: { name: string },
 ): void {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const qs = parseQueryString(req.url);
   const levelFilter = qs.level ?? null;
-  const limit = Math.min(Math.max(parseInt(qs.limit ?? '200', 10) || 200, 1), 2000);
+  const limit = parseIntParam(qs, 'limit', 200, 1, 2000);
 
   const logFile = findLatestLogFile(instance.logDir);
   if (!logFile) {
@@ -399,10 +388,7 @@ export function handleCheckExists(
   deps: DataDeps,
   params: { name: string },
 ): void {
-  const configDir = path.join(
-    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'),
-    'whatsoup', 'instances', params.name,
-  );
+  const configDir = path.join(configRoot(), params.name);
   const exists = deps.discovery.getInstance(params.name) != null || fs.existsSync(configDir);
   jsonResponse(res, 200, { exists });
 }

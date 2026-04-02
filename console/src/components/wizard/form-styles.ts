@@ -1,5 +1,16 @@
 // ── Shared style constants for wizard form fields ──
 
+export function getBorderColor(error?: boolean, confirmed?: boolean): string {
+  if (error) return 'var(--color-s-crit)'
+  if (confirmed) return 'var(--wizard-accent)'
+  return 'var(--b2)'
+}
+
+export const confirmCheckStyle: React.CSSProperties = {
+  color: 'var(--wizard-accent)',
+  flexShrink: 0,
+}
+
 export const inputStyle: React.CSSProperties = {
   width: '100%',
   background: 'var(--color-d1)',

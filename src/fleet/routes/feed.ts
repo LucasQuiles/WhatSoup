@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { jsonResponse, parseQueryString } from '../../lib/http.ts';
+import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller } from '../health-poller.ts';
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
@@ -81,7 +81,7 @@ export function handleGetFeed(
   deps: FeedDeps,
 ): void {
   const qs = parseQueryString(req.url);
-  const limit = Math.min(Math.max(parseInt(qs.limit ?? '20', 10) || 20, 1), 100);
+  const limit = parseIntParam(qs, 'limit', 20, 1, 100);
 
   const instances = deps.discovery.getInstances();
   const events: FeedEvent[] = [];

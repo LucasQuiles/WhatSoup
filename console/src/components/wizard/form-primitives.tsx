@@ -1,6 +1,6 @@
 import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode } from 'react'
 import { Check } from 'lucide-react'
-import { inputStyle, selectStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle } from './form-styles'
+import { inputStyle, selectStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle, getBorderColor, confirmCheckStyle } from './form-styles'
 
 // ── Form field wrapper ──
 
@@ -18,7 +18,7 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, childre
     <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
       <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
       {!error && confirmed && (
-        <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+        <Check size={16} className="wizard-check" style={confirmCheckStyle} />
       )}
     </div>
     {error && <div style={errorStyle}>{error}</div>}
@@ -37,7 +37,7 @@ export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ...
   <input
     {...props}
     className={`font-mono ${className ?? ''}`}
-    style={{ ...inputStyle, borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)' }}
+    style={{ ...inputStyle, borderColor: getBorderColor(error, confirmed) }}
   />
 )
 
@@ -51,7 +51,7 @@ export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className,
     type="number"
     {...props}
     className={`font-mono ${className ?? ''}`}
-    style={{ ...numberInputStyle, borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)' }}
+    style={{ ...numberInputStyle, borderColor: getBorderColor(error, confirmed) }}
   />
 )
 
@@ -64,7 +64,7 @@ export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, 
   <select
     {...props}
     className={className ?? ''}
-    style={{ ...selectStyle, borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)' }}
+    style={{ ...selectStyle, borderColor: getBorderColor(error, confirmed) }}
   >
     {children}
   </select>
@@ -84,7 +84,7 @@ export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, class
       ...inputStyle,
       minHeight: minHeight ?? 80,
       resize: 'vertical',
-      borderColor: error ? 'var(--color-s-crit)' : confirmed ? 'var(--wizard-accent)' : 'var(--b2)',
+      borderColor: getBorderColor(error, confirmed),
     }}
   />
 )

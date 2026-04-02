@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
-import { jsonResponse } from '../../lib/http.ts';
+import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -173,11 +173,8 @@ export async function handleGetLine(
   deps: LinesDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
 
   const poll = deps.healthPoller.getStatus(params.name);
   const dbStats = deps.dbReader.getSummaryStats(instance.name, instance.dbPath);

@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { jsonResponse, checkBearerAuth, parseRoute, parseQueryString, readBody } from '../lib/http.ts';
@@ -13,6 +12,7 @@ import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
+import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
 
 const log = createChildLogger('fleet');
@@ -69,7 +69,7 @@ const handlers: Record<string, HandlerFn> = {
 /** Load or create the fleet token at ~/.config/whatsoup/fleet-token */
 export async function loadOrCreateFleetToken(): Promise<string> {
   const tokenPath = path.join(
-    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'),
+    xdgDir('XDG_CONFIG_HOME', '.config'),
     'whatsoup',
     'fleet-token',
   );
