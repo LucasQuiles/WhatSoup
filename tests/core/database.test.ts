@@ -374,6 +374,86 @@ describe('importFromLegacyDb', () => {
   it('throws if legacy DB path does not exist', () => {
     expect(() => targetDb.importFromLegacyDb('/nonexistent/path.db')).toThrow();
   });
+
+  it('imports access_list from legacy phone-only schema', () => {
+    const phoneLegacyPath = tmpFile();
+    const phoneLegacy = new DatabaseSync(phoneLegacyPath);
+    phoneLegacy.exec(`
+      CREATE TABLE messages (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT, chat_jid TEXT NOT NULL, sender_jid TEXT NOT NULL,
+        sender_name TEXT, message_id TEXT UNIQUE, content TEXT,
+        content_type TEXT NOT NULL DEFAULT 'text', is_from_me INTEGER NOT NULL DEFAULT 0,
+        timestamp INTEGER NOT NULL, quoted_message_id TEXT,
+        enrichment_processed_at TEXT, enrichment_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE access_list (
+        phone TEXT PRIMARY KEY, status TEXT NOT NULL, display_name TEXT,
+        requested_at TEXT, decided_at TEXT
+      );
+      CREATE TABLE rate_limits (sender_jid TEXT NOT NULL, response_at TEXT NOT NULL);
+    `);
+    phoneLegacy.exec(`
+      INSERT INTO access_list (phone, status, display_name, requested_at)
+      VALUES ('15550100001', 'allowed', 'Alice', datetime('now'));
+      INSERT INTO access_list (phone, status, display_name, requested_at)
+      VALUES ('15550100002', 'blocked', 'Bob', datetime('now'));
+    `);
+    phoneLegacy.close();
+
+    const freshPath = tmpFile();
+    const freshDb = new Database(freshPath);
+    freshDb.open();
+    freshDb.importFromLegacyDb(phoneLegacyPath);
+
+    const rows = freshDb.raw
+      .prepare('SELECT subject_type, subject_id, status, display_name FROM access_list ORDER BY subject_id')
+      .all() as Array<{ subject_type: string; subject_id: string; status: string; display_name: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ subject_type: 'phone', subject_id: '15550100001', status: 'allowed', display_name: 'Alice' });
+    expect(rows[1]).toMatchObject({ subject_type: 'phone', subject_id: '15550100002', status: 'blocked', display_name: 'Bob' });
+
+    freshDb.close();
+    cleanup(freshPath, phoneLegacyPath);
+  });
+
+  it('skips missing tables gracefully (no agent_sessions, no enrichment_runs)', () => {
+    const minimalLegacyPath = tmpFile();
+    const minimalLegacy = new DatabaseSync(minimalLegacyPath);
+    minimalLegacy.exec(`
+      CREATE TABLE messages (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT, chat_jid TEXT NOT NULL, sender_jid TEXT NOT NULL,
+        sender_name TEXT, message_id TEXT UNIQUE, content TEXT,
+        content_type TEXT NOT NULL DEFAULT 'text', is_from_me INTEGER NOT NULL DEFAULT 0,
+        timestamp INTEGER NOT NULL, quoted_message_id TEXT,
+        enrichment_processed_at TEXT, enrichment_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE rate_limits (sender_jid TEXT NOT NULL, response_at TEXT NOT NULL);
+    `);
+    minimalLegacy.exec(`
+      INSERT INTO messages (chat_jid, sender_jid, message_id, content, timestamp, created_at)
+      VALUES ('15550100001@s.whatsapp.net', '15550100001@s.whatsapp.net', 'msg-min-1', 'Hello', 1700000000, datetime('now'));
+      INSERT INTO rate_limits (sender_jid, response_at)
+      VALUES ('15550100001@s.whatsapp.net', datetime('now'));
+    `);
+    minimalLegacy.close();
+
+    const freshPath = tmpFile();
+    const freshDb = new Database(freshPath);
+    freshDb.open();
+    freshDb.importFromLegacyDb(minimalLegacyPath);
+
+    const msgs = freshDb.raw.prepare('SELECT count(*) AS n FROM messages').get() as { n: number };
+    expect(msgs.n).toBe(1);
+    const sessions = freshDb.raw.prepare('SELECT count(*) AS n FROM agent_sessions').get() as { n: number };
+    expect(sessions.n).toBe(0);
+    const enrichment = freshDb.raw.prepare('SELECT count(*) AS n FROM enrichment_runs').get() as { n: number };
+    expect(enrichment.n).toBe(0);
+
+    freshDb.close();
+    cleanup(freshPath, minimalLegacyPath);
+  });
 });
 
 // ─── Timestamp coercion ───────────────────────────────────────────────────────

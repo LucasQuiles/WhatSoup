@@ -485,6 +485,28 @@ export class Database {
     }
   }
 
+  private legacyTableInfo(
+    schema: string,
+    table: string,
+    requiredColumns?: string[],
+  ): { exists: boolean; hasColumns: boolean; columns: string[] } {
+    const tableRow = this.db
+      .prepare(`SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name=?`)
+      .get(table) as { name: string } | undefined;
+    if (!tableRow) return { exists: false, hasColumns: false, columns: [] };
+
+    const cols = this.db
+      .prepare(`PRAGMA ${schema}.table_info('${table}')`)
+      .all() as Array<{ name: string }>;
+    const colNames = cols.map((c) => c.name);
+
+    const hasColumns = requiredColumns
+      ? requiredColumns.every((col) => colNames.includes(col))
+      : true;
+
+    return { exists: true, hasColumns, columns: colNames };
+  }
+
   /**
    * Import data from a legacy database (pre-WhatSoup format).
    *
@@ -517,66 +539,91 @@ export class Database {
       const counts: Record<string, number> = {};
 
       // ── access_list ──────────────────────────────────────────────────────
-      try {
-        this.db.exec(`
-          INSERT OR IGNORE INTO main.access_list
-            (subject_type, subject_id, status, display_name, requested_at, decided_at)
-          SELECT subject_type, subject_id, status, display_name, requested_at, decided_at
-          FROM old.access_list
-        `);
-        const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-        counts['access_list'] = row.n;
-      } catch (err) {
-        log.warn({ err, table: 'access_list' }, 'legacy import failed for table');
-        counts['access_list'] = 0;
+      {
+        const info = this.legacyTableInfo('old', 'access_list', ['subject_type', 'subject_id']);
+        if (!info.exists) {
+          log.info('legacy DB has no access_list table, skipping');
+          counts['access_list'] = 0;
+        } else if (info.hasColumns) {
+          this.db.exec(`
+            INSERT OR IGNORE INTO main.access_list
+              (subject_type, subject_id, status, display_name, requested_at, decided_at)
+            SELECT subject_type, subject_id, status, display_name, requested_at, decided_at
+            FROM old.access_list
+          `);
+          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+          counts['access_list'] = row.n;
+        } else if (info.columns.includes('phone')) {
+          log.info('legacy access_list uses phone-only schema, mapping to subject_type/subject_id');
+          this.db.exec(`
+            INSERT OR IGNORE INTO main.access_list
+              (subject_type, subject_id, status, display_name, requested_at, decided_at)
+            SELECT 'phone', phone, status, display_name, requested_at, decided_at
+            FROM old.access_list
+          `);
+          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+          counts['access_list'] = row.n;
+        } else {
+          log.info({ columns: info.columns }, 'legacy access_list has unrecognized schema, skipping');
+          counts['access_list'] = 0;
+        }
       }
 
       // ── agent_sessions ───────────────────────────────────────────────────
-      try {
-        this.db.exec(`
-          INSERT OR IGNORE INTO main.agent_sessions
-            (id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
-             transcript_path, message_count, started_at, last_message_at, status)
-          SELECT id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
-                 transcript_path, message_count, started_at, last_message_at, status
-          FROM old.agent_sessions
-        `);
-        const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-        counts['agent_sessions'] = row.n;
-      } catch (err) {
-        log.warn({ err, table: 'agent_sessions' }, 'legacy import failed for table');
-        counts['agent_sessions'] = 0;
+      {
+        const info = this.legacyTableInfo('old', 'agent_sessions');
+        if (!info.exists) {
+          log.info('legacy DB has no agent_sessions table, skipping');
+          counts['agent_sessions'] = 0;
+        } else {
+          this.db.exec(`
+            INSERT OR IGNORE INTO main.agent_sessions
+              (id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+               transcript_path, message_count, started_at, last_message_at, status)
+            SELECT id, session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+                   transcript_path, message_count, started_at, last_message_at, status
+            FROM old.agent_sessions
+          `);
+          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+          counts['agent_sessions'] = row.n;
+        }
       }
 
       // ── rate_limits ──────────────────────────────────────────────────────
-      try {
-        this.db.exec(`
-          INSERT INTO main.rate_limits (sender_jid, response_at)
-          SELECT sender_jid, response_at FROM old.rate_limits
-          GROUP BY sender_jid, response_at
-        `);
-        const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-        counts['rate_limits'] = row.n;
-      } catch (err) {
-        log.warn({ err, table: 'rate_limits' }, 'legacy import failed for table');
-        counts['rate_limits'] = 0;
+      {
+        const info = this.legacyTableInfo('old', 'rate_limits');
+        if (!info.exists) {
+          log.info('legacy DB has no rate_limits table, skipping');
+          counts['rate_limits'] = 0;
+        } else {
+          this.db.exec(`
+            INSERT INTO main.rate_limits (sender_jid, response_at)
+            SELECT sender_jid, response_at FROM old.rate_limits
+            GROUP BY sender_jid, response_at
+          `);
+          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+          counts['rate_limits'] = row.n;
+        }
       }
 
       // ── enrichment_runs ──────────────────────────────────────────────────
-      try {
-        this.db.exec(`
-          INSERT OR IGNORE INTO main.enrichment_runs
-            (run_id, started_at, completed_at, messages_processed,
-             facts_extracted, facts_upserted, error)
-          SELECT run_id, started_at, completed_at, messages_processed,
-                 facts_extracted, facts_upserted, error
-          FROM old.enrichment_runs
-        `);
-        const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
-        counts['enrichment_runs'] = row.n;
-      } catch (err) {
-        log.warn({ err, table: 'enrichment_runs' }, 'legacy import failed for table');
-        counts['enrichment_runs'] = 0;
+      {
+        const info = this.legacyTableInfo('old', 'enrichment_runs');
+        if (!info.exists) {
+          log.info('legacy DB has no enrichment_runs table, skipping');
+          counts['enrichment_runs'] = 0;
+        } else {
+          this.db.exec(`
+            INSERT OR IGNORE INTO main.enrichment_runs
+              (run_id, started_at, completed_at, messages_processed,
+               facts_extracted, facts_upserted, error)
+            SELECT run_id, started_at, completed_at, messages_processed,
+                   facts_extracted, facts_upserted, error
+            FROM old.enrichment_runs
+          `);
+          const row = this.db.prepare('SELECT changes() AS n').get() as { n: number };
+          counts['enrichment_runs'] = row.n;
+        }
       }
 
       // ── messages (with conversation_key backfill) ────────────────────────
