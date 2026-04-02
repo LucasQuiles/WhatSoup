@@ -30,28 +30,28 @@ const ACCESS_OPTIONS = [
     label: 'Admin Only',
     description: 'Only admin phone numbers can interact',
     icon: <Lock size={24} />,
-    color: 'var(--color-s-ok)',
+    color: 'var(--wizard-accent)',
   },
   {
     value: 'allowlist',
     label: 'Allowlist',
     description: 'Approved contacts only',
     icon: <List size={24} />,
-    color: 'var(--color-s-ok)',
+    color: 'var(--wizard-accent)',
   },
   {
     value: 'open_dm',
     label: 'Open DMs',
     description: 'Anyone can send direct messages',
     icon: <MessageCircle size={24} />,
-    color: 'var(--color-s-ok)',
+    color: 'var(--wizard-accent)',
   },
   {
     value: 'groups_only',
     label: 'Groups Only',
     description: 'Only responds in group chats',
     icon: <Users size={24} />,
-    color: 'var(--color-s-ok)',
+    color: 'var(--wizard-accent)',
   },
 ]
 
@@ -450,7 +450,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                   onClick={() => onChange({ pineconeSearchMode: mode })}
                   style={{
                     background:
-                      pineconeSearchMode === mode ? 'var(--color-s-ok)' : 'var(--color-d3)',
+                      pineconeSearchMode === mode ? 'var(--wizard-accent)' : 'var(--color-d3)',
                     color:
                       pineconeSearchMode === mode ? 'var(--color-d0)' : 'var(--color-t3)',
                     borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
