@@ -108,7 +108,7 @@ const ApiKeyInput: FC<{
   value: string
   onChange: (value: string) => void
   placeholder: string
-  helper: string
+  helper?: string
   error?: string
 }> = ({ label, value, onChange, placeholder, helper, error }) => {
   const [visible, setVisible] = useState(false)
@@ -152,7 +152,7 @@ const ApiKeyInput: FC<{
         )}
       </div>
       {error && <div style={errorStyle}>{error}</div>}
-      <span style={helperStyle}>{helper}</span>
+      {helper && <span style={helperStyle}>{helper}</span>}
     </div>
   )
 }
@@ -192,7 +192,6 @@ const ChatView: FC<{
         value={apiKey}
         onChange={(v) => onChange({ apiKey: v })}
         placeholder="sk-ant-..."
-        helper="Required for chat instances. Stored securely in system keyring."
         error={errors.apiKey}
       />
       <ApiKeyInput
@@ -200,7 +199,6 @@ const ChatView: FC<{
         value={openaiKey}
         onChange={(v) => onChange({ openaiKey: v })}
         placeholder="sk-..."
-        helper="Required for GPT fallback model. Stored securely."
         error={errors.openaiKey}
       />
     </div>
@@ -271,7 +269,6 @@ const AgentView: FC<{
               value={apiKey}
               onChange={(v) => onChange({ apiKey: v })}
               placeholder="sk-ant-..."
-              helper="Required for chat instances. Stored securely in system keyring."
               error={errors.apiKey}
             />
             <ApiKeyInput
@@ -279,7 +276,6 @@ const AgentView: FC<{
               value={openaiKey}
               onChange={(v) => onChange({ openaiKey: v })}
               placeholder="sk-..."
-              helper="Required for GPT fallback model. Stored securely."
               error={errors.openaiKey}
             />
           </>
@@ -300,7 +296,6 @@ const AgentView: FC<{
               value={openaiKey}
               onChange={(v) => onChange({ openaiKey: v })}
               placeholder="sk-..."
-              helper="Required for GPT fallback model. Stored securely."
               error={errors.openaiKey}
             />
           </>
