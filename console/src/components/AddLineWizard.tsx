@@ -1,5 +1,5 @@
 import { type FC, useState, useCallback, useRef } from 'react'
-import { X, Check } from 'lucide-react'
+import { X, Check, ChevronRight, ChevronLeft } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import IdentityStep from './wizard/IdentityStep'
 import ModelAuthStep from './wizard/ModelAuthStep'
@@ -278,18 +278,21 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
             style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-3)' }}
           >
             <button
-              className="c-btn c-btn-ghost"
+              className="c-btn c-btn-ghost c-btn-nav"
               onClick={() =>
                 currentStep > 0 ? setCurrentStep((s) => s - 1) : handleClose()
               }
             >
-              {currentStep > 0 ? 'Back' : 'Cancel'}
+              {currentStep > 0 && <ChevronLeft size={16} />}
+              <span className="c-btn-nav-label">{currentStep > 0 ? 'Back' : 'Cancel'}</span>
+              {currentStep === 0 && <X size={16} />}
             </button>
             <button
-              className="c-btn c-btn-primary"
+              className="c-btn c-btn-primary c-btn-nav"
               onClick={handleNext}
             >
-              Next
+              <span className="c-btn-nav-label">Next</span>
+              <ChevronRight size={16} />
             </button>
           </div>
         )}

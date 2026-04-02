@@ -366,9 +366,9 @@ body::before {
   cursor: pointer;
   transition: all 0.15s var(--ease);
 }
-.c-btn:hover         { background: var(--color-d5); border-color: var(--b3); }
+.c-btn:hover         { filter: brightness(1.1); }
 .c-btn-primary       { background: var(--color-m-cht); border-color: var(--color-m-cht); color: var(--color-d0); }
-.c-btn-primary:hover { opacity: 0.88; }
+.c-btn-primary:hover { filter: brightness(1.15); }
 .c-btn-danger        { background: transparent; border-color: var(--s-crit-ring); color: var(--color-s-crit); }
 .c-btn-danger:hover  { background: var(--s-crit-wash); }
 .c-btn-success       { background: transparent; border-color: var(--s-ok-ring); color: var(--color-s-ok); }
@@ -376,6 +376,29 @@ body::before {
 .c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
 .c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
 .c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
+.c-btn-nav {
+  padding: 6px 10px;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: padding 0.2s ease, gap 0.2s ease;
+}
+.c-btn-nav .c-btn-nav-label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.2s ease, opacity 0.15s ease;
+}
+.c-btn-nav:hover {
+  padding: 6px 12px;
+  gap: var(--sp-2);
+  filter: brightness(1.15);
+}
+.c-btn-nav:hover .c-btn-nav-label {
+  max-width: 60px;
+  opacity: 1;
+}
 .c-btn-send {
   padding: 6px 10px;
   gap: 0;
