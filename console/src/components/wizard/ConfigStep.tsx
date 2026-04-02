@@ -9,6 +9,7 @@ interface ConfigStepProps {
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
   errors: Record<string, string>
+  onSkip?: () => void
 }
 
 interface AgentOptions {
@@ -76,7 +77,7 @@ const SESSION_SCOPE_DESCRIPTIONS: Record<string, string> = {
   per_chat: 'Separate session per conversation \u2014 recommended',
 }
 
-const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
+const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
   const type = (data.type as string) ?? 'chat'
   const accessMode = (data.accessMode as string) ?? 'self_only'
   const allowedContacts = (data.allowedContacts as string[]) ?? []
@@ -174,18 +175,6 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-      {/* Use Defaults & Continue */}
-      <button
-        type="button"
-        className="c-btn c-btn-ghost self-end"
-        onClick={() => {
-          /* no-op: leave formData unchanged, parent advances step */
-        }}
-        style={{ marginBottom: 'var(--sp-2)' }}
-      >
-        Use Defaults &amp; Continue
-      </button>
-
       {/* Tab bar */}
       <div className="flex" style={{ borderBottomWidth: 'var(--bw)', borderBottomStyle: 'solid', borderBottomColor: 'var(--b1)' }}>
         <button type="button" style={tabStyle(activeTab === 'access')} onClick={() => setActiveTab('access')}>Access</button>
@@ -501,6 +490,19 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
               accentColor={pineconeAllowedIndexes.length > 0 ? 'var(--wizard-accent)' : undefined}
             />
           </Field>
+        </div>
+      )}
+      {/* Skip — sticky at bottom, right-aligned */}
+      {onSkip && (
+        <div className="flex justify-end" style={{ marginTop: 'var(--sp-4)', paddingTop: 'var(--sp-3)', borderTopWidth: 'var(--bw)', borderTopStyle: 'solid', borderTopColor: 'var(--b1)' }}>
+          <button
+            type="button"
+            className="c-btn c-btn-ghost"
+            onClick={onSkip}
+            style={{ fontSize: 'var(--font-size-data)' }}
+          >
+            Skip — Use Defaults
+          </button>
         </div>
       )}
     </div>

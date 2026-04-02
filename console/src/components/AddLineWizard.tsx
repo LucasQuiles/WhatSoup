@@ -255,7 +255,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
                 <ModelAuthStep data={formData} onChange={patchForm} errors={errors} />
               )}
               {currentStep === 2 && (
-                <ConfigStep data={formData} onChange={patchForm} errors={errors} />
+                <ConfigStep data={formData} onChange={patchForm} errors={errors} onSkip={handleNext} />
               )}
               {currentStep === 3 && (
                 <ReviewStep
@@ -279,22 +279,9 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         {/* Footer — hidden on Review (has own CTA) and Link (has own controls) */}
         {currentStep < 3 && (
           <div
-            className="flex items-center justify-between c-toolbar"
+            className="flex items-center justify-end c-toolbar"
             style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-3)' }}
           >
-            {/* Use Defaults — only on config step */}
-            {currentStep === 2 ? (
-              <button
-                type="button"
-                className="c-btn c-btn-ghost"
-                onClick={handleNext}
-                style={{ fontSize: 'var(--font-size-data)' }}
-              >
-                Use Defaults &amp; Continue
-              </button>
-            ) : <div />}
-
-            <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
             <button
               className="c-btn c-btn-ghost c-btn-nav"
               onClick={() =>
@@ -312,7 +299,6 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
               <span className="c-btn-nav-label">Next</span>
               <ChevronRight size={16} />
             </button>
-            </div>
           </div>
         )}
       </div>
