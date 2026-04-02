@@ -294,13 +294,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
 
+      // Determine health status.
+      // Enrichment staleness only matters if enrichment has actually run before
+      // (instances without RAG/Pinecone never run enrichment — that's not degraded).
+      const enrichmentIsStale = enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS;
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (!isConnected) {
         status = 'unhealthy';
-      } else if (
-        (enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS) ||
-        enrichmentStats.runtimeDegraded
-      ) {
+      } else if (enrichmentIsStale || enrichmentStats.runtimeDegraded) {
         status = 'degraded';
       } else {
         status = 'healthy';

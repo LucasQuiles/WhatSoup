@@ -1340,9 +1340,9 @@ export class AgentRuntime implements Runtime {
         if (s.getStatus().active) activeSessions++;
       }
       let healthStatus: RuntimeHealth['status'] = 'healthy';
-      if (sessions.length > 0 && activeSessions === 0) {
-        healthStatus = 'degraded';
-      }
+      // For per_chat: idle sessions (all inactive) are normal — not degraded.
+      // Only degrade if we have sessions that SHOULD be active but aren't
+      // (indicated by recent crashes, not by inactivity).
       // Crash counter survives session map deletions — if sessions have been crashing
       // recently but were cleaned up before this health check, recentCrashCount captures it.
       if (this.recentCrashCount > 0 && healthStatus === 'healthy') {
