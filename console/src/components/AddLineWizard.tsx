@@ -1,6 +1,9 @@
-import { type FC, useState } from 'react'
+import { type FC, useState, useCallback } from 'react'
 import { X, Check } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
+import IdentityStep from './wizard/IdentityStep'
+import ModelAuthStep from './wizard/ModelAuthStep'
+import ConfigStep from './wizard/ConfigStep'
 
 interface AddLineWizardProps {
   onClose: () => void
@@ -80,12 +83,17 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
 /* ── Wizard shell ── */
 const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const [currentStep, setCurrentStep] = useState(0)
-  const [_formData] = useState<Record<string, unknown>>({
+  const [formData, setFormData] = useState<Record<string, unknown>>({
     type: 'chat',
     accessMode: 'self_only',
     adminPhones: [],
   })
-  void _formData
+  const [errors] = useState<Record<string, string>>({})
+
+  const patchForm = useCallback(
+    (patch: Record<string, unknown>) => setFormData((d) => ({ ...d, ...patch })),
+    [],
+  )
 
   return (
     <div
@@ -132,9 +140,19 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
             >
-              {currentStep === 0 && <div className="c-body">Identity placeholder</div>}
-              {currentStep === 1 && <div className="c-body">Model placeholder</div>}
-              {currentStep === 2 && <div className="c-body">Config placeholder</div>}
+              {currentStep === 0 && (
+                <IdentityStep
+                  data={formData}
+                  onChange={patchForm}
+                  errors={errors}
+                />
+              )}
+              {currentStep === 1 && (
+                <ModelAuthStep data={formData} onChange={patchForm} />
+              )}
+              {currentStep === 2 && (
+                <ConfigStep data={formData} onChange={patchForm} />
+              )}
               {currentStep === 3 && <div className="c-body">Review placeholder</div>}
               {currentStep === 4 && <div className="c-body">Link placeholder</div>}
             </motion.div>

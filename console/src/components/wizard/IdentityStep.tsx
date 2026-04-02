@@ -1,0 +1,209 @@
+import { type FC, useEffect, useRef, useState } from 'react'
+import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
+import CardSelector from '../CardSelector'
+import TagInput from '../TagInput'
+import { api } from '../../lib/api'
+
+interface IdentityStepProps {
+  data: Record<string, unknown>
+  onChange: (patch: Record<string, unknown>) => void
+  errors: Record<string, string>
+}
+
+const TYPE_OPTIONS = [
+  {
+    value: 'passive',
+    label: 'Passive',
+    description: 'Listen & store messages. No AI responses.',
+    icon: <Eye size={24} />,
+    color: 'var(--color-m-pas)',
+  },
+  {
+    value: 'chat',
+    label: 'Chat',
+    description: 'Conversational AI bot with API key.',
+    icon: <MessageSquare size={24} />,
+    color: 'var(--color-m-cht)',
+  },
+  {
+    value: 'agent',
+    label: 'Agent',
+    description: 'Full Claude Code agent with tool access.',
+    icon: <Bot size={24} />,
+    color: 'var(--color-m-agt)',
+  },
+]
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+}
+
+function validatePhone(value: string): boolean {
+  const digits = value.replace(/\D/g, '')
+  return digits.length >= 10 && digits.length <= 15 && /^\d+$/.test(value)
+}
+
+type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
+
+const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
+  const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const name = (data.name as string) ?? ''
+  const description = (data.description as string) ?? ''
+  const type = (data.type as string) ?? 'chat'
+  const adminPhones = (data.adminPhones as string[]) ?? []
+
+  /* Debounced uniqueness check */
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    if (abortRef.current) abortRef.current.abort()
+
+    const slug = slugify(name)
+
+    debounceRef.current = setTimeout(() => {
+      if (!slug) {
+        setNameStatus('idle')
+        return
+      }
+      setNameStatus('checking')
+      const controller = new AbortController()
+      abortRef.current = controller
+      api
+        .checkExists(slug)
+        .then((res) => {
+          if (controller.signal.aborted) return
+          setNameStatus(res.exists ? 'taken' : 'available')
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          setNameStatus('error')
+        })
+    }, slug ? 500 : 0)
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      if (abortRef.current) abortRef.current.abort()
+    }
+  }, [name])
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    background: 'var(--color-d1)',
+    border: 'var(--bw) solid var(--b2)',
+    borderRadius: 'var(--radius-sm)',
+    padding: 'var(--sp-2) var(--sp-3)',
+    fontSize: 'var(--font-size-data)',
+    color: 'var(--color-t1)',
+  }
+
+  return (
+    <div className="flex flex-col" style={{ gap: 'var(--sp-5)' }}>
+      {/* Name */}
+      <div>
+        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+          Name
+        </label>
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => onChange({ name: e.target.value })}
+            placeholder="my-line"
+            className="font-mono"
+            style={{
+              ...inputStyle,
+              borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' ? 'var(--color-s-ok)' : 'var(--b2)',
+            }}
+          />
+          {nameStatus === 'checking' && (
+            <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
+          )}
+          {nameStatus === 'available' && (
+            <Check size={16} style={{ color: 'var(--color-s-ok)', flexShrink: 0 }} />
+          )}
+          {nameStatus === 'taken' && (
+            <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
+          )}
+        </div>
+        {name && slugify(name) !== name && (
+          <div
+            className="font-mono"
+            style={{
+              fontSize: 'var(--font-size-xs)',
+              color: 'var(--color-t4)',
+              marginTop: 'var(--sp-1)',
+            }}
+          >
+            slug: {slugify(name)}
+          </div>
+        )}
+        {nameStatus === 'taken' && (
+          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+            Name already exists
+          </div>
+        )}
+        {errors.name && (
+          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+            {errors.name}
+          </div>
+        )}
+      </div>
+
+      {/* Description */}
+      <div>
+        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+          Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
+        </label>
+        <input
+          type="text"
+          value={description}
+          onChange={(e) => onChange({ description: e.target.value })}
+          placeholder="What this line is for"
+          style={inputStyle}
+        />
+      </div>
+
+      {/* Type */}
+      <div>
+        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-2)' }}>
+          Type
+        </label>
+        <CardSelector
+          options={TYPE_OPTIONS}
+          selected={type}
+          onChange={(value) => onChange({ type: value })}
+        />
+        {errors.type && (
+          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+            {errors.type}
+          </div>
+        )}
+      </div>
+
+      {/* Admin Phones */}
+      <div>
+        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+          Admin Phones
+        </label>
+        <TagInput
+          values={adminPhones}
+          onChange={(values) => onChange({ adminPhones: values })}
+          placeholder="Enter phone number"
+          validate={validatePhone}
+        />
+        {errors.adminPhones && (
+          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+            {errors.adminPhones}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default IdentityStep
