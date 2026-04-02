@@ -54,6 +54,7 @@ export interface LineInstance {
   };
   group?: string;
   config?: Record<string, unknown>;
+  linkedStatus?: 'linked' | 'unlinked';
 }
 
 export interface ChatItem {

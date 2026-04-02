@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
@@ -99,6 +100,17 @@ function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Mes
   return stats;
 }
 
+function getLinkedStatus(configPath: string): 'linked' | 'unlinked' {
+  try {
+    const authDir = path.join(path.dirname(configPath), 'auth');
+    const entries = fs.readdirSync(authDir);
+    return entries.some(f => f.startsWith('creds') || f.startsWith('app-state-sync'))
+      ? 'linked' : 'unlinked';
+  } catch {
+    return 'unlinked';
+  }
+}
+
 /** Build the enriched LineInstance object the console expects. */
 function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, messagesToday?: number, messageStats?: MessageStats): Record<string, unknown> {
   const h = poll?.health ?? null;
@@ -140,6 +152,7 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     activeSessions: activeSessions ?? 0,
     lastSessionStatus,
     messageStats: messageStats ?? null,
+    linkedStatus: getLinkedStatus(inst.configPath),
   };
 }
 
