@@ -150,6 +150,37 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* Reset native form element styles — design system controls all visual treatment */
+input, select, textarea, button {
+  font: inherit;
+  color: inherit;
+  outline: none;
+  border: none;
+  background: none;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--color-s-ok);
+}
+
+input[type="file"] {
+  cursor: pointer;
+  color: var(--color-t3);
+  font-size: var(--font-size-data);
+}
+
+input[type="file"]::file-selector-button {
+  font: inherit;
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--color-d4);
+  color: var(--color-t2);
+  border: var(--bw) solid var(--b2);
+  border-radius: var(--radius-sm);
+  margin-right: var(--sp-3);
+}
+
 body {
   background: var(--color-d0);
   color: var(--color-t2);
