@@ -433,6 +433,15 @@ body::before {
   opacity: 1;
 }
 
+/* Wizard accent-scoped focus ring — matches the selected line type color */
+.wizard-accent-scope input:focus-visible,
+.wizard-accent-scope select:focus-visible,
+.wizard-accent-scope textarea:focus-visible {
+  border-color: var(--wizard-accent) !important;
+  box-shadow: 0 0 0 var(--bw-focus) color-mix(in srgb, var(--wizard-accent) 20%, transparent),
+              0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent) 10%, transparent);
+}
+
 /* ═══ Toggle switch — c-toggle from design system ═══ */
 .c-toggle {
   position: relative;

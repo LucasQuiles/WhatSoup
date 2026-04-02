@@ -109,6 +109,12 @@ const validateStep = (step: number, formData: Record<string, unknown>): Record<s
   return errs
 }
 
+const TYPE_ACCENT: Record<string, string> = {
+  passive: 'var(--color-m-pas)',
+  chat: 'var(--color-m-cht)',
+  agent: 'var(--color-m-agt)',
+}
+
 /* ── Wizard shell ── */
 const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const [currentStep, setCurrentStep] = useState(0)
@@ -188,7 +194,9 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     >
       <div
         onClick={(e) => e.stopPropagation()}
+        className="wizard-accent-scope"
         style={{
+          '--wizard-accent': TYPE_ACCENT[(formData.type as string) ?? 'chat'],
           width: 'var(--panel-wizard)',
           maxWidth: '90%',
           maxHeight: 'var(--modal-max-h)',
