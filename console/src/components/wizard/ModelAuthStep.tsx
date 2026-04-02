@@ -43,65 +43,110 @@ const passwordInputStyle: React.CSSProperties = {
   paddingRight: 'var(--sp-8)',
 }
 
-/* -- Shared sub-sections -- */
+/* -- Tabbed model/key section -- */
 
-const ModelSelectionSection: FC<{
+const tabStyle = (active: boolean): React.CSSProperties => ({
+  padding: 'var(--sp-2) var(--sp-4)',
+  fontSize: 'var(--font-size-data)',
+  cursor: 'pointer',
+  borderBottomWidth: '2px',
+  borderBottomStyle: 'solid',
+  borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
+  color: active ? 'var(--color-t1)' : 'var(--color-t4)',
+  background: 'none',
+  transition: 'border-color 0.2s ease, color 0.2s ease',
+})
+
+const ModelAndKeyTabs: FC<{
   models: Record<ModelRole, string>
   onModelChange: (role: ModelRole, value: string) => void
-}> = ({ models, onModelChange }) => (
-  <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-    <span className="c-heading">Model Selection</span>
+  apiKey: string
+  openaiKey: string
+  onApiKeyChange: (v: string) => void
+  onOpenaiKeyChange: (v: string) => void
+  errors: Record<string, string>
+  hideAnthropicKey?: boolean
+}> = ({ models, onModelChange, apiKey, openaiKey, onApiKeyChange, onOpenaiKeyChange, errors, hideAnthropicKey }) => {
+  const [activeTab, setActiveTab] = useState<'anthropic' | 'openai'>('anthropic')
 
-    {/* Anthropic-only roles */}
-    {ANTHROPIC_ROLES.map(({ key, label }) => (
-      <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-        <label className="c-label" style={labelStyle}>{label}</label>
-        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <SelectInput
-              value={models[key]}
-              onChange={(e) => onModelChange(key, e.target.value)}
-              confirmed
-            >
-              <optgroup label="Anthropic">
-                {ANTHROPIC_MODELS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </optgroup>
-            </SelectInput>
+  return (
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+      {/* Tab bar */}
+      <div className="flex" style={{ borderBottomWidth: 'var(--bw)', borderBottomStyle: 'solid', borderBottomColor: 'var(--b1)' }}>
+        <button type="button" style={tabStyle(activeTab === 'anthropic')} onClick={() => setActiveTab('anthropic')}>
+          Anthropic
+        </button>
+        <button type="button" style={tabStyle(activeTab === 'openai')} onClick={() => setActiveTab('openai')}>
+          OpenAI
+        </button>
+      </div>
+
+      {/* Anthropic tab */}
+      {activeTab === 'anthropic' && (
+        <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+          {ANTHROPIC_ROLES.map(({ key, label }) => (
+            <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
+              <label className="c-label" style={labelStyle}>{label}</label>
+              <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <SelectInput
+                    value={models[key]}
+                    onChange={(e) => onModelChange(key, e.target.value)}
+                    confirmed
+                  >
+                    {ANTHROPIC_MODELS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </SelectInput>
+                </div>
+                <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+              </div>
+            </div>
+          ))}
+          {!hideAnthropicKey && (
+            <ApiKeyInput
+              label="API Key"
+              value={apiKey}
+              onChange={onApiKeyChange}
+              placeholder="sk-ant-..."
+              error={errors.apiKey}
+            />
+          )}
+        </div>
+      )}
+
+      {/* OpenAI tab */}
+      {activeTab === 'openai' && (
+        <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+          <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
+            <label className="c-label" style={labelStyle}>Fallback Model</label>
+            <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <SelectInput
+                  value={models.fallback}
+                  onChange={(e) => onModelChange('fallback', e.target.value)}
+                  confirmed
+                >
+                  {OPENAI_MODELS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </SelectInput>
+              </div>
+              <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+            </div>
           </div>
-          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+          <ApiKeyInput
+            label="API Key"
+            value={openaiKey}
+            onChange={onOpenaiKeyChange}
+            placeholder="sk-..."
+            error={errors.openaiKey}
+          />
         </div>
-      </div>
-    ))}
-
-    {/* Fallback role — OpenAI primary, Anthropic secondary */}
-    <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-      <label className="c-label" style={labelStyle}>Fallback</label>
-      <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <SelectInput
-            value={models.fallback}
-            onChange={(e) => onModelChange('fallback', e.target.value)}
-            confirmed
-          >
-            <optgroup label="OpenAI">
-              {OPENAI_MODELS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </optgroup>
-            <optgroup label="Anthropic">
-              {ANTHROPIC_MODELS.filter((m) => m.value !== 'claude-opus-4-6').map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </optgroup>
-          </SelectInput>
-        </div>
-        <Check size={16} className="wizard-check" style={confirmCheckStyle} />
-      </div>
+      )}
     </div>
-  </div>
-)
+  )
+}
 
 const ApiKeyInput: FC<{
   label: string
@@ -185,23 +230,15 @@ const ChatView: FC<{
   }
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-      <ModelSelectionSection models={models} onModelChange={handleModelChange} />
-      <ApiKeyInput
-        label="Anthropic API Key"
-        value={apiKey}
-        onChange={(v) => onChange({ apiKey: v })}
-        placeholder="sk-ant-..."
-        error={errors.apiKey}
-      />
-      <ApiKeyInput
-        label="OpenAI API Key"
-        value={openaiKey}
-        onChange={(v) => onChange({ openaiKey: v })}
-        placeholder="sk-..."
-        error={errors.openaiKey}
-      />
-    </div>
+    <ModelAndKeyTabs
+      models={models}
+      onModelChange={handleModelChange}
+      apiKey={apiKey}
+      openaiKey={openaiKey}
+      onApiKeyChange={(v) => onChange({ apiKey: v })}
+      onOpenaiKeyChange={(v) => onChange({ openaiKey: v })}
+      errors={errors}
+    />
   )
 }
 
@@ -223,13 +260,11 @@ const AgentView: FC<{
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-      <ModelSelectionSection models={models} onModelChange={handleModelChange} />
-
-      {/* Auth Method */}
-      <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-        <span className="c-heading">Auth Method</span>
+      {/* Auth Method — Anthropic only */}
+      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+        <span className="c-heading">Anthropic Auth</span>
         <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-          <div className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 'var(--sp-2)' }}>
+          <div className="flex" style={{ flex: 1, minWidth: 0, gap: 'var(--sp-4)' }}>
             <label
               className="flex items-center cursor-pointer"
               style={{ gap: 'var(--sp-2)', color: 'var(--color-t2)' }}
@@ -240,7 +275,6 @@ const AgentView: FC<{
                 value="api_key"
                 checked={authMethod === 'api_key'}
                 onChange={() => onChange({ authMethod: 'api_key' })}
-                style={{ accentColor: 'var(--color-s-ok)' }}
               />
               <span className="c-body">API Key</span>
             </label>
@@ -254,53 +288,33 @@ const AgentView: FC<{
                 value="oauth"
                 checked={authMethod === 'oauth'}
                 onChange={() => onChange({ authMethod: 'oauth' })}
-                style={{ accentColor: 'var(--color-s-ok)' }}
               />
-              <span className="c-body">Use existing Claude session</span>
+              <span className="c-body">Existing Claude session</span>
             </label>
           </div>
           <Check size={16} className="wizard-check" style={confirmCheckStyle} />
         </div>
-
-        {authMethod === 'api_key' ? (
-          <>
-            <ApiKeyInput
-              label="Anthropic API Key"
-              value={apiKey}
-              onChange={(v) => onChange({ apiKey: v })}
-              placeholder="sk-ant-..."
-              error={errors.apiKey}
-            />
-            <ApiKeyInput
-              label="OpenAI API Key"
-              value={openaiKey}
-              onChange={(v) => onChange({ openaiKey: v })}
-              placeholder="sk-..."
-              error={errors.openaiKey}
-            />
-          </>
-        ) : (
-          <>
-            <div
-              className="c-body text-t3"
-              style={{
-                background: 'var(--color-d3)',
-                borderRadius: 'var(--radius-sm)',
-                padding: 'var(--sp-3)',
-              }}
-            >
-              Requires active Claude CLI login on this machine.
-            </div>
-            <ApiKeyInput
-              label="OpenAI API Key"
-              value={openaiKey}
-              onChange={(v) => onChange({ openaiKey: v })}
-              placeholder="sk-..."
-              error={errors.openaiKey}
-            />
-          </>
+        {authMethod === 'oauth' && (
+          <div
+            className="c-body text-t3"
+            style={{ background: 'var(--color-d3)', borderRadius: 'var(--radius-sm)', padding: 'var(--sp-3)' }}
+          >
+            Requires active Claude CLI login on this machine.
+          </div>
         )}
       </div>
+
+      {/* Tabbed model + key config */}
+      <ModelAndKeyTabs
+        models={models}
+        onModelChange={handleModelChange}
+        apiKey={authMethod === 'api_key' ? apiKey : ''}
+        openaiKey={openaiKey}
+        onApiKeyChange={(v) => onChange({ apiKey: v })}
+        onOpenaiKeyChange={(v) => onChange({ openaiKey: v })}
+        errors={errors}
+        hideAnthropicKey={authMethod === 'oauth'}
+      />
     </div>
   )
 }
