@@ -102,7 +102,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
   }
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-5)' }}>
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Name */}
       <div>
         <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>

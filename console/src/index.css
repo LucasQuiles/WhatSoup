@@ -125,6 +125,11 @@
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
   --feed-min-w: 240px;       /* activity feed min width */
+  /* ═══ Wizard tokens ═══ */
+  --stepper-line-w: 24px;    /* wizard stepper connector width */
+  --stepper-dot: 6px;        /* wizard stepper dot size */
+  --qr-size: 256px;          /* QR code display size */
+  --modal-max-h: 85vh;       /* modal maximum height */
   /* ═══ Off-grid half-steps ═══ */
   --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */
   --sp-2h: 10px;             /* 2.5 × 4px — table cell vertical, toolbar padding */

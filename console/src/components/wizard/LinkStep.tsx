@@ -122,7 +122,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
       ) : (
         <div
           className="flex items-center justify-center"
-          style={{ width: 256, height: 256 }}
+          style={{ width: 'var(--qr-size)', height: 'var(--qr-size)' }}
         >
           <Loader2
             size={32}

@@ -30,18 +30,18 @@ const MODEL_ROLES: { key: ModelRole; label: string }[] = [
   { key: 'fallback', label: 'Fallback' },
 ]
 
-const selectStyle: React.CSSProperties = {
+const inputStyle: React.CSSProperties = {
+  width: '100%',
   background: 'var(--color-d1)',
   border: 'var(--bw) solid var(--b2)',
   borderRadius: 'var(--radius-sm)',
   padding: 'var(--sp-2) var(--sp-3)',
   fontSize: 'var(--font-size-data)',
   color: 'var(--color-t1)',
-  width: '100%',
 }
 
-const inputStyle: React.CSSProperties = {
-  ...selectStyle,
+const passwordInputStyle: React.CSSProperties = {
+  ...inputStyle,
   paddingRight: 'var(--sp-8)',
 }
 
@@ -59,7 +59,7 @@ const ModelSelectionSection: FC<{
         <select
           value={models[key]}
           onChange={(e) => onModelChange(key, e.target.value)}
-          style={selectStyle}
+          style={inputStyle}
         >
           {MODEL_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -90,7 +90,7 @@ const ApiKeyInput: FC<{
           placeholder="sk-ant-..."
           className="w-full font-mono"
           style={{
-            ...inputStyle,
+            ...passwordInputStyle,
             borderColor: error ? 'var(--color-s-crit)' : undefined,
           }}
         />
@@ -116,7 +116,7 @@ const ApiKeyInput: FC<{
           {error}
         </div>
       )}
-      <span className="c-body text-t3" style={{ fontSize: 'var(--font-size-xs)' }}>
+      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t4)', marginTop: 'var(--sp-1)' }}>
         Required for chat instances. Stored securely in system keyring.
       </span>
     </div>
@@ -150,7 +150,7 @@ const ChatView: FC<{
   }
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-5)' }}>
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       <ModelSelectionSection models={models} onModelChange={handleModelChange} />
       <ApiKeyInput value={apiKey} onChange={(v) => onChange({ apiKey: v })} error={errors.apiKey} />
     </div>
@@ -173,7 +173,7 @@ const AgentView: FC<{
   }
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-5)' }}>
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       <ModelSelectionSection models={models} onModelChange={handleModelChange} />
 
       {/* Auth Method */}

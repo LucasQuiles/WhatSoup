@@ -32,8 +32,8 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
           {i > 0 && (
             <div
               style={{
-                width: 24,
-                height: 1,
+                width: 'var(--stepper-line-w)',
+                height: 'var(--bw)',
                 background: completed ? 'var(--color-s-ok)' : 'var(--color-t5)',
                 opacity: completed ? 1 : 0.4,
                 transition: 'background 0.2s ease',
@@ -57,8 +57,8 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
               ) : (
                 <div
                   style={{
-                    width: 6,
-                    height: 6,
+                    width: 'var(--stepper-dot)',
+                    height: 'var(--stepper-dot)',
                     borderRadius: '50%',
                     background: active ? 'var(--color-d0)' : 'var(--color-t5)',
                     opacity: active ? 1 : 0.5,
@@ -191,7 +191,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         style={{
           width: 'var(--panel-wizard)',
           maxWidth: '90%',
-          maxHeight: '85vh',
+          maxHeight: 'var(--modal-max-h)',
           background: 'var(--color-d2)',
           border: 'var(--bw) solid var(--b2)',
           borderRadius: 'var(--radius-lg)',
