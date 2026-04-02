@@ -166,8 +166,15 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
       {/* Admin Phones */}
       <div>
-        <label className="c-heading" style={labelStyle}>Admin Phones</label>
-        <div className="flex items-start" style={{ gap: 'var(--sp-2)' }}>
+        <label className="c-heading" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>Admin Phones</label>
+        <div style={helperStyle}>{
+          adminPhones.length === 0
+            ? 'Phone numbers with full admin access to this line. Use international format without the +.'
+            : adminPhones.length === 1
+              ? 'Add another number for shared admin access, or continue with one.'
+              : `${adminPhones.length} admin numbers configured.`
+        }</div>
+        <div className="flex items-start" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <TagInput
               values={adminPhones}
@@ -182,13 +189,6 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           )}
         </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
-        {!errors.adminPhones && <div style={helperStyle}>{
-          adminPhones.length === 0
-            ? 'Phone numbers with full admin access to this line. Use international format without the +.'
-            : adminPhones.length === 1
-              ? 'Add another number for shared admin access, or continue with one.'
-              : `${adminPhones.length} admin numbers configured.`
-        }</div>}
       </div>
     </div>
   )
