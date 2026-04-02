@@ -82,7 +82,7 @@ const ApiKeyInput: FC<{
           className="w-full font-mono"
           style={{
             ...passwordInputStyle,
-            borderColor: error ? 'var(--color-s-crit)' : undefined,
+            borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)',
           }}
         />
         <button

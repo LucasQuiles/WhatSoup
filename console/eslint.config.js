@@ -242,6 +242,14 @@ export default defineConfig([
           selector: 'Property[key.name="borderRight"][value.value=/^[0-9]+px solid/]',
           message: '⛔ Hardcoded borderRight width — use var(--bw) solid var(--b*).',
         },
+
+        // ═══ BORDER SHORTHAND ═══
+        // React inline styles drop border shorthand properties on spread.
+        // Use longhand (borderWidth, borderStyle, borderColor) instead.
+        {
+          selector: 'Property[key.name="border"][value.value=/var\\(--bw\\)/]',
+          message: '⛔ Border shorthand in inline style — React drops it on spread. Use borderWidth/borderStyle/borderColor longhands.',
+        },
       ],
     },
   },

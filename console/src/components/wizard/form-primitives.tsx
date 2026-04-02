@@ -29,7 +29,7 @@ export const TextInput: FC<TextInputProps> = ({ error, className, ...props }) =>
   <input
     {...props}
     className={`font-mono ${className ?? ''}`}
-    style={{ ...inputStyle, borderColor: error ? 'var(--color-s-crit)' : undefined }}
+    style={{ ...inputStyle, borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)' }}
   />
 )
 
@@ -42,7 +42,7 @@ export const NumberInput: FC<NumberInputProps> = ({ error, className, ...props }
     type="number"
     {...props}
     className={`font-mono ${className ?? ''}`}
-    style={{ ...numberInputStyle, borderColor: error ? 'var(--color-s-crit)' : undefined }}
+    style={{ ...numberInputStyle, borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)' }}
   />
 )
 
@@ -54,7 +54,7 @@ export const SelectInput: FC<SelectInputProps> = ({ error, children, className, 
   <select
     {...props}
     className={className ?? ''}
-    style={{ ...selectStyle, borderColor: error ? 'var(--color-s-crit)' : undefined }}
+    style={{ ...selectStyle, borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)' }}
   >
     {children}
   </select>
@@ -73,7 +73,7 @@ export const TextArea: FC<TextAreaProps> = ({ error, minHeight, className, ...pr
       ...inputStyle,
       minHeight: minHeight ?? 80,
       resize: 'vertical',
-      borderColor: error ? 'var(--color-s-crit)' : undefined,
+      borderColor: error ? 'var(--color-s-crit)' : 'var(--b2)',
     }}
   />
 )
