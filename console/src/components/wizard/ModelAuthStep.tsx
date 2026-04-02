@@ -1,5 +1,7 @@
 import { type FC, useState } from 'react'
 import { Check, Eye, EyeOff } from 'lucide-react'
+import { SelectInput } from './form-primitives'
+import { inputStyle, errorStyle, helperStyle } from './form-styles'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -30,16 +32,6 @@ const MODEL_ROLES: { key: ModelRole; label: string }[] = [
   { key: 'fallback', label: 'Fallback' },
 ]
 
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  background: 'var(--color-d1)',
-  border: 'var(--bw) solid var(--b2)',
-  borderRadius: 'var(--radius-sm)',
-  padding: 'var(--sp-2) var(--sp-3)',
-  fontSize: 'var(--font-size-data)',
-  color: 'var(--color-t1)',
-}
-
 const passwordInputStyle: React.CSSProperties = {
   ...inputStyle,
   paddingRight: 'var(--sp-8)',
@@ -56,17 +48,16 @@ const ModelSelectionSection: FC<{
     {MODEL_ROLES.map(({ key, label }) => (
       <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
         <label className="c-label">{label}</label>
-        <select
+        <SelectInput
           value={models[key]}
           onChange={(e) => onModelChange(key, e.target.value)}
-          style={inputStyle}
         >
           {MODEL_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
             </option>
           ))}
-        </select>
+        </SelectInput>
       </div>
     ))}
   </div>
@@ -111,12 +102,8 @@ const ApiKeyInput: FC<{
           {visible ? <EyeOff size={16} /> : <Eye size={16} />}
         </button>
       </div>
-      {error && (
-        <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
-          {error}
-        </div>
-      )}
-      <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t4)', marginTop: 'var(--sp-1)' }}>
+      {error && <div style={errorStyle}>{error}</div>}
+      <span style={helperStyle}>
         Required for chat instances. Stored securely in system keyring.
       </span>
     </div>

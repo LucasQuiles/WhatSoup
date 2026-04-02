@@ -3,6 +3,7 @@ import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
+import { errorStyle, helperStyle, labelStyle, inputStyle } from './form-styles'
 
 interface IdentityStepProps {
   data: Record<string, unknown>
@@ -91,21 +92,11 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
     }
   }, [name])
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%',
-    background: 'var(--color-d1)',
-    border: 'var(--bw) solid var(--b2)',
-    borderRadius: 'var(--radius-sm)',
-    padding: 'var(--sp-2) var(--sp-3)',
-    fontSize: 'var(--font-size-data)',
-    color: 'var(--color-t1)',
-  }
-
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Name */}
       <div>
-        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+        <label className="c-label" style={labelStyle}>
           Name
         </label>
         <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
@@ -131,32 +122,21 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           )}
         </div>
         {name && slugify(name) !== name && (
-          <div
-            className="font-mono"
-            style={{
-              fontSize: 'var(--font-size-xs)',
-              color: 'var(--color-t4)',
-              marginTop: 'var(--sp-1)',
-            }}
-          >
+          <div className="font-mono" style={helperStyle}>
             slug: {slugify(name)}
           </div>
         )}
         {nameStatus === 'taken' && (
-          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
-            Name already exists
-          </div>
+          <div style={errorStyle}>Name already exists</div>
         )}
         {errors.name && (
-          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
-            {errors.name}
-          </div>
+          <div style={errorStyle}>{errors.name}</div>
         )}
       </div>
 
       {/* Description */}
       <div>
-        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+        <label className="c-label" style={labelStyle}>
           Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
         </label>
         <input
@@ -170,7 +150,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
       {/* Type */}
       <div>
-        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-2)' }}>
+        <label className="c-label" style={{ ...labelStyle, marginBottom: 'var(--sp-2)' }}>
           Type
         </label>
         <CardSelector
@@ -178,16 +158,12 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           selected={type}
           onChange={(value) => onChange({ type: value })}
         />
-        {errors.type && (
-          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
-            {errors.type}
-          </div>
-        )}
+        {errors.type && <div style={errorStyle}>{errors.type}</div>}
       </div>
 
       {/* Admin Phones */}
       <div>
-        <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+        <label className="c-label" style={labelStyle}>
           Admin Phones
         </label>
         <TagInput
@@ -196,11 +172,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           placeholder="Enter phone number"
           validate={validatePhone}
         />
-        {errors.adminPhones && (
-          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
-            {errors.adminPhones}
-          </div>
-        )}
+        {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
       </div>
     </div>
   )
