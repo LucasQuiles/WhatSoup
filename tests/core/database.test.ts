@@ -395,7 +395,7 @@ describe('historyMessages timestamp coercion', () => {
     // Raw Long-like object — SQLite rejects it (the production bug).
     // Node's sqlite treats plain objects as named-param maps, so it throws
     // "Unknown named parameter" rather than a bind-type error.
-    expect(() => insert.run(longLike)).toThrow();
+    expect(() => insert.run(longLike)).toThrow(/unknown named parameter/i);
 
     // Number()-coerced — SQLite accepts it (the fix)
     insert.run(Number(longLike));
