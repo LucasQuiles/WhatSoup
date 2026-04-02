@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { readBody, jsonResponse } from '../../lib/http.ts';
+import { createChildLogger } from '../../logger.ts';
+const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
@@ -457,7 +459,7 @@ export async function handleAuth(
 
   // Spawn auth process
   const child = spawn('node', ['--experimental-strip-types', 'src/bootstrap-auth.ts', params.name], {
-    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..'),
+    cwd: process.cwd(),
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -483,6 +485,12 @@ export async function handleAuth(
         }
       } catch { /* skip non-JSON lines */ }
     }
+  });
+
+  // Log stderr from auth process for debugging
+  child.stderr!.on('data', (chunk: Buffer) => {
+    const text = chunk.toString().trim();
+    if (text) log.info({ instance: params.name, stderr: text.slice(0, 200) }, 'auth process stderr');
   });
 
   // Forward errors
