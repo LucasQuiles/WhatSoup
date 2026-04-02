@@ -10,8 +10,8 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
-import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping } from './routes/data.ts';
-import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate } from './routes/ops.ts';
+import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists } from './routes/data.ts';
+import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -56,6 +56,8 @@ const handlers: Record<string, HandlerFn> = {
   configUpdate: (req, res, deps, params) => handleConfigUpdate(req, res, deps, params as any),
   getTyping:    (req, res, deps, _params) => handleGetTyping(req, res, deps),
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
+  createLine:   (req, res, deps, _params) => handleCreateLine(req, res, deps),
+  checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params as any),
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +91,8 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/typing$/, handler: 'getTyping' },
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/lines$/, handler: 'getLines' },
+  { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/messages$/, handler: 'getMessages' },

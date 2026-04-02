@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { execFile } from 'node:child_process';
 import { readBody, jsonResponse } from '../../lib/http.ts';
 import { mcpCall } from '../mcp-client.ts';
@@ -196,4 +197,204 @@ export async function handleConfigUpdate(
   }
 
   jsonResponse(res, 200, merged);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for handleCreateLine
+// ---------------------------------------------------------------------------
+
+function xdgDir(envVar: string, fallbackSuffix: string): string {
+  return process.env[envVar] ?? path.join(os.homedir(), fallbackSuffix);
+}
+
+function configRoot(): string {
+  return path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances');
+}
+
+function dataRoot(name: string): string {
+  return path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'instances', name);
+}
+
+function stateRoot(name: string): string {
+  return path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name);
+}
+
+/** Scan all existing config.json files for healthPort values. */
+function usedHealthPorts(): number[] {
+  const root = configRoot();
+  let entries: string[];
+  try { entries = fs.readdirSync(root); } catch { return []; }
+  const ports: number[] = [];
+  for (const name of entries) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(root, name, 'config.json'), 'utf-8'));
+      if (typeof raw.healthPort === 'number') ports.push(raw.healthPort);
+    } catch { /* skip unreadable configs */ }
+  }
+  return ports;
+}
+
+function execFileAsync(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+/** Remove directories/files created during a partial instance creation. */
+function cleanupPartial(name: string, extraPaths?: string[]): void {
+  const dirs = [
+    path.join(configRoot(), name),
+    path.join(dataRoot(name)),
+    path.join(stateRoot(name)),
+  ];
+  for (const d of dirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  if (extraPaths) {
+    for (const p of extraPaths) {
+      try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/lines — create a new instance
+// ---------------------------------------------------------------------------
+
+const NAME_RE = /^[a-z][a-z0-9-]*$/;
+const VALID_TYPES = new Set(['passive', 'chat', 'agent']);
+
+/** POST /api/lines — create a new WhatSoup instance. */
+export async function handleCreateLine(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+): Promise<void> {
+  const raw = await readBody(req);
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(raw);
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      throw new Error('body must be a JSON object');
+    }
+  } catch (err) {
+    jsonResponse(res, 400, { error: `invalid JSON: ${(err as Error).message}` });
+    return;
+  }
+
+  // --- Validate name ---
+  const name = body.name;
+  if (typeof name !== 'string' || !NAME_RE.test(name) || name.length < 2 || name.length > 30) {
+    jsonResponse(res, 400, { error: 'name must be 2-30 lowercase alphanumeric/hyphens, starting with a letter' });
+    return;
+  }
+
+  // --- Uniqueness check ---
+  const configDir = path.join(configRoot(), name);
+  if (deps.discovery.getInstance(name) != null || fs.existsSync(configDir)) {
+    jsonResponse(res, 409, { error: `instance '${name}' already exists` });
+    return;
+  }
+
+  // --- Validate type ---
+  const type = body.type as string;
+  if (!VALID_TYPES.has(type)) {
+    jsonResponse(res, 400, { error: `type must be one of: passive, chat, agent` });
+    return;
+  }
+
+  // --- Validate adminPhones ---
+  const adminPhones = body.adminPhones;
+  if (!Array.isArray(adminPhones) || adminPhones.length === 0 ||
+      adminPhones.some((p: unknown) => typeof p !== 'string' || p === '')) {
+    jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
+    return;
+  }
+
+  // --- Type-specific validation ---
+  if (type === 'chat' && !body.systemPrompt) {
+    jsonResponse(res, 400, { error: 'chat instances require a systemPrompt' });
+    return;
+  }
+  if (type === 'agent' && !body.systemPrompt) {
+    jsonResponse(res, 400, { error: 'agent instances require a systemPrompt' });
+    return;
+  }
+  if (type === 'passive' && body.systemPrompt) {
+    jsonResponse(res, 400, { error: 'passive instances must not have a systemPrompt' });
+    return;
+  }
+
+  // --- Auto-assign healthPort ---
+  let healthPort = typeof body.healthPort === 'number' ? body.healthPort as number : null;
+  if (healthPort == null) {
+    const used = usedHealthPorts();
+    healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
+  }
+
+  // --- Build config object (claudeMd excluded — it goes to a file) ---
+  const config: Record<string, unknown> = {
+    name,
+    type,
+    adminPhones,
+    healthPort,
+    accessMode: type === 'passive' ? 'self_only' : (body.accessMode ?? 'self_only'),
+  };
+
+  if (body.description != null)        config.description = body.description;
+  if (body.systemPrompt != null)       config.systemPrompt = body.systemPrompt;
+  if (body.maxTokens != null)          config.maxTokens = body.maxTokens;
+  if (body.tokenBudget != null)        config.tokenBudget = body.tokenBudget;
+  if (body.rateLimitPerHour != null)   config.rateLimitPerHour = body.rateLimitPerHour;
+  if (body.models != null)             config.models = body.models;
+  if (body.pineconeIndex != null)      config.pineconeIndex = body.pineconeIndex;
+  if (body.pineconeSearchMode != null) config.pineconeSearchMode = body.pineconeSearchMode;
+  if (body.pineconeRerank != null)     config.pineconeRerank = body.pineconeRerank;
+  if (body.pineconeTopK != null)       config.pineconeTopK = body.pineconeTopK;
+  if (body.agentOptions != null)       config.agentOptions = body.agentOptions;
+
+  // --- Create directories ---
+  const createdExtras: string[] = [];
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true });
+    fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true });
+    fs.mkdirSync(stateRoot(name), { recursive: true });
+
+    // --- Write config.json ---
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
+
+    // --- Copy shared health token ---
+    try {
+      const token = await execFileAsync('secret-tool', ['lookup', 'service', 'whatsoup_health']);
+      if (token) {
+        fs.writeFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { mode: 0o600 });
+      }
+    } catch { /* keyring unavailable — skip token */ }
+
+    // --- Write CLAUDE.md for agent instances ---
+    if (body.claudeMd && type === 'agent' && body.agentOptions &&
+        typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
+      const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
+      const claudeDir = path.join(cwd, '.claude');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+      fs.writeFileSync(claudeMdPath, body.claudeMd as string, 'utf-8');
+      createdExtras.push(claudeMdPath);
+    }
+
+    // --- Enable systemd unit ---
+    await execFileAsync('systemctl', ['--user', 'enable', `whatsoup@${name}`]);
+
+    // --- Re-scan discovery ---
+    deps.discovery.scan();
+
+    jsonResponse(res, 201, { name, healthPort });
+  } catch (err) {
+    cleanupPartial(name, createdExtras);
+    jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
+  }
 }

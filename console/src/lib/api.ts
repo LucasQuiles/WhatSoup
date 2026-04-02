@@ -126,4 +126,13 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+
+  createLine: (config: Record<string, unknown>) =>
+    apiFetch<{ name: string; healthPort: number }>('/api/lines', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    }),
+
+  checkExists: (name: string) =>
+    apiFetch<{ exists: boolean }>(`/api/lines/${encodeURIComponent(name)}/exists`),
 };

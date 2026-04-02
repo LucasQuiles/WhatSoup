@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { jsonResponse, parseQueryString } from '../../lib/http.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -375,4 +376,19 @@ export async function handleGetTyping(
 
   await Promise.all(promises);
   jsonResponse(res, 200, typing);
+}
+
+/** GET /api/lines/:name/exists — check whether an instance name is already taken. */
+export function handleCheckExists(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  deps: DataDeps,
+  params: { name: string },
+): void {
+  const configDir = path.join(
+    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'),
+    'whatsoup', 'instances', params.name,
+  );
+  const exists = deps.discovery.getInstance(params.name) != null || fs.existsSync(configDir);
+  jsonResponse(res, 200, { exists });
 }
