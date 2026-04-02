@@ -88,9 +88,9 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
 const validateStep = (step: number, formData: Record<string, unknown>): Record<string, string> => {
   const errs: Record<string, string> = {}
   if (step === 0) {
-    const name = (formData.name as string) ?? ''
+    const raw = (formData.name as string) ?? ''
+    const name = raw.toLowerCase().replace(/[^a-z0-9-]/g, '')
     if (!name || name.length < 2) errs.name = 'Name must be at least 2 characters'
-    else if (!/^[a-z][a-z0-9-]*$/.test(name)) errs.name = 'Lowercase letters, numbers, and hyphens only'
     if (!formData.type) errs.type = 'Select a line type'
     const phones = formData.adminPhones as string[]
     if (!phones || phones.length === 0) errs.adminPhones = 'At least one admin phone is required'
