@@ -1,5 +1,5 @@
 import { type FC } from 'react'
-import { Image, FileAudio, FileText, HelpCircle } from 'lucide-react'
+import { Image, Film, FileAudio, FileText, HelpCircle } from 'lucide-react'
 import type { Message } from '../types'
 
 /**
@@ -105,7 +105,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null }> = ({ type, c
     image: <Image size={16} strokeWidth={1.75} className="text-m-cht" />,
     audio: <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />,
     document: <FileText size={16} strokeWidth={1.75} className="text-s-warn" />,
-    video: <Image size={16} strokeWidth={1.75} className="text-m-pas" />,
+    video: <Film size={16} strokeWidth={1.75} className="text-m-pas" />,
   }
 
   const labels: Record<string, string> = {
@@ -197,6 +197,53 @@ const RichMedia: FC<{ msg: Message }> = ({ msg }) => {
                 {[ext, fileSize].filter(Boolean).join(' \u00b7 ')}
               </div>
             </div>
+          </div>
+        )
+      }
+    } catch { /* fall through */ }
+  }
+
+  // B04: Video thumbnails
+  if (msg.type === 'video' && msg.rawMessage) {
+    try {
+      const raw = JSON.parse(msg.rawMessage)
+      const video = raw?.message?.videoMessage
+      const thumb = video?.jpegThumbnail
+      const seconds = video?.seconds ?? 0
+      const isGif = video?.gifPlayback === true
+      const duration = seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
+
+      if (thumb) {
+        return (
+          <div style={{ position: 'relative', display: 'inline-block' }}>
+            <img
+              src={`data:image/jpeg;base64,${thumb}`}
+              alt={msg.content || (isGif ? 'GIF' : 'Video')}
+              style={{
+                maxHeight: '200px',
+                maxWidth: '100%',
+                borderRadius: 'var(--radius-md)',
+                display: 'block',
+              }}
+            />
+            {/* Duration badge + play icon overlay */}
+            <div className="font-mono" style={{
+              position: 'absolute',
+              bottom: 'var(--sp-2)',
+              right: 'var(--sp-2)',
+              background: 'var(--overlay-badge)',
+              color: 'white',
+              padding: '2px var(--sp-2)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--font-size-xs)',
+            }}>
+              {isGif ? 'GIF' : duration || 'Video'}
+            </div>
+            {msg.content && (
+              <div className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginTop: 'var(--sp-1)' }}>
+                {msg.content}
+              </div>
+            )}
           </div>
         )
       }

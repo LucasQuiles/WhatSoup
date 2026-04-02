@@ -80,6 +80,7 @@
   --s-crit-wash: rgba(252,129,129, 0.07);
   --s-crit-soft: rgba(252,129,129, 0.19);
   --overlay: rgba(5,7,9, 0.75);
+  --overlay-badge: rgba(0,0,0, 0.6);
   /* ═══ Easing ═══ */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   /* Semantic tier — spec completeness */
