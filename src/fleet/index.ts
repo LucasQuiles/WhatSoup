@@ -11,7 +11,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping } from './routes/data.ts';
-import { handleSend, handleAccessUpdate, handleRestart, handleConfigUpdate } from './routes/ops.ts';
+import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -52,6 +52,7 @@ const handlers: Record<string, HandlerFn> = {
   send:         (req, res, deps, params) => handleSend(req, res, deps, params as any),
   accessUpdate: (req, res, deps, params) => handleAccessUpdate(req, res, deps, params as any),
   restart:      (req, res, deps, params) => handleRestart(req, res, deps, params as any),
+  stop:         (req, res, deps, params) => handleStop(req, res, deps, params as any),
   configUpdate: (req, res, deps, params) => handleConfigUpdate(req, res, deps, params as any),
   getTyping:    (req, res, deps, _params) => handleGetTyping(req, res, deps),
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
@@ -96,6 +97,7 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/send$/, handler: 'send' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/access$/, handler: 'accessUpdate' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/restart$/, handler: 'restart' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
 ] as const;
 

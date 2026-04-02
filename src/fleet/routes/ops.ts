@@ -117,6 +117,35 @@ export async function handleRestart(
   }
 }
 
+/** POST /api/lines/:name/stop — stop the systemd user unit. */
+export async function handleStop(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  const instance = deps.discovery.getInstance(params.name);
+  if (!instance) {
+    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
+    return;
+  }
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile('systemctl', ['--user', 'stop', `whatsoup@${params.name}`], (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    jsonResponse(res, 202, { status: 'stop_requested', instance: params.name });
+  } catch (err) {
+    jsonResponse(res, 500, {
+      error: `stop failed: ${(err as Error).message}`,
+      instance: params.name,
+    });
+  }
+}
+
 /** PATCH /api/lines/:name/config — merge fields into instance config. */
 export async function handleConfigUpdate(
   req: IncomingMessage,
