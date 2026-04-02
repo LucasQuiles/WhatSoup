@@ -9,6 +9,7 @@ const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
+import { configRoot, dataRoot, stateRoot } from '../paths.ts';
 
 export interface OpsDeps {
   discovery: FleetDiscovery;
@@ -91,9 +92,9 @@ export async function handleAccessUpdate(
   res.end(result.body);
 }
 
-/** POST /api/lines/:name/restart — restart the systemd user unit. */
-export async function handleRestart(
-  _req: IncomingMessage,
+/** Shared systemctl action handler for restart/stop. */
+async function handleSystemctlAction(
+  verb: 'restart' | 'stop',
   res: ServerResponse,
   deps: OpsDeps,
   params: { name: string },
@@ -105,19 +106,24 @@ export async function handleRestart(
   }
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      execFile('systemctl', ['--user', 'restart', `whatsoup@${params.name}`], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-    jsonResponse(res, 202, { status: 'restart_requested', instance: params.name });
+    await execFileAsync('systemctl', ['--user', verb, `whatsoup@${params.name}`]);
+    jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
   } catch (err) {
     jsonResponse(res, 500, {
-      error: `restart failed: ${(err as Error).message}`,
+      error: `${verb} failed: ${(err as Error).message}`,
       instance: params.name,
     });
   }
+}
+
+/** POST /api/lines/:name/restart — restart the systemd user unit. */
+export async function handleRestart(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  return handleSystemctlAction('restart', res, deps, params);
 }
 
 /** POST /api/lines/:name/stop — stop the systemd user unit. */
@@ -127,26 +133,7 @@ export async function handleStop(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  const instance = deps.discovery.getInstance(params.name);
-  if (!instance) {
-    jsonResponse(res, 404, { error: `instance '${params.name}' not found` });
-    return;
-  }
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      execFile('systemctl', ['--user', 'stop', `whatsoup@${params.name}`], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-    jsonResponse(res, 202, { status: 'stop_requested', instance: params.name });
-  } catch (err) {
-    jsonResponse(res, 500, {
-      error: `stop failed: ${(err as Error).message}`,
-      instance: params.name,
-    });
-  }
+  return handleSystemctlAction('stop', res, deps, params);
 }
 
 /** PATCH /api/lines/:name/config — merge fields into instance config. */
@@ -204,22 +191,6 @@ export async function handleConfigUpdate(
 // ---------------------------------------------------------------------------
 // Helpers for handleCreateLine
 // ---------------------------------------------------------------------------
-
-function xdgDir(envVar: string, fallbackSuffix: string): string {
-  return process.env[envVar] ?? path.join(os.homedir(), fallbackSuffix);
-}
-
-function configRoot(): string {
-  return path.join(xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances');
-}
-
-function dataRoot(name: string): string {
-  return path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'instances', name);
-}
-
-function stateRoot(name: string): string {
-  return path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name);
-}
 
 /** Scan all existing config.json files for healthPort values. */
 function usedHealthPorts(): number[] {

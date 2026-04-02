@@ -7,7 +7,7 @@ import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 
-import { findLatestLogFile } from '../log-utils.ts';
+import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
 import { toIsoFromUnix } from '../time-utils.ts';
 
@@ -254,25 +254,8 @@ export function handleGetLogs(
     return;
   }
 
-  let raw: Buffer;
-  try {
-    const stat = fs.statSync(logFile);
-    const readSize = Math.min(stat.size, 65_536); // last 64KB
-    const fd = fs.openSync(logFile, 'r');
-    try {
-      raw = Buffer.alloc(readSize);
-      fs.readSync(fd, raw, 0, readSize, Math.max(0, stat.size - readSize));
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    // File missing or unreadable — return empty
-    jsonResponse(res, 200, []);
-    return;
-  }
-
-  const text = raw.toString('utf-8');
-  const lines = text.split('\n').filter(Boolean);
+  // readTailLines reads last 64KB and returns up to maxLines — same logic that was inlined here
+  const lines = readTailLines(logFile, 2000);
 
   // Map pino numeric level → LogEntry label
   const pinoLevelMap: Record<number, 'debug' | 'info' | 'warn' | 'error'> = {

@@ -56,28 +56,6 @@ function buildHeartbeat(poll: InstanceStatus | undefined): ('up' | 'down')[] {
   ] as ('up' | 'down')[];
 }
 
-/** Cached daily message counts — refreshed every 60s, not every request. */
-const dailyCountCache = new Map<string, { count: number; cachedAt: number }>();
-const DAILY_CACHE_TTL = 60_000; // 60 seconds
-
-function countMessagesToday(dbReader: FleetDbReader, inst: DiscoveredInstance): number {
-  const now = Date.now();
-  const cached = dailyCountCache.get(inst.name);
-  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.count;
-
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  // Messages table stores timestamps as Unix SECONDS, not milliseconds
-  const startSec = Math.floor(startOfDay.getTime() / 1000);
-  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    const row = db.prepare('SELECT COUNT(*) AS cnt FROM messages WHERE timestamp >= ?').get(startSec) as { cnt: number };
-    return row.cnt;
-  });
-  const count = result.ok ? result.data : 0;
-  dailyCountCache.set(inst.name, { count, cachedAt: now });
-  return count;
-}
-
 /** Detailed message stats by direction and content type — 60s cache. */
 interface MessageStats {
   sent: number;
@@ -87,6 +65,7 @@ interface MessageStats {
   documents: number;
 }
 
+const DAILY_CACHE_TTL = 60_000; // 60 seconds
 const messageStatsCache = new Map<string, { stats: MessageStats; cachedAt: number }>();
 
 function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): MessageStats {
@@ -179,8 +158,8 @@ export function handleGetLines(
 
   const lines = Array.from(instances.values()).map((inst) => {
     const poll = statuses.get(inst.name);
-    const todayCount = countMessagesToday(deps.dbReader, inst);
     const stats = getMessageStats(deps.dbReader, inst);
+    const todayCount = stats.sent + stats.received;
     return enrichInstance(inst, poll, todayCount, stats);
   });
 
@@ -213,8 +192,8 @@ export async function handleGetLine(
     instanceConfig = JSON.parse(raw);
   } catch { /* config unreadable */ }
 
-  // Also compute real messagesToday for detail view (same as list view)
-  const todayCount = countMessagesToday(deps.dbReader, instance);
+  // Compute real messagesToday for detail view (derived from stats)
+  const todayCount = stats.sent + stats.received;
 
   jsonResponse(res, 200, {
     ...enriched,
