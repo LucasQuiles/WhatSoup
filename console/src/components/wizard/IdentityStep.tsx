@@ -167,7 +167,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
       {/* Admin Phones */}
       <div>
         <label className="c-heading" style={labelStyle}>Admin Phones</label>
-        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex items-start" style={{ gap: 'var(--sp-2)' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <TagInput
               values={adminPhones}
@@ -178,7 +178,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             />
           </div>
           {!errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+            <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0, marginTop: 'var(--sp-2)' }} />
           )}
         </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
