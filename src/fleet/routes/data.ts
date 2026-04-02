@@ -8,6 +8,7 @@ import { proxyToInstance } from '../http-proxy.ts';
 
 import { findLatestLogFile } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
+import { toIsoFromUnix } from '../time-utils.ts';
 
 export interface DataDeps {
   discovery: FleetDiscovery;
@@ -120,7 +121,7 @@ export function handleGetChats(
         name: displayName,
         lastMessagePreview: formattedPreview,
         lastMessageAt: chat.lastMessageAt != null
-          ? new Date((chat.lastMessageAt > 1e12 ? chat.lastMessageAt : chat.lastMessageAt * 1000)).toISOString()
+          ? toIsoFromUnix(chat.lastMessageAt)
           : null,
         unreadCount: unread,
         isGroup,
@@ -190,7 +191,7 @@ export function handleGetMessages(
     senderName: row.sender_name,
     content: row.content,
     type: row.content_type,
-    timestamp: new Date(row.timestamp > 1e12 ? row.timestamp : row.timestamp * 1000).toISOString(),
+    timestamp: toIsoFromUnix(row.timestamp),
     fromMe: row.is_from_me === 1,
   }));
 
@@ -308,7 +309,7 @@ export function handleGetLogs(
       // Derive ISO timestamp from pino's time/timestamp field
       const rawTs = obj.time ?? obj.timestamp;
       const timestamp = typeof rawTs === 'number'
-        ? new Date(rawTs > 1e12 ? rawTs : rawTs * 1000).toISOString()  // handle both ms and seconds
+        ? toIsoFromUnix(rawTs)
         : typeof rawTs === 'string'
           ? rawTs
           : new Date().toISOString();

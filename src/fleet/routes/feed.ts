@@ -3,6 +3,7 @@ import { jsonResponse, parseQueryString } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller } from '../health-poller.ts';
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
+import { toIsoFromUnix } from '../time-utils.ts';
 
 export interface FeedDeps {
   discovery: FleetDiscovery;
@@ -123,7 +124,7 @@ export function handleGetFeed(
 
       const rawTs = obj.time ?? obj.timestamp;
       const time = typeof rawTs === 'number'
-        ? new Date(rawTs > 1e12 ? rawTs : rawTs * 1000).toISOString()
+        ? toIsoFromUnix(rawTs)
         : typeof rawTs === 'string'
           ? rawTs
           : new Date().toISOString();
