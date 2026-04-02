@@ -1,7 +1,7 @@
 import { type FC, useState } from 'react'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
-import { inputStyle, errorStyle, helperStyle } from './form-styles'
+import { inputStyle, errorStyle, helperStyle, labelStyle } from './form-styles'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -47,7 +47,7 @@ const ModelSelectionSection: FC<{
     <span className="c-heading">Model Selection</span>
     {MODEL_ROLES.map(({ key, label }) => (
       <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-        <label className="c-label">{label}</label>
+        <label className="c-label" style={labelStyle}>{label}</label>
         <SelectInput
           value={models[key]}
           onChange={(e) => onModelChange(key, e.target.value)}
@@ -72,7 +72,7 @@ const ApiKeyInput: FC<{
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-      <label className="c-label">Anthropic API Key</label>
+      <label className="c-label" style={labelStyle}>Anthropic API Key</label>
       <div className="relative">
         <input
           type={visible ? 'text' : 'password'}

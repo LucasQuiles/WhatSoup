@@ -120,14 +120,14 @@
   --chat-name-max: 140px;    /* chat list name truncation */
   --empty-max-w: 320px;      /* empty state description max */
   --panel-confirm: 420px;    /* confirm dialog width */
-  --panel-wizard: 640px;     /* wizard dialog width */
+  --panel-wizard: 720px;     /* wizard dialog width */
   --tooltip-min-w: 220px;    /* message tooltip min width */
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
   --feed-min-w: 240px;       /* activity feed min width */
   /* ═══ Wizard tokens ═══ */
-  --stepper-line-w: 24px;    /* wizard stepper connector width */
-  --stepper-dot: 6px;        /* wizard stepper dot size */
+  --stepper-line-w: 32px;    /* wizard stepper connector width */
+  --stepper-dot: 8px;        /* wizard stepper dot size */
   --qr-size: 256px;          /* QR code display size */
   --modal-max-h: 85vh;       /* modal maximum height */
   /* ═══ Off-grid half-steps ═══ */

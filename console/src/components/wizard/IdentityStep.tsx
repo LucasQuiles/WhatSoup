@@ -150,7 +150,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
       {/* Type */}
       <div>
-        <label className="c-label" style={{ ...labelStyle, marginBottom: 'var(--sp-2)' }}>
+        <label className="c-label" style={labelStyle}>
           Type
         </label>
         <CardSelector

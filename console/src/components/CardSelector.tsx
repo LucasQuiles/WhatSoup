@@ -44,8 +44,9 @@ const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) =>
                 ? `var(--bw) solid ${opt.color}`
                 : 'var(--bw) solid var(--b2)',
               borderRadius: 'var(--radius-lg)',
-              padding: 'var(--sp-5) var(--sp-4)',
+              padding: 'var(--sp-4)',
               minWidth: 0,
+              minHeight: 'var(--sp-12)',
             }}
           >
             <div style={{ marginBottom: 'var(--sp-3)', color: opt.color }}>
@@ -54,7 +55,7 @@ const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) =>
             <div className="c-heading" style={{ marginBottom: 'var(--sp-1)' }}>
               {opt.label}
             </div>
-            <div className="c-body text-t3">
+            <div className="text-t3" style={{ fontSize: 'var(--font-size-data)' }}>
               {opt.description}
             </div>
           </button>

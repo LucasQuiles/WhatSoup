@@ -18,7 +18,7 @@ export const numberInputStyle: React.CSSProperties = {
 
 export const labelStyle: React.CSSProperties = {
   display: 'block',
-  marginBottom: 'var(--sp-1)',
+  marginBottom: 'var(--sp-2)',
 }
 
 export const helperStyle: React.CSSProperties = {

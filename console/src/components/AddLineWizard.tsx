@@ -22,7 +22,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
 }) => (
   <div
     className="flex items-center justify-center flex-shrink-0"
-    style={{ padding: 'var(--sp-4) var(--sp-5)', gap: 'var(--sp-1)' }}
+    style={{ padding: 'var(--sp-4) var(--sp-5)', gap: 'var(--sp-1)', marginBottom: 'var(--sp-4)' }}
   >
     {steps.map((label, i) => {
       const completed = i < currentStep
@@ -69,7 +69,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
             <span
               className="font-mono font-medium"
               style={{
-                fontSize: 'var(--font-size-xs)',
+                fontSize: 'var(--font-size-label)',
                 letterSpacing: 'var(--tracking-label)',
                 color: active ? 'var(--color-s-ok)' : completed ? 'var(--color-t2)' : 'var(--color-t5)',
                 transition: 'color 0.2s ease',
@@ -216,7 +216,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         <WizardStepper steps={STEPS} currentStep={currentStep} />
 
         {/* Content */}
-        <div style={{ flex: 1, overflow: 'auto', padding: 'var(--sp-5)' }}>
+        <div style={{ flex: 1, overflow: 'auto', padding: 'var(--sp-6)' }}>
           <AnimatePresence mode="wait">
             <motion.div
               key={currentStep}
@@ -260,8 +260,8 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         {/* Footer — hidden on Review (has own CTA) and Link (has own controls) */}
         {currentStep < 3 && (
           <div
-            className="flex items-center justify-between c-toolbar"
-            style={{ borderTop: 'var(--bw) solid var(--b1)' }}
+            className="flex items-center justify-end c-toolbar"
+            style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-3)' }}
           >
             <button
               className="c-btn c-btn-ghost"
