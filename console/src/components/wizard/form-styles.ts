@@ -10,6 +10,15 @@ export const inputStyle: React.CSSProperties = {
   color: 'var(--color-t1)',
 }
 
+export const selectStyle: React.CSSProperties = {
+  ...inputStyle,
+  paddingRight: 'var(--sp-8)',
+  appearance: 'none',
+  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7a90' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`,
+  backgroundRepeat: 'no-repeat',
+  backgroundPosition: `right var(--sp-3) center`,
+}
+
 export const numberInputStyle: React.CSSProperties = {
   ...inputStyle,
   width: 120,

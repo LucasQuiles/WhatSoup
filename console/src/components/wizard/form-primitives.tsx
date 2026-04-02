@@ -1,5 +1,5 @@
 import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode } from 'react'
-import { inputStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle } from './form-styles'
+import { inputStyle, selectStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle } from './form-styles'
 
 // ── Form field wrapper ──
 
@@ -54,7 +54,7 @@ export const SelectInput: FC<SelectInputProps> = ({ error, children, className, 
   <select
     {...props}
     className={className ?? ''}
-    style={{ ...inputStyle, borderColor: error ? 'var(--color-s-crit)' : undefined }}
+    style={{ ...selectStyle, borderColor: error ? 'var(--color-s-crit)' : undefined }}
   >
     {children}
   </select>
