@@ -96,7 +96,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Type — first so it drives the rest of the wizard */}
       <div>
-        <label className="c-label" style={labelStyle}>
+        <label className="c-heading" style={labelStyle}>
           Type
         </label>
         <CardSelector
@@ -109,7 +109,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
       {/* Name */}
       <div>
-        <label className="c-label" style={labelStyle}>
+        <label className="c-heading" style={labelStyle}>
           Name
         </label>
         <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
@@ -149,7 +149,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
       {/* Description */}
       <div>
-        <label className="c-label" style={labelStyle}>
+        <label className="c-heading" style={labelStyle}>
           Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
         </label>
         <input
@@ -163,7 +163,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
 
       {/* Admin Phones */}
       <div>
-        <label className="c-label" style={labelStyle}>
+        <label className="c-heading" style={labelStyle}>
           Admin Phones
         </label>
         <TagInput
