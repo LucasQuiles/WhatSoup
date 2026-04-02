@@ -6,6 +6,7 @@ import CardSelector from '../CardSelector'
 interface ConfigStepProps {
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
+  errors: Record<string, string>
 }
 
 const ACCESS_OPTIONS = [
@@ -62,7 +63,13 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 'var(--sp-1)',
 }
 
-const ConfigStep: FC<ConfigStepProps> = ({ data, onChange }) => {
+const SESSION_SCOPE_DESCRIPTIONS: Record<string, string> = {
+  single: 'One session, one admin \u2014 most restrictive',
+  shared: 'One shared session across all chats',
+  per_chat: 'Separate session per conversation \u2014 recommended',
+}
+
+const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
   const type = (data.type as string) ?? 'chat'
   const accessMode = (data.accessMode as string) ?? 'self_only'
   const systemPrompt = (data.systemPrompt as string) ?? ''
@@ -148,8 +155,14 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange }) => {
                   background: 'var(--color-d1)',
                   minHeight: 120,
                   resize: 'vertical',
+                  borderColor: errors.systemPrompt ? 'var(--color-s-crit)' : undefined,
                 }}
               />
+              {errors.systemPrompt && (
+                <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+                  {errors.systemPrompt}
+                </div>
+              )}
             </div>
           )}
 
@@ -207,10 +220,22 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange }) => {
                 type="text"
                 value={agentOptions.cwd ?? ''}
                 onChange={(e) => handleAgentOption('cwd', e.target.value)}
-                placeholder="/home/user/project"
+                placeholder="/home/q/LAB/your-project"
                 className="font-mono"
-                style={inputStyle}
+                style={{
+                  ...inputStyle,
+                  borderColor: errors.cwd ? 'var(--color-s-crit)' : undefined,
+                }}
               />
+              {errors.cwd ? (
+                <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+                  {errors.cwd}
+                </div>
+              ) : (
+                <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t4)', marginTop: 'var(--sp-1)' }}>
+                  Directory will be created if it doesn&apos;t exist
+                </div>
+              )}
             </div>
             <div>
               <label className="c-label" style={labelStyle}>
@@ -225,6 +250,9 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange }) => {
                 <option value="shared">shared</option>
                 <option value="per_chat">per_chat</option>
               </select>
+              <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t4)', marginTop: 'var(--sp-1)' }}>
+                {SESSION_SCOPE_DESCRIPTIONS[agentOptions.sessionScope ?? 'per_chat']}
+              </div>
             </div>
           </div>
         </CollapsibleSection>

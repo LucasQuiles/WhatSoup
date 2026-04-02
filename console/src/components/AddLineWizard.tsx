@@ -1,4 +1,4 @@
-import { type FC, useState, useCallback } from 'react'
+import { type FC, useState, useCallback, useRef } from 'react'
 import { X, Check } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import IdentityStep from './wizard/IdentityStep'
@@ -6,6 +6,7 @@ import ModelAuthStep from './wizard/ModelAuthStep'
 import ConfigStep from './wizard/ConfigStep'
 import ReviewStep from './wizard/ReviewStep'
 import LinkStep from './wizard/LinkStep'
+import ConfirmDialog from './ConfirmDialog'
 import { api } from '../lib/api'
 
 interface AddLineWizardProps {
@@ -83,6 +84,31 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
   </div>
 )
 
+/* ── Step validation ── */
+const validateStep = (step: number, formData: Record<string, unknown>): Record<string, string> => {
+  const errs: Record<string, string> = {}
+  if (step === 0) {
+    const name = (formData.name as string) ?? ''
+    if (!name || name.length < 2) errs.name = 'Name must be at least 2 characters'
+    else if (!/^[a-z][a-z0-9-]*$/.test(name)) errs.name = 'Lowercase letters, numbers, and hyphens only'
+    if (!formData.type) errs.type = 'Select a line type'
+    const phones = formData.adminPhones as string[]
+    if (!phones || phones.length === 0) errs.adminPhones = 'At least one admin phone is required'
+  }
+  if (step === 1 && formData.type !== 'passive') {
+    if (formData.type === 'chat' && !formData.apiKey) errs.apiKey = 'API key is required for chat instances'
+    if (formData.type === 'agent' && (formData.authMethod ?? 'api_key') === 'api_key' && !formData.apiKey) errs.apiKey = 'API key is required'
+  }
+  if (step === 2) {
+    if (formData.type !== 'passive' && !formData.systemPrompt) errs.systemPrompt = 'System prompt is required'
+    if (formData.type === 'agent') {
+      const ao = formData.agentOptions as Record<string, unknown> | undefined
+      if (!ao?.cwd || !(ao.cwd as string).trim()) errs.cwd = 'Working directory is required for agent instances'
+    }
+  }
+  return errs
+}
+
 /* ── Wizard shell ── */
 const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const [currentStep, setCurrentStep] = useState(0)
@@ -101,14 +127,34 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     maxTokens: 4096,
     tokenBudget: 50000,
   })
-  const [errors] = useState<Record<string, string>>({})
+  const [errors, setErrors] = useState<Record<string, string>>({})
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const isDirtyRef = useRef(false)
+  const [showConfirmExit, setShowConfirmExit] = useState(false)
 
   const patchForm = useCallback(
-    (patch: Record<string, unknown>) => setFormData((d) => ({ ...d, ...patch })),
+    (patch: Record<string, unknown>) => {
+      isDirtyRef.current = true
+      setFormData((d) => ({ ...d, ...patch }))
+    },
     [],
   )
+
+  const handleNext = useCallback(() => {
+    const errs = validateStep(currentStep, formData)
+    setErrors(errs)
+    if (Object.keys(errs).length > 0) return
+    setCurrentStep((s) => s + 1)
+  }, [currentStep, formData])
+
+  const handleClose = useCallback(() => {
+    if (isDirtyRef.current) {
+      setShowConfirmExit(true)
+    } else {
+      onClose()
+    }
+  }, [onClose])
 
   const handleCreateLine = useCallback(async () => {
     setCreating(true)
@@ -127,7 +173,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
       style={{ background: 'var(--overlay)' }}
-      onClick={onClose}
+      onClick={handleClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -150,7 +196,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           style={{ borderBottom: 'var(--bw) solid var(--b1)' }}
         >
           <h2 className="c-heading">Add New Line</h2>
-          <button onClick={onClose} className="c-btn c-btn-ghost">
+          <button onClick={handleClose} className="c-btn c-btn-ghost">
             <X size={16} />
           </button>
         </div>
@@ -176,10 +222,10 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
                 />
               )}
               {currentStep === 1 && (
-                <ModelAuthStep data={formData} onChange={patchForm} />
+                <ModelAuthStep data={formData} onChange={patchForm} errors={errors} />
               )}
               {currentStep === 2 && (
-                <ConfigStep data={formData} onChange={patchForm} />
+                <ConfigStep data={formData} onChange={patchForm} errors={errors} />
               )}
               {currentStep === 3 && (
                 <ReviewStep
@@ -209,20 +255,32 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
             <button
               className="c-btn c-btn-ghost"
               onClick={() =>
-                currentStep > 0 ? setCurrentStep((s) => s - 1) : onClose()
+                currentStep > 0 ? setCurrentStep((s) => s - 1) : handleClose()
               }
             >
               {currentStep > 0 ? 'Back' : 'Cancel'}
             </button>
             <button
               className="c-btn c-btn-primary"
-              onClick={() => setCurrentStep((s) => s + 1)}
+              onClick={handleNext}
             >
               Next
             </button>
           </div>
         )}
       </div>
+
+      {/* Exit confirmation dialog */}
+      <ConfirmDialog
+        open={showConfirmExit}
+        title="Discard changes?"
+        confirmLabel="Discard"
+        confirmVariant="danger"
+        onConfirm={onClose}
+        onCancel={() => setShowConfirmExit(false)}
+      >
+        You have unsaved configuration. Closing the wizard will discard all changes.
+      </ConfirmDialog>
     </div>
   )
 }

@@ -80,6 +80,16 @@ function truncate(text: string, max: number): string {
   return firstLine.slice(0, max) + '...'
 }
 
+/* ── Friendly error messages ── */
+
+function friendlyError(raw: string): string {
+  if (raw.includes('already exists')) return 'An instance with this name already exists. Go back and choose a different name.'
+  if (raw.includes('systemPrompt')) return 'A system prompt is required. Go back to the Configuration step.'
+  if (raw.includes('agentOptions')) return 'Agent configuration is incomplete. Go back to the Configuration step.'
+  if (raw.includes('adminPhones')) return 'At least one admin phone number is required.'
+  return `Something went wrong: ${raw}`
+}
+
 /* ── Main component ── */
 
 const ReviewStep: FC<ReviewStepProps> = ({
@@ -190,7 +200,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
         >
           <AlertCircle size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
           <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-s-crit)' }}>
-            {error}
+            {friendlyError(error)}
           </span>
         </div>
       )}

@@ -10,7 +10,7 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
-import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists } from './routes/data.ts';
+import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -58,6 +58,7 @@ const handlers: Record<string, HandlerFn> = {
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
   createLine:   (req, res, deps, _params) => handleCreateLine(req, res, deps),
   checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params as any),
+  checkDirectory: (req, res) => handleCheckDirectory(req, res),
   auth:         (req, res, deps, params) => handleAuth(req, res, deps, params as any),
 };
 
@@ -91,6 +92,7 @@ export async function loadOrCreateFleetToken(): Promise<string> {
 const ROUTES = [
   { method: 'GET',   path: /^\/api\/typing$/, handler: 'getTyping' },
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
+  { method: 'GET',   path: /^\/api\/directories\/check$/, handler: 'checkDirectory' },
   { method: 'GET',   path: /^\/api\/lines$/, handler: 'getLines' },
   { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },

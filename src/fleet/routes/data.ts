@@ -378,6 +378,37 @@ export async function handleGetTyping(
   jsonResponse(res, 200, typing);
 }
 
+/** GET /api/directories/check?path=... — check whether a directory exists and is writable. */
+export function handleCheckDirectory(
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
+  const qs = parseQueryString(req.url);
+  const dirPath = qs.path;
+  if (!dirPath) {
+    jsonResponse(res, 400, { error: 'missing required query parameter: path' });
+    return;
+  }
+  const resolved = path.resolve(dirPath);
+  if (!resolved.startsWith(os.homedir() + path.sep) && resolved !== os.homedir()) {
+    jsonResponse(res, 400, { error: 'path must be within the home directory' });
+    return;
+  }
+  let exists = false;
+  let writable = false;
+  try {
+    const stat = fs.statSync(resolved);
+    exists = stat.isDirectory();
+    if (exists) {
+      fs.accessSync(resolved, fs.constants.W_OK);
+      writable = true;
+    }
+  } catch {
+    // exists stays false, or writable stays false
+  }
+  jsonResponse(res, 200, { exists, writable });
+}
+
 /** GET /api/lines/:name/exists — check whether an instance name is already taken. */
 export function handleCheckExists(
   _req: IncomingMessage,

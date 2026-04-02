@@ -135,4 +135,7 @@ export const api = {
 
   checkExists: (name: string) =>
     apiFetch<{ exists: boolean }>(`/api/lines/${encodeURIComponent(name)}/exists`),
+
+  checkDirectory: (dirPath: string) =>
+    apiFetch<{ exists: boolean; writable: boolean }>(`/api/directories/check?path=${encodeURIComponent(dirPath)}`),
 };

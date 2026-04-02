@@ -4,6 +4,7 @@ import { Check, Eye, EyeOff } from 'lucide-react'
 interface ModelAuthStepProps {
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
+  errors: Record<string, string>
 }
 
 const MODEL_OPTIONS = [
@@ -74,7 +75,8 @@ const ModelSelectionSection: FC<{
 const ApiKeyInput: FC<{
   value: string
   onChange: (value: string) => void
-}> = ({ value, onChange }) => {
+  error?: string
+}> = ({ value, onChange, error }) => {
   const [visible, setVisible] = useState(false)
 
   return (
@@ -87,7 +89,10 @@ const ApiKeyInput: FC<{
           onChange={(e) => onChange(e.target.value)}
           placeholder="sk-ant-..."
           className="w-full font-mono"
-          style={inputStyle}
+          style={{
+            ...inputStyle,
+            borderColor: error ? 'var(--color-s-crit)' : undefined,
+          }}
         />
         <button
           type="button"
@@ -106,6 +111,11 @@ const ApiKeyInput: FC<{
           {visible ? <EyeOff size={16} /> : <Eye size={16} />}
         </button>
       </div>
+      {error && (
+        <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)' }}>
+          {error}
+        </div>
+      )}
       <span className="c-body text-t3" style={{ fontSize: 'var(--font-size-xs)' }}>
         Required for chat instances. Stored securely in system keyring.
       </span>
@@ -130,7 +140,8 @@ const PassiveView: FC = () => (
 const ChatView: FC<{
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
-}> = ({ data, onChange }) => {
+  errors: Record<string, string>
+}> = ({ data, onChange, errors }) => {
   const models = (data.models as Record<ModelRole, string> | undefined) ?? { ...MODEL_DEFAULTS }
   const apiKey = (data.apiKey as string | undefined) ?? ''
 
@@ -141,7 +152,7 @@ const ChatView: FC<{
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-5)' }}>
       <ModelSelectionSection models={models} onModelChange={handleModelChange} />
-      <ApiKeyInput value={apiKey} onChange={(v) => onChange({ apiKey: v })} />
+      <ApiKeyInput value={apiKey} onChange={(v) => onChange({ apiKey: v })} error={errors.apiKey} />
     </div>
   )
 }
@@ -151,7 +162,8 @@ const ChatView: FC<{
 const AgentView: FC<{
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
-}> = ({ data, onChange }) => {
+  errors: Record<string, string>
+}> = ({ data, onChange, errors }) => {
   const models = (data.models as Record<ModelRole, string> | undefined) ?? { ...MODEL_DEFAULTS }
   const apiKey = (data.apiKey as string | undefined) ?? ''
   const authMethod = (data.authMethod as 'api_key' | 'oauth' | undefined) ?? 'api_key'
@@ -199,7 +211,7 @@ const AgentView: FC<{
         </div>
 
         {authMethod === 'api_key' ? (
-          <ApiKeyInput value={apiKey} onChange={(v) => onChange({ apiKey: v })} />
+          <ApiKeyInput value={apiKey} onChange={(v) => onChange({ apiKey: v })} error={errors.apiKey} />
         ) : (
           <div
             className="c-body text-t3"
@@ -219,16 +231,16 @@ const AgentView: FC<{
 
 /* ── Main step component ── */
 
-const ModelAuthStep: FC<ModelAuthStepProps> = ({ data, onChange }) => {
+const ModelAuthStep: FC<ModelAuthStepProps> = ({ data, onChange, errors }) => {
   const instanceType = data.type as string | undefined
 
   switch (instanceType) {
     case 'passive':
       return <PassiveView />
     case 'agent':
-      return <AgentView data={data} onChange={onChange} />
+      return <AgentView data={data} onChange={onChange} errors={errors} />
     default:
-      return <ChatView data={data} onChange={onChange} />
+      return <ChatView data={data} onChange={onChange} errors={errors} />
   }
 }
 
