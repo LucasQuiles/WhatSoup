@@ -4,6 +4,9 @@ import { AnimatePresence, motion } from 'framer-motion'
 import IdentityStep from './wizard/IdentityStep'
 import ModelAuthStep from './wizard/ModelAuthStep'
 import ConfigStep from './wizard/ConfigStep'
+import ReviewStep from './wizard/ReviewStep'
+import LinkStep from './wizard/LinkStep'
+import { api } from '../lib/api'
 
 interface AddLineWizardProps {
   onClose: () => void
@@ -89,11 +92,26 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     adminPhones: [],
   })
   const [errors] = useState<Record<string, string>>({})
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const patchForm = useCallback(
     (patch: Record<string, unknown>) => setFormData((d) => ({ ...d, ...patch })),
     [],
   )
+
+  const handleCreateLine = useCallback(async () => {
+    setCreating(true)
+    setCreateError(null)
+    try {
+      await api.createLine(formData)
+      setCurrentStep(4)
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCreating(false)
+    }
+  }, [formData])
 
   return (
     <div
@@ -153,33 +171,47 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
               {currentStep === 2 && (
                 <ConfigStep data={formData} onChange={patchForm} />
               )}
-              {currentStep === 3 && <div className="c-body">Review placeholder</div>}
-              {currentStep === 4 && <div className="c-body">Link placeholder</div>}
+              {currentStep === 3 && (
+                <ReviewStep
+                  data={formData}
+                  onEditPhase={(phase) => setCurrentStep(phase)}
+                  onCreateLine={handleCreateLine}
+                  creating={creating}
+                  error={createError}
+                />
+              )}
+              {currentStep === 4 && (
+                <LinkStep
+                  lineName={formData.name as string}
+                  onComplete={onClose}
+                />
+              )}
             </motion.div>
           </AnimatePresence>
         </div>
 
-        {/* Footer */}
-        <div
-          className="flex items-center justify-between c-toolbar"
-          style={{ borderTop: 'var(--bw) solid var(--b1)' }}
-        >
-          <button
-            className="c-btn c-btn-ghost"
-            onClick={() =>
-              currentStep > 0 ? setCurrentStep((s) => s - 1) : onClose()
-            }
+        {/* Footer — hidden on Review (has own CTA) and Link (has own controls) */}
+        {currentStep < 3 && (
+          <div
+            className="flex items-center justify-between c-toolbar"
+            style={{ borderTop: 'var(--bw) solid var(--b1)' }}
           >
-            {currentStep > 0 ? 'Back' : 'Cancel'}
-          </button>
-          <button
-            className="c-btn c-btn-primary"
-            onClick={() => setCurrentStep((s) => s + 1)}
-            disabled={currentStep >= STEPS.length - 1}
-          >
-            {currentStep < 3 ? 'Next' : currentStep === 3 ? 'Create Line' : 'Done'}
-          </button>
-        </div>
+            <button
+              className="c-btn c-btn-ghost"
+              onClick={() =>
+                currentStep > 0 ? setCurrentStep((s) => s - 1) : onClose()
+              }
+            >
+              {currentStep > 0 ? 'Back' : 'Cancel'}
+            </button>
+            <button
+              className="c-btn c-btn-primary"
+              onClick={() => setCurrentStep((s) => s + 1)}
+            >
+              Next
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

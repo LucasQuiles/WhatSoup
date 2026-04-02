@@ -11,7 +11,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists } from './routes/data.ts';
-import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine } from './routes/ops.ts';
+import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -58,6 +58,7 @@ const handlers: Record<string, HandlerFn> = {
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
   createLine:   (req, res, deps, _params) => handleCreateLine(req, res, deps),
   checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params as any),
+  auth:         (req, res, deps, params) => handleAuth(req, res, deps, params as any),
 };
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/restart$/, handler: 'restart' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/auth$/, handler: 'auth' },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -131,7 +133,9 @@ export function createFleetServer(deps: FleetDeps) {
 
     // API routes require auth
     if (pathname.startsWith('/api/')) {
-      if (!checkBearerAuth(req, deps.fleetToken)) {
+      // Accept Bearer header or ?token= query param (EventSource can't set headers)
+      const queryToken = parseQueryString(url).token;
+      if (!checkBearerAuth(req, deps.fleetToken) && queryToken !== deps.fleetToken) {
         jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
