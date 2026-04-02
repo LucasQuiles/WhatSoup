@@ -250,6 +250,32 @@ export default defineConfig([
           selector: 'Property[key.name="border"][value.value=/var\\(--bw\\)/]',
           message: '⛔ Border shorthand in inline style — React drops it on spread. Use borderWidth/borderStyle/borderColor longhands.',
         },
+        // Same bug in template literals: border: `var(--bw) solid ${...}`
+        {
+          selector: 'TemplateLiteral[parent.key.name="border"]',
+          message: '⛔ Border shorthand in template literal — React drops it on spread. Use borderWidth/borderStyle/borderColor longhands.',
+        },
+
+        // ═══ REGRESSION: borderColor: undefined ═══
+        // Ternary that falls back to undefined silently drops the border.
+        {
+          selector: 'Property[key.name="borderColor"][value.type="ConditionalExpression"][value.alternate.type="Identifier"][value.alternate.name="undefined"]',
+          message: '⛔ borderColor: ... : undefined drops the border. Use getBorderColor() or var(--b2) as fallback.',
+        },
+
+        // ═══ REGRESSION: inline accentColor ═══
+        // Checkbox/radio accent is set globally in index.css. Inline overrides drift.
+        {
+          selector: 'Property[key.name="accentColor"]',
+          message: '⛔ Inline accentColor — checkbox/radio accent is set globally in index.css.',
+        },
+
+        // ═══ REGRESSION: fractional opacity ═══
+        // opacity < 1 on interactive elements looks disabled. Use filter: brightness().
+        {
+          selector: 'Property[key.name="opacity"][value.value=/^0\\.[0-9]/]',
+          message: '⛔ Fractional opacity on interactive elements looks disabled. Use filter: brightness() for hover effects.',
+        },
       ],
     },
   },

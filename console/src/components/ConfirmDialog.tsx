@@ -90,7 +90,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
             style={{
               fontSize: 'var(--font-size-heading)',
-              border: `var(--bw) solid ${confirmStyles.borderColor}`,
+              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: confirmStyles.borderColor,
               background: confirmStyles.background,
               color: confirmStyles.color,
             }}

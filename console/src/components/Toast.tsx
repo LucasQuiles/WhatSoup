@@ -43,7 +43,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
         padding: '10px var(--sp-4)',
         borderRadius: 'var(--radius-md)',
         fontSize: 'var(--font-size-body)',
-        border: `var(--bw) solid ${borderColor[variant]}`,
+        borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: borderColor[variant],
         background: 'var(--color-d3)',
         boxShadow: 'var(--shadow-md)',
         maxWidth: 'var(--toast-max-w)',

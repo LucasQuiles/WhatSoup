@@ -103,7 +103,7 @@ export const CheckboxField: FC<CheckboxFieldProps> = ({ label, checked, onChange
         type="checkbox"
         checked={checked}
         onChange={e => onChange(e.target.checked)}
-        style={{ accentColor: 'var(--color-s-ok)' }}
+        /* accentColor set globally in index.css */
       />
       <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t2)' }}>{label}</span>
     </label>

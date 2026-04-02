@@ -13,6 +13,15 @@ interface AddLineWizardProps {
   onClose: () => void
 }
 
+/**
+ * STEP INDEX MAP — Keep in sync with:
+ * - Step rendering (currentStep === N)
+ * - ReviewStep.tsx onEditPhase(N) calls
+ * - handleNext() step-specific logic
+ * - Footer visibility conditions
+ *
+ * 0 = Identity, 1 = Link, 2 = Model, 3 = Config, 4 = Review
+ */
 const STEPS = ['Identity', 'Link', 'Model', 'Config', 'Review'] as const
 
 /* ── Stepper sub-component ── */
