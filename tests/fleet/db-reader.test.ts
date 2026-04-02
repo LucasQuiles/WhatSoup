@@ -40,6 +40,7 @@ const MINIMAL_SCHEMA = `
     quoted_message_id TEXT,
     edited_at TEXT,
     deleted_at TEXT,
+    raw_message TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 

@@ -21,7 +21,7 @@ import {
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
   User, Users, UserPlus, UserX,
   RotateCw, MessageSquareOff, Bot, ChevronsUp, Power,
-  X, AlertTriangle, Save,
+  X, AlertTriangle, Save, Loader2,
 } from 'lucide-react'
 import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../types'
 
@@ -1302,7 +1302,8 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   const loadOlder = async () => {
     if (loadingOlder || !hasMore) return
     const allMsgs = [...(messages || []), ...olderMessages]
-    const oldestPk = allMsgs.length > 0 ? Math.min(...allMsgs.map(m => m.pk).filter(pk => pk > 0)) : undefined
+    const positivePks = allMsgs.map(m => m.pk).filter(pk => pk > 0)
+    const oldestPk = positivePks.length > 0 ? Math.min(...positivePks) : undefined
     if (!oldestPk) return
 
     setLoadingOlder(true)
