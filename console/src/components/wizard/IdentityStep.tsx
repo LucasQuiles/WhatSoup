@@ -50,6 +50,7 @@ function validatePhone(value: string): boolean {
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 
 const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
+  const initialName = useRef((data.name as string) ?? '')
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -59,12 +60,16 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
   const type = (data.type as string) ?? 'chat'
   const adminPhones = (data.adminPhones as string[]) ?? []
 
-  /* Debounced uniqueness check */
+  /* Debounced uniqueness check — runs immediately on mount if name already set */
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     if (abortRef.current) abortRef.current.abort()
 
     const slug = slugify(name)
+    // Skip debounce on mount when returning to this step with an existing name
+    const isRemount = initialName.current === name && slug.length >= 2
+    const delay = isRemount ? 0 : 500
+    initialName.current = '' // clear so subsequent edits debounce normally
 
     debounceRef.current = setTimeout(() => {
       if (!slug) {
@@ -84,7 +89,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           if (controller.signal.aborted) return
           setNameStatus('error')
         })
-    }, slug ? 500 : 0)
+    }, slug ? delay : 0)
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
