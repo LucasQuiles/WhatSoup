@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
 import { formatTimeWithSeconds } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
@@ -9,15 +9,23 @@ import type { LogEntry } from '../types'
 import {
   Terminal, ChevronDown, Power,
   AlertTriangle, CheckCircle2,
+  Trash2, Link2, Loader2,
 } from 'lucide-react'
 
 import { levelColor, levelBg } from '../lib/log-theme'
 import { api } from '../lib/api'
 import { useToast } from '../hooks/toast-context'
+import { useQueryClient } from '@tanstack/react-query'
 import { displayInstanceName } from '../lib/text-utils'
+import ConfirmDialog from '../components/ConfirmDialog'
+import RelinkModal from '../components/RelinkModal'
 
 export default function Ops() {
   const toast = useToast()
+  const queryClient = useQueryClient()
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [relinkTarget, setRelinkTarget] = useState<string | null>(null)
   const { data: lines = [] } = useLines()
   const { data: feed = [] } = useFeed()
   const [logFilter, setLogFilter] = useState<string>('all')
@@ -34,6 +42,21 @@ export default function Ops() {
   }, [logs, logFilter])
 
   const alerts = useMemo(() => feed.filter(e => e.isError), [feed])
+
+  const handleDelete = useCallback(async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      await api.deleteLine(deleteTarget)
+      toast.success(`${deleteTarget} deleted`)
+      queryClient.invalidateQueries({ queryKey: ['lines'] })
+    } catch (err) {
+      toast.error(`Delete failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setDeleting(false)
+      setDeleteTarget(null)
+    }
+  }, [deleteTarget, toast, queryClient])
 
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
@@ -146,18 +169,35 @@ export default function Ops() {
                 {/* Row 3: Actions for unhealthy lines */}
                 {line.status !== 'online' && (
                   <div className="flex" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-3)', paddingTop: 'var(--sp-3)', borderTop: 'var(--bw) solid var(--b1)' }}>
+                    {line.linkedStatus === 'unlinked' ? (
+                      <button
+                        className="c-btn"
+                        style={{ padding: 'var(--sp-1) var(--sp-3)', fontSize: 'var(--font-size-label)' }}
+                        onClick={e => { e.stopPropagation(); setRelinkTarget(line.name) }}
+                      >
+                        <Link2 size={12} strokeWidth={1.75} /> Re-link
+                      </button>
+                    ) : (
+                      <button
+                        className="c-btn"
+                        style={{ padding: 'var(--sp-1) var(--sp-3)', fontSize: 'var(--font-size-label)' }}
+                        onClick={e => {
+                          e.stopPropagation()
+                          toast.info(`Restarting ${line.name}...`)
+                          api.restart(line.name)
+                            .then(() => toast.success(`${line.name} restart requested`))
+                            .catch(err => toast.error(`Failed: ${err.message}`))
+                        }}
+                      >
+                        <Power size={12} strokeWidth={1.75} /> Restart
+                      </button>
+                    )}
                     <button
                       className="c-btn"
-                      style={{ padding: '5px var(--sp-3)', fontSize: 'var(--font-size-label)' }}
-                      onClick={e => {
-                        e.stopPropagation()
-                        toast.info(`Restarting ${line.name}...`)
-                        api.restart(line.name)
-                          .then(() => toast.success(`${line.name} restart requested`))
-                          .catch(err => toast.error(`Failed: ${err.message}`))
-                      }}
+                      style={{ padding: 'var(--sp-1) var(--sp-3)', fontSize: 'var(--font-size-label)', color: 'var(--color-s-crit)' }}
+                      onClick={e => { e.stopPropagation(); setDeleteTarget(line.name) }}
                     >
-                      <Power size={12} strokeWidth={1.75} /> Restart
+                      <Trash2 size={12} strokeWidth={1.75} /> Delete
                     </button>
                   </div>
                 )}
@@ -308,6 +348,26 @@ export default function Ops() {
           <span>{activeLine} — {currentLine?.mode ?? '—'}</span>
         </div>
       </div>
+
+      {/* Modals */}
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title={`Delete ${deleteTarget}?`}
+        confirmLabel={deleting ? 'Deleting...' : 'Delete permanently'}
+        confirmVariant="danger"
+        confirmIcon={deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteTarget(null)}
+      >
+        This will stop the process, remove all configuration, data, and message history for <strong>{deleteTarget}</strong>. This cannot be undone.
+      </ConfirmDialog>
+
+      <RelinkModal
+        lineName={relinkTarget ?? ''}
+        open={!!relinkTarget}
+        onClose={() => setRelinkTarget(null)}
+        onLinked={() => { setRelinkTarget(null); queryClient.invalidateQueries({ queryKey: ['lines'] }); toast.success('Instance re-linked!'); }}
+      />
     </div>
   )
 }
