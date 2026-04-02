@@ -64,11 +64,14 @@ async function startSocket(): Promise<void> {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      // Emit raw QR for fleet SSE consumers
+      process.stdout.write(JSON.stringify({ event: 'qr', data: qr }) + '\n');
       console.error('\nScan the QR code below with WhatsApp > Linked Devices > Link a Device:\n');
       qrcodeTerminal.generate(qr, { small: true });
     }
 
     if (connection === 'open') {
+      process.stdout.write(JSON.stringify({ event: 'connected' }) + '\n');
       clearTimeout(timeoutHandle);
       const rawId: string | undefined = (sock as any).user?.id;
       const jid = rawId ?? 'unknown';

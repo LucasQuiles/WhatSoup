@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { readBody, jsonResponse } from '../../lib/http.ts';
 import { mcpCall } from '../mcp-client.ts';
 import { proxyToInstance } from '../http-proxy.ts';
@@ -397,4 +397,70 @@ export async function handleCreateLine(
     cleanupPartial(name, createdExtras);
     jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
   }
+}
+
+/** GET /api/lines/:name/auth — SSE stream of QR codes from the auth process. */
+export async function handleAuth(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  const instance = deps.discovery.getInstance(params.name);
+  if (!instance) {
+    jsonResponse(res, 404, { error: 'not found' });
+    return;
+  }
+
+  // SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  // Spawn auth process
+  const child = spawn('node', ['--experimental-strip-types', 'src/bootstrap-auth.ts', params.name], {
+    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..'),
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  // Parse stdout for JSON events
+  let buffer = '';
+  child.stdout!.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        res.write(`event: ${evt.event}\ndata: ${JSON.stringify(evt.data ?? {})}\n\n`);
+        if (evt.event === 'connected') {
+          // Start the instance
+          execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], () => {});
+          deps.discovery.scan();
+          setTimeout(() => { res.end(); }, 1000);
+        }
+      } catch { /* skip non-JSON lines */ }
+    }
+  });
+
+  // Forward errors
+  child.on('error', (err) => {
+    res.write(`event: error\ndata: ${JSON.stringify({ message: err.message })}\n\n`);
+    res.end();
+  });
+  child.on('exit', (code) => {
+    if (code !== 0) {
+      res.write(`event: error\ndata: ${JSON.stringify({ message: `auth exited with code ${code}` })}\n\n`);
+    }
+    res.end();
+  });
+
+  // Cleanup on client disconnect
+  req.on('close', () => {
+    child.kill('SIGTERM');
+  });
 }
