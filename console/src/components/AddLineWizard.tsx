@@ -208,7 +208,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           className="flex items-center justify-between c-toolbar"
           style={{ borderBottom: 'var(--bw) solid var(--b1)' }}
         >
-          <h2 className="c-heading">Add New Line</h2>
+          <h2 className="c-heading-lg">Add New Line</h2>
           <button onClick={handleClose} className="c-btn c-btn-ghost">
             <X size={16} />
           </button>

@@ -319,6 +319,13 @@ body::before {
   color: var(--color-t1);
 }
 
+@utility c-heading-lg {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--font-size-lg);
+  color: var(--color-t1);
+}
+
 /* Body text: sans 400 body --t2 */
 @utility c-body {
   font-family: var(--font-sans);
