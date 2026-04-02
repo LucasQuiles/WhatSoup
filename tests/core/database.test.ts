@@ -376,6 +376,36 @@ describe('importFromLegacyDb', () => {
   });
 });
 
+// ─── Timestamp coercion ───────────────────────────────────────────────────────
+
+describe('historyMessages timestamp coercion', () => {
+  it('Long-like object fails SQLite bind; Number()-coerced value succeeds', () => {
+    // Simulate what Baileys sends: a protobuf Long object
+    const longLike = Object.create(null);
+    longLike.low = 1700000000;
+    longLike.high = 0;
+    longLike.unsigned = true;
+    longLike.valueOf = () => 1700000000;
+    longLike[Symbol.toPrimitive] = () => 1700000000;
+
+    const db = new DatabaseSync(':memory:');
+    db.exec('CREATE TABLE t (ts INTEGER NOT NULL)');
+    const insert = db.prepare('INSERT INTO t (ts) VALUES (?)');
+
+    // Raw Long-like object — SQLite rejects it (the production bug).
+    // Node's sqlite treats plain objects as named-param maps, so it throws
+    // "Unknown named parameter" rather than a bind-type error.
+    expect(() => insert.run(longLike)).toThrow();
+
+    // Number()-coerced — SQLite accepts it (the fix)
+    insert.run(Number(longLike));
+    const row = db.prepare('SELECT ts FROM t').get() as { ts: number };
+    expect(row.ts).toBe(1700000000);
+
+    db.close();
+  });
+});
+
 // ─── Migration 3: Chat sync tables ───────────────────────────────────────────
 
 describe('migration 3 — chat sync tables', () => {

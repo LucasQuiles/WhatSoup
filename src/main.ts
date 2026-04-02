@@ -320,7 +320,7 @@ connectionManager.on('historyMessages', (messages) => {
       const existing = checkStmt.get(msgId);
       if (existing) continue;
       const conversationKey = toConversationKey(chatJid);
-      const timestamp = waMsg.messageTimestamp ?? Math.floor(Date.now() / 1000);
+      const timestamp = Number(waMsg.messageTimestamp ?? Math.floor(Date.now() / 1000));
       insertStmt.run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
     } catch (err) {
       log.error({ err }, 'historyMessages: failed to store message');
