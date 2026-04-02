@@ -16,16 +16,8 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
   const [retryKey, setRetryKey] = useState(0)
 
   useEffect(() => {
-    const baseUrl = window.location.origin.includes('localhost:5176')
-      ? 'http://localhost:9099'
-      : ''
-
-    // Read fleet token from cookie or pass via query param
-    // For EventSource (no custom headers), we pass token as query param
-    const tokenMeta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]')
-    const token = tokenMeta?.content ?? ''
-
-    const url = `${baseUrl}/api/lines/${encodeURIComponent(lineName)}/auth${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    // Use relative URL — Vite proxy (dev) or same-origin (prod) forwards to fleet server with auth
+    const url = `/api/lines/${encodeURIComponent(lineName)}/auth`
     const es = new EventSource(url)
 
     es.addEventListener('qr', (e: MessageEvent) => {
