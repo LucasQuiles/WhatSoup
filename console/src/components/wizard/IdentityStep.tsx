@@ -128,7 +128,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
           )}
           {nameStatus === 'available' && (
-            <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+            <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
           )}
           {nameStatus === 'taken' && (
             <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
@@ -159,7 +159,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           }}
         />
         {description.trim() && (
-          <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+          <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
         )}
         </div>
       </div>
@@ -185,7 +185,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             />
           </div>
           {!errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0, marginTop: 'var(--sp-2)' }} />
+            <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0, marginTop: 'var(--sp-2)' }} />
           )}
         </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}

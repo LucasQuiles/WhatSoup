@@ -18,7 +18,7 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, childre
     <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
       <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
       {!error && confirmed && (
-        <Check size={16} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+        <Check size={16} className="wizard-check" style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
       )}
     </div>
     {error && <div style={errorStyle}>{error}</div>}

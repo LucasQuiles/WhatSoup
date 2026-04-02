@@ -442,6 +442,16 @@ body::before {
               0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent) 10%, transparent);
 }
 
+/* Wizard confirmation check animation — fade + scale in */
+@keyframes wizard-check-in {
+  0% { opacity: 0; transform: scale(0.5); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.wizard-accent-scope svg.wizard-check {
+  animation: wizard-check-in 0.3s ease both;
+}
+
 /* ═══ Toggle switch — c-toggle from design system ═══ */
 .c-toggle {
   position: relative;
