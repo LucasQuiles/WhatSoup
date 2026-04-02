@@ -1,6 +1,5 @@
-import { type FC, type ChangeEvent, useCallback, useMemo } from 'react'
+import { type FC, type ChangeEvent, useCallback, useMemo, useState } from 'react'
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
-import CollapsibleSection from '../CollapsibleSection'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
@@ -145,6 +144,20 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
     [agentOptions, onChange],
   )
 
+  const [activeTab, setActiveTab] = useState<string>('access')
+
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    padding: 'var(--sp-2) var(--sp-4)',
+    fontSize: 'var(--font-size-data)',
+    cursor: 'pointer',
+    borderBottomWidth: '2px',
+    borderBottomStyle: 'solid',
+    borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
+    color: active ? 'var(--color-t1)' : 'var(--color-t4)',
+    background: 'none',
+    transition: 'border-color 0.2s ease, color 0.2s ease',
+  })
+
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Use Defaults & Continue */}
@@ -159,8 +172,21 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
         Use Defaults &amp; Continue
       </button>
 
+      {/* Tab bar */}
+      <div className="flex" style={{ borderBottomWidth: 'var(--bw)', borderBottomStyle: 'solid', borderBottomColor: 'var(--b1)' }}>
+        <button type="button" style={tabStyle(activeTab === 'access')} onClick={() => setActiveTab('access')}>Access</button>
+        <button type="button" style={tabStyle(activeTab === 'behavior')} onClick={() => setActiveTab('behavior')}>Behavior</button>
+        {type === 'agent' && (
+          <button type="button" style={tabStyle(activeTab === 'permissions')} onClick={() => setActiveTab('permissions')}>Permissions</button>
+        )}
+        <button type="button" style={tabStyle(activeTab === 'limits')} onClick={() => setActiveTab('limits')}>Limits</button>
+        <button type="button" style={tabStyle(activeTab === 'rag')} onClick={() => setActiveTab('rag')}>
+          RAG <span style={{ color: 'var(--color-t5)', fontSize: 'var(--font-size-xs)' }}>(optional)</span>
+        </button>
+      </div>
+
       {/* 1. Access */}
-      <CollapsibleSection title="Access" defaultOpen>
+      {activeTab === 'access' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <div>
             <label className="c-label" style={labelStyle}>
@@ -176,10 +202,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
             />
           </div>
         </div>
-      </CollapsibleSection>
+      )}
 
       {/* 2. Behavior */}
-      <CollapsibleSection title="Behavior">
+      {activeTab === 'behavior' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           {/* System Prompt — hidden for passive lines */}
           {type !== 'passive' && (
@@ -236,87 +262,85 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
             />
           </div>
         </div>
-      </CollapsibleSection>
+      )}
 
       {/* 3. Permissions — only for agent type */}
-      {type === 'agent' && (
-        <CollapsibleSection title="Permissions">
-          <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-            <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}>
+      {activeTab === 'permissions' && type === 'agent' && (
+        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+          <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}>
+            <TextInput
+              value={agentOptions.cwd ?? ''}
+              onChange={(e) => handleAgentOption('cwd', e.target.value)}
+              placeholder="/home/q/LAB/your-project"
+              error={!!errors.cwd}
+              confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}
+            />
+          </Field>
+          <Field label="Session Scope" helper={SESSION_SCOPE_DESCRIPTIONS[agentOptions.sessionScope ?? 'per_chat']} confirmed>
+            <SelectInput
+              value={agentOptions.sessionScope ?? 'per_chat'}
+              onChange={(e) => handleAgentOption('sessionScope', e.target.value)}
+              confirmed
+            >
+              <option value="single">single</option>
+              <option value="shared">shared</option>
+              <option value="per_chat">per_chat</option>
+            </SelectInput>
+          </Field>
+
+          {/* Sandbox per chat */}
+          <CheckboxField
+            label="Isolate per-chat workspaces"
+            checked={agentOptions.sandboxPerChat ?? true}
+            onChange={(v) => handleAgentOption('sandboxPerChat', v)}
+            helper="Each conversation gets its own sandboxed directory"
+          />
+
+          {/* Per-user directories */}
+          <CheckboxField
+            label="Enable per-user directories"
+            checked={agentOptions.perUserDirs?.enabled ?? false}
+            onChange={(v) => handlePerUserDirs('enabled', v)}
+          />
+          {(agentOptions.perUserDirs?.enabled ?? false) && (
+            <Field label="Base path" helper="Create separate workspace folders per contact" confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}>
               <TextInput
-                value={agentOptions.cwd ?? ''}
-                onChange={(e) => handleAgentOption('cwd', e.target.value)}
-                placeholder="/home/q/LAB/your-project"
-                error={!!errors.cwd}
-                confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}
+                value={agentOptions.perUserDirs?.basePath ?? 'users'}
+                onChange={(e) => handlePerUserDirs('basePath', e.target.value)}
+                placeholder="users"
+                confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}
               />
             </Field>
-            <Field label="Session Scope" helper={SESSION_SCOPE_DESCRIPTIONS[agentOptions.sessionScope ?? 'per_chat']} confirmed>
-              <SelectInput
-                value={agentOptions.sessionScope ?? 'per_chat'}
-                onChange={(e) => handleAgentOption('sessionScope', e.target.value)}
-                confirmed
-              >
-                <option value="single">single</option>
-                <option value="shared">shared</option>
-                <option value="per_chat">per_chat</option>
-              </SelectInput>
-            </Field>
+          )}
 
-            {/* Sandbox per chat */}
-            <CheckboxField
-              label="Isolate per-chat workspaces"
-              checked={agentOptions.sandboxPerChat ?? true}
-              onChange={(v) => handleAgentOption('sandboxPerChat', v)}
-              helper="Each conversation gets its own sandboxed directory"
-            />
+          {/* Bash enabled */}
+          <CheckboxField
+            label="Allow bash commands"
+            checked={agentOptions.sandbox?.bash?.enabled ?? true}
+            onChange={(v) => handleSandboxBash('enabled', v)}
+            helper="Uncheck to completely disable shell access"
+          />
 
-            {/* Per-user directories */}
-            <CheckboxField
-              label="Enable per-user directories"
-              checked={agentOptions.perUserDirs?.enabled ?? false}
-              onChange={(v) => handlePerUserDirs('enabled', v)}
-            />
-            {(agentOptions.perUserDirs?.enabled ?? false) && (
-              <Field label="Base path" helper="Create separate workspace folders per contact" confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}>
-                <TextInput
-                  value={agentOptions.perUserDirs?.basePath ?? 'users'}
-                  onChange={(e) => handlePerUserDirs('basePath', e.target.value)}
-                  placeholder="users"
-                  confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}
-                />
-              </Field>
-            )}
+          {/* Bash path restriction */}
+          <CheckboxField
+            label="Restrict bash to allowed paths"
+            checked={agentOptions.sandbox?.bash?.pathRestricted ?? true}
+            onChange={(v) => handleSandboxBash('pathRestricted', v)}
+            helper="Bash commands can only access files within the sandbox"
+          />
 
-            {/* Bash enabled */}
-            <CheckboxField
-              label="Allow bash commands"
-              checked={agentOptions.sandbox?.bash?.enabled ?? true}
-              onChange={(v) => handleSandboxBash('enabled', v)}
-              helper="Uncheck to completely disable shell access"
-            />
-
-            {/* Bash path restriction */}
-            <CheckboxField
-              label="Restrict bash to allowed paths"
-              checked={agentOptions.sandbox?.bash?.pathRestricted ?? true}
-              onChange={(v) => handleSandboxBash('pathRestricted', v)}
-              helper="Bash commands can only access files within the sandbox"
-            />
-
-            {/* MCP send media */}
-            <CheckboxField
-              label="Allow sending media (images, files)"
-              checked={agentOptions.mcp?.send_media ?? true}
-              onChange={(v) => handleMcpOption('send_media', v)}
-              helper="Enable the send_media MCP tool"
-            />
-          </div>
-        </CollapsibleSection>
+          {/* MCP send media */}
+          <CheckboxField
+            label="Allow sending media (images, files)"
+            checked={agentOptions.mcp?.send_media ?? true}
+            onChange={(v) => handleMcpOption('send_media', v)}
+            helper="Enable the send_media MCP tool"
+          />
+        </div>
       )}
 
       {/* 4. Limits */}
-      <CollapsibleSection title="Limits">
+      {activeTab === 'limits' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <Field label="Messages per hour" confirmed>
             <NumberInput
@@ -355,10 +379,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
             </SelectInput>
           </Field>
         </div>
-      </CollapsibleSection>
+      )}
 
-      {/* 5. RAG (optional) */}
-      <CollapsibleSection title="RAG" badge="optional">
+      {/* 5. RAG */}
+      {activeTab === 'rag' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <Field label="Pinecone Index Name" confirmed={pineconeIndex.trim().length > 0}>
             <TextInput
@@ -425,7 +449,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
             />
           </Field>
         </div>
-      </CollapsibleSection>
+      )}
     </div>
   )
 }
