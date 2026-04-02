@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -21,6 +21,7 @@ import {
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
   User, Users, UserPlus, UserX,
   RotateCw, MessageSquareOff, Bot, ChevronsUp, Power,
+  X, AlertTriangle, Save,
 } from 'lucide-react'
 import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../types'
 
@@ -281,10 +282,319 @@ const TYPE_COLOR: Record<string, string> = {
   boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
 }
 
+/* ═══ Enum options for known select fields ═══ */
+const ENUM_OPTIONS: Record<string, string[]> = {
+  accessMode: ['self_only', 'allowlist', 'open_dm', 'groups_only'],
+  toolUpdateMode: ['full', 'minimal'],
+}
+
+/* ═══ ConfigEditDialog — type-aware form for editing line config ═══ */
+function ConfigEditDialog({
+  config,
+  lineName,
+  onClose,
+}: {
+  config: Record<string, unknown>
+  lineName: string
+  onClose: () => void
+}) {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [patch, setPatch] = useState<Record<string, unknown>>({})
+  const [saving, setSaving] = useState(false)
+
+  const editableEntries = Object.entries(config).filter(
+    ([k]) => !CONFIG_EXCLUDE_KEYS.has(k),
+  )
+
+  const currentValue = (key: string): unknown =>
+    key in patch ? patch[key] : config[key]
+
+  const setField = useCallback((key: string, value: unknown) => {
+    setPatch(prev => {
+      // If value matches original, remove from patch
+      if (value === config[key]) {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      }
+      return { ...prev, [key]: value }
+    })
+  }, [config])
+
+  const handleSave = async () => {
+    if (Object.keys(patch).length === 0) {
+      onClose()
+      return
+    }
+    setSaving(true)
+    try {
+      await api.updateConfig(lineName, patch)
+      toast.success('Configuration updated')
+      await queryClient.invalidateQueries({ queryKey: ['lines', lineName] })
+      onClose()
+    } catch (e) {
+      toast.error(`Update failed: ${(e as Error).message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const renderField = (key: string, originalValue: unknown) => {
+    const val = currentValue(key)
+
+    // Boolean -> checkbox
+    if (typeof originalValue === 'boolean') {
+      return (
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={val as boolean}
+            onChange={e => setField(key, e.target.checked)}
+            className="accent-current"
+            style={{ width: 16, height: 16 }}
+          />
+          <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
+            {String(val)}
+          </span>
+        </label>
+      )
+    }
+
+    // Number -> number input
+    if (typeof originalValue === 'number') {
+      return (
+        <input
+          type="number"
+          value={val as number}
+          onChange={e => setField(key, Number(e.target.value))}
+          className="font-mono"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-s-warn)',
+            border: 'var(--bw) solid var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            outline: 'none',
+          }}
+        />
+      )
+    }
+
+    // Object -> read-only JSON textarea
+    if (typeof originalValue === 'object' && originalValue !== null) {
+      return (
+        <textarea
+          readOnly
+          value={JSON.stringify(val, null, 2)}
+          className="font-mono"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-t3)',
+            border: 'var(--bw) solid var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            resize: 'vertical',
+            minHeight: 60,
+            opacity: 0.7,
+          }}
+        />
+      )
+    }
+
+    // String with known enum -> select
+    if (typeof originalValue === 'string' && key in ENUM_OPTIONS) {
+      return (
+        <select
+          value={val as string}
+          onChange={e => setField(key, e.target.value)}
+          className="font-mono cursor-pointer"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-m-pas)',
+            border: 'var(--bw) solid var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            outline: 'none',
+          }}
+        >
+          {ENUM_OPTIONS[key].map(opt => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+      )
+    }
+
+    // String (long) -> textarea
+    if (typeof originalValue === 'string' && (originalValue as string).length > 80) {
+      return (
+        <textarea
+          value={val as string}
+          onChange={e => setField(key, e.target.value)}
+          className="font-mono"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-m-pas)',
+            border: 'var(--bw) solid var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            resize: 'vertical',
+            minHeight: 80,
+            outline: 'none',
+          }}
+        />
+      )
+    }
+
+    // String (short) -> text input
+    return (
+      <input
+        type="text"
+        value={val as string}
+        onChange={e => setField(key, e.target.value)}
+        className="font-mono"
+        style={{
+          width: '100%',
+          padding: '6px var(--sp-3)',
+          fontSize: 'var(--font-size-data)',
+          background: 'var(--color-d1)',
+          color: 'var(--color-m-pas)',
+          border: 'var(--bw) solid var(--b2)',
+          borderRadius: 'var(--radius-sm)',
+          outline: 'none',
+        }}
+      />
+    )
+  }
+
+  const hasChanges = Object.keys(patch).length > 0
+
+  return (
+    <div
+      className="fixed inset-0 flex items-center justify-center z-50"
+      style={{ background: 'var(--overlay)' }}
+      onClick={onClose}
+    >
+      <div
+        className="flex flex-col overflow-hidden"
+        style={{
+          background: 'var(--color-d2)',
+          border: 'var(--bw) solid var(--b2)',
+          borderRadius: 'var(--radius-lg)',
+          width: 560,
+          maxWidth: '90%',
+          maxHeight: '80vh',
+          boxShadow: 'var(--shadow-lg)',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between flex-shrink-0"
+          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
+        >
+          <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            Edit Configuration
+          </span>
+          <button
+            onClick={onClose}
+            className="text-t4 hover:text-t2 cursor-pointer c-hover"
+          >
+            <X size={18} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        {/* Restart warning */}
+        <div
+          className="flex items-center gap-2 flex-shrink-0"
+          style={{
+            padding: 'var(--sp-3) var(--sp-5)',
+            background: 'var(--s-warn-wash)',
+            borderBottom: 'var(--bw) solid var(--b1)',
+            fontSize: 'var(--font-size-sm)',
+            color: 'var(--color-s-warn)',
+          }}
+        >
+          <AlertTriangle size={14} strokeWidth={1.75} />
+          <span>Some changes may require a restart to take effect.</span>
+        </div>
+
+        {/* Body — scrollable */}
+        <div className="flex-1 overflow-y-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
+          <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+            {editableEntries.map(([key, originalValue]) => (
+              <div key={key}>
+                <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+                  {key}
+                  {key in patch && (
+                    <span
+                      className="font-mono"
+                      style={{
+                        marginLeft: 'var(--sp-2)',
+                        fontSize: 'var(--font-size-xs)',
+                        color: 'var(--color-s-warn)',
+                      }}
+                    >
+                      modified
+                    </span>
+                  )}
+                </label>
+                {renderField(key, originalValue)}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div
+          className="flex justify-end gap-2 flex-shrink-0"
+          style={{
+            padding: 'var(--sp-3) var(--sp-5)',
+            borderTop: 'var(--bw) solid var(--b1)',
+            background: 'var(--color-d1)',
+          }}
+        >
+          <button
+            onClick={onClose}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans text-t3 hover:text-t2 hover:bg-d4 cursor-pointer c-hover"
+            style={{ fontSize: 'var(--font-size-heading)', border: 'none', background: 'transparent' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !hasChanges}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
+            style={{
+              fontSize: 'var(--font-size-heading)',
+              border: 'var(--bw) solid var(--color-m-cht)',
+              background: hasChanges ? 'var(--color-m-cht)' : 'transparent',
+              color: hasChanges ? 'var(--color-d0)' : 'var(--color-t5)',
+              opacity: saving ? 0.6 : 1,
+            }}
+          >
+            <Save size={14} strokeWidth={1.75} />
+            {saving ? 'Saving...' : `Save${hasChanges ? ` (${Object.keys(patch).length})` : ''}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ═══ Summary Tab — KPI strip + pipeline strip + config/actions columns ═══ */
 function SummaryTab({ line }: { line: LineInstance }) {
   const toast = useToast()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
+  const [showConfigEditor, setShowConfigEditor] = useState(false)
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
@@ -405,7 +715,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             <span className="c-col-header text-t4">{line.mode} Configuration</span>
             {config && (
               <button
-                onClick={() => toast.info('Edit mode coming in Phase 2')}
+                onClick={() => setShowConfigEditor(true)}
                 className="c-btn c-btn-ghost"
                 style={{ padding: '3px var(--sp-2)', fontSize: 'var(--font-size-xs)' }}
               >
@@ -456,7 +766,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             </button>
             {line.mode !== 'passive' && (
               <button
-                onClick={() => toast.info('Config editor coming in Phase 2')}
+                onClick={() => setShowConfigEditor(true)}
                 className="c-btn w-full justify-center"
                 style={{ fontSize: 'var(--font-size-label)' }}
               >
@@ -530,6 +840,15 @@ function SummaryTab({ line }: { line: LineInstance }) {
           <li>Messages received while stopped will not be delivered</li>
         </ul>
       </ConfirmDialog>
+
+      {/* Config editor dialog */}
+      {showConfigEditor && rawConfig && (
+        <ConfigEditDialog
+          config={rawConfig}
+          lineName={line.name}
+          onClose={() => setShowConfigEditor(false)}
+        />
+      )}
     </div>
   )
 }
