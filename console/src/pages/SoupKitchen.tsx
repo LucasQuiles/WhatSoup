@@ -1,6 +1,6 @@
 import { type FC, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search } from "lucide-react";
+import { Search, Plus } from "lucide-react";
 import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
 import { computeKpis } from "../mock-data";
@@ -13,6 +13,7 @@ import ModeBadge from "../components/ModeBadge";
 import FilterPill from "../components/FilterPill";
 import { formatRelative } from "../lib/format-time";
 import { formatPhone, displayInstanceName } from "../lib/text-utils";
+import AddLineWizard from "../components/AddLineWizard";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -57,6 +58,7 @@ const SoupKitchen: FC = () => {
   const [activeKpi, setActiveKpi] = useState<KpiFilter>(null);
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [search, setSearch] = useState("");
+  const [showAddWizard, setShowAddWizard] = useState(false);
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
 
@@ -290,6 +292,15 @@ const SoupKitchen: FC = () => {
                 }}
               />
             </div>
+
+            <button
+              className="c-btn c-btn-add flex-shrink-0"
+              onClick={() => setShowAddWizard(true)}
+              style={{ marginLeft: 'var(--sp-3)' }}
+            >
+              <Plus size={16} strokeWidth={2} />
+              <span className="c-btn-add-label">Add Line</span>
+            </button>
           </div>
 
           {/* Table */}
@@ -432,6 +443,8 @@ const SoupKitchen: FC = () => {
           <ActivityFeed events={feed} />
         </div>
       </motion.div>
+
+      {showAddWizard && <AddLineWizard onClose={() => setShowAddWizard(false)} />}
     </div>
   );
 };
