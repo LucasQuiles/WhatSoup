@@ -373,7 +373,7 @@ export async function handleCreateLine(
     }
   }
 
-  // --- Build config object (claudeMd excluded — it goes to a file) ---
+  // --- Build config — start with validated required fields, then merge optional fields ---
   const config: Record<string, unknown> = {
     name,
     type,
@@ -382,17 +382,15 @@ export async function handleCreateLine(
     accessMode,
   };
 
-  if (body.description != null)        config.description = body.description;
-  if (body.systemPrompt != null)       config.systemPrompt = body.systemPrompt;
-  if (body.maxTokens != null)          config.maxTokens = body.maxTokens;
-  if (body.tokenBudget != null)        config.tokenBudget = body.tokenBudget;
-  if (body.rateLimitPerHour != null)   config.rateLimitPerHour = body.rateLimitPerHour;
-  if (body.models != null)             config.models = body.models;
-  if (body.pineconeIndex != null)      config.pineconeIndex = body.pineconeIndex;
-  if (body.pineconeSearchMode != null) config.pineconeSearchMode = body.pineconeSearchMode;
-  if (body.pineconeRerank != null)     config.pineconeRerank = body.pineconeRerank;
-  if (body.pineconeTopK != null)       config.pineconeTopK = body.pineconeTopK;
-  if (body.agentOptions != null)       config.agentOptions = body.agentOptions;
+  // Pass through all optional config fields (exclude internal/UI-only fields)
+  const PASSTHROUGH_FIELDS = [
+    'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
+    'models', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
+    'pineconeAllowedIndexes', 'agentOptions', 'toolUpdateMode', 'controlPeers',
+  ];
+  for (const field of PASSTHROUGH_FIELDS) {
+    if (body[field] != null) config[field] = body[field];
+  }
 
   // --- Create directories ---
   const createdExtras: string[] = [];
@@ -404,6 +402,10 @@ export async function handleCreateLine(
 
     // --- Write config.json ---
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
+
+    // TODO: Store per-instance API key in keyring if body.apiKey is provided.
+    // The deploy wrapper currently reads a shared key from `secret-tool lookup service anthropic`.
+    // Per-instance keys would need `secret-tool store ... service anthropic user <name>`.
 
     // --- Copy shared health token ---
     try {

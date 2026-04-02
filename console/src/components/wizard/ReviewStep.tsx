@@ -107,7 +107,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const authMethod = (data.authMethod as string) ?? 'api_key'
   const accessMode = (data.accessMode as string) ?? 'self_only'
   const systemPrompt = (data.systemPrompt as string) ?? ''
-  const rateLimit = (data.rateLimit as number) ?? 60
+  const rateLimitPerHour = (data.rateLimitPerHour as number) ?? 60
   const tokenBudget = (data.tokenBudget as number) ?? 50000
   const agentOptions = (data.agentOptions as { cwd?: string; sessionScope?: string }) ?? {}
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
@@ -172,7 +172,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
         {type !== 'passive' && systemPrompt && (
           <KV label="System prompt" value={truncate(systemPrompt, 60)} />
         )}
-        <KV label="Rate limit" value={`${rateLimit}/hr`} />
+        <KV label="Rate limit" value={`${rateLimitPerHour}/hr`} />
         <KV label="Token budget" value={tokenBudget.toLocaleString()} />
         {type === 'agent' && (
           <>

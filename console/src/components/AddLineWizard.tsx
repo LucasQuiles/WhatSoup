@@ -116,7 +116,17 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     type: 'chat',
     accessMode: 'self_only',
     adminPhones: [],
-    agentOptions: { cwd: '', sessionScope: 'per_chat' },
+    agentOptions: {
+      cwd: '',
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox: {
+        allowedPaths: [],
+        bash: { enabled: true, pathRestricted: true },
+      },
+      mcp: { send_media: true },
+      perUserDirs: { enabled: false, basePath: 'users' },
+    },
     models: {
       conversation: 'claude-sonnet-4-6',
       extraction: 'claude-haiku-4-5-20251001',
@@ -126,6 +136,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     rateLimitPerHour: 60,
     maxTokens: 4096,
     tokenBudget: 50000,
+    toolUpdateMode: 'full',
   })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [creating, setCreating] = useState(false)
