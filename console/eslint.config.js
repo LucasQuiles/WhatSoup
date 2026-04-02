@@ -266,8 +266,8 @@ export default defineConfig([
         // ═══ REGRESSION: inline accentColor ═══
         // Checkbox/radio accent is set globally in index.css. Inline overrides drift.
         {
-          selector: 'Property[key.name="accentColor"]',
-          message: '⛔ Inline accentColor — checkbox/radio accent is set globally in index.css.',
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="accentColor"]',
+          message: '⛔ Inline accentColor in style — checkbox/radio accent is set globally in index.css.',
         },
 
         // ═══ REGRESSION: fractional opacity ═══

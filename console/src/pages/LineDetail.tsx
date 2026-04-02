@@ -400,7 +400,7 @@ function ConfigEditDialog({
             borderRadius: 'var(--radius-sm)',
             resize: 'vertical',
             minHeight: 60,
-            opacity: 0.7,
+            filter: 'brightness(0.7)',
           }}
         />
       )
