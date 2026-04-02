@@ -173,6 +173,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           validate={validatePhone}
         />
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
+        {!errors.adminPhones && <div style={helperStyle}>Phone numbers with full admin access to this line. Use international format without the +.</div>}
       </div>
     </div>
   )
