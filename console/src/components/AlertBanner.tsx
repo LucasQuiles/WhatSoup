@@ -20,7 +20,7 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
       style={{
         padding: "var(--sp-2) var(--sp-4)",
         backgroundColor: "var(--s-crit-wash)",
-        border: "var(--bw) solid var(--s-crit-border)",
+        borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--s-crit-border)",
         borderRadius: 'var(--radius-md)',
         fontSize: "var(--font-size-data)",
       }}

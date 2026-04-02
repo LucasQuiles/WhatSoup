@@ -91,7 +91,7 @@ export default function Inbox() {
         style={{
           width: 'var(--panel-chat-list)',
           background: 'var(--color-d1)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -114,7 +114,7 @@ export default function Inbox() {
           {linePickerOpen && (
             <div
               className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide"
-              style={{ background: 'var(--color-d6)', border: 'var(--bw) solid var(--b2)', borderTop: 'none', borderRadius: '0 0 var(--radius-md) var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
+              style={{ background: 'var(--color-d6)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)', borderTop: 'none', borderRadius: '0 0 var(--radius-md) var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
             >
               {lines?.map(line => (
                 <button
@@ -159,7 +159,7 @@ export default function Inbox() {
         className="flex-1 flex flex-col min-h-0"
         style={{
           background: 'var(--color-d0)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -226,7 +226,7 @@ export default function Inbox() {
                   fontSize: 'var(--font-size-body)',
                   padding: 'var(--sp-2h) var(--sp-4)',
                   background: 'var(--color-d1)',
-                  border: 'var(--bw) solid var(--b2)',
+                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
                   borderRadius: 'var(--radius-md)',
                   maxHeight: '120px',
                   resize: 'none',
@@ -270,7 +270,7 @@ export default function Inbox() {
         style={{
           width: 'var(--panel-contact)',
           background: 'var(--color-d1)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -305,7 +305,7 @@ export default function Inbox() {
                 <div
                   style={{
                     background: 'var(--color-d2)',
-                    border: 'var(--bw) solid var(--b1)',
+                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
                     borderRadius: 'var(--radius-md)',
                     padding: 'var(--sp-3) var(--sp-4)',
                   }}

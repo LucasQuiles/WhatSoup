@@ -150,7 +150,7 @@ const SoupKitchen: FC = () => {
           gridTemplateColumns: "repeat(7, 1fr)",
           gap: "var(--sp-2)",
           background: "var(--color-d1)",
-          border: "var(--bw) solid var(--b1)",
+          borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)",
           borderRadius: "var(--radius-lg)",
           padding: "var(--sp-2)",
         }}
@@ -224,7 +224,7 @@ const SoupKitchen: FC = () => {
           style={{
             flex: 3,
             background: "var(--color-d2)",
-            border: "var(--bw) solid var(--b1)",
+            borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)",
             borderRadius: 'var(--radius-lg)',
             overflow: "hidden",
           }}
@@ -286,7 +286,7 @@ const SoupKitchen: FC = () => {
                 style={{
                   fontSize: "var(--font-size-label)",
                   padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) 28px",
-                  border: "var(--bw) solid var(--b2)",
+                  borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b2)",
                   borderRadius: "var(--radius-sm)",
                   transition: "border-color 0.2s var(--ease)",
                 }}
@@ -435,7 +435,7 @@ const SoupKitchen: FC = () => {
             flex: 1,
             minWidth: "var(--feed-min-w)",
             background: "var(--color-d1)",
-            border: "var(--bw) solid var(--b1)",
+            borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)",
             borderRadius: 'var(--radius-lg)',
             overflow: "hidden",
           }}

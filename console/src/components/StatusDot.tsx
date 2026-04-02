@@ -45,7 +45,7 @@ const StatusDot: FC<StatusDotProps> = ({ status, size = "md" }) => {
           className="absolute rounded-full animate-breathe-ring"
           style={{
             inset: "-3px",
-            border: "var(--bw) solid var(--s-ok-soft)",
+            borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--s-ok-soft)",
           }}
         />
       )}

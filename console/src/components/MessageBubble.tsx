@@ -34,7 +34,7 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
         marginBottom: 'var(--sp-2)',
         padding: 'var(--sp-3) var(--sp-4)',
         background: 'var(--color-d5)',
-        border: 'var(--bw) solid var(--b3)',
+        borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b3)',
         borderRadius: 'var(--radius-lg)',
         boxShadow: 'var(--shadow-lg)',
         minWidth: 'var(--tooltip-min-w)',

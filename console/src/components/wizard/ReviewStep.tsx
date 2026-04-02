@@ -14,7 +14,7 @@ interface ReviewStepProps {
 
 const cardStyle: React.CSSProperties = {
   background: 'var(--color-d1)',
-  border: 'var(--bw) solid var(--b2)',
+  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
   borderRadius: 'var(--radius-md)',
   padding: 'var(--sp-4)',
 }
@@ -195,7 +195,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
             padding: 'var(--sp-3)',
             background: 'var(--color-d3)',
             borderRadius: 'var(--radius-sm)',
-            border: 'var(--bw) solid var(--color-s-crit)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--color-s-crit)',
           }}
         >
           <AlertCircle size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />

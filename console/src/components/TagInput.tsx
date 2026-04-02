@@ -47,7 +47,7 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate }
         className="w-full font-mono"
         style={{
           background: 'var(--color-d1)',
-          border: 'var(--bw) solid var(--b2)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
           borderRadius: 'var(--radius-sm)',
           padding: 'var(--sp-2) var(--sp-3)',
           fontSize: 'var(--font-size-data)',

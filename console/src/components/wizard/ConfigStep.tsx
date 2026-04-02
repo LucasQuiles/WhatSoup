@@ -199,7 +199,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
             <div
               className="flex items-center justify-center cursor-pointer"
               style={{
-                border: 'var(--bw) dashed var(--b2)',
+                borderWidth: 'var(--bw)', borderStyle: 'dashed', borderColor: 'var(--b2)',
                 borderRadius: 'var(--radius-sm)',
                 padding: 'var(--sp-4)',
                 background: 'var(--color-d3)',
@@ -366,7 +366,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors }) => {
                       pineconeSearchMode === mode ? 'var(--color-s-ok)' : 'var(--color-d3)',
                     color:
                       pineconeSearchMode === mode ? 'var(--color-d0)' : 'var(--color-t3)',
-                    border: 'var(--bw) solid var(--b2)',
+                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
                     borderRadius:
                       mode === 'Memory'
                         ? 'var(--radius-sm) 0 0 var(--radius-sm)'

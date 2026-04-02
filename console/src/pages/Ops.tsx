@@ -44,7 +44,7 @@ export default function Ops() {
         style={{
           flex: 1,
           background: 'var(--color-d1)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -101,7 +101,7 @@ export default function Ops() {
                     : line.status === 'degraded'
                     ? 'var(--s-warn-wash)'
                     : 'var(--color-d2)',
-                  border: 'var(--bw) solid var(--b1)',
+                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
                 }}
                 onClick={() => { setSelectedLine(line.name); setLinePickerOpen(false) }}
               >
@@ -172,7 +172,7 @@ export default function Ops() {
         className="flex flex-col min-h-0"
         style={{
           flex: 1.6,
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           overflow: 'hidden',
         }}
@@ -193,7 +193,7 @@ export default function Ops() {
                   letterSpacing: 'var(--tracking-pill)',
                   padding: '5px var(--sp-3)',
                   borderRadius: 'var(--radius-sm)',
-                  border: 'var(--bw) solid var(--b2)',
+                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
                 }}
               >
                 {currentLine && <StatusDot status={currentLine.status} size="sm" />}
@@ -204,7 +204,7 @@ export default function Ops() {
               {linePickerOpen && (
                 <div
                   className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto"
-                  style={{ minWidth: 'var(--dropdown-min-w)', background: 'var(--color-d6)', border: 'var(--bw) solid var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
+                  style={{ minWidth: 'var(--dropdown-min-w)', background: 'var(--color-d6)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
                 >
                   {lines.map(line => (
                     <button

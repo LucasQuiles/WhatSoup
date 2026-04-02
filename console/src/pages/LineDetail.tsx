@@ -110,7 +110,7 @@ export default function LineDetail() {
       {/* ═══ Line Header ═══ */}
       <div
         className="flex items-center gap-4 c-toolbar flex-shrink-0"
-        style={{ background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)', borderRadius: 'var(--radius-lg)' }}
+        style={{ background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', borderRadius: 'var(--radius-lg)' }}
       >
         <button
           onClick={() => navigate('/')}
@@ -161,7 +161,7 @@ export default function LineDetail() {
         <button
           onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-t3 hover:text-t1 hover:bg-d5 cursor-pointer c-hover"
-          style={{ fontSize: 'var(--font-size-label)', border: 'var(--bw) solid var(--b2)' }}
+          style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
         >
           <RotateCw size={11} strokeWidth={1.75} /> Restart
         </button>
@@ -170,7 +170,7 @@ export default function LineDetail() {
       {/* ═══ Tab bar + content container ═══ */}
       <div
         className="flex-1 flex flex-col min-h-0"
-        style={{ background: 'var(--color-d1)', border: 'var(--bw) solid var(--b1)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}
+        style={{ background: 'var(--color-d1)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}
       >
       <div
         className="flex gap-0 flex-shrink-0"
@@ -375,7 +375,7 @@ function ConfigEditDialog({
             fontSize: 'var(--font-size-data)',
             background: 'var(--color-d1)',
             color: 'var(--color-s-warn)',
-            border: 'var(--bw) solid var(--b2)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
             borderRadius: 'var(--radius-sm)',
             outline: 'none',
           }}
@@ -396,7 +396,7 @@ function ConfigEditDialog({
             fontSize: 'var(--font-size-data)',
             background: 'var(--color-d1)',
             color: 'var(--color-t3)',
-            border: 'var(--bw) solid var(--b2)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
             borderRadius: 'var(--radius-sm)',
             resize: 'vertical',
             minHeight: 60,
@@ -419,7 +419,7 @@ function ConfigEditDialog({
             fontSize: 'var(--font-size-data)',
             background: 'var(--color-d1)',
             color: 'var(--color-m-pas)',
-            border: 'var(--bw) solid var(--b2)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
             borderRadius: 'var(--radius-sm)',
             outline: 'none',
           }}
@@ -444,7 +444,7 @@ function ConfigEditDialog({
             fontSize: 'var(--font-size-data)',
             background: 'var(--color-d1)',
             color: 'var(--color-m-pas)',
-            border: 'var(--bw) solid var(--b2)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
             borderRadius: 'var(--radius-sm)',
             resize: 'vertical',
             minHeight: 80,
@@ -467,7 +467,7 @@ function ConfigEditDialog({
           fontSize: 'var(--font-size-data)',
           background: 'var(--color-d1)',
           color: 'var(--color-m-pas)',
-          border: 'var(--bw) solid var(--b2)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
           borderRadius: 'var(--radius-sm)',
           outline: 'none',
         }}
@@ -487,7 +487,7 @@ function ConfigEditDialog({
         className="flex flex-col overflow-hidden"
         style={{
           background: 'var(--color-d2)',
-          border: 'var(--bw) solid var(--b2)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
           borderRadius: 'var(--radius-lg)',
           width: 560,
           maxWidth: '90%',
@@ -575,7 +575,7 @@ function ConfigEditDialog({
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
             style={{
               fontSize: 'var(--font-size-heading)',
-              border: 'var(--bw) solid var(--color-m-cht)',
+              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--color-m-cht)',
               background: hasChanges ? 'var(--color-m-cht)' : 'transparent',
               color: hasChanges ? 'var(--color-d0)' : 'var(--color-t5)',
               opacity: saving ? 0.6 : 1,
@@ -659,7 +659,7 @@ function ModeSwitchDialog({
               style={{
                 padding: 'var(--sp-3) var(--sp-4)',
                 borderRadius: 'var(--radius-md)',
-                border: `var(--bw) solid ${isSelected ? `var(--m-${mk}-soft)` : 'var(--b1)'}`,
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: ` ${isSelected ? `var(--m-${mk}-soft)` : 'var(--b1)'}`,
                 background: isSelected ? `var(--m-${mk}-wash)` : 'var(--color-d1)',
                 opacity: switching ? 0.6 : 1,
               }}
@@ -772,7 +772,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
           gridTemplateColumns: 'repeat(6, 1fr)',
           gap: 'var(--sp-2)',
           background: 'var(--color-d1)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           padding: 'var(--sp-2)',
         }}
@@ -786,7 +786,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             style={{
               padding: 'var(--sp-3) var(--sp-4)',
               background: 'var(--color-d2)',
-              border: 'var(--bw) solid var(--b1)',
+              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
               borderRadius: 'var(--radius-md)',
             }}
           >
@@ -808,7 +808,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
         className="flex items-center justify-between"
         style={{
           background: 'var(--color-d2)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-lg)',
           padding: 'var(--sp-4) var(--sp-5)',
         }}
@@ -836,7 +836,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
           className="flex-1"
           style={{
             background: 'var(--color-d2)',
-            border: 'var(--bw) solid var(--b1)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
             borderRadius: 'var(--radius-lg)',
             overflow: 'hidden',
           }}
@@ -878,7 +878,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             width: 'var(--panel-actions)',
             flexShrink: 0,
             background: 'var(--color-d2)',
-            border: 'var(--bw) solid var(--b1)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
             borderRadius: 'var(--radius-lg)',
             overflow: 'hidden',
           }}
@@ -1002,7 +1002,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
   if (mode === 'passive') {
     return (
       <div
-        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)', padding: 'var(--sp-7)' }}
+        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
       >
         <EmptyState
           icon={<Bot size={40} strokeWidth={1.25} />}
@@ -1018,7 +1018,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
 
   return (
     <div
-      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)', padding: 'var(--sp-7)' }}
+      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
     >
       <div className="c-col-header mb-5">
         {mode} Configuration
@@ -1028,7 +1028,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
         className="font-mono overflow-x-auto whitespace-pre leading-relaxed"
         style={{
           background: 'var(--color-d1)',
-          border: 'var(--bw) solid var(--b1)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-md)',
           padding: '14px var(--sp-4)',
           fontSize: 'var(--font-size-data)',
@@ -1057,7 +1057,7 @@ function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance
   if (mode === 'passive') {
     return (
       <div
-        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)', padding: 'var(--sp-7)' }}
+        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12">
           <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
@@ -1074,7 +1074,7 @@ function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance
     const enrichUnproc = line.enrichmentUnprocessed ?? 0
     return (
       <div
-        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)', padding: 'var(--sp-7)' }}
+        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
           <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
@@ -1095,7 +1095,7 @@ function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance
   const sessions = line.activeSessions ?? 0
   return (
     <div
-      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)', padding: 'var(--sp-7)' }}
+      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
     >
       <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
         <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
@@ -1190,14 +1190,14 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
           <button
             onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
             className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
-            style={{ fontSize: 'var(--font-size-label)', border: 'var(--bw) solid var(--b2)' }}
+            style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
           >
             <UserCheck size={11} strokeWidth={1.75} /> Allow
           </button>
           <button
             onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
             className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
-            style={{ fontSize: 'var(--font-size-label)', border: 'var(--bw) solid var(--b2)' }}
+            style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
           >
             <Ban size={11} strokeWidth={1.75} /> Block
           </button>
@@ -1207,7 +1207,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
         <button
           onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
           className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
-          style={{ fontSize: 'var(--font-size-label)', border: 'var(--bw) solid var(--b2)' }}
+          style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
         >
           <Ban size={11} strokeWidth={1.75} />
         </button>
@@ -1216,7 +1216,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
         <button
           onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
           className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
-          style={{ fontSize: 'var(--font-size-label)', border: 'var(--bw) solid var(--b2)' }}
+          style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
         >
           <UserCheck size={11} strokeWidth={1.75} />
         </button>
@@ -1228,7 +1228,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
     <div className="space-y-4">
       {/* Pending queue */}
       {pending.length > 0 && (
-        <div className="rounded-lg overflow-hidden" style={{ border: 'var(--bw) solid var(--b1)' }}>
+        <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
             style={{ padding: '8px 14px', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
@@ -1241,7 +1241,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
 
       {/* Allowed + Blocked in two columns */}
       <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-lg overflow-hidden" style={{ border: 'var(--bw) solid var(--b1)' }}>
+        <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
             style={{ padding: '8px 14px', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
@@ -1250,7 +1250,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
           </div>
           {allowed.map(e => renderItem(e, 'allowed'))}
         </div>
-        <div className="rounded-lg overflow-hidden" style={{ border: 'var(--bw) solid var(--b1)' }}>
+        <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
             style={{ padding: '8px 14px', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
@@ -1460,7 +1460,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             fontSize: 'var(--font-size-body)',
             padding: 'var(--sp-2h) var(--sp-4)',
             background: 'var(--color-d1)',
-            border: 'var(--bw) solid var(--b2)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
             borderRadius: 'var(--radius-md)',
             maxHeight: '120px',
             resize: 'none',
@@ -1499,7 +1499,7 @@ function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, lineNam
   return (
     <div
       className="flex overflow-hidden h-full"
-      style={{ border: 'var(--bw) solid var(--b1)', borderRadius: 'var(--radius-lg)' }}
+      style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', borderRadius: 'var(--radius-lg)' }}
     >
       {/* Chat list */}
       <div
@@ -1561,7 +1561,7 @@ function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: s
   return (
     <div
       className="overflow-hidden"
-      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', border: 'var(--bw) solid var(--b1)' }}
+      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}
     >
       {/* Toolbar with level filter pills — matches established pattern */}
       <div
@@ -1586,7 +1586,7 @@ function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: s
       {/* Log viewer — c-log-line pattern */}
       <div
         className="rounded-lg overflow-hidden font-mono"
-        style={{ border: 'var(--bw) solid var(--b1)', background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
+        style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
       >
         {filtered.map((log, i) => (
           <div

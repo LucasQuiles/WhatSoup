@@ -38,7 +38,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         className="overflow-hidden"
         style={{
           background: 'var(--color-d2)',
-          border: 'var(--bw) solid var(--b2)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
           borderRadius: 'var(--radius-lg)',
           width: 'var(--panel-confirm)',
           maxWidth: '90%',
