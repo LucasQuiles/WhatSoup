@@ -140,7 +140,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>
           <span className="font-medium" style={headingStyle}>Model &amp; Auth</span>
-          <EditBtn onClick={() => onEditPhase(1)} />
+          <EditBtn onClick={() => onEditPhase(2)} />
         </div>
         {type === 'passive' ? (
           <KV label="Models" value="None (passive)" />
@@ -166,7 +166,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>
           <span className="font-medium" style={headingStyle}>Config</span>
-          <EditBtn onClick={() => onEditPhase(2)} />
+          <EditBtn onClick={() => onEditPhase(3)} />
         </div>
         <KV label="Access mode" value={accessLabels[accessMode] ?? accessMode} />
         {type !== 'passive' && systemPrompt && (
