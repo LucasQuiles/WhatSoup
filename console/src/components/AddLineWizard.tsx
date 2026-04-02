@@ -84,7 +84,11 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
   </div>
 )
 
-/* ── Step validation ── */
+/* ── Step validation ──
+ * Principle: normalize first, then validate the normalized value.
+ * Never reject what can be silently fixed (case, whitespace, formatting).
+ * Only block on genuinely missing or invalid data.
+ */
 const validateStep = (step: number, formData: Record<string, unknown>): Record<string, string> => {
   const errs: Record<string, string> = {}
   if (step === 0) {
