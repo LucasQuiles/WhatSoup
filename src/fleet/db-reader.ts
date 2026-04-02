@@ -26,6 +26,7 @@ export interface MessageRow {
   content_type: string;
   timestamp: number;
   is_from_me: number;
+  raw_message: string | null;
 }
 
 export interface AccessEntry {
@@ -131,7 +132,7 @@ export class FleetDbReader {
 
       return db.prepare(`
         SELECT pk, conversation_key, sender_jid, sender_name,
-               content, content_type, timestamp, is_from_me
+               content, content_type, timestamp, is_from_me, raw_message
         FROM messages m
         WHERE m.conversation_key = ? AND m.deleted_at IS NULL ${wherePk}
           AND m.pk = (

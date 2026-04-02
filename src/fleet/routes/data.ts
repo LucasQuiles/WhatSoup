@@ -193,6 +193,7 @@ export function handleGetMessages(
     type: row.content_type,
     timestamp: toIsoFromUnix(row.timestamp),
     fromMe: row.is_from_me === 1,
+    rawMessage: row.raw_message ?? null,
   }));
 
   jsonResponse(res, 200, messages);
