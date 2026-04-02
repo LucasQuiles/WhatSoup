@@ -1,5 +1,6 @@
 import { type FC, useState, useCallback, useRef, type KeyboardEvent } from 'react'
 import { X } from 'lucide-react'
+import { inputStyle } from './wizard/form-styles'
 
 interface TagInputProps {
   values: string[]
@@ -47,12 +48,8 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
         placeholder={placeholder ? `${placeholder} (press Enter to add)` : 'Press Enter to add'}
         className="w-full font-mono"
         style={{
-          background: 'var(--color-d1)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: (accentColor && values.length > 0) ? accentColor : 'var(--b2)',
-          borderRadius: 'var(--radius-sm)',
-          padding: 'var(--sp-2) var(--sp-3)',
-          fontSize: 'var(--font-size-data)',
-          color: 'var(--color-t1)',
+          ...inputStyle,
+          borderColor: (accentColor && values.length > 0) ? accentColor : 'var(--b2)',
         }}
       />
       {values.length > 0 && (
