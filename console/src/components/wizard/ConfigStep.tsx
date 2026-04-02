@@ -77,6 +77,18 @@ const SESSION_SCOPE_DESCRIPTIONS: Record<string, string> = {
   per_chat: 'Separate session per conversation \u2014 recommended',
 }
 
+const tabStyle = (active: boolean): React.CSSProperties => ({
+  padding: 'var(--sp-2) var(--sp-4)',
+  fontSize: 'var(--font-size-data)',
+  cursor: 'pointer',
+  borderBottomWidth: '2px',
+  borderBottomStyle: 'solid',
+  borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
+  color: active ? 'var(--color-t1)' : 'var(--color-t4)',
+  background: 'none',
+  transition: 'border-color 0.2s ease, color 0.2s ease',
+})
+
 const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
   const type = (data.type as string) ?? 'chat'
   const accessMode = (data.accessMode as string) ?? 'self_only'
@@ -161,17 +173,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
   const [activeTab, setActiveTab] = useState<string>('access')
 
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    padding: 'var(--sp-2) var(--sp-4)',
-    fontSize: 'var(--font-size-data)',
-    cursor: 'pointer',
-    borderBottomWidth: '2px',
-    borderBottomStyle: 'solid',
-    borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
-    color: active ? 'var(--color-t1)' : 'var(--color-t4)',
-    background: 'none',
-    transition: 'border-color 0.2s ease, color 0.2s ease',
-  })
+
 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
