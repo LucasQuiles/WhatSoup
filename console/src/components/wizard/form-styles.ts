@@ -22,13 +22,13 @@ export const labelStyle: React.CSSProperties = {
 }
 
 export const helperStyle: React.CSSProperties = {
-  fontSize: 'var(--font-size-xs)',
+  fontSize: 'var(--font-size-data)',
   color: 'var(--color-t4)',
   marginTop: 'var(--sp-1)',
 }
 
 export const errorStyle: React.CSSProperties = {
-  fontSize: 'var(--font-size-xs)',
+  fontSize: 'var(--font-size-data)',
   color: 'var(--color-s-crit)',
   marginTop: 'var(--sp-1)',
 }
