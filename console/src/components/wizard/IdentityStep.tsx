@@ -182,7 +182,13 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
           )}
         </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
-        {!errors.adminPhones && <div style={helperStyle}>Phone numbers with full admin access to this line. Use international format without the +.</div>}
+        {!errors.adminPhones && <div style={helperStyle}>{
+          adminPhones.length === 0
+            ? 'Phone numbers with full admin access to this line. Use international format without the +.'
+            : adminPhones.length === 1
+              ? 'Add another number for shared admin access, or continue with one.'
+              : `${adminPhones.length} admin numbers configured.`
+        }</div>}
       </div>
     </div>
   )
