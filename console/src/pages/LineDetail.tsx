@@ -16,12 +16,15 @@ import MessageBubble from '../components/MessageBubble'
 import FilterPill from '../components/FilterPill'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
+import RelinkModal from '../components/RelinkModal'
+import EditConfigModal from '../components/EditConfigModal'
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield, Send,
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
   User, Users, UserPlus, UserX,
   RotateCw, MessageSquareOff, Bot, ChevronsUp, Power,
   X, AlertTriangle, Save, Loader2,
+  Trash2, Link2, Settings,
 } from 'lucide-react'
 import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../types'
 
@@ -85,7 +88,26 @@ export default function LineDetail() {
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
   const { data: messages } = useMessages(name || '', selectedChat || '')
   const toast = useToast()
+  const queryClient = useQueryClient()
   const [logFilter, setLogFilter] = useState<string>('all')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showRelink, setShowRelink] = useState(false)
+  const [showEditConfig, setShowEditConfig] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
+  const handleDelete = useCallback(async () => {
+    setDeleting(true)
+    try {
+      await api.deleteLine(line!.name)
+      toast.success(`${line!.name} deleted`)
+      navigate('/ops')
+    } catch (err) {
+      toast.error(`Delete failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setDeleting(false)
+      setShowDeleteConfirm(false)
+    }
+  }, [line, toast, navigate])
 
   if (!line) {
     return (
@@ -156,15 +178,44 @@ export default function LineDetail() {
           <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
         </div>
 
-        {/* Heartbeat + Restart */}
+        {/* Heartbeat + Actions */}
         <HeartbeatStrip beats={line.heartbeat} />
-        <button
-          onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-t3 hover:text-t1 hover:bg-d5 cursor-pointer c-hover"
-          style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
-        >
-          <RotateCw size={11} strokeWidth={1.75} /> Restart
-        </button>
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+          {line.linkedStatus === 'unlinked' && (
+            <button
+              onClick={() => setShowRelink(true)}
+              className="c-btn c-btn-ghost"
+              style={{ fontSize: 'var(--font-size-label)' }}
+            >
+              <Link2 size={11} strokeWidth={1.75} /> Re-link
+            </button>
+          )}
+          {line.linkedStatus !== 'unlinked' && (
+            <button
+              onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
+              className="c-btn c-btn-ghost"
+              style={{ fontSize: 'var(--font-size-label)' }}
+            >
+              <RotateCw size={11} strokeWidth={1.75} /> Restart
+            </button>
+          )}
+          {line.status !== 'online' && (
+            <button
+              onClick={() => setShowEditConfig(true)}
+              className="c-btn c-btn-ghost"
+              style={{ fontSize: 'var(--font-size-label)' }}
+            >
+              <Settings size={11} strokeWidth={1.75} /> Configure
+            </button>
+          )}
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="c-btn c-btn-ghost"
+            style={{ fontSize: 'var(--font-size-label)', color: 'var(--color-s-crit)' }}
+          >
+            <Trash2 size={11} strokeWidth={1.75} /> Delete
+          </button>
+        </div>
       </div>
 
       {/* ═══ Tab bar + content container ═══ */}
@@ -191,7 +242,7 @@ export default function LineDetail() {
                   ? 'text-t1 cursor-pointer'
                   : 'text-t4 hover:text-t3 cursor-pointer'
               }`}
-              style={{ padding: '10px var(--sp-4)', fontSize: 'var(--font-size-data)' }}
+              style={{ padding: 'var(--sp-2h) var(--sp-4)', fontSize: 'var(--font-size-data)' }}
               title={isDeferred ? 'Coming in Phase 2' : undefined}
             >
               <Icon size={15} strokeWidth={1.75} />
@@ -243,6 +294,33 @@ export default function LineDetail() {
         </AnimatePresence>
       </div>
       </div>
+
+      {/* ═══ Modals ═══ */}
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        title={`Delete ${line?.name}?`}
+        confirmLabel={deleting ? 'Deleting...' : 'Delete permanently'}
+        confirmVariant="danger"
+        confirmIcon={deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+        onConfirm={handleDelete}
+        onCancel={() => setShowDeleteConfirm(false)}
+      >
+        This will stop the process, remove all configuration, data, and message history for <strong>{line?.name}</strong>. This cannot be undone.
+      </ConfirmDialog>
+
+      <RelinkModal
+        lineName={line?.name ?? ''}
+        open={showRelink}
+        onClose={() => setShowRelink(false)}
+        onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
+      />
+
+      <EditConfigModal
+        lineName={line?.name ?? ''}
+        open={showEditConfig}
+        onClose={() => setShowEditConfig(false)}
+        onSaved={() => { setShowEditConfig(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success('Config saved'); }}
+      />
     </div>
   )
 }
@@ -1030,7 +1108,7 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
           background: 'var(--color-d1)',
           borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
           borderRadius: 'var(--radius-md)',
-          padding: '14px var(--sp-4)',
+          padding: 'var(--msg-pad-h) var(--sp-4)',
           fontSize: 'var(--font-size-data)',
           color: 'var(--color-t2)',
         }}
@@ -1146,7 +1224,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
       key={entry.subjectId}
       className="flex items-center gap-3 hover:bg-d3 c-hover"
       style={{
-        padding: '10px var(--sp-4)',
+        padding: 'var(--sp-2h) var(--sp-4)',
         borderBottom: 'var(--bw) solid var(--b1)',
         ...(showActions === 'pending' ? { background: 'var(--s-warn-wash)' } : {}),
         ...(showActions === 'blocked' ? { opacity: 0.6 } : {}),
@@ -1231,7 +1309,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
         <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
-            style={{ padding: '8px 14px', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
+            style={{ padding: 'var(--sp-2) var(--msg-pad-h)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
           >
             Pending ({pending.length})
           </div>
@@ -1244,7 +1322,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
         <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
-            style={{ padding: '8px 14px', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
+            style={{ padding: 'var(--sp-2) var(--msg-pad-h)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
           >
             Allowed ({allowed.length})
           </div>
@@ -1253,7 +1331,7 @@ function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: stri
         <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
-            style={{ padding: '8px 14px', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
+            style={{ padding: 'var(--sp-2) var(--msg-pad-h)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
           >
             Blocked ({blocked.length})
           </div>
