@@ -123,8 +123,15 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
         <>
           {inst}
           <Badge>{d.toolName}</Badge>
-          <span className="text-s-crit" style={{ marginLeft: "var(--sp-1)" }}>
-            {d.error.length > 80 ? d.error.slice(0, 80) + "\u2026" : d.error}
+          <span
+            className="text-s-crit"
+            style={{
+              marginLeft: "var(--sp-1)",
+              wordBreak: "break-word",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {d.error.length > 200 ? d.error.slice(0, 200) + "\u2026" : d.error}
           </span>
         </>
       );
@@ -147,9 +154,12 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
     case "message": {
       const dirColor = d.direction === "inbound" ? "text-m-cht" : "text-m-agt";
       const chatShort = d.chatJid ? d.chatJid.replace(/@.*/, "").slice(-8) : undefined;
-      // Detect collapsed count from backend (text like "instance: sent ×N to chatJid")
       const countMatch = event.text.match(/\u00d7(\d+)/);
       const count = countMatch ? parseInt(countMatch[1], 10) : undefined;
+      const isNonText = d.contentType && d.contentType !== "text";
+      const preview = d.preview
+        ? (d.preview.length > 80 ? d.preview.slice(0, 77) + "\u2026" : d.preview)
+        : undefined;
       return (
         <>
           {inst}
@@ -157,7 +167,20 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
             {d.direction === "inbound" ? "recv" : "sent"}
             {count && count > 1 ? ` \u00d7${count}` : ""}
           </Badge>
-          {chatShort && <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{chatShort}</span>}
+          {d.senderName && d.direction === "inbound" && (
+            <span className="text-t2 font-medium" style={{ marginLeft: "var(--sp-1)" }}>{d.senderName}</span>
+          )}
+          {!d.senderName && chatShort && (
+            <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{chatShort}</span>
+          )}
+          {isNonText && (
+            <span className="text-t5" style={{ marginLeft: "var(--sp-1)" }}>[{d.contentType}]</span>
+          )}
+          {preview && (
+            <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>
+              {preview}
+            </span>
+          )}
         </>
       );
     }
