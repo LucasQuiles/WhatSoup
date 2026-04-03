@@ -1,4 +1,6 @@
 import React, { useState, useCallback } from 'react'
+import TagInput from '../components/TagInput'
+import { validatePhone } from '../lib/validation'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -328,7 +330,7 @@ export default function LineDetail() {
 }
 
 /* ═══ Config helpers — build entries dynamically from real instance config ═══ */
-const CONFIG_EXCLUDE_KEYS = new Set(['name', 'type', 'adminPhones', 'paths', 'healthPort'])
+const CONFIG_EXCLUDE_KEYS = new Set(['name', 'type', 'paths', 'healthPort'])
 
 const CONFIG_PATH_KEYS = new Set(['cwd', 'instructionsPath', 'socketPath', 'configDir', 'dataDir', 'stateDir'])
 
@@ -459,6 +461,20 @@ function ConfigEditDialog({
             borderRadius: 'var(--radius-sm)',
             outline: 'none',
           }}
+        />
+      )
+    }
+
+    // Array of strings -> TagInput
+    if (Array.isArray(originalValue) && originalValue.every(v => typeof v === 'string')) {
+      const values = (val as string[]) ?? []
+      return (
+        <TagInput
+          values={values}
+          onChange={(newValues) => setField(key, newValues)}
+          placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
+          validate={key === 'adminPhones' ? validatePhone : undefined}
+          accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
         />
       )
     }
