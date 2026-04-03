@@ -217,7 +217,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
       key="copy"
       className="fc-action"
       aria-label="Copy to clipboard"
-      title="Copy"
       onClick={(e) => {
         e.stopPropagation();
         const text = copyContent(event);
@@ -237,7 +236,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
         key="jump"
         className="fc-action"
         aria-label="Open conversation"
-        title="Open conversation"
         onClick={(e) => {
           e.stopPropagation();
           onNavigate(`/inbox?line=${encodeURIComponent(inst)}&chat=${encodeURIComponent(ck)}`);
@@ -259,7 +257,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
           key="restart"
           className="fc-action"
           aria-label={`Restart ${inst}`}
-          title="Restart"
           onClick={(e) => { e.stopPropagation(); onRestart(inst); }}
         >
           <RotateCw size={12} strokeWidth={2} />
@@ -279,7 +276,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
           key="stop"
           className="fc-action fc-action--danger"
           aria-label={`Stop ${inst} line`}
-          title="Stop line"
           onClick={(e) => { e.stopPropagation(); onStop(inst); }}
         >
           <Square size={12} strokeWidth={2} />
