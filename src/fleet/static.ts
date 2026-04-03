@@ -18,7 +18,7 @@ const MIME_TYPES: Record<string, string> = {
   '.map': 'application/json',
 };
 
-export function createStaticHandler(distDir: string, fleetToken?: string) {
+export function createStaticHandler(distDir: string, fleetToken?: string, version?: string) {
   return (req: IncomingMessage, res: ServerResponse): boolean => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
@@ -30,7 +30,7 @@ export function createStaticHandler(distDir: string, fleetToken?: string) {
 
     // Helper: serve HTML with token injection when applicable
     const serveHtml = (htmlPath: string) =>
-      fleetToken ? serveHtmlWithToken(htmlPath, fleetToken, res) : serveFile(htmlPath, res);
+      (fleetToken && version) ? serveHtmlWithMeta(htmlPath, fleetToken, version, res) : serveFile(htmlPath, res);
 
     // Try exact file first
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
@@ -58,12 +58,13 @@ export function createStaticHandler(distDir: string, fleetToken?: string) {
   };
 }
 
-function serveHtmlWithToken(filePath: string, token: string, res: ServerResponse): boolean {
+function serveHtmlWithMeta(filePath: string, token: string, version: string, res: ServerResponse): boolean {
   try {
     let html = fs.readFileSync(filePath, 'utf-8');
-    // Inject fleet token meta tag before </head> — sanitize to prevent XSS
+    // Inject fleet token and version meta tags before </head> — sanitize to prevent XSS
     const safeToken = token.replace(/[^0-9a-zA-Z_\-]/g, '');
-    const meta = `<meta name="fleet-token" content="${safeToken}">`;
+    const safeVersion = version.replace(/[^0-9a-zA-Z_\-]/g, '');
+    const meta = `<meta name="fleet-token" content="${safeToken}">\n<meta name="fleet-version" content="${safeVersion}">`;
     html = html.replace('</head>', `${meta}\n</head>`);
     const buf = Buffer.from(html, 'utf-8');
     res.writeHead(200, {

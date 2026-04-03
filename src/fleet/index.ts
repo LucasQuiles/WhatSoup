@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
 import { jsonResponse, checkBearerAuth, parseRoute, parseQueryString, readBody } from '../lib/http.ts';
 import { FleetDiscovery } from './discovery.ts';
@@ -12,8 +13,12 @@ import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
+import { handleGetVersion, handleUpdate } from './routes/update.ts';
+import { UpdateChecker } from './update-checker.ts';
 import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
+
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
 const log = createChildLogger('fleet');
 
@@ -29,6 +34,7 @@ export interface RouteDeps {
   healthPoller: HealthPoller;
   dbReader: FleetDbReader;
   log: typeof log;
+  updateChecker: UpdateChecker;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +67,8 @@ const handlers: Record<string, HandlerFn> = {
   checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params as any),
   checkDirectory: (req, res) => handleCheckDirectory(req, res),
   auth:         (req, res, deps, params) => handleAuth(req, res, deps, params as any),
+  getVersion:   (_req, res, deps, _params) => handleGetVersion(_req, res, deps.updateChecker),
+  update:       (req, res, deps, _params) => handleUpdate(req, res, deps.updateChecker, repoRoot),
 };
 
 // ---------------------------------------------------------------------------
@@ -111,6 +119,8 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/auth$/, handler: 'auth' },
+  { method: 'GET',   path: /^\/api\/version$/, handler: 'getVersion' },
+  { method: 'POST',  path: /^\/api\/update$/,  handler: 'update' },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -128,9 +138,17 @@ export function createFleetServer(deps: FleetDeps) {
 
   // Determine dist directory for static files
   const distDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');
-  const staticHandler = createStaticHandler(distDir, deps.fleetToken);
 
-  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, log };
+  // Read initial git SHA for HTML injection
+  let initialSha = 'unknown';
+  try {
+    initialSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot }).toString().trim();
+  } catch { /* git not available */ }
+
+  const staticHandler = createStaticHandler(distDir, deps.fleetToken, initialSha);
+
+  const updateChecker = new UpdateChecker(repoRoot);
+  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, log, updateChecker };
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -186,6 +204,7 @@ export function createFleetServer(deps: FleetDeps) {
     start(port: number): void {
       discovery.startAutoRefresh();
       healthPoller.start();
+      updateChecker.start();
       server.listen(port, '127.0.0.1', () => {
         log.info({ port }, 'fleet server listening');
       });
@@ -193,6 +212,7 @@ export function createFleetServer(deps: FleetDeps) {
     stop(): void {
       healthPoller.stop();
       discovery.stop();
+      updateChecker.stop();
       server.close();
     },
   };
