@@ -11,6 +11,18 @@ import * as mock from '../mock-data';
 
 const API_BASE = '';
 
+/** Read the fleet token from the meta tag injected by the production server. */
+function getFleetToken(): string | null {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]');
+  return meta?.content || null;
+}
+
+/** Build auth headers — Bearer token in production, empty in dev (proxy handles it). */
+function authHeaders(): Record<string, string> {
+  const token = getFleetToken();
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+}
+
 let fleetAvailable: boolean | null = null;
 let checkInFlight: Promise<boolean> | null = null;
 
@@ -24,6 +36,7 @@ async function checkFleetAvailable(): Promise<boolean> {
       const timer = setTimeout(() => controller.abort(), 1500);
       const res = await fetch(`${API_BASE}/api/lines`, {
         signal: controller.signal,
+        headers: authHeaders(),
       });
       clearTimeout(timer);
       fleetAvailable = res.ok;
@@ -43,6 +56,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
       ...init?.headers,
     },
     signal: init?.signal ?? AbortSignal.timeout(5000),

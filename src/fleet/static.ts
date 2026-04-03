@@ -28,14 +28,21 @@ export function createStaticHandler(distDir: string, fleetToken?: string) {
     const safePath = path.normalize(url).replace(/^(\.\.[/\\])+/, '');
     let filePath = path.join(distDir, safePath);
 
+    // Helper: serve HTML with token injection when applicable
+    const serveHtml = (htmlPath: string) =>
+      fleetToken ? serveHtmlWithToken(htmlPath, fleetToken, res) : serveFile(htmlPath, res);
+
     // Try exact file first
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      // Inject token into any HTML file (index.html at root or nested)
+      if (path.extname(filePath) === '.html') return serveHtml(filePath);
       return serveFile(filePath, res);
     }
 
     // Try with index.html for directory requests
-    if (fs.existsSync(path.join(filePath, 'index.html'))) {
-      return serveFile(path.join(filePath, 'index.html'), res);
+    const dirIndex = path.join(filePath, 'index.html');
+    if (fs.existsSync(dirIndex)) {
+      return serveHtml(dirIndex);
     }
 
     // SPA fallback: non-API routes without file extensions → index.html
@@ -43,11 +50,7 @@ export function createStaticHandler(distDir: string, fleetToken?: string) {
     if (!ext && !url.startsWith('/api/')) {
       const indexPath = path.join(distDir, 'index.html');
       if (fs.existsSync(indexPath)) {
-        // Inject fleet token meta tag for EventSource auth in production
-        if (fleetToken) {
-          return serveHtmlWithToken(indexPath, fleetToken, res);
-        }
-        return serveFile(indexPath, res);
+        return serveHtml(indexPath);
       }
     }
 
