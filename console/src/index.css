@@ -395,8 +395,8 @@ body::before {
   border-bottom: var(--bw) solid var(--b1);
   border-left: var(--bw-accent) solid transparent;
   outline: none;
-  animation: fc-enter 120ms ease-out both;
-  transition: background-color var(--dur-fast) ease;
+  animation: fc-enter 120ms var(--ease) both;
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .fc:hover,
@@ -549,7 +549,7 @@ body::before {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width var(--dur-norm) ease, opacity var(--dur-fast) ease, margin var(--dur-norm) ease;
+  transition: max-width var(--dur-norm) var(--ease), opacity var(--dur-fast) var(--ease), margin var(--dur-norm) var(--ease);
   margin-left: 0;
 }
 
@@ -571,7 +571,8 @@ body::before {
   border-color: var(--s-crit-border);
 }
 
-.fc-action--danger:hover {
+.fc-action--danger:hover,
+.fc-action--danger:focus-visible {
   color: var(--color-s-crit);
   background: var(--s-crit-wash);
   border-color: var(--s-crit-soft);

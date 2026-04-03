@@ -68,23 +68,46 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
   const errorCount = useMemo(() => displayEvents.filter((e) => e.isError).length, [displayEvents]);
 
+  // Only the newest error card per instance gets restart/stop actions
+  const actionableKeys = useMemo(() => {
+    const seen = new Set<string>();
+    const keys = new Set<string>();
+    for (const event of filtered) {
+      const inst = event.instance;
+      if (inst && event.isError && !seen.has(inst)) {
+        seen.add(inst);
+        keys.add(eventKey(event));
+      }
+    }
+    return keys;
+  }, [filtered]);
+
+  // Track in-flight instance actions to prevent double-clicks
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+
   const handleRestart = (instance: string) => {
+    if (pendingAction) return;
+    setPendingAction(instance);
     toast.info(`Restarting ${instance}...`);
     api.restart(instance)
       .then(() => toast.success(`${instance} restart requested`))
-      .catch((err: Error) => toast.error(`Failed to restart: ${err.message}`));
+      .catch((err: Error) => toast.error(`Failed to restart: ${err.message}`))
+      .finally(() => setPendingAction(null));
   };
 
   const handleStop = (instance: string) => {
+    if (pendingAction) return;
     setStopTarget(instance);
   };
 
   const confirmStop = () => {
     if (!stopTarget) return;
+    setPendingAction(stopTarget);
     toast.info(`Stopping ${stopTarget}...`);
     api.stopInstance(stopTarget)
       .then(() => toast.success(`${stopTarget} stop requested`))
-      .catch((err: Error) => toast.error(`Failed to stop: ${err.message}`));
+      .catch((err: Error) => toast.error(`Failed to stop: ${err.message}`))
+      .finally(() => setPendingAction(null));
     setStopTarget(null);
   };
 
@@ -184,16 +207,20 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
       {/* ── Feed stream ── */}
       <div className="feed-stream">
-        {filtered.map((event) => (
-          <FeedCard
-            key={eventKey(event)}
-            event={event}
-            onRestart={handleRestart}
-            onStop={handleStop}
-            onNavigate={handleNavigate}
-            onCopyResult={handleCopyResult}
-          />
-        ))}
+        {filtered.map((event) => {
+          const key = eventKey(event);
+          const canAct = actionableKeys.has(key);
+          return (
+            <FeedCard
+              key={key}
+              event={event}
+              onRestart={canAct ? handleRestart : undefined}
+              onStop={canAct ? handleStop : undefined}
+              onNavigate={handleNavigate}
+              onCopyResult={handleCopyResult}
+            />
+          );
+        })}
 
         {filtered.length === 0 && (
           <div className="feed-empty">
