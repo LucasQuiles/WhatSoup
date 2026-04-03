@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import { normalizePhoneE164 } from '../../lib/phone.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
@@ -351,7 +352,7 @@ export async function handleCreateLine(
     jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
     return;
   }
-  adminPhones = [...new Set((adminPhones as string[]).map((p: string) => p.replace(/\D/g, '')))];
+  adminPhones = [...new Set((adminPhones as string[]).map((p: string) => normalizePhoneE164(p)))];
 
   // --- Type-specific validation ---
   // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.

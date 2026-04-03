@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { normalizePhoneE164 } from './lib/phone.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -104,8 +105,8 @@ const rawAdminPhones: string[] = instance
       ? (instance.adminPhones as string[])
       : [])
   : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
-// Normalize to digits-only so "+1-845-978-0919" becomes "18459780919"
-const resolvedAdminPhones = rawAdminPhones.map(p => p.replace(/\D/g, ''));
+// Normalize to E.164 digits — "845-978-0919" → "18459780919", "+1 845 978 0919" → "18459780919"
+const resolvedAdminPhones = rawAdminPhones.map(normalizePhoneE164);
 
 // ---------------------------------------------------------------------------
 // Default system prompt (extracted for readability)

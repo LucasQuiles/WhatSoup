@@ -19,6 +19,19 @@ export function normalizePhone(input: string): string {
 }
 
 /**
+ * Normalize a phone number to E.164 digits (with country code).
+ *
+ * If the number is 10 digits (US/CA), prepends "1".
+ * Otherwise returns digits-only as-is.
+ */
+export function normalizePhoneE164(input: string): string {
+  const digits = input.replace(/\D/g, '');
+  // 10-digit NANP number → prepend country code 1
+  if (digits.length === 10) return `1${digits}`;
+  return digits;
+}
+
+/**
  * Check if a phone number (from a JID) matches any admin phone.
  *
  * Uses suffix matching: if the extracted phone is "18459780919" and
