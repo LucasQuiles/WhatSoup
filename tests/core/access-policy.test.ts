@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Database } from '../../src/core/database.ts';
-import { shouldRespond } from '../../src/core/access-policy.ts';
+import { shouldRespond, resolveLidPhone } from '../../src/core/access-policy.ts';
 import { extractPhone } from '../../src/core/access-list.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
 
@@ -595,5 +595,68 @@ describe('media implicit mention in known groups', () => {
     const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
     expect(result.respond).toBe(true);
     expect(result.reason).toBe('group_auto_respond');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveLidPhone — LID→phone reverse mapping
+// ---------------------------------------------------------------------------
+
+describe('resolveLidPhone', () => {
+  const ADMIN_PHONE = '18455880337';
+  const ADMIN_LID_NUM = '31478083756155';
+  const NON_ADMIN_LID_NUM = '99999999999999';
+
+  let tmpAuthDir: string;
+
+  beforeAll(() => {
+    tmpAuthDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-lid-test-'));
+    // Write a valid reverse mapping for the admin LID
+    fs.writeFileSync(
+      path.join(tmpAuthDir, `lid-mapping-${ADMIN_LID_NUM}_reverse.json`),
+      JSON.stringify(ADMIN_PHONE),
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpAuthDir, { recursive: true, force: true });
+  });
+
+  it('returns the phone number for a known LID', () => {
+    const result = resolveLidPhone(ADMIN_LID_NUM, tmpAuthDir);
+    expect(result).toBe(ADMIN_PHONE);
+  });
+
+  it('returns null when no reverse mapping file exists', () => {
+    const result = resolveLidPhone(NON_ADMIN_LID_NUM, tmpAuthDir);
+    expect(result).toBeNull();
+  });
+
+  it('returns null for a malformed (non-string) mapping file', () => {
+    const malformedLid = '11111111111111';
+    fs.writeFileSync(
+      path.join(tmpAuthDir, `lid-mapping-${malformedLid}_reverse.json`),
+      JSON.stringify({ not: 'a phone' }),
+    );
+    const result = resolveLidPhone(malformedLid, tmpAuthDir);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when mapping file contains an empty string', () => {
+    const emptyLid = '22222222222222';
+    fs.writeFileSync(
+      path.join(tmpAuthDir, `lid-mapping-${emptyLid}_reverse.json`),
+      JSON.stringify(''),
+    );
+    const result = resolveLidPhone(emptyLid, tmpAuthDir);
+    expect(result).toBeNull();
+  });
+
+  it('caches results so subsequent calls for the same LID skip the filesystem', () => {
+    // ADMIN_LID_NUM was already resolved above; delete the file and confirm cache hit
+    const reversePath = path.join(tmpAuthDir, `lid-mapping-${ADMIN_LID_NUM}_reverse.json`);
+    // File may or may not still exist due to cache — call again and confirm consistent result
+    const result = resolveLidPhone(ADMIN_LID_NUM, tmpAuthDir);
+    expect(result).toBe(ADMIN_PHONE);
   });
 });

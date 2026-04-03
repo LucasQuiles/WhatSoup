@@ -1,9 +1,40 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { lookupAccess, extractPhone } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
 import { isAdminPhone } from '../lib/phone.ts';
+
+/**
+ * Resolve a LID number to a phone number via the Baileys reverse-mapping file.
+ *
+ * Baileys writes `lid-mapping-{lid}_reverse.json` containing the E.164 phone
+ * string when it receives a lid-mapping.update event. Returns null if the file
+ * doesn't exist or is malformed.
+ *
+ * The results are cached in memory so repeated calls for the same LID within a
+ * process lifetime don't hit the filesystem.
+ */
+const _lidPhoneCache = new Map<string, string | null>();
+
+export function resolveLidPhone(lidNum: string, authDir: string): string | null {
+  if (_lidPhoneCache.has(lidNum)) return _lidPhoneCache.get(lidNum)!;
+  const filePath = join(authDir, `lid-mapping-${lidNum}_reverse.json`);
+  try {
+    const raw = readFileSync(filePath, 'utf8').trim();
+    const phone = JSON.parse(raw);
+    if (typeof phone === 'string' && phone.length > 0) {
+      _lidPhoneCache.set(lidNum, phone);
+      return phone;
+    }
+  } catch {
+    // File absent or malformed — treat as unresolvable
+  }
+  _lidPhoneCache.set(lidNum, null);
+  return null;
+}
 
 const log = createChildLogger('conversation');
 
@@ -60,11 +91,26 @@ export function shouldRespond(
       log.debug({ messageId: msg.messageId }, 'trigger: self_only rejects groups');
       return { respond: false, reason: 'self_only_no_groups' };
     }
-    if (isAdminPhone(phone, config.adminPhones)) {
-      log.debug({ messageId: msg.messageId, phone }, 'trigger: self_only admin DM → respond');
+
+    // For LID senders, the extracted "phone" is an opaque LID number unrelated
+    // to the real phone — resolve it from the Baileys reverse-mapping file.
+    let effectivePhone = phone;
+    if (msg.senderJid.endsWith('@lid')) {
+      const resolved = resolveLidPhone(phone, config.authDir);
+      if (resolved !== null) {
+        effectivePhone = resolved;
+        log.debug({ messageId: msg.messageId, lid: phone, resolvedPhone: effectivePhone }, 'trigger: resolved LID → phone');
+      } else {
+        log.debug({ messageId: msg.messageId, lid: phone }, 'trigger: LID phone unresolvable, self_only rejects');
+        return { respond: false, reason: 'self_only_rejected', accessStatus: 'blocked' };
+      }
+    }
+
+    if (isAdminPhone(effectivePhone, config.adminPhones)) {
+      log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: self_only admin DM → respond');
       return { respond: true, reason: 'self_only_admin', accessStatus: 'allowed' };
     }
-    log.debug({ messageId: msg.messageId, phone }, 'trigger: self_only rejects non-admin');
+    log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: self_only rejects non-admin');
     return { respond: false, reason: 'self_only_rejected', accessStatus: 'blocked' };
   }
 
