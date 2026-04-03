@@ -3,6 +3,7 @@ import { RotateCw, Square, Copy, ExternalLink } from "lucide-react";
 import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
 import { formatTimeWithSeconds } from "../lib/format-time";
+import { formatWhatsAppText } from "../lib/format-wa-text";
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -132,7 +133,7 @@ function MessageBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["det
       />
       {d.preview && (
         <div className="fc-body-text">
-          {d.preview}
+          {formatWhatsAppText(d.preview)}
         </div>
       )}
     </>
@@ -144,7 +145,7 @@ function ToolErrorBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["d
     <>
       <CardHeader event={event} label={d.toolName} labelClass="fc-label--crit" />
       <div className="fc-body-text fc-body-text--error">
-        {d.error}
+        {formatWhatsAppText(d.error)}
       </div>
     </>
   );
