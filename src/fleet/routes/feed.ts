@@ -11,7 +11,7 @@ export interface FeedDeps {
 }
 
 type FeedDetail =
-  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean }
+  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean; state?: 'connecting' | 'connected' | 'disconnected' }
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
@@ -84,24 +84,47 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | 'noi
     ...(isWarnOrAbove ? { isError: true } : {}),
   };
 
-  // 1. Connection error
-  if (/stream errored out|WhatsApp connection closed/i.test(msg)) {
-    const directCode = typeof obj.statusCode === 'number' ? obj.statusCode : undefined;
+  // 1a. Connection error — "WhatsApp connection closed" (richer, has reason)
+  if (/WhatsApp connection closed/i.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'connection',
+        statusCode: typeof obj.statusCode === 'number' ? obj.statusCode : undefined,
+        reason: typeof obj.reason === 'string' ? obj.reason : undefined,
+      },
+    };
+  }
+
+  // 1b. Connection error — "stream errored out" (low-level Baileys, often duplicates 1a)
+  if (/stream errored out/i.test(msg)) {
     const fullErr = obj.fullErrorNode as { attrs?: { code?: string } } | undefined;
     const errCode = fullErr?.attrs?.code ? parseInt(fullErr.attrs.code, 10) : undefined;
     return {
       ...base,
       detail: {
         type: 'connection',
-        statusCode: directCode ?? errCode,
-        reason: typeof obj.reason === 'string' ? obj.reason : undefined,
+        statusCode: errCode,
+        // Mark as stream-level so coalescer can suppress when a richer event exists
+        reason: '_streamError',
       },
     };
   }
 
-  // 2. Reconnect
+  // 2. Reconnect scheduling
   if (/Scheduling reconnect/i.test(msg)) {
     return { ...base, detail: { type: 'connection', reconnecting: true } };
+  }
+
+  // 2b. Connection state transitions
+  if (/^Connecting to WhatsApp$/i.test(msg)) {
+    return { ...base, detail: { type: 'connection', state: 'connecting' } };
+  }
+  if (/^WhatsApp connected$/i.test(msg)) {
+    return { ...base, detail: { type: 'connection', state: 'connected' } };
+  }
+  if (/client disconnected/i.test(msg)) {
+    return { ...base, detail: { type: 'connection', state: 'disconnected' } };
   }
 
   // 3. Tool error
@@ -244,6 +267,150 @@ function synthesizeHealthEvents(
 }
 
 // ---------------------------------------------------------------------------
+// Post-parse coalescing
+// ---------------------------------------------------------------------------
+
+/**
+ * Coalesce connection lifecycle events per instance within the same second.
+ * A disconnect/reconnect cycle (error → reconnecting → connecting → connected)
+ * becomes one summary card. Also suppresses stream-error duplicates when a
+ * richer connection-closed event exists for the same instance+second.
+ */
+function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
+  // Group connection events by instance + second
+  const connGroups = new Map<string, FeedEvent[]>();
+  const nonConn: FeedEvent[] = [];
+
+  for (const e of events) {
+    const d = e.detail;
+    if (d?.type === 'connection' && e.instance) {
+      const sec = e.time.slice(0, 19); // ISO second precision
+      const key = `${e.instance}|${sec}`;
+      const group = connGroups.get(key);
+      if (group) group.push(e);
+      else connGroups.set(key, [e]);
+    } else {
+      nonConn.push(e);
+    }
+  }
+
+  const result = [...nonConn];
+
+  for (const group of connGroups.values()) {
+    if (group.length === 1) {
+      result.push(group[0]);
+      continue;
+    }
+
+    // Find the richest error event (prefer connection-closed over stream-error)
+    const errors = group.filter(e => {
+      const d = e.detail as { type: 'connection'; reason?: string; reconnecting?: boolean; state?: string };
+      return !d.reconnecting && !d.state && d.reason !== '_streamError';
+    });
+    const streamErrors = group.filter(e => {
+      const d = e.detail as { type: 'connection'; reason?: string };
+      return d.reason === '_streamError';
+    });
+    const reconnects = group.filter(e => (e.detail as { reconnecting?: boolean }).reconnecting);
+    const states = group.filter(e => (e.detail as { state?: string }).state);
+
+    // Pick the best error event, or fall back to stream error
+    const bestError = errors[0] ?? streamErrors[0];
+
+    if (bestError) {
+      // Build a merged event: error + reconnecting status + final state
+      const d = bestError.detail as { type: 'connection'; statusCode?: number; reason?: string };
+      const finalState = states.find(e => (e.detail as { state?: string }).state === 'connected');
+      const isReconnecting = reconnects.length > 0;
+      const reconnected = !!finalState;
+
+      const reason = d.reason === '_streamError' ? undefined : d.reason;
+      const statusCode = d.statusCode;
+
+      // Build human-readable summary
+      const reasonText = reason ? (REASON_LABELS[reason] ?? reason) : (statusCode ? `${statusCode}` : 'disconnected');
+      const suffix = reconnected ? ' → reconnected' : isReconnecting ? ' → reconnecting' : '';
+
+      result.push({
+        ...bestError,
+        text: `${bestError.instance}: ${reasonText}${suffix}`,
+        detail: {
+          type: 'connection',
+          statusCode,
+          reason,
+          reconnecting: isReconnecting && !reconnected ? true : undefined,
+          state: reconnected ? 'connected' : undefined,
+        },
+      });
+    } else {
+      // No error in this group — just state transitions (connecting → connected)
+      const connected = states.find(e => (e.detail as { state?: string }).state === 'connected');
+      if (connected) {
+        result.push(connected);
+      } else {
+        // Keep the first event from the group
+        result.push(group[0]);
+      }
+    }
+  }
+
+  return result;
+}
+
+/** Map Baileys reason codes to human-readable text (used in coalesced summaries). */
+const REASON_LABELS: Record<string, string> = {
+  unavailableService: 'WhatsApp unavailable',
+  connectionClosed: 'connection closed',
+  connectionLost: 'connection lost',
+  connectionReplaced: 'connection replaced',
+  timedOut: 'timed out',
+  loggedOut: 'logged out',
+  Unknown: 'disconnected',
+};
+
+/**
+ * Collapse rapid outbound message events by instance + chatJid within a 60s window.
+ * Instead of 10 identical "sent to X" cards, emit one "sent ×10 to X".
+ */
+function collapseOutboundMessages(events: FeedEvent[]): FeedEvent[] {
+  const result: FeedEvent[] = [];
+  // Bucket outbound messages by instance + chatJid + minute
+  const buckets = new Map<string, { count: number; last: FeedEvent }>();
+
+  for (const e of events) {
+    const d = e.detail;
+    if (d?.type === 'message' && d.direction === 'outbound' && e.instance) {
+      const minute = e.time.slice(0, 16); // ISO minute precision
+      const key = `${e.instance}|${d.chatJid ?? '?'}|${minute}`;
+      const bucket = buckets.get(key);
+      if (bucket) {
+        bucket.count++;
+        bucket.last = e;
+      } else {
+        buckets.set(key, { count: 1, last: e });
+      }
+    } else {
+      result.push(e);
+    }
+  }
+
+  for (const { count, last } of buckets.values()) {
+    const d = last.detail as { type: 'message'; direction: string; chatJid?: string };
+    if (count === 1) {
+      result.push(last);
+    } else {
+      result.push({
+        ...last,
+        text: `${last.instance}: sent ×${count} to ${d.chatJid ?? 'unknown'}`,
+        detail: { type: 'message', direction: 'outbound', chatJid: d.chatJid },
+      });
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
@@ -293,16 +460,25 @@ export function handleGetFeed(
     }
   }
 
-  // 3. Deduplicate identical events (same text within 1 minute)
+  // 3. Coalesce connection lifecycle per instance
+  //    A reconnect cycle produces: error → reconnecting → connecting → connected
+  //    Collapse into one card per instance per time window (same second).
+  //    Also suppress stream-error duplicates when a richer connection-closed exists.
+  const coalesced = coalesceConnectionEvents(events);
+
+  // 4. Collapse rapid outbound sends by instance + chatJid
+  const collapsed = collapseOutboundMessages(coalesced);
+
+  // 5. Deduplicate identical events (same text within 1 minute)
   const seen = new Set<string>();
-  const deduped = events.filter(e => {
+  const deduped = collapsed.filter(e => {
     const key = `${e.text}|${e.time.slice(0, 16)}`; // dedupe within same minute
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  // 4. Sort descending by time, take the first `limit`
+  // 6. Sort descending by time, take the first `limit`
   deduped.sort((a, b) => (a.time > b.time ? -1 : a.time < b.time ? 1 : 0));
   jsonResponse(res, 200, deduped.slice(0, limit));
 }

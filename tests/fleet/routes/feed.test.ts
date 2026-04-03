@@ -75,15 +75,15 @@ describe('parsePinoLine', () => {
     expect(parsePinoLine(makeLine({ msg: 42 }), CTX)).toBeNull();
   });
 
-  it('identifies connection error — stream errored out', () => {
+  it('identifies connection error — stream errored out (marked as _streamError for coalescing)', () => {
     const result = parsePinoLine(
-      makeLine({ msg: 'stream errored out', statusCode: 408, reason: 'timeout' }),
+      makeLine({ msg: 'stream errored out', fullErrorNode: { tag: 'stream:error', attrs: { code: '408' } } }),
       CTX,
     );
     expect(result).not.toBeNull();
     expect(result).not.toBe('noise');
     if (result && result !== 'noise') {
-      expect(result.detail).toMatchObject({ type: 'connection', statusCode: 408, reason: 'timeout' });
+      expect(result.detail).toMatchObject({ type: 'connection', statusCode: 408, reason: '_streamError' });
     }
   });
 
@@ -105,6 +105,33 @@ describe('parsePinoLine', () => {
     expect(result).not.toBe('noise');
     if (result && result !== 'noise') {
       expect(result.detail).toMatchObject({ type: 'connection' });
+    }
+  });
+
+  it('parses "Connecting to WhatsApp" as connection state', () => {
+    const result = parsePinoLine(makeLine({ msg: 'Connecting to WhatsApp', component: 'connection' }), CTX);
+    expect(result).not.toBeNull();
+    expect(result).not.toBe('noise');
+    if (result && result !== 'noise') {
+      expect(result.detail).toMatchObject({ type: 'connection', state: 'connecting' });
+    }
+  });
+
+  it('parses "WhatsApp connected" as connection state', () => {
+    const result = parsePinoLine(makeLine({ msg: 'WhatsApp connected', component: 'connection' }), CTX);
+    expect(result).not.toBeNull();
+    expect(result).not.toBe('noise');
+    if (result && result !== 'noise') {
+      expect(result.detail).toMatchObject({ type: 'connection', state: 'connected' });
+    }
+  });
+
+  it('parses "client disconnected" as connection state', () => {
+    const result = parsePinoLine(makeLine({ msg: 'client disconnected', component: 'WhatSoupSocketServer' }), CTX);
+    expect(result).not.toBeNull();
+    expect(result).not.toBe('noise');
+    if (result && result !== 'noise') {
+      expect(result.detail).toMatchObject({ type: 'connection', state: 'disconnected' });
     }
   });
 

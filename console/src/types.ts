@@ -95,7 +95,7 @@ export interface LogEntry {
 }
 
 export type FeedDetail =
-  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean }
+  | { type: 'connection'; statusCode?: number; reason?: string; reconnecting?: boolean; state?: 'connecting' | 'connected' | 'disconnected' }
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }

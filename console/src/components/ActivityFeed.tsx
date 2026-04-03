@@ -71,23 +71,41 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
   ) : null;
 
   if (!d || d.type === "generic") {
-    const text = event.instance && event.text.startsWith(`${event.instance}: `)
+    let text = event.instance && event.text.startsWith(`${event.instance}: `)
       ? event.text.slice(event.instance.length + 2)
       : event.text;
+    // Strip doubled [component] prefix — backend prepends it in text, but we show component separately
+    if (event.component && text.startsWith(`[${event.component}] `)) {
+      text = text.slice(event.component.length + 3);
+    }
     return <>{inst}<span>{text}</span></>;
   }
 
   switch (d.type) {
     case "connection": {
-      if (d.reconnecting) {
+      // State transitions (connecting, connected, disconnected)
+      if (d.state === "connected") {
+        return <>{inst}<span className="text-s-ok">connected</span></>;
+      }
+      if (d.state === "connecting") {
+        return <>{inst}<span className="text-t4">connecting</span></>;
+      }
+      if (d.state === "disconnected") {
+        return <>{inst}<span className="text-s-warn">disconnected</span></>;
+      }
+      if (d.reconnecting && !d.statusCode && !d.reason) {
         return <>{inst}<span className="text-t4">reconnecting</span></>;
       }
+      // Error with optional reconnect suffix (coalesced lifecycle)
       const code = d.statusCode;
       const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
       if (!code && !reason) {
-        const text = event.instance && event.text.startsWith(`${event.instance}: `)
+        let text = event.instance && event.text.startsWith(`${event.instance}: `)
           ? event.text.slice(event.instance.length + 2)
           : event.text;
+        if (event.component && text.startsWith(`[${event.component}] `)) {
+          text = text.slice(event.component.length + 3);
+        }
         return <>{inst}<span className="text-t4">{text}</span></>;
       }
       return (
@@ -95,6 +113,8 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
           {inst}
           {code && <Badge color={statusCodeColor(code)}>{code}</Badge>}
           {reason && <span className={isErr ? "text-s-crit" : "text-t3"} style={{ marginLeft: "var(--sp-1)" }}>{reason}</span>}
+          {d.reconnecting && <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{"\u2192"} reconnecting</span>}
+          {d.state === "connected" && <span className="text-s-ok" style={{ marginLeft: "var(--sp-1)" }}>{"\u2192"} reconnected</span>}
         </>
       );
     }
@@ -127,10 +147,16 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
     case "message": {
       const dirColor = d.direction === "inbound" ? "text-m-cht" : "text-m-agt";
       const chatShort = d.chatJid ? d.chatJid.replace(/@.*/, "").slice(-8) : undefined;
+      // Detect collapsed count from backend (text like "instance: sent ×N to chatJid")
+      const countMatch = event.text.match(/\u00d7(\d+)/);
+      const count = countMatch ? parseInt(countMatch[1], 10) : undefined;
       return (
         <>
           {inst}
-          <Badge color={dirColor}>{d.direction === "inbound" ? "recv" : "sent"}</Badge>
+          <Badge color={dirColor}>
+            {d.direction === "inbound" ? "recv" : "sent"}
+            {count && count > 1 ? ` \u00d7${count}` : ""}
+          </Badge>
           {chatShort && <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{chatShort}</span>}
         </>
       );
@@ -153,9 +179,12 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
         </>
       );
     default: {
-      const text = event.instance && event.text.startsWith(`${event.instance}: `)
+      let text = event.instance && event.text.startsWith(`${event.instance}: `)
         ? event.text.slice(event.instance.length + 2)
         : event.text;
+      if (event.component && text.startsWith(`[${event.component}] `)) {
+        text = text.slice(event.component.length + 3);
+      }
       return <>{inst}<span>{text}</span></>;
     }
   }
