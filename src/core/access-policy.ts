@@ -1,7 +1,6 @@
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
-import { lookupAccess, extractPhone } from './access-list.ts';
-import { resolveLid } from './lid-resolver.ts';
+import { lookupAccess, resolvePhoneFromJid } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
 import { isAdminPhone } from '../lib/phone.ts';
@@ -49,31 +48,24 @@ export function shouldRespond(
     return { respond: false, reason: 'not_response_worthy' };
   }
 
-  const phone = extractPhone(msg.senderJid);
+  const effectivePhone = resolvePhoneFromJid(msg.senderJid, db);
   const accessMode: AccessMode = config.accessMode;
 
   // ── self_only mode (REQ-003.AC-01) ──
   // Only DMs from admin phones respond. Groups always rejected.
-  // Admin check uses config.adminPhones directly (not access_list) to handle
-  // both JID and LID phone formats.
   if (accessMode === 'self_only') {
     if (msg.isGroup) {
       log.debug({ messageId: msg.messageId }, 'trigger: self_only rejects groups');
       return { respond: false, reason: 'self_only_no_groups' };
     }
 
-    // For LID senders, the extracted "phone" is an opaque LID number unrelated
-    // to the real phone — resolve it from the lid_mappings DB table.
-    let effectivePhone = phone;
-    if (msg.senderJid.endsWith('@lid')) {
-      const resolved = resolveLid(db, phone);
-      if (resolved !== null) {
-        effectivePhone = resolved;
-        log.debug({ messageId: msg.messageId, lid: phone, resolvedPhone: effectivePhone }, 'trigger: resolved LID → phone');
-      } else {
-        log.debug({ messageId: msg.messageId, lid: phone }, 'trigger: LID phone unresolvable, self_only rejects');
-        return { respond: false, reason: 'self_only_rejected', accessStatus: 'blocked' };
-      }
+    // Explicit guard: if this is a LID sender whose LID couldn't be resolved
+    // to a real phone, reject with a distinct reason for debuggability.
+    // Detect by comparing effectivePhone to the raw colon-stripped LID local part.
+    const lidLocal = msg.senderJid.split('@')[0].split(':')[0];
+    if (msg.senderJid.endsWith('@lid') && effectivePhone === lidLocal) {
+      log.debug({ messageId: msg.messageId, senderJid: msg.senderJid }, 'trigger: self_only — LID unresolvable, rejecting');
+      return { respond: false, reason: 'self_only_lid_unresolvable', accessStatus: 'blocked' };
     }
 
     if (isAdminPhone(effectivePhone, config.adminPhones)) {
@@ -85,23 +77,23 @@ export function shouldRespond(
   }
 
   // ── Shared phone lookup for all remaining modes ──
-  const entry = lookupAccess(db, 'phone', phone);
+  const entry = lookupAccess(db, 'phone', effectivePhone);
 
   if (entry?.status === 'blocked') {
-    log.info({ messageId: msg.messageId, phone }, 'trigger: blocked sender');
+    log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: blocked sender');
     return { respond: false, reason: 'blocked', accessStatus: 'blocked' };
   }
 
   // ── open_dm mode (REQ-003.AC-03) ──
   // Anyone can DM (unless blocked, already handled above), groups by mention only.
   if (accessMode === 'open_dm' && !msg.isGroup) {
-    log.debug({ messageId: msg.messageId, phone }, 'trigger: open_dm DM → respond');
+    log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: open_dm DM → respond');
     return { respond: true, reason: 'open_dm', accessStatus: 'allowed' };
   }
 
   // ── groups_only mode (REQ-003.AC-04) ── reject all DMs
   if (accessMode === 'groups_only' && !msg.isGroup) {
-    log.debug({ messageId: msg.messageId, phone }, 'trigger: groups_only rejects DMs');
+    log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: groups_only rejects DMs');
     return { respond: false, reason: 'groups_only_no_dms' };
   }
 
@@ -141,12 +133,12 @@ export function shouldRespond(
 
   // DM — check access list
   if (!entry) {
-    log.info({ messageId: msg.messageId, phone }, 'trigger: DM from unknown sender');
+    log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: DM from unknown sender');
     return { respond: false, reason: 'unknown', accessStatus: 'unknown' };
   }
 
   if (entry.status === 'pending') {
-    log.info({ messageId: msg.messageId, phone }, 'trigger: DM from pending sender');
+    log.info({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: DM from pending sender');
     return { respond: false, reason: 'pending', accessStatus: 'pending' };
   }
 

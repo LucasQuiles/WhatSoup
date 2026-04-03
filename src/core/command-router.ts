@@ -1,11 +1,12 @@
 import { config } from '../config.ts';
 import type { IncomingMessage } from './types.ts';
-import { extractPhone } from './access-list.ts';
+import type { Database } from './database.ts';
+import { resolvePhoneFromJid } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
 import { isAdminPhone } from '../lib/phone.ts';
 
-export function isAdminMessage(msg: IncomingMessage): boolean {
-  const phone = extractPhone(msg.senderJid);
+export function isAdminMessage(msg: IncomingMessage, db: Database): boolean {
+  const phone = resolvePhoneFromJid(msg.senderJid, db);
   return isAdminPhone(phone, config.adminPhones) && msg.isGroup === false;
 }
 

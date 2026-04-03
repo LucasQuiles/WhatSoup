@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
+import { extractLocal } from '../../core/access-list.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -26,11 +27,10 @@ function formatUptime(seconds: number | undefined | null): string | null {
   return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
 }
 
-/** Extract phone number from a WhatsApp JID like "1234567890@s.whatsapp.net". */
+/** Extract phone number from a WhatsApp JID. Null-safe wrapper around extractLocal. */
 function phoneFromJid(jid: string | undefined | null): string {
   if (!jid) return 'unknown';
-  const at = jid.indexOf('@');
-  return at > 0 ? jid.slice(0, at) : jid;
+  return extractLocal(jid);
 }
 
 /**

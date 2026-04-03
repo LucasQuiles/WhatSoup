@@ -2,6 +2,7 @@ import type { Database } from '../../core/database.ts';
 import type { ChatMessage } from './providers/types.ts';
 import { getRecentMessages } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -46,7 +47,7 @@ export function loadConversationWindow(db: Database, chatJid: string): ChatMessa
     if (msg.isFromMe) {
       result.push({ role: 'assistant', content: msg.content });
     } else {
-      const name = msg.senderName ?? msg.senderJid.split('@')[0] ?? 'Unknown';
+      const name = msg.senderName ?? resolvePhoneFromJid(msg.senderJid, db) ?? 'Unknown';
       result.push({ role: 'user', content: `[${name}]: ${msg.content}` });
     }
   }

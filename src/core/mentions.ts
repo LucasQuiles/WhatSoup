@@ -1,7 +1,8 @@
 // src/core/mentions.ts
 // Utility for detecting, resolving, and formatting @mentions in outgoing text.
 
-import { extractPhone } from './access-list.ts';
+import { resolvePhoneFromJid, extractLocal } from './access-list.ts';
+import type { Database } from './database.ts';
 import { toPersonalJid } from './jid-constants.ts';
 
 /**
@@ -33,9 +34,37 @@ export class ContactsDirectory {
   private readonly map: ContactsMap = new Map();
   private readonly insertOrder: string[] = [];
   private readonly maxEntries: number;
+  private db: Database | null = null;
+  /**
+   * Cache LID→phone resolutions to avoid repeated DB queries for the same sender.
+   * Bounded to maxEntries. Cleared on invalidation (e.g. when LID mappings change).
+   */
+  private readonly lidCache: Map<string, string> = new Map();
 
-  constructor(maxEntries = 500) {
-    this.maxEntries = maxEntries;
+  constructor(maxEntries?: number);
+  constructor(db: Database, maxEntries?: number);
+  constructor(dbOrMax?: Database | number, maxEntries?: number) {
+    if (typeof dbOrMax === 'number') {
+      this.maxEntries = dbOrMax;
+    } else if (dbOrMax != null) {
+      this.db = dbOrMax;
+      this.maxEntries = maxEntries ?? 500;
+    } else {
+      this.maxEntries = maxEntries ?? 500;
+    }
+  }
+
+  /** Inject the database after construction (for ConnectionManager). */
+  setDatabase(db: Database): void {
+    this.db = db;
+  }
+
+  /**
+   * Clear the LID→phone cache. Call when LID mappings change
+   * (e.g. after upsertLidMapping) so stale resolutions are evicted.
+   */
+  invalidateLidCache(): void {
+    this.lidCache.clear();
   }
 
   /**
@@ -43,10 +72,30 @@ export class ContactsDirectory {
    * Call this for every incoming message to keep the directory fresh.
    *
    * Accepts a full JID (e.g. '15184194479@s.whatsapp.net') or bare phone.
+   * Resolves LID JIDs to real phone numbers via the DB when available.
    * Generates lowercase keys for: full name, first name, and phone number.
    */
   observe(senderJid: string, senderName: string | null): void {
-    const phone = extractPhone(senderJid);
+    let phone: string;
+    if (this.db && senderJid.endsWith('@lid')) {
+      // LID senders: check cache first, resolve via DB only on miss
+      const cached = this.lidCache.get(senderJid);
+      if (cached) {
+        phone = cached;
+      } else {
+        phone = resolvePhoneFromJid(senderJid, this.db);
+        // Bound the cache to prevent unbounded growth
+        if (this.lidCache.size >= this.maxEntries) {
+          const oldest = this.lidCache.keys().next().value;
+          if (oldest !== undefined) this.lidCache.delete(oldest);
+        }
+        this.lidCache.set(senderJid, phone);
+      }
+    } else if (this.db) {
+      phone = resolvePhoneFromJid(senderJid, this.db);
+    } else {
+      phone = extractLocal(senderJid);
+    }
     if (!phone || phone.length < 5) return;
 
     const keys: string[] = [];

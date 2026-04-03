@@ -1,5 +1,7 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { DOMAIN_LID } from './jid-constants.ts';
+import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
 export type SubjectType = 'phone' | 'group';
@@ -95,24 +97,74 @@ export function getPendingCount(db: Database): number {
 }
 
 /**
- * Extract the canonical phone/identity from a JID using toConversationKey.
- * Replaces the old raw suffix-stripping approach for consistency with the
- * rest of the system.
+ * Extract the local part of a JID (the portion before the @).
+ *
+ * WARNING: For LID JIDs this returns the opaque LID number, NOT a phone
+ * number. If you need an actual phone number for identity checks (admin
+ * verification, access control, approval requests, display names), use
+ * `resolvePhoneFromJid(jid, db)` instead.
  *
  * Examples:
  *   '15184194479@s.whatsapp.net' → '15184194479'
- *   '81536414179557@lid'         → '81536414179557'
+ *   '81536414179557@lid'         → '81536414179557'  (opaque LID!)
  *   '120363123456789@g.us'       → '120363123456789_at_g.us'
- *
- * Falls back to the old raw @ stripping if the JID has no @, or if
- * toConversationKey throws (invalid JID).
  */
-export function extractPhone(jid: string): string {
+export function extractLocal(jid: string): string {
   const atIdx = jid.indexOf('@');
   if (atIdx === -1) return jid;
   try {
     return toConversationKey(jid);
   } catch {
     return jid.slice(0, atIdx);
+  }
+}
+
+/**
+ * @deprecated Use `extractLocal()` for local parts or `resolvePhoneFromJid()` for identity checks.
+ * Kept as alias to avoid breaking external callers during migration.
+ */
+export const extractPhone = extractLocal;
+
+/**
+ * Resolve a JID to an actual phone number, handling LID→phone translation.
+ *
+ * For personal JIDs (`@s.whatsapp.net`), returns the phone digits directly.
+ * For LID JIDs (`@lid`), resolves through the lid_mappings DB table to find
+ * the real phone number. Returns the raw LID number as fallback only if
+ * resolution fails (caller should handle this case).
+ *
+ * This is the ONLY function that should be used when you need an actual
+ * phone number for:
+ *   - Admin phone checks (isAdminPhone)
+ *   - Access list lookups
+ *   - Approval requests
+ *   - Display to users or LLMs
+ *   - Contact directory population
+ *
+ * Examples:
+ *   resolvePhoneFromJid('15184194479@s.whatsapp.net', db) → '15184194479'
+ *   resolvePhoneFromJid('81536414179557@lid', db)         → '18455880337' (resolved)
+ *   resolvePhoneFromJid('99999999@lid', db)               → '99999999'   (unresolvable fallback)
+ */
+export function resolvePhoneFromJid(jid: string, db: Database): string {
+  const atIdx = jid.indexOf('@');
+  if (atIdx === -1) return jid;
+
+  const local = jid.slice(0, atIdx);
+  const domain = jid.slice(atIdx + 1);
+
+  if (domain === DOMAIN_LID) {
+    // resolveLid handles colon-device suffix normalization internally
+    const resolved = resolveLid(db, local);
+    // Fallback: strip colon suffix for the raw LID return
+    const colonIdx = local.indexOf(':');
+    return resolved ?? (colonIdx >= 0 ? local.slice(0, colonIdx) : local);
+  }
+
+  // Personal JID or other — return local part
+  try {
+    return toConversationKey(jid);
+  } catch {
+    return local;
   }
 }

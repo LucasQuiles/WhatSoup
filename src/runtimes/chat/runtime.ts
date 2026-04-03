@@ -7,6 +7,7 @@ import type { Runtime } from '../types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { resolvePhoneFromJid } from '../../core/access-list.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
 import { recordResponse } from './rate-limits-db.ts';
 import { config } from '../../config.ts';
@@ -150,14 +151,17 @@ export class ChatRuntime implements Runtime {
   }
 
   private async processMessage(msg: IncomingMessage, traceId: string, startTime: number): Promise<void> {
-    // 1. Rate limit check
-    const { allowed, remaining } = checkRateLimit(this.db, msg.senderJid);
+    // 1. Rate limit check — resolve sender to phone number so the same person
+    //    via LID or JID shares a single rate limit bucket.
+    //    Uses senderJid (not chatJid) so group chats track per-sender, not per-group.
+    const rateLimitKey = resolvePhoneFromJid(msg.senderJid, this.db);
+    const { allowed, remaining } = checkRateLimit(this.db, rateLimitKey);
 
     if (!allowed) {
-      if (!this.rateLimitNotified.has(msg.senderJid)) {
-        this.rateLimitNotified.add(msg.senderJid);
+      if (!this.rateLimitNotified.has(rateLimitKey)) {
+        this.rateLimitNotified.add(rateLimitKey);
         setTimeout(
-          () => this.rateLimitNotified.delete(msg.senderJid),
+          () => this.rateLimitNotified.delete(rateLimitKey),
           config.rateLimitNoticeWindowMs,
         );
 
@@ -249,7 +253,7 @@ export class ChatRuntime implements Runtime {
 
     // 5. Add current message to window
     // Include sender phone/LID in group messages so the LLM can @mention them back
-    const senderPhone = msg.senderJid.split('@')[0];
+    const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
     const senderLabel = msg.isGroup && msg.senderName
       ? `[${msg.senderName} (@${senderPhone})]: `
       : msg.senderName ? `[${msg.senderName}]: ` : '';
@@ -396,7 +400,7 @@ export class ChatRuntime implements Runtime {
 
     // 11. Record rate limit
     try {
-      recordResponse(this.db, msg.senderJid);
+      recordResponse(this.db, rateLimitKey);
     } catch (err) {
       log.error({ traceId, err }, 'failed to record rate limit response');
     }

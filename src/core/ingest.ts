@@ -11,8 +11,9 @@ import { storeMessageIfNew } from './messages.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
-import { extractPhone } from './access-list.ts';
+import { resolvePhoneFromJid } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { DOMAIN_LID } from './jid-constants.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
@@ -49,7 +50,7 @@ export function createIngestHandler(
     void (async () => {
       // 0. Control plane intercept — before any normal storage
       if (msg.content && extractProtocol(msg.content) !== null) {
-        const phone = extractPhone(msg.senderJid);
+        const phone = resolvePhoneFromJid(msg.senderJid, db);
         const isPeer = [...config.controlPeers.values()].includes(phone);
         if (isPeer) {
           const protocol = extractProtocol(msg.content);
@@ -92,9 +93,15 @@ export function createIngestHandler(
 
       // 1. Store the incoming message — always, even if we later reject it.
       //    Atomic insert: INSERT OR IGNORE returns false if message_id already exists.
+      //    For LID DMs, resolve to the phone-based conversation key so messages from
+      //    the same person (via LID or JID) share one conversation thread.
       let conversationKey: string;
       try {
-        conversationKey = toConversationKey(msg.chatJid);
+        if (!msg.isGroup && msg.chatJid.endsWith(`@${DOMAIN_LID}`)) {
+          conversationKey = resolvePhoneFromJid(msg.chatJid, db);
+        } else {
+          conversationKey = toConversationKey(msg.chatJid);
+        }
         const isNew = storeMessageIfNew(db, {
           chatJid: msg.chatJid,
           conversationKey,
@@ -144,7 +151,7 @@ export function createIngestHandler(
       }
 
       // 2. Check admin commands FIRST (before trigger check)
-      if (isAdminMessage(msg) && msg.content) {
+      if (isAdminMessage(msg, db) && msg.content) {
         const cmd = parseAdminCommand(msg.content);
         if (cmd) {
           let seq: number | undefined;
@@ -182,11 +189,11 @@ export function createIngestHandler(
 
         // 4. Send approval request for unknown senders
         if (triggerResult.accessStatus === 'unknown') {
-          const phone = extractPhone(msg.senderJid);
+          const approvalPhone = resolvePhoneFromJid(msg.senderJid, db);
           try {
-            await sendApprovalRequest(db, messenger, phone, msg.senderName ?? '', msg.content ?? '', durability);
+            await sendApprovalRequest(db, messenger, approvalPhone, msg.senderName ?? '', msg.content ?? '', durability);
           } catch (err) {
-            log.error({ err, phone }, 'failed to send approval request');
+            log.error({ err, phone: approvalPhone }, 'failed to send approval request');
           }
         }
 

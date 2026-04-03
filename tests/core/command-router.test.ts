@@ -35,6 +35,27 @@ vi.mock('../../src/logger.ts', () => ({
 // ---------------------------------------------------------------------------
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
+import type { Database } from '../../src/core/database.ts';
+
+// Minimal mock DB for resolvePhoneFromJid — lid_mappings table queries
+function makeMockDb(lidMap: Record<string, string> = {}): Database {
+  return {
+    raw: {
+      prepare: vi.fn((sql: string) => ({
+        get: vi.fn((lid: string) => {
+          if (sql.includes('lid_mappings') && lidMap[lid]) {
+            return { phone_jid: `${lidMap[lid]}@s.whatsapp.net` };
+          }
+          return undefined;
+        }),
+        run: vi.fn(),
+        all: vi.fn().mockReturnValue([]),
+      })),
+      exec: vi.fn(),
+    },
+  } as unknown as Database;
+}
+const mockDb = makeMockDb();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,15 +86,16 @@ function makeIncomingMsg(overrides: Partial<IncomingMessage> = {}): IncomingMess
 describe('isAdminMessage — positive', () => {
   it('returns true when senderJid matches adminPhones and message is a DM', () => {
     const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: false });
-    expect(isAdminMessage(msg)).toBe(true);
+    expect(isAdminMessage(msg, mockDb)).toBe(true);
   });
 
-  it('returns true for LID-format admin phone', async () => {
-    // The mock config uses a Set — add a LID number for this test
+  it('returns true for LID-format admin phone when LID is mapped', async () => {
     const { config } = await import('../../src/config.ts');
     config.adminPhones.add('15550100002');
-    const msg = makeIncomingMsg({ senderJid: '15550100002@lid', isGroup: false });
-    expect(isAdminMessage(msg)).toBe(true);
+    // Create a DB that maps the LID to the admin phone
+    const dbWithLid = makeMockDb({ '99999999999': '15550100002' });
+    const msg = makeIncomingMsg({ senderJid: '99999999999@lid', isGroup: false });
+    expect(isAdminMessage(msg, dbWithLid)).toBe(true);
     config.adminPhones.delete('15550100002');
   });
 });
@@ -81,17 +103,17 @@ describe('isAdminMessage — positive', () => {
 describe('isAdminMessage — negative', () => {
   it('returns false for non-admin phone DM', () => {
     const msg = makeIncomingMsg({ senderJid: '15559998888@s.whatsapp.net', isGroup: false });
-    expect(isAdminMessage(msg)).toBe(false);
+    expect(isAdminMessage(msg, mockDb)).toBe(false);
   });
 
   it('returns false when admin phone sends from a group', () => {
     const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: true });
-    expect(isAdminMessage(msg)).toBe(false);
+    expect(isAdminMessage(msg, mockDb)).toBe(false);
   });
 
   it('returns false for completely different sender', () => {
     const msg = makeIncomingMsg({ senderJid: '15550001111@s.whatsapp.net', isGroup: false });
-    expect(isAdminMessage(msg)).toBe(false);
+    expect(isAdminMessage(msg, mockDb)).toBe(false);
   });
 });
 

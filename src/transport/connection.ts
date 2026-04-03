@@ -1024,8 +1024,10 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   // --- Display name ---
   let senderName: string | null = msg.pushName ?? null;
-  if (!senderName) {
-    // Fall back to the phone-number portion of the JID
+  if (!senderName && !senderJid.endsWith('@lid')) {
+    // Fall back to the phone-number portion for personal JIDs only.
+    // LID JIDs contain opaque numbers that are meaningless to users —
+    // leave senderName null so downstream code can resolve via DB.
     senderName = senderJid.split('@')[0] ?? null;
   }
 

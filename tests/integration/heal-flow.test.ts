@@ -76,6 +76,8 @@ vi.mock('../../src/core/access-policy.ts', () => ({
 
 vi.mock('../../src/core/access-list.ts', () => ({
   extractPhone: vi.fn((jid: string) => jid.split('@')[0]),
+  extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
+  resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
   lookupAccess: vi.fn(),
   insertPending: vi.fn(),
   updateAccess: vi.fn(),

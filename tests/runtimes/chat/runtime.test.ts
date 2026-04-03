@@ -270,7 +270,8 @@ describe('Happy path', () => {
     await handleAndDrain(handler, msg);
 
     // 1. Rate limit checked
-    expect(mockCheckRateLimit).toHaveBeenCalledWith(expect.anything(), msg.senderJid);
+    // Rate limit uses conversation key (not raw JID) to normalize LID/phone variants
+    expect(mockCheckRateLimit).toHaveBeenCalledWith(expect.anything(), '15184194479');
 
     // 2. Context and window loaded
     expect(mockLoadContext).toHaveBeenCalled();
@@ -286,7 +287,7 @@ describe('Happy path', () => {
     //    — no direct storeMessage call in the runtime
 
     // 6. Rate limit recorded
-    expect(mockRecordResponse).toHaveBeenCalledWith(expect.anything(), msg.senderJid);
+    expect(mockRecordResponse).toHaveBeenCalledWith(expect.anything(), '15184194479');
   });
 
   it('response content matches LLM output', async () => {

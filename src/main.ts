@@ -30,7 +30,7 @@ import {
 } from './core/chat-sync.ts';
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
-import { lookupAccess, updateAccess, insertAllowed, extractPhone } from './core/access-list.ts';
+import { lookupAccess, updateAccess, insertAllowed, resolvePhoneFromJid } from './core/access-list.ts';
 import { hydrateLidMappings, upsertLidMapping } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
@@ -349,6 +349,8 @@ connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
   try {
     runtime.handleJidAliasChanged?.(conversationKey, newJid);
     upsertLidMapping(db, conversationKey, newJid);
+    // Invalidate the contacts directory LID cache so stale resolutions are evicted
+    connectionManager.contactsDir.invalidateLidCache();
     log.info({ conversationKey, newJid }, 'jidAliasChanged: updated delivery JID');
   } catch (err) {
     log.error({ err, conversationKey, newJid }, 'jidAliasChanged: failed to update delivery JID');
@@ -390,7 +392,7 @@ connectionManager.on('groupParticipantsUpdate', (data) => {
   if (!botAdded) return;
 
   // Check if the person who added the bot is an admin
-  const authorPhone = extractPhone(author);
+  const authorPhone = resolvePhoneFromJid(author, db);
   if (!isAdminPhone(authorPhone, config.adminPhones)) {
     log.info({ groupJid, author, authorPhone }, 'bot added to group by non-admin — not auto-allowing');
     return;
@@ -572,6 +574,9 @@ const degradationInterval = config.controlPeers.has('q') ? setInterval(() => {
 
 // 13. Seed contacts directory from message history (so @name mentions work after restart)
 {
+  // Inject DB into contacts directory so LID→phone resolution works for @mentions
+  connectionManager.contactsDir.setDatabase(db);
+
   const rows = db.raw.prepare(
     `SELECT DISTINCT sender_jid, sender_name FROM messages
      WHERE sender_jid IS NOT NULL AND sender_name IS NOT NULL AND sender_name != ''

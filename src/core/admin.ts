@@ -4,7 +4,9 @@ import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
 import { toPersonalJid, toLidJid } from './jid-constants.ts';
+import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender } from './messages.ts';
+import { isAdminPhone } from '../lib/phone.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
@@ -28,8 +30,16 @@ export async function handleAdminCommand(
     if (subjectType === 'phone') {
       await sendTracked(messenger, adminChatJid, `Got it, allowed +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
 
-      // Replay queued messages: try both JID formats
-      const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
+      // Replay queued messages: try the personal JID, plus any LIDs that map
+      // to this phone. toLidJid(phone) is wrong — LIDs are opaque numbers
+      // unrelated to phone numbers. We must reverse-lookup from lid_mappings.
+      const jidFormats: string[] = [toPersonalJid(subjectId)];
+      const lidMap = getAllLidMappings(db);
+      for (const [lid, mappedPhone] of lidMap) {
+        if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
+          jidFormats.push(toLidJid(lid));
+        }
+      }
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
         for (const msg of stored) {
@@ -71,18 +81,32 @@ export async function handleAdminCommand(
 // ---------------------------------------------------------------------------
 
 /**
- * Find the admin's chat JID — checks both phone@s.whatsapp.net and known LID formats
- * from the access_list (pre-seeded admin phones).
+ * Find the admin's chat JID — checks personal JIDs and reverse-mapped LIDs
+ * from the lid_mappings table using a targeted query.
  */
 function resolveAdminChatJid(db: Database): string | null {
-  // Try to find a recent message from any admin phone to get their chatJid
-  const stmt = db.raw.prepare(
+  const msgStmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
   );
+
+  // Search by admin phone numbers first (fast path)
   for (const phone of config.adminPhones) {
-    const row = stmt.get(`${phone}%`) as { chat_jid: string } | undefined;
+    const row = msgStmt.get(`${phone}%`) as { chat_jid: string } | undefined;
     if (row) return row.chat_jid;
   }
+
+  // Search by LIDs that map to admin phones (scans lid_mappings — typically small table)
+  const lidRows = db.raw.prepare(
+    'SELECT lid, phone_jid FROM lid_mappings',
+  ).all() as { lid: string; phone_jid: string }[];
+  for (const { lid, phone_jid } of lidRows) {
+    const mappedPhone = phone_jid.split('@')[0];
+    if (isAdminPhone(mappedPhone, config.adminPhones)) {
+      const row = msgStmt.get(`${lid}%`) as { chat_jid: string } | undefined;
+      if (row) return row.chat_jid;
+    }
+  }
+
   // Fallback to phone@s.whatsapp.net format
   const firstAdmin = [...config.adminPhones][0];
   if (!firstAdmin) {

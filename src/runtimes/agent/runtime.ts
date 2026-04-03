@@ -34,7 +34,7 @@ import { getRecentMessages } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
-import { extractPhone } from '../../core/access-list.ts';
+import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
@@ -949,7 +949,7 @@ export class AgentRuntime implements Runtime {
       switch (classified.command) {
         case 'new':
           // Shared mode: /new is admin-only
-          if (this.shared && !isAdminPhone(extractPhone(msg.senderJid), config.adminPhones)) {
+          if (this.shared && !isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
             // @check CHK-067 // @traces REQ-012.AC-06
             return;
           }
@@ -1091,7 +1091,7 @@ export class AgentRuntime implements Runtime {
 
     // Build context prefix
     // @check CHK-064 // @traces REQ-012.AC-02
-    const phone = extractPhone(senderJid);
+    const phone = resolvePhoneFromJid(senderJid, this.db);
     const displayName = senderName ?? phone;
     const prefix = isGroup
       ? `[Group: ${chatJid} — ${displayName}]`
