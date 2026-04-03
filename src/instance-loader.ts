@@ -128,6 +128,13 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
         throw new Error('agentOptions.instructionsPath must be a string');
       }
 
+      // pluginDirs is optional but must be an array of strings when present
+      if (opts['pluginDirs'] !== undefined) {
+        if (!Array.isArray(opts['pluginDirs']) || !opts['pluginDirs'].every((d: unknown) => typeof d === 'string')) {
+          throw new Error('agentOptions.pluginDirs must be an array of strings');
+        }
+      }
+
       // sandboxPerChat requires sessionScope 'per_chat'
       if (opts['sandboxPerChat'] === true && opts['sessionScope'] !== 'per_chat') {
         throw new Error('agentOptions.sandboxPerChat requires sessionScope "per_chat"');

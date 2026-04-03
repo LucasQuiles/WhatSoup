@@ -48,6 +48,7 @@ export interface SessionManagerOptions {
   cwd?: string;
   instructionsPath?: string;
   model?: string;
+  pluginDirs?: string[];
 }
 
 export class SessionManager {
@@ -59,6 +60,7 @@ export class SessionManager {
   private readonly configuredCwd: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
+  private readonly pluginDirs: string[];
 
   private child: ReturnType<typeof spawn> | null = null;
   private dbRowId: number | null = null;
@@ -103,6 +105,7 @@ export class SessionManager {
     this.configuredCwd = opts.cwd;
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
+    this.pluginDirs = opts.pluginDirs ?? [];
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -160,6 +163,7 @@ export class SessionManager {
         '--permission-mode', 'bypassPermissions',
         '--system-prompt', systemPrompt,
         ...(this.model ? ['--model', this.model] : []),
+        ...this.pluginDirs.flatMap(dir => ['--plugin-dir', dir]),
         ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
       ],
       {

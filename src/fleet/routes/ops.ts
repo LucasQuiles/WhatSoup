@@ -195,6 +195,24 @@ export async function handleConfigUpdate(
     return;
   }
 
+  // Validate accessMode if patched
+  if (patch.accessMode !== undefined) {
+    const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'];
+    if (!VALID_ACCESS_MODES.includes(patch.accessMode as string)) {
+      jsonResponse(res, 400, { error: `accessMode must be one of: ${VALID_ACCESS_MODES.join(', ')}` });
+      return;
+    }
+  }
+
+  // Validate and normalize adminPhones if patched
+  if (patch.adminPhones !== undefined) {
+    if (!Array.isArray(patch.adminPhones) || patch.adminPhones.length === 0 || !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())) {
+      jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
+      return;
+    }
+    merged.adminPhones = [...new Set((patch.adminPhones as string[]).map((p: string) => normalizePhoneE164(p)))];
+  }
+
   // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
   if (patch.claudeMd && merged.type === 'agent') {
     const ao = merged.agentOptions as Record<string, unknown> | undefined;
@@ -432,7 +450,7 @@ export async function handleCreateLine(
   // Pass through all optional config fields (exclude internal/UI-only fields)
   const PASSTHROUGH_FIELDS = [
     'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
-    'models', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
+    'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
     'pineconeAllowedIndexes', 'agentOptions', 'toolUpdateMode', 'controlPeers',
   ];
   for (const field of PASSTHROUGH_FIELDS) {

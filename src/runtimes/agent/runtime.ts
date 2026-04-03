@@ -198,6 +198,8 @@ export interface AgentRuntimeOptions {
   model?: string;
   /** When true, each chat gets an isolated workspace directory with its own Claude config. Requires sessionScope 'per_chat'. */
   sandboxPerChat?: boolean;
+  /** Plugin directories to pass via --plugin-dir to the claude subprocess. */
+  pluginDirs?: string[];
 }
 
 /**
@@ -434,6 +436,7 @@ export class AgentRuntime implements Runtime {
   private readonly sandbox: SandboxPolicy | undefined;
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
+  private readonly pluginDirs: string[];
   private readonly registry: ToolRegistry;
 
   // single mode: one session, one queue
@@ -508,6 +511,7 @@ export class AgentRuntime implements Runtime {
     this.sandbox = options?.sandbox;
     this.model = options?.model;
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
+    this.pluginDirs = options?.pluginDirs ?? [];
 
     this.registry = new ToolRegistry();
     this.registerAllTools();
@@ -1651,6 +1655,7 @@ export class AgentRuntime implements Runtime {
       cwd: opts.cwd,
       instructionsPath: this.instructionsPath,
       model: this.model,
+      pluginDirs: this.pluginDirs,
     });
     if (this.durability) {
       session.setDurability(this.durability);

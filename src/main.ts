@@ -121,6 +121,14 @@ process.on('exit', () => releaseLock());
 const db = new Database(config.dbPath);
 db.open();
 
+// 2a. Seed admin phones into access_list for allowlist/open_dm modes.
+// INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
+if (config.accessMode !== 'self_only') {
+  for (const phone of config.adminPhones) {
+    insertAllowed(db, 'phone', phone);
+  }
+}
+
 // 2b. Pre-connect recovery — runs synchronously before any connection attempt
 const durability = new DurabilityEngine(db);
 durability.preConnectRecovery();
@@ -183,6 +191,7 @@ if (instanceType === 'agent') {
       bash: { enabled: boolean };
     };
     sandboxPerChat?: boolean;
+    pluginDirs?: string[];
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   runtime = new AgentRuntime(db, connectionManager, config.botName, {
@@ -193,6 +202,7 @@ if (instanceType === 'agent') {
     sandbox: agentOpts?.sandbox,
     model: instanceConfig?.model,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
+    pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
   });
 } else if (instanceType === 'passive') {
   runtime = new PassiveRuntime(db, connectionManager, {
