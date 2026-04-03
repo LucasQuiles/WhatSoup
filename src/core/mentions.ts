@@ -3,7 +3,7 @@
 
 import { resolvePhoneFromJid, extractLocal } from './access-list.ts';
 import type { Database } from './database.ts';
-import { toPersonalJid } from './jid-constants.ts';
+import { toPersonalJid, isLidJid } from './jid-constants.ts';
 
 /**
  * Result of formatting + extracting mentions from a text string.
@@ -77,7 +77,7 @@ export class ContactsDirectory {
    */
   observe(senderJid: string, senderName: string | null): void {
     let phone: string;
-    if (this.db && senderJid.endsWith('@lid')) {
+    if (this.db && isLidJid(senderJid)) {
       // LID senders: check cache first, resolve via DB only on miss
       const cached = this.lidCache.get(senderJid);
       if (cached) {

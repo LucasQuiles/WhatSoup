@@ -13,7 +13,7 @@ import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID } from './jid-constants.ts';
+import { isLidJid } from './jid-constants.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
@@ -97,7 +97,7 @@ export function createIngestHandler(
       //    the same person (via LID or JID) share one conversation thread.
       let conversationKey: string;
       try {
-        if (!msg.isGroup && msg.chatJid.endsWith(`@${DOMAIN_LID}`)) {
+        if (!msg.isGroup && isLidJid(msg.chatJid)) {
           conversationKey = resolvePhoneFromJid(msg.chatJid, db);
         } else {
           conversationKey = toConversationKey(msg.chatJid);

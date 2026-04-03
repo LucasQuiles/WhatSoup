@@ -1,6 +1,7 @@
 import type { IncomingMessage } from './types.ts';
 import type { Database } from './database.ts';
 import { lookupAccess, resolvePhoneFromJid } from './access-list.ts';
+import { bareNumber, normalizeLid, isLidJid } from './jid-constants.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
 import { isAdminPhone } from '../lib/phone.ts';
@@ -62,8 +63,8 @@ export function shouldRespond(
     // Explicit guard: if this is a LID sender whose LID couldn't be resolved
     // to a real phone, reject with a distinct reason for debuggability.
     // Detect by comparing effectivePhone to the raw colon-stripped LID local part.
-    const lidLocal = msg.senderJid.split('@')[0].split(':')[0];
-    if (msg.senderJid.endsWith('@lid') && effectivePhone === lidLocal) {
+    const lidLocal = normalizeLid(bareNumber(msg.senderJid));
+    if (isLidJid(msg.senderJid) && effectivePhone === lidLocal) {
       log.debug({ messageId: msg.messageId, senderJid: msg.senderJid }, 'trigger: self_only — LID unresolvable, rejecting');
       return { respond: false, reason: 'self_only_lid_unresolvable', accessStatus: 'blocked' };
     }
@@ -117,14 +118,14 @@ export function shouldRespond(
     // Build set of identifiers the bot is known by (normalized — number before @)
     const botIds = new Set<string>();
     botIds.add(botJid);
-    botIds.add(botJid.split('@')[0]);
+    botIds.add(bareNumber(botJid));
     if (botLid) {
       botIds.add(botLid);
-      botIds.add(botLid.split('@')[0]);
+      botIds.add(bareNumber(botLid));
     }
 
     const mentioned = msg.mentionedJids.some(
-      (jid) => botIds.has(jid) || botIds.has(jid.split('@')[0]),
+      (jid) => botIds.has(jid) || botIds.has(bareNumber(jid)),
     );
 
     log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, mentioned }, 'trigger: group message');

@@ -19,6 +19,7 @@ import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
+import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 
@@ -60,6 +61,8 @@ export interface TransportEvents {
     action: 'add' | 'remove' | 'promote' | 'demote';
   }) => void;
   jidAliasChanged: (conversationKey: string, newJid: string) => void;
+  /** L3: LID↔phone pair discovered from message key participant/participantAlt. */
+  lidPairDiscovered: (participant: string, participantAlt: string) => void;
   historySyncComplete: () => void;
   exhausted: () => void;
   reactionReceived: (data: {
@@ -208,12 +211,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
     if (this.selfMentionRegexJid) {
-      const ownBare = this.botJid!.split('@')[0];
+      const ownBare = bareNumber(this.botJid!);
       cleaned = cleaned.replace(this.selfMentionRegexJid, ownBare);
       this.selfMentionRegexJid.lastIndex = 0; // reset global regex state
     }
     if (this.selfMentionRegexLid) {
-      const lidBare = this.botLid!.split('@')[0];
+      const lidBare = bareNumber(this.botLid!);
       cleaned = cleaned.replace(this.selfMentionRegexLid, lidBare);
       this.selfMentionRegexLid.lastIndex = 0;
     }
@@ -712,9 +715,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const rawLid: string | undefined = user?.lid ?? (sock as any).authState?.creds?.me?.lid;
       this.botJid = rawId ? jidNormalizedUser(rawId) : null;
       this.botLid = rawLid ? jidNormalizedUser(rawLid) : null;
-      const bare = this.botJid?.split('@')[0];
+      const bare = this.botJid ? bareNumber(this.botJid) : undefined;
       this.selfMentionRegexJid = bare ? new RegExp(`@${bare}\\b`, 'g') : null;
-      const lidBare = this.botLid?.split('@')[0];
+      const lidBare = this.botLid ? bareNumber(this.botLid) : undefined;
       this.selfMentionRegexLid = (lidBare && lidBare !== bare) ? new RegExp(`@${lidBare}\\b`, 'g') : null;
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
@@ -837,6 +840,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           timestamp: msg.messageTimestamp != null ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000),
         });
         continue;
+      }
+
+      // L3: Mine LID↔phone pairs from message key's participant + participantAlt.
+      // Baileys provides participantAlt as the alternate addressing form (PN when
+      // participant is LID, or vice versa). This is a major untapped mapping source.
+      const participant = msg.key.participant as string | undefined;
+      const participantAlt = (msg.key as any).participantAlt as string | undefined;
+      if (participant && participantAlt) {
+        this.emit('lidPairDiscovered', participant, participantAlt);
       }
 
       const parsed = parseIncomingMessage(msg);
@@ -1024,11 +1036,11 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   // --- Display name ---
   let senderName: string | null = msg.pushName ?? null;
-  if (!senderName && !senderJid.endsWith('@lid')) {
+  if (!senderName && !isLidJid(senderJid)) {
     // Fall back to the phone-number portion for personal JIDs only.
     // LID JIDs contain opaque numbers that are meaningless to users —
     // leave senderName null so downstream code can resolve via DB.
-    senderName = senderJid.split('@')[0] ?? null;
+    senderName = bareNumber(senderJid) ?? null;
   }
 
   // --- @mentioned JIDs ---

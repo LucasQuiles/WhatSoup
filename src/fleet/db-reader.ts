@@ -94,6 +94,39 @@ export class FleetDbReader {
     }
   }
 
+  /**
+   * Open a writable connection, run the callback, then close.
+   * For self-instance, reuses the already-open handle.
+   * Use sparingly — only for cross-instance sync operations (e.g. LID mapping sync).
+   */
+  queryWrite<T>(instanceName: string, dbPath: string, fn: (db: DatabaseSync) => T): DbResult<T> {
+    if (instanceName === this.selfName) {
+      try {
+        return { ok: true, data: fn(this.selfDb) };
+      } catch (err) {
+        const msg = (err as Error).message;
+        log.warn({ instance: instanceName, error: msg }, 'self-db write query failed');
+        return { ok: false, error: msg };
+      }
+    }
+
+    let db: DatabaseSync | null = null;
+    try {
+      db = new DatabaseSync(dbPath);
+      // busy_timeout for safe concurrent access — WAL mode is already set by the
+      // running instance at startup (database.ts), we just need patience for locks.
+      db.prepare('PRAGMA busy_timeout = 5000').run();
+      const result = fn(db);
+      return { ok: true, data: result };
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.warn({ instance: instanceName, dbPath, error: msg }, 'remote db write query failed');
+      return { ok: false, error: msg };
+    } finally {
+      try { db?.close(); } catch { /* already closed or never opened */ }
+    }
+  }
+
   /** Get chat list grouped by conversation_key, ordered by last message time. */
   getChats(name: string, dbPath: string, opts: { limit: number; offset: number }): DbResult<ChatSummary[]> {
     return this.query(name, dbPath, (db) => {

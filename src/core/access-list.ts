@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID } from './jid-constants.ts';
+import { DOMAIN_LID, normalizeLid } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -156,9 +156,8 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
   if (domain === DOMAIN_LID) {
     // resolveLid handles colon-device suffix normalization internally
     const resolved = resolveLid(db, local);
-    // Fallback: strip colon suffix for the raw LID return
-    const colonIdx = local.indexOf(':');
-    return resolved ?? (colonIdx >= 0 ? local.slice(0, colonIdx) : local);
+    // Fallback: return normalized LID (colon-device suffix stripped)
+    return resolved ?? normalizeLid(local);
   }
 
   // Personal JID or other — return local part

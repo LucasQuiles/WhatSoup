@@ -49,29 +49,34 @@ export function handleBlocklistUpdate(
 ): void {
   if (!Array.isArray(data?.blocklist)) return;
 
-  if (data.type === 'add') {
-    const stmt = db.raw.prepare('INSERT OR IGNORE INTO blocklist (jid) VALUES (?)');
-    for (const jid of data.blocklist) {
-      stmt.run(jid);
-      // Propagate block to access_list (handles both JID and LID formats)
-      const phone = resolvePhoneFromJid(jid, db);
-      if (phone && phone.length >= 5) {
-        upsertAccess(db, 'phone', phone, 'blocked');
+  db.raw.exec('BEGIN');
+  try {
+    if (data.type === 'add') {
+      const stmt = db.raw.prepare('INSERT OR IGNORE INTO blocklist (jid) VALUES (?)');
+      for (const jid of data.blocklist) {
+        stmt.run(jid);
+        const phone = resolvePhoneFromJid(jid, db);
+        if (phone && phone.length >= 5) {
+          upsertAccess(db, 'phone', phone, 'blocked');
+        }
       }
-    }
-  } else if (data.type === 'remove') {
-    const stmt = db.raw.prepare('DELETE FROM blocklist WHERE jid = ?');
-    for (const jid of data.blocklist) {
-      stmt.run(jid);
-      // Propagate unblock: only re-allow if the entry is currently blocked
-      const phone = resolvePhoneFromJid(jid, db);
-      if (phone && phone.length >= 5) {
-        const entry = lookupAccess(db, 'phone', phone);
-        if (entry?.status === 'blocked') {
-          upsertAccess(db, 'phone', phone, 'allowed');
+    } else if (data.type === 'remove') {
+      const stmt = db.raw.prepare('DELETE FROM blocklist WHERE jid = ?');
+      for (const jid of data.blocklist) {
+        stmt.run(jid);
+        const phone = resolvePhoneFromJid(jid, db);
+        if (phone && phone.length >= 5) {
+          const entry = lookupAccess(db, 'phone', phone);
+          if (entry?.status === 'blocked') {
+            upsertAccess(db, 'phone', phone, 'allowed');
+          }
         }
       }
     }
+    db.raw.exec('COMMIT');
+  } catch (err) {
+    db.raw.exec('ROLLBACK');
+    throw err;
   }
   log.debug({ count: data.blocklist.length, type: data.type }, 'blocklist updated');
 }

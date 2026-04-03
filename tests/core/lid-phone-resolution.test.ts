@@ -14,7 +14,7 @@
  *   - Conversation key: LID vs phone consistency
  */
 
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -78,6 +78,7 @@ import { isAdminPhone, normalizePhone, normalizePhoneE164 } from '../../src/lib/
 import { shouldRespond } from '../../src/core/access-policy.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { ContactsDirectory } from '../../src/core/mentions.ts';
+import { handleBlocklistSet, handleBlocklistUpdate } from '../../src/core/blocklist-sync.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -1167,6 +1168,139 @@ describe('LID sender display name handling', () => {
     const displayName = null ?? phone;
     // This is the best we can do without a mapping
     expect(displayName).toBe(UNKNOWN_LID);
+    db.close();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 19. Rate limiter — unified bucket for JID/LID via resolvePhoneFromJid
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('rate limiter identity unification', () => {
+  it('same person via JID and LID produces same rate limit key', () => {
+    const db = createTestDb();
+    seedLidMappings(db);
+
+    // Chat runtime now uses resolvePhoneFromJid(msg.senderJid, db) for rate limit key
+    const jidKey = resolvePhoneFromJid(ADMIN_JID, db);
+    const lidKey = resolvePhoneFromJid(ADMIN_LID_JID, db);
+    expect(jidKey).toBe(lidKey);
+    expect(jidKey).toBe(ADMIN_PHONE);
+    db.close();
+  });
+
+  it('unresolvable LID gets its own rate limit bucket (expected)', () => {
+    const db = createTestDb();
+    const key = resolvePhoneFromJid(UNKNOWN_LID_JID, db);
+    expect(key).toBe(UNKNOWN_LID);
+    // Different from any phone-based key — acceptable since we can't resolve
+    db.close();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 20. Blocklist sync — propagates to access_list with LID resolution
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('blocklist sync with LID resolution', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    seedLidMappings(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('handleBlocklistSet propagates blocks to access_list via resolved phone', () => {
+    handleBlocklistSet(db, [ADMIN_JID]);
+    const entry = lookupAccess(db, 'phone', ADMIN_PHONE);
+    expect(entry).not.toBeNull();
+    expect(entry!.status).toBe('blocked');
+  });
+
+  it('handleBlocklistSet resolves LID JIDs before blocking', () => {
+    handleBlocklistSet(db, [ADMIN_LID_JID]);
+    // Should block the resolved phone, not the LID number
+    const entry = lookupAccess(db, 'phone', ADMIN_PHONE);
+    expect(entry).not.toBeNull();
+    expect(entry!.status).toBe('blocked');
+    // No entry for the raw LID
+    expect(lookupAccess(db, 'phone', ADMIN_LID)).toBeNull();
+  });
+
+  it('handleBlocklistUpdate add → blocks resolved phone', () => {
+    handleBlocklistUpdate(db, { blocklist: [USER_LID_JID], type: 'add' });
+    const entry = lookupAccess(db, 'phone', USER_PHONE);
+    expect(entry).not.toBeNull();
+    expect(entry!.status).toBe('blocked');
+  });
+
+  it('handleBlocklistUpdate remove → unblocks if currently blocked', () => {
+    // First block
+    handleBlocklistUpdate(db, { blocklist: [USER_JID], type: 'add' });
+    expect(lookupAccess(db, 'phone', USER_PHONE)!.status).toBe('blocked');
+    // Then unblock
+    handleBlocklistUpdate(db, { blocklist: [USER_JID], type: 'remove' });
+    expect(lookupAccess(db, 'phone', USER_PHONE)!.status).toBe('allowed');
+  });
+
+  it('handleBlocklistUpdate remove does not change non-blocked entry', () => {
+    // Insert as allowed
+    insertAllowed(db, 'phone', ADMIN_PHONE);
+    // Remove from blocklist (wasn't blocked via access_list)
+    handleBlocklistUpdate(db, { blocklist: [ADMIN_JID], type: 'remove' });
+    // Should still be allowed (not changed)
+    expect(lookupAccess(db, 'phone', ADMIN_PHONE)!.status).toBe('allowed');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 21. ContactsDirectory LID cache — invalidation and bounds
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('ContactsDirectory LID cache lifecycle', () => {
+  it('invalidateLidCache clears cached resolutions', () => {
+    const db = createTestDb();
+    seedLidMappings(db);
+    const dir = new ContactsDirectory(db);
+
+    // Observe to populate cache
+    dir.observe(ADMIN_LID_JID, 'Shannon');
+    expect(dir.resolve('shannon')).toBe(ADMIN_PHONE);
+
+    // Update the mapping to a different phone
+    upsertLidMapping(db, ADMIN_LID, '19998887777@s.whatsapp.net');
+
+    // Cache still has old value
+    dir.observe(ADMIN_LID_JID, 'Shannon Updated');
+    expect(dir.resolve('shannon updated')).toBe(ADMIN_PHONE); // stale
+
+    // Invalidate cache
+    dir.invalidateLidCache();
+
+    // Now observe again — should re-resolve from DB
+    dir.observe(ADMIN_LID_JID, 'Shannon Fresh');
+    expect(dir.resolve('shannon fresh')).toBe('19998887777'); // updated
+
+    db.close();
+  });
+
+  it('lidCache is bounded to maxEntries', () => {
+    const db = createTestDb();
+    const dir = new ContactsDirectory(db, 5); // small cap
+
+    // Create more LID mappings than the cap
+    for (let i = 0; i < 10; i++) {
+      const lid = `${90000000000 + i}`;
+      upsertLidMapping(db, lid, `1555000${i}@s.whatsapp.net`);
+      dir.observe(`${lid}@lid`, `User ${i}`);
+    }
+
+    // The lidCache should not exceed maxEntries
+    // We can't directly inspect private fields, but we can verify it doesn't crash
+    // and that the latest entries are correctly resolved
+    expect(dir.resolve('user 9')).toBe('15550009');
     db.close();
   });
 });

@@ -226,7 +226,7 @@ describe('SessionManager', () => {
     expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
     expect(sentMessages).toHaveLength(1);
     expect(sentMessages[0].jid).toBe(CHAT_JID);
-    expect(sentMessages[0].text).toContain('crashed');
+    expect(sentMessages[0].text).toContain('session ended');
   });
 
   it('getStatus returns correct state when active', async () => {
@@ -379,7 +379,7 @@ describe('SessionManager', () => {
 
     // Only the first crash should have sent a notification
     expect(sentMessages).toHaveLength(1);
-    expect(sentMessages[0].text).toContain('crashed');
+    expect(sentMessages[0].text).toContain('session ended');
   });
 
   // ─── P3-A: Watchdog tests ─────────────────────────────────────────────────
@@ -836,7 +836,7 @@ describe('SessionManager', () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     expect(sentMessages).toHaveLength(2);
-    expect(sentMessages[1].text).toContain('crashed');
+    expect(sentMessages[1].text).toContain('session ended');
   });
 });
 

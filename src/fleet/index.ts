@@ -69,6 +69,8 @@ const handlers: Record<string, HandlerFn> = {
   auth:         (req, res, deps, params) => handleAuth(req, res, deps, params as any),
   getVersion:   (_req, res, deps, _params) => handleGetVersion(_req, res, deps.updateChecker),
   update:       (req, res, deps, _params) => handleUpdate(req, res, deps.updateChecker, repoRoot),
+  getLidMappings:  (_req, res, deps, _params) => handleGetLidMappings(_req, res, deps),
+  syncLidMappings: (req, res, deps, _params) => handleSyncLidMappings(req, res, deps),
 };
 
 // ---------------------------------------------------------------------------
@@ -121,7 +123,95 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/auth$/, handler: 'auth' },
   { method: 'GET',   path: /^\/api\/version$/, handler: 'getVersion' },
   { method: 'POST',  path: /^\/api\/update$/,  handler: 'update' },
+  { method: 'GET',   path: /^\/api\/lid-mappings$/, handler: 'getLidMappings' },
+  { method: 'POST',  path: /^\/api\/lid-mappings\/sync$/, handler: 'syncLidMappings' },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// L5: Cross-instance LID mapping sync handlers
+// ---------------------------------------------------------------------------
+
+/** GET /api/lid-mappings — export all LID mappings from all instances. */
+function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): void {
+  try {
+    const instances = [...deps.discovery.getInstances().values()];
+    const allMappings: Array<{ lid: string; phone_jid: string; instance: string }> = [];
+    const seen = new Set<string>();
+
+    for (const inst of instances) {
+      const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
+        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+      });
+      if (result.ok) {
+        for (const m of result.data) {
+          if (!seen.has(m.lid)) {
+            seen.add(m.lid);
+            allMappings.push({ ...m, instance: inst.name });
+          }
+        }
+      }
+    }
+
+    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length });
+  } catch (err) {
+    log.error({ err }, 'L5: failed to export LID mappings');
+    jsonResponse(res, 500, { error: 'internal error' });
+  }
+}
+
+/** POST /api/lid-mappings/sync — broadcast LID mappings to all instances. */
+async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
+  try {
+    const instances = [...deps.discovery.getInstances().values()];
+    const allMappings = new Map<string, string>(); // lid → phone_jid
+
+    // Phase 1: Collect union of all mappings from every instance
+    for (const inst of instances) {
+      const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
+        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+      });
+      if (result.ok) {
+        for (const m of result.data) {
+          allMappings.set(m.lid, m.phone_jid);
+        }
+      }
+    }
+
+    // Phase 2: Write the union set into every instance's DB (needs writable access)
+    const results: Record<string, number> = {};
+    for (const inst of instances) {
+      const insertResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (db: DatabaseSync) => {
+        // Wrap in a transaction — without this, each INSERT is a separate WAL write
+        // which is both slow and creates contention with the running instance.
+        db.prepare('BEGIN').run();
+        try {
+          const stmt = db.prepare(
+            `INSERT OR IGNORE INTO lid_mappings (lid, phone_jid, updated_at)
+             VALUES (?, ?, datetime('now'))`,
+          );
+          let imported = 0;
+          for (const [lid, phoneJid] of allMappings) {
+            const r = stmt.run(lid, phoneJid);
+            if ((r as any).changes > 0) imported++;
+          }
+          db.prepare('COMMIT').run();
+          return imported;
+        } catch (err) {
+          db.prepare('ROLLBACK').run();
+          throw err;
+        }
+      });
+      results[inst.name] = insertResult.ok ? insertResult.data : -1;
+    }
+
+    const totalMappings = allMappings.size;
+    log.info({ totalMappings, results }, 'L5: cross-instance LID sync completed');
+    jsonResponse(res, 200, { totalMappings, results });
+  } catch (err) {
+    log.error({ err }, 'L5: failed to sync LID mappings');
+    jsonResponse(res, 500, { error: 'internal error' });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Server factory

@@ -220,9 +220,9 @@ export function buildToolUpdate(toolName: string, input: Record<string, unknown>
     return rel.slice(0, half) + '…' + rel.slice(-(80 - half - 1));
   }
 
-  /** End-truncate a string to 80 chars. */
+  /** End-truncate a string to 160 chars (fits WhatsApp status lines without mid-word cuts). */
   function trunc(s: string): string {
-    return s.length <= 80 ? s : s.slice(0, 79) + '…';
+    return s.length <= 160 ? s : s.slice(0, 159) + '…';
   }
 
   switch (toolName) {

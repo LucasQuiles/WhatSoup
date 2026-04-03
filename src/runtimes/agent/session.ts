@@ -334,16 +334,28 @@ export class SessionManager {
 
         // Notify user of unexpected crash (rate-limited to avoid flood on rapid restarts).
         // Deferred via setImmediate so any synchronous onCrash cleanup runs first.
+
+        // Exit code 0 = normal shutdown (e.g. /new, graceful stop) — skip notification entirely.
+        if (code === 0 && !signal) {
+          log.info({ rowId: this.dbRowId }, 'session exited cleanly (code 0) — no crash notification');
+          return;
+        }
+
         const now = Date.now();
-        const suppressed =
+        const rateLimited =
           this.lastCrashNotifiedAt !== null &&
           now - this.lastCrashNotifiedAt < SessionManager.CRASH_NOTIFY_COOLDOWN_MS;
 
-        if (suppressed) {
+        if (rateLimited) {
           log.warn({ rowId: this.dbRowId }, 'crash notification suppressed (rate limited)');
         } else {
           this.lastCrashNotifiedAt = now;
-          const msg = 'Agent session crashed. Send any message to start a new session.';
+          // Build a deterministic, user-friendly message based on the exit reason
+          // code === 0 already returned above; only non-zero exits reach here
+          const reason = signal
+            ? `terminated by signal ${signal}`
+            : `exited with code ${code}`;
+          const msg = `Agent session ended (${reason}). Send any message to start a new session.`;
           if (this.notifyUser) {
             // Route through runtime's outbound queue so it arrives after buffered turn output.
             setImmediate(() => this.notifyUser!(msg));

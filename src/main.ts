@@ -31,7 +31,7 @@ import {
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
 import { lookupAccess, updateAccess, insertAllowed, resolvePhoneFromJid } from './core/access-list.ts';
-import { hydrateLidMappings, upsertLidMapping } from './core/lid-resolver.ts';
+import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
@@ -357,9 +357,35 @@ connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
   }
 });
 
+// L3: Mine LID↔phone pairs from message key participant/participantAlt.
+// Every inbound group message may carry both addressing forms — this is
+// the highest-volume mapping source and catches pairs that L1/L2 miss.
+connectionManager.on('lidPairDiscovered', (participant, participantAlt) => {
+  try {
+    const pair = mineMessageKey(db, participant, participantAlt);
+    if (pair) {
+      upsertLidMapping(db, pair.lid, pair.phoneJid);
+      connectionManager.contactsDir.invalidateLidCache();
+      log.info({ lid: pair.lid, phoneJid: pair.phoneJid, source: 'L3-message-mining' }, 'new LID mapping from message key');
+    }
+  } catch (err) {
+    log.warn({ err, participant, participantAlt }, 'L3: failed to mine message key LID pair');
+  }
+});
+
 connectionManager.on('groupsUpsert', (groups) => {
   try {
     handleGroupsUpsert(db, groups as any);
+    // L4: Mine LID↔phone from group participant metadata.
+    // Groups carry both lid and phoneNumber fields per participant.
+    for (const group of groups as any[]) {
+      if (group.participants && Array.isArray(group.participants)) {
+        const discovered = mineGroupParticipants(db, group.participants);
+        if (discovered > 0) {
+          connectionManager.contactsDir.invalidateLidCache();
+        }
+      }
+    }
     log.info({ count: groups.length }, 'groupsUpsert: persisted group metadata');
   } catch (err) {
     log.error({ err }, 'groupsUpsert: failed to persist group metadata');
@@ -572,7 +598,22 @@ const degradationInterval = config.controlPeers.has('q') ? setInterval(() => {
   } catch (err) { log.error({ err }, 'degradation signal check failed'); }
 }, 60_000) : null;
 
-// 13. Seed contacts directory from message history (so @name mentions work after restart)
+// 13. L6: Periodic LID reconciliation — re-reads auth dir + finds unresolved LIDs
+const lidReconcileInterval = setInterval(() => {
+  try {
+    const result = reconcileLidMappings(db, config.authDir);
+    if (result.hydrated > 0 || result.unresolvedLids.length > 0) {
+      log.info({
+        hydrated: result.hydrated,
+        unresolvedCount: result.unresolvedLids.length,
+        unresolvedLids: result.unresolvedLids,
+      }, 'L6: LID reconciliation sweep completed');
+      if (result.hydrated > 0) connectionManager.contactsDir.invalidateLidCache();
+    }
+  } catch (err) { log.error({ err }, 'L6: LID reconciliation failed'); }
+}, 30 * 60 * 1000); // every 30 minutes
+
+// 14. Seed contacts directory from message history (so @name mentions work after restart)
 {
   // Inject DB into contacts directory so LID→phone resolution works for @mentions
   connectionManager.contactsDir.setDatabase(db);
@@ -670,6 +711,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(startupCleanupTimeout);
     clearInterval(retentionInterval);
     clearInterval(echoTimeoutInterval);
+    clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered

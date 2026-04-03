@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import { extractLocal } from '../../core/access-list.ts';
+import { bareNumber } from '../../core/jid-constants.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -362,7 +363,7 @@ export async function handleGetLine(
       const rows = db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as { lid: string; phone_jid: string }[];
       const map: Record<string, string> = {};
       for (const row of rows) {
-        map[row.lid] = row.phone_jid.split('@')[0];
+        map[row.lid] = bareNumber(row.phone_jid);
       }
       return map;
     });
