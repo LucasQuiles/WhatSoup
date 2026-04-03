@@ -368,6 +368,7 @@ const TYPE_COLOR: Record<string, string> = {
 const ENUM_OPTIONS: Record<string, string[]> = {
   accessMode: ['self_only', 'allowlist', 'open_dm', 'groups_only'],
   toolUpdateMode: ['full', 'minimal'],
+  model: ['', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
 }
 
 /* ═══ ConfigEditDialog — type-aware form for editing line config ═══ */
@@ -521,7 +522,7 @@ function ConfigEditDialog({
           }}
         >
           {ENUM_OPTIONS[key].map(opt => (
-            <option key={opt} value={opt}>{opt}</option>
+            <option key={opt} value={opt}>{opt || '(default)'}</option>
           ))}
         </select>
       )
