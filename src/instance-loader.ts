@@ -59,7 +59,7 @@ interface InstanceConfig {
 // Validation
 // ---------------------------------------------------------------------------
 
-function validateInstance(raw: Record<string, unknown>, name: string): void {
+function validateInstance(raw: Record<string, unknown>, name: string, authOnly = false): void {
   // Name match
   if (raw['name'] !== name) {
     throw new Error(
@@ -95,6 +95,10 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
   if (phones.some((p: unknown) => typeof p !== 'string' || (p as string).trim() === '')) {
     throw new Error(`adminPhones must contain only non-empty strings in ${instancePath}`);
   }
+
+  // Auth-only mode: skip runtime validation (agentOptions, systemPrompt, etc.)
+  // Used by bootstrap-auth.ts which only needs paths + WhatsApp connection config
+  if (authOnly) return;
 
   // Agent access mode gate — CON-007
   if (raw['type'] === 'agent') {
@@ -167,7 +171,7 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
 // Main export
 // ---------------------------------------------------------------------------
 
-export function loadInstance(name: string): void {
+export function loadInstance(name: string, opts?: { authOnly?: boolean }): void {
   if (!name) {
     throw new Error('Instance name is required');
   }
@@ -193,7 +197,7 @@ export function loadInstance(name: string): void {
   }
 
   // 4. Validate
-  validateInstance(parsed, name);
+  validateInstance(parsed, name, opts?.authOnly);
 
   // 5. Resolve paths
   const paths = instancePaths(name);

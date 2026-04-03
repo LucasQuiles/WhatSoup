@@ -1,4 +1,4 @@
-import { type FC, type ChangeEvent, useCallback, useMemo, useState } from 'react'
+import { type FC, type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
@@ -85,6 +85,51 @@ const tabStyle = (active: boolean): React.CSSProperties => ({
   transition: 'border-color var(--dur-norm) var(--ease), color var(--dur-norm) var(--ease)',
 })
 
+/** Generate a sensible default system prompt based on instance type. */
+function defaultSystemPrompt(name: string, type: string): string {
+  const titleName = name.charAt(0).toUpperCase() + name.slice(1)
+  if (type === 'agent') {
+    return `You are ${titleName}, a helpful AI agent on WhatsApp. You have access to tools including file operations, web search, and code execution within your sandbox. Keep responses concise — they're delivered as WhatsApp messages. Ask clarifying questions when a request is ambiguous. Be direct, helpful, and personable.`
+  }
+  return `You are ${titleName}, a helpful AI assistant on WhatsApp. You respond to messages in a conversational, friendly tone. Keep responses concise and relevant — they're delivered as WhatsApp messages. If you don't know something, say so rather than guessing.`
+}
+
+/** Generate a sensible default CLAUDE.md for a new agent instance. */
+function defaultClaudeMd(name: string, cwd: string): string {
+  const titleName = name.charAt(0).toUpperCase() + name.slice(1)
+  return `# ${titleName} — WhatsApp Agent
+
+You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
+
+## Identity
+- You are a helpful, direct assistant reachable over WhatsApp
+- You run as a Claude Code agent with tool access within your sandbox
+
+## Workspace
+- Your working directory is \`${cwd || '/home/q/LAB/' + name}\`
+- You can create files, folders, and projects here freely
+- Stay within this directory for all file operations
+
+## Guardrails
+
+### Stay in your lane
+- Do NOT modify files outside your workspace
+- Do NOT modify system configs, credentials, or infrastructure
+- Do NOT restart, stop, or modify other WhatsApp instances
+
+### Be conservative with resources
+- Keep responses concise — they're delivered via WhatsApp
+- Don't spawn unnecessary background processes
+- Don't install system-level packages without explicit permission
+
+## Capabilities
+- Web search and research
+- Create and edit documents, code, and scripts
+- Read and analyze files sent to you
+- Help with planning, writing, and brainstorming
+`
+}
+
 const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
   const type = (data.type as string) ?? 'chat'
   const accessMode = (data.accessMode as string) ?? 'self_only'
@@ -98,6 +143,23 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const rateLimitPerHour = (data.rateLimitPerHour as number) ?? 60
   const maxTokens = (data.maxTokens as number) ?? 4096
   const tokenBudget = (data.tokenBudget as number) ?? 50000
+  const name = (data.name as string) ?? ''
+
+  // Pre-fill system prompt and claudeMd with sensible defaults (once only on mount)
+  const prefilled = useRef(false)
+  useEffect(() => {
+    if (prefilled.current) return
+    prefilled.current = true
+    const patch: Record<string, unknown> = {}
+    if (type !== 'passive' && !systemPrompt.trim()) {
+      patch.systemPrompt = defaultSystemPrompt(name, type)
+    }
+    if (type === 'agent' && !claudeMd.trim()) {
+      patch.claudeMd = defaultClaudeMd(name, agentOptions.cwd ?? '')
+    }
+    if (Object.keys(patch).length > 0) onChange(patch)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- intentional mount-only
+
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
   const pineconeSearchMode = (data.pineconeSearchMode as string) ?? 'Memory'
   const pineconeRerank = (data.pineconeRerank as boolean) ?? false

@@ -858,12 +858,28 @@ export const MOCK_LOGS: Record<string, LogEntry[]> = {
 //  Helper / accessor functions
 // ---------------------------------------------------------------------------
 
+/** Enrich mock lines with fields the real API adds server-side. */
+function enrichMockLine(line: LineInstance): LineInstance {
+  return {
+    ...line,
+    linkedStatus: line.status === 'unreachable' && line.phone === 'unknown' ? 'unlinked' : 'linked',
+    messageStats: line.messageStats ?? {
+      sent: Math.floor(Math.random() * 200) + 10,
+      received: Math.floor(Math.random() * 800) + 50,
+      images: Math.floor(Math.random() * 40),
+      audio: Math.floor(Math.random() * 15),
+      documents: Math.floor(Math.random() * 10),
+    },
+  };
+}
+
 export function getLines(): LineInstance[] {
-  return MOCK_LINES;
+  return MOCK_LINES.map(enrichMockLine);
 }
 
 export function getLine(name: string): LineInstance | undefined {
-  return MOCK_LINES.find((l) => l.name === name);
+  const line = MOCK_LINES.find((l) => l.name === name);
+  return line ? enrichMockLine(line) : undefined;
 }
 
 export function getChats(name: string): ChatItem[] {

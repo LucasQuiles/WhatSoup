@@ -83,10 +83,16 @@ function truncate(text: string, max: number): string {
 /* ── Friendly error messages ── */
 
 function friendlyError(raw: string): string {
-  if (raw.includes('already exists')) return 'An instance with this name already exists. Go back and choose a different name.'
-  if (raw.includes('systemPrompt')) return 'A system prompt is required. Go back to the Configuration step.'
-  if (raw.includes('agentOptions')) return 'Agent configuration is incomplete. Go back to the Configuration step.'
-  if (raw.includes('adminPhones')) return 'At least one admin phone number is required.'
+  if (raw.includes('already exists')) return 'An instance with this name already exists. Go back to Identity and choose a different name.'
+  if (raw.includes('systemPrompt')) return 'A system prompt is required. Click "Edit" on the Config card above to add one.'
+  if (raw.includes('agentOptions')) return 'Agent configuration is incomplete. Click "Edit" on the Config card to set a working directory.'
+  if (raw.includes('adminPhones')) return 'At least one admin phone number is required. Click "Edit" on the Identity card.'
+  if (raw.includes('cwd must be within')) return 'The working directory must be inside the home directory. Click "Edit" on the Config card to fix.'
+  if (raw.includes('rateLimitPerHour')) return 'Rate limit must be between 1 and 10,000 per hour. Click "Edit" on the Config card.'
+  if (raw.includes('maxTokens')) return 'Max tokens must be between 256 and 200,000. Click "Edit" on the Config card.'
+  if (raw.includes('tokenBudget')) return 'Token budget must be between 1,000 and 10,000,000. Click "Edit" on the Config card.'
+  if (raw.includes('timeout') || raw.includes('AbortError')) return 'The request timed out. The fleet server may be under heavy load — try again.'
+  if (raw.includes('fetch') || raw.includes('network')) return 'Could not reach the fleet server. Check that it is running and try again.'
   return `Something went wrong: ${raw}`
 }
 

@@ -109,6 +109,9 @@ export const api = {
   stopInstance: (name: string) =>
     apiFetch<{ status: string; instance: string }>(`/api/lines/${encodeURIComponent(name)}/stop`, { method: 'POST' }),
 
+  deleteLine: (name: string) =>
+    apiFetch<{ deleted: string }>(`/api/lines/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
   sendMessage: (name: string, chatJid: string, text: string) =>
     apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
       method: 'POST',
@@ -125,12 +128,14 @@ export const api = {
     apiFetch<Record<string, unknown>>(`/api/lines/${encodeURIComponent(name)}/config`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(30_000),
     }),
 
   createLine: (config: Record<string, unknown>) =>
     apiFetch<{ name: string; healthPort: number }>('/api/lines', {
       method: 'POST',
       body: JSON.stringify(config),
+      signal: AbortSignal.timeout(30_000),
     }),
 
   checkExists: (name: string) =>

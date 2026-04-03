@@ -36,7 +36,7 @@ const ModeBadge: FC<ModeBadgeProps> = ({ mode }) => {
       style={{
         fontSize: "var(--font-size-label)",
         letterSpacing: "var(--tracking-pill)",
-        padding: "3px 10px 3px 8px",
+        padding: "var(--sp-0h) var(--sp-2h) var(--sp-0h) var(--sp-2)",
         borderRadius: "var(--radius-sm)",
         backgroundColor: washVar,
       }}

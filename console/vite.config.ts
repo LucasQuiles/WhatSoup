@@ -19,6 +19,22 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      // SSE auth endpoint needs special handling — no response buffering
+      '/api/lines': {
+        target: 'http://127.0.0.1:9099',
+        changeOrigin: true,
+        headers: fleetToken ? { 'Authorization': `Bearer ${fleetToken}` } : {},
+        configure: (proxy) => {
+          // Disable response buffering for SSE streams
+          proxy.on('proxyRes', (proxyRes) => {
+            const ct = proxyRes.headers['content-type'] ?? ''
+            if (ct.includes('text/event-stream')) {
+              proxyRes.headers['cache-control'] = 'no-cache'
+              proxyRes.headers['x-accel-buffering'] = 'no'
+            }
+          })
+        },
+      },
       '/api': {
         target: 'http://127.0.0.1:9099',
         changeOrigin: true,

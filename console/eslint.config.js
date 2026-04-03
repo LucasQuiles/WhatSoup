@@ -124,6 +124,15 @@ export default defineConfig([
           selector: 'Property[key.name="padding"][value.value=/^\\d{2,}px$/]',
           message: '⛔ Hardcoded padding px — use var(--sp-*) spacing token.',
         },
+        // Compound padding with hardcoded px (e.g. '6px var(--sp-3)' or '8px 14px')
+        {
+          selector: 'Property[key.name="padding"][value.value=/\\d{2,}px /]',
+          message: '⛔ Compound padding with hardcoded px — use var(--sp-*) tokens for all values.',
+        },
+        {
+          selector: 'Property[key.name="padding"][value.value=/ \\d{2,}px/]',
+          message: '⛔ Compound padding with hardcoded px — use var(--sp-*) tokens for all values.',
+        },
         {
           selector: 'Property[key.name="margin"][value.value=/^\\d{2,}px$/]',
           message: '⛔ Hardcoded margin px — use var(--sp-*) spacing token.',
@@ -131,6 +140,13 @@ export default defineConfig([
         {
           selector: 'Property[key.name="gap"][value.value=/^\\d{2,}px$/]',
           message: '⛔ Hardcoded gap px — use var(--sp-*) spacing token.',
+        },
+
+        // ═══ INLINE TRANSITION ═══
+        // Inline transition style — use CSS classes or design system utilities
+        {
+          selector: 'Property[key.name="transition"][value.value=/\\d+\\.?\\d*(s|ms)/]',
+          message: '⛔ Inline transition with hardcoded duration — use a CSS class or design system utility.',
         },
 
         // ═══ SIZING ANTI-PATTERNS ═══

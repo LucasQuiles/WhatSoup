@@ -60,7 +60,7 @@ const tabStyle = (active: boolean): React.CSSProperties => ({
   borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
   color: active ? 'var(--color-t1)' : 'var(--color-t4)',
   background: 'none',
-  transition: 'border-color 0.2s ease, color 0.2s ease',
+  transition: 'border-color var(--dur-norm) var(--ease), color var(--dur-norm) var(--ease)',
 })
 
 const ModelAndKeyTabs: FC<{

@@ -32,6 +32,7 @@ import {
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
 import { lookupAccess, updateAccess, insertAllowed, extractPhone } from './core/access-list.ts';
+import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 
@@ -378,7 +379,7 @@ connectionManager.on('groupParticipantsUpdate', (data) => {
 
   // Check if the person who added the bot is an admin
   const authorPhone = extractPhone(author);
-  if (!config.adminPhones.has(authorPhone)) {
+  if (!isAdminPhone(authorPhone, config.adminPhones)) {
     log.info({ groupJid, author, authorPhone }, 'bot added to group by non-admin — not auto-allowing');
     return;
   }
@@ -590,29 +591,50 @@ async function start(): Promise<void> {
 
   log.info('WhatSoup bot started');
 
-  // Agent instances notify the user on startup (resume or fresh start).
-  // Delay 3 s to allow the WA connection to fully stabilise before sending.
-  // In minimal toolUpdateMode, suppress startup notifications — non-technical users
-  // don't need to know about agent lifecycle events.
-  if (instanceType === 'agent' && runtime instanceof AgentRuntime && config.toolUpdateMode !== 'minimal') {
-    const pending = runtime.popStartupMessage();
-    const notifyTarget = pending
-      ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
-      : (() => {
-          const adminPhone = [...config.adminPhones][0];
-          if (!adminPhone) return null; // no admin phones — skip startup notification
-          return { chatJid: toPersonalJid(adminPhone), text: '*Agent back online* ✓', isResume: false };
-        })();
+  // ── Startup notification ──
+  // introSent flag in config: false = send introduction, true = skip.
+  // Set to false on creation and re-link. Patched to true after sending.
+  // Restarts (agent only): send terse "back online" status ping.
+  const adminPhone = [...config.adminPhones][0];
+  if (adminPhone && instanceType !== 'passive') {
+    const needsIntro = instanceConfig?.introSent === false;
 
-    if (notifyTarget) {
+    if (needsIntro) {
+      // First boot or re-link — introduce the instance
+      const titleName = config.botName.charAt(0).toUpperCase() + config.botName.slice(1);
+      const introText = instanceType === 'agent'
+        ? `Hey! *${titleName}* is online and ready. I'm an AI agent with tool access — I can research, write code, manage files, and help with tasks. Send me a message to get started.`
+        : `Hey! *${titleName}* is online and ready. I'm an AI assistant — send me a message and I'll respond.`;
+      setTimeout(() => {
+        sendTracked(connectionManager, toPersonalJid(adminPhone), introText, durability, { replayPolicy: 'safe' })
+          .then(() => {
+            log.info({ chatJid: toPersonalJid(adminPhone) }, 'sent introduction');
+            // Mark intro as sent so restarts don't re-send
+            try {
+              const cfgPath = join(config.configRoot, 'config.json');
+              if (existsSync(cfgPath)) {
+                const raw = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+                raw.introSent = true;
+                writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+              }
+            } catch (e) { log.warn({ err: e }, 'failed to persist introSent flag'); }
+          })
+          .catch((err) => log.warn({ err }, 'failed to send introduction'));
+      }, 3_000);
+    } else if (instanceType === 'agent' && runtime instanceof AgentRuntime && config.toolUpdateMode !== 'minimal') {
+      // Agent restart notification (existing behavior)
+      const pending = runtime.popStartupMessage();
+      const notifyTarget = pending
+        ? { chatJid: pending.chatJid, text: pending.text, isResume: true }
+        : { chatJid: toPersonalJid(adminPhone), text: '*Agent back online* ✓', isResume: false };
       setTimeout(() => {
         sendTracked(connectionManager, notifyTarget.chatJid, notifyTarget.text, durability, { replayPolicy: 'safe' })
           .then(() => log.info({ chatJid: notifyTarget.chatJid, isResume: notifyTarget.isResume }, 'sent startup notification'))
           .catch((err) => log.warn({ err, chatJid: notifyTarget.chatJid }, 'failed to send startup notification'));
       }, 3_000);
-    } else {
-      log.warn('no admin phones configured — skipping startup notification');
     }
+  } else if (!adminPhone) {
+    log.warn('no admin phones configured — skipping startup notification');
   }
 }
 

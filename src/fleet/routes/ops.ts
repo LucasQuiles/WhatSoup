@@ -158,8 +158,56 @@ export async function handleConfigUpdate(
     return;
   }
 
-  // Shallow merge
+  // Deep merge for known nested objects so partial patches don't destroy siblings
+  const DEEP_MERGE_KEYS = ['agentOptions', 'models'];
   const merged = { ...existing, ...patch };
+  for (const key of DEEP_MERGE_KEYS) {
+    if (existing[key] && patch[key] && typeof existing[key] === 'object' && typeof patch[key] === 'object') {
+      merged[key] = { ...(existing[key] as Record<string, unknown>), ...(patch[key] as Record<string, unknown>) };
+    }
+  }
+
+  // Validate cwd path traversal (same guard as handleCreateLine)
+  if (merged.agentOptions && typeof (merged.agentOptions as Record<string, unknown>).cwd === 'string') {
+    const cwd = (merged.agentOptions as Record<string, unknown>).cwd as string;
+    if (cwd.trim()) {
+      const safeCwd = path.resolve(cwd);
+      if (!safeCwd.startsWith(os.homedir() + path.sep)) {
+        jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
+        return;
+      }
+      (merged.agentOptions as Record<string, unknown>).cwd = safeCwd;
+    }
+  }
+
+  // Validate numeric bounds if present in patch
+  if (typeof patch.rateLimitPerHour === 'number' && (patch.rateLimitPerHour < 1 || patch.rateLimitPerHour > 10000)) {
+    jsonResponse(res, 400, { error: 'rateLimitPerHour must be between 1 and 10,000' });
+    return;
+  }
+  if (typeof patch.maxTokens === 'number' && (patch.maxTokens < 256 || patch.maxTokens > 200000)) {
+    jsonResponse(res, 400, { error: 'maxTokens must be between 256 and 200,000' });
+    return;
+  }
+  if (typeof patch.tokenBudget === 'number' && (patch.tokenBudget < 1000 || patch.tokenBudget > 10000000)) {
+    jsonResponse(res, 400, { error: 'tokenBudget must be between 1,000 and 10,000,000' });
+    return;
+  }
+
+  // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
+  if (patch.claudeMd && merged.type === 'agent') {
+    const ao = merged.agentOptions as Record<string, unknown> | undefined;
+    if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+      try {
+        const claudeDir = path.join(ao.cwd, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string, 'utf-8');
+      } catch (err) {
+        jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
+        return;
+      }
+    }
+  }
 
   // Atomic write: write to .tmp then rename
   const tmpPath = instance.configPath + '.tmp';
@@ -174,6 +222,35 @@ export async function handleConfigUpdate(
   }
 
   jsonResponse(res, 200, merged);
+}
+
+/** DELETE /api/lines/:name — tear down and remove an instance completely.
+ *  Idempotent: returns 200 even if the instance was already deleted. */
+export async function handleDeleteLine(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  // Defense-in-depth: validate name format before any fs/systemd operations
+  if (!NAME_RE.test(params.name)) {
+    jsonResponse(res, 400, { error: 'invalid instance name' });
+    return;
+  }
+
+  // 1. Stop the systemd unit (ignore failure — may already be stopped/gone)
+  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* ok */ }
+
+  // 2. Disable the systemd unit (ignore failure — may not be enabled)
+  try { await execFileAsync('systemctl', ['--user', 'disable', `whatsoup@${params.name}`]); } catch { /* ok */ }
+
+  // 3. Remove config, data, and state directories
+  cleanupPartial(params.name);
+
+  // 4. Re-scan discovery so the instance disappears from the UI
+  deps.discovery.scan();
+
+  jsonResponse(res, 200, { deleted: params.name });
 }
 
 // ---------------------------------------------------------------------------
@@ -267,13 +344,14 @@ export async function handleCreateLine(
     return;
   }
 
-  // --- Validate adminPhones ---
-  const adminPhones = body.adminPhones;
+  // --- Validate & deduplicate adminPhones ---
+  let adminPhones = body.adminPhones;
   if (!Array.isArray(adminPhones) || adminPhones.length === 0 ||
       adminPhones.some((p: unknown) => typeof p !== 'string' || p === '')) {
     jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
     return;
   }
+  adminPhones = [...new Set((adminPhones as string[]).map((p: string) => p.replace(/\D/g, '')))];
 
   // --- Type-specific validation ---
   // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.
@@ -333,7 +411,22 @@ export async function handleCreateLine(
     adminPhones,
     healthPort,
     accessMode,
+    introSent: false, // triggers introduction message on first boot
   };
+
+  // --- Validate numeric bounds ---
+  if (typeof body.rateLimitPerHour === 'number' && (body.rateLimitPerHour < 1 || body.rateLimitPerHour > 10000)) {
+    jsonResponse(res, 400, { error: 'rateLimitPerHour must be between 1 and 10,000' });
+    return;
+  }
+  if (typeof body.maxTokens === 'number' && (body.maxTokens < 256 || body.maxTokens > 200000)) {
+    jsonResponse(res, 400, { error: 'maxTokens must be between 256 and 200,000' });
+    return;
+  }
+  if (typeof body.tokenBudget === 'number' && (body.tokenBudget < 1000 || body.tokenBudget > 10000000)) {
+    jsonResponse(res, 400, { error: 'tokenBudget must be between 1,000 and 10,000,000' });
+    return;
+  }
 
   // Pass through all optional config fields (exclude internal/UI-only fields)
   const PASSTHROUGH_FIELDS = [
@@ -392,6 +485,12 @@ export async function handleCreateLine(
   }
 }
 
+// Active auth processes per instance — prevents duplicate concurrent auth sessions
+const activeAuthProcesses = new Map<string, ReturnType<typeof spawn>>();
+
+// Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** GET /api/lines/:name/auth — SSE stream of QR codes from the auth process. */
 export async function handleAuth(
   req: IncomingMessage,
@@ -401,6 +500,16 @@ export async function handleAuth(
 ): Promise<void> {
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
+
+  // Stop the running instance first so the lock file is released for auth
+  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* may not be running */ }
+
+  // Kill any existing auth process for this instance before starting a new one
+  const existing = activeAuthProcesses.get(params.name);
+  if (existing) {
+    try { existing.kill('SIGTERM'); } catch { /* already exited */ }
+    activeAuthProcesses.delete(params.name);
+  }
 
   // SSE headers
   res.writeHead(200, {
@@ -415,13 +524,28 @@ export async function handleAuth(
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  activeAuthProcesses.set(params.name, child);
 
   // Guard against double res.end() — declared before any event handlers
   let ended = false;
-  const endOnce = () => { if (!ended) { ended = true; res.end(); } };
+  const endOnce = () => {
+    if (!ended) {
+      ended = true;
+      activeAuthProcesses.delete(params.name);
+      clearTimeout(authTimer);
+      res.end();
+    }
+  };
   const writeSSE = (event: string, data: unknown) => {
     if (!ended) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
+
+  // Wall-clock timeout — prevents auth process from hanging forever
+  const authTimer = setTimeout(() => {
+    writeSSE('error', { message: 'Authentication timed out. QR codes expire after ~60 seconds. Please retry.' });
+    child.kill('SIGTERM');
+    endOnce();
+  }, AUTH_TIMEOUT_MS);
 
   // Parse stdout for JSON events
   let buffer = '';
@@ -437,6 +561,13 @@ export async function handleAuth(
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
         writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
+          // Reset introSent so the instance sends an introduction on next boot
+          try {
+            const cfgPath = instance.configPath;
+            const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+            raw.introSent = false;
+            fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+          } catch { /* config write failed — intro won't re-fire but not critical */ }
           execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], () => {});
           deps.discovery.scan();
           setTimeout(endOnce, 1000);
@@ -467,5 +598,6 @@ export async function handleAuth(
   req.on('close', () => {
     child.kill('SIGTERM');
     setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);
+    endOnce();
   });
 }

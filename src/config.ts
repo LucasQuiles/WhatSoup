@@ -99,11 +99,13 @@ mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
 // ---------------------------------------------------------------------------
 const instanceModels: Record<string, string> = instance?.models ?? {};
 
-const resolvedAdminPhones: string[] = instance
+const rawAdminPhones: string[] = instance
   ? (Array.isArray(instance.adminPhones) && instance.adminPhones.length > 0
       ? (instance.adminPhones as string[])
       : [])
   : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
+// Normalize to digits-only so "+1-845-978-0919" becomes "18459780919"
+const resolvedAdminPhones = rawAdminPhones.map(p => p.replace(/\D/g, ''));
 
 // ---------------------------------------------------------------------------
 // Default system prompt (extracted for readability)

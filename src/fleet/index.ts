@@ -10,7 +10,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
-import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleAuth } from './routes/ops.ts';
+import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -57,6 +57,7 @@ const handlers: Record<string, HandlerFn> = {
   getTyping:    (req, res, deps, _params) => handleGetTyping(req, res, deps),
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
   createLine:   (req, res, deps, _params) => handleCreateLine(req, res, deps),
+  deleteLine:   (req, res, deps, params) => handleDeleteLine(req, res, deps, params as any),
   checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params as any),
   checkDirectory: (req, res) => handleCheckDirectory(req, res),
   auth:         (req, res, deps, params) => handleAuth(req, res, deps, params as any),
@@ -98,6 +99,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines$/, handler: 'getLines' },
   { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
+  { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'deleteLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/messages$/, handler: 'getMessages' },

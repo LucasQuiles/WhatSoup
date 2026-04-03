@@ -108,7 +108,7 @@ const validateStep = (step: number, formData: Record<string, unknown>): Record<s
     const phones = formData.adminPhones as string[]
     if (!phones || phones.length === 0) errs.adminPhones = 'Add at least one admin phone number, then press Enter'
   }
-  if (step === 2) {
+  if (step === 3) {
     if (formData.type !== 'passive' && !formData.systemPrompt) errs.systemPrompt = 'Add a system prompt — this defines how the AI responds'
     if (formData.type === 'agent') {
       const ao = formData.agentOptions as Record<string, unknown> | undefined
@@ -170,17 +170,18 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   )
 
   const [instanceCreated, setInstanceCreated] = useState(false)
+  const [wizardCompleted, setWizardCompleted] = useState(false)
 
   // Warn user about tab close when instance is created but wizard incomplete
   useEffect(() => {
-    if (!instanceCreated) return
+    if (!instanceCreated || wizardCompleted) return
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault()
       e.returnValue = ''
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
-  }, [instanceCreated])
+  }, [instanceCreated, wizardCompleted])
 
   // Lock the instance name after creation to prevent orphaned instances on back-nav
   const [lockedName, setLockedName] = useState<string | null>(null)
@@ -241,6 +242,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       // Instance already created at step 0→1 transition. Update config with final settings.
       await api.updateConfig(formData.name as string, formData)
       // Instance already linked + running from step 1. Config saved. Done.
+      setWizardCompleted(true)
       onClose()
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err))

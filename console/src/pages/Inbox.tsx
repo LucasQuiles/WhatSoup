@@ -9,7 +9,7 @@ import ModeBadge from '../components/ModeBadge'
 import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
-import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Shield } from 'lucide-react'
+import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Loader2 } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -248,8 +248,10 @@ export default function Inbox() {
                 onClick={handleSend}
                 disabled={isSending || !msgText.trim()}
               >
-                <Send size={16} strokeWidth={2} />
-                <span className="c-btn-send-label">Send</span>
+                {isSending
+                  ? <Loader2 size={16} strokeWidth={2} className="animate-spin" />
+                  : <Send size={16} strokeWidth={2} />}
+                <span className="c-btn-send-label">{isSending ? 'Sending' : 'Send'}</span>
               </button>
             </div>
           </>
@@ -335,17 +337,34 @@ export default function Inbox() {
               <div>
                 <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Actions</div>
                 <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
-                  <button className="c-btn c-btn-success w-full justify-center">
+                  <button
+                    className="c-btn c-btn-success w-full justify-center"
+                    onClick={async () => {
+                      try {
+                        const subjectType = currentChat.isGroup ? 'group' : 'number'
+                        await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'allow')
+                        toast.success(`Allowed ${resolveDisplayName(currentChat.name)}`)
+                      } catch (err) {
+                        toast.error(`Failed to allow: ${err instanceof Error ? err.message : String(err)}`)
+                      }
+                    }}
+                  >
                     <UserCheck size={14} strokeWidth={1.75} /> Allow Contact
                   </button>
-                  <button className="c-btn c-btn-danger w-full justify-center">
+                  <button
+                    className="c-btn c-btn-danger w-full justify-center"
+                    onClick={async () => {
+                      try {
+                        const subjectType = currentChat.isGroup ? 'group' : 'number'
+                        await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'block')
+                        toast.error(`Blocked ${resolveDisplayName(currentChat.name)}`)
+                      } catch (err) {
+                        toast.error(`Failed to block: ${err instanceof Error ? err.message : String(err)}`)
+                      }
+                    }}
+                  >
                     <Ban size={14} strokeWidth={1.75} /> Block Contact
                   </button>
-                  <div style={{ borderTop: 'var(--bw) solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
-                    <button className="c-btn c-btn-ghost w-full justify-center">
-                      <Shield size={14} strokeWidth={1.75} /> View Access List
-                    </button>
-                  </div>
                 </div>
               </div>
             </div>

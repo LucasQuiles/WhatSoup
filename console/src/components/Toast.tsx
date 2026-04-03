@@ -40,7 +40,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
     <div
       className="flex items-center gap-2.5 font-medium"
       style={{
-        padding: '10px var(--sp-4)',
+        padding: 'var(--sp-2h) var(--sp-4)',
         borderRadius: 'var(--radius-md)',
         fontSize: 'var(--font-size-body)',
         borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: borderColor[variant],

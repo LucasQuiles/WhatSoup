@@ -285,10 +285,10 @@ const SoupKitchen: FC = () => {
                            placeholder:text-t5 focus:border-m-cht/40"
                 style={{
                   fontSize: "var(--font-size-label)",
-                  padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) 28px",
+                  padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) var(--sp-7)",
                   borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b2)",
                   borderRadius: "var(--radius-sm)",
-                  transition: "border-color 0.2s var(--ease)",
+                  transition: "border-color var(--dur-norm) var(--ease)",
                 }}
               />
             </div>

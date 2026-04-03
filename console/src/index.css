@@ -131,6 +131,7 @@
   --qr-size: 256px;          /* QR code display size */
   --modal-max-h: 85vh;       /* modal maximum height */
   /* ═══ Off-grid half-steps ═══ */
+  --sp-0h: 3px;              /* 0.75 × 4px — pill vertical padding */
   --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */
   --sp-2h: 10px;             /* 2.5 × 4px — table cell vertical, toolbar padding */
   --msg-pad-h: 14px;         /* message bubble horizontal padding */
@@ -146,6 +147,11 @@
   --sp-8:  32px;
   --sp-10: 40px;
   --sp-12: 48px;
+  /* ═══ Motion — transition durations ═══ */
+  --dur-fast: 0.15s;        /* micro-interactions: hover, focus */
+  --dur-norm: 0.2s;         /* standard UI transitions */
+  --dur-slow: 0.3s;         /* border/color emphasis changes */
+  --ease: ease;             /* default easing */
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -375,6 +381,10 @@ body::before {
 .c-btn-success:hover { background: var(--s-ok-wash); }
 .c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
 .c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
+
+/* Disabled state for all button variants */
+.c-btn:disabled,
+.c-btn[disabled]     { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
 .c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
 .c-btn-nav {
   padding: 6px 10px;

@@ -96,10 +96,12 @@ export default function LineDetail() {
   const [deleting, setDeleting] = useState(false)
 
   const handleDelete = useCallback(async () => {
+    if (!line) return
+    const lineName = line.name
     setDeleting(true)
     try {
-      await api.deleteLine(line!.name)
-      toast.success(`${line!.name} deleted`)
+      await api.deleteLine(lineName)
+      toast.success(`${lineName} deleted`)
       navigate('/ops')
     } catch (err) {
       toast.error(`Delete failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -199,7 +201,7 @@ export default function LineDetail() {
               <RotateCw size={11} strokeWidth={1.75} /> Restart
             </button>
           )}
-          {line.status !== 'online' && (
+          {line.status === 'unreachable' && (
             <button
               onClick={() => setShowEditConfig(true)}
               className="c-btn c-btn-ghost"

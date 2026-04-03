@@ -3,6 +3,7 @@ import type { Database } from './database.ts';
 import { lookupAccess, extractPhone } from './access-list.ts';
 import { createChildLogger } from '../logger.ts';
 import { config, type AccessMode } from '../config.ts';
+import { isAdminPhone } from '../lib/phone.ts';
 
 const log = createChildLogger('conversation');
 
@@ -59,7 +60,7 @@ export function shouldRespond(
       log.debug({ messageId: msg.messageId }, 'trigger: self_only rejects groups');
       return { respond: false, reason: 'self_only_no_groups' };
     }
-    if (config.adminPhones.has(phone)) {
+    if (isAdminPhone(phone, config.adminPhones)) {
       log.debug({ messageId: msg.messageId, phone }, 'trigger: self_only admin DM → respond');
       return { respond: true, reason: 'self_only_admin', accessStatus: 'allowed' };
     }

@@ -21,7 +21,7 @@ export const inputStyle: React.CSSProperties = {
   padding: 'var(--sp-2) var(--sp-3)',
   fontSize: 'var(--font-size-data)',
   color: 'var(--color-t1)',
-  transition: 'border-color 0.3s ease',
+  transition: 'border-color var(--dur-slow) var(--ease)',
 }
 
 export const selectStyle: React.CSSProperties = {

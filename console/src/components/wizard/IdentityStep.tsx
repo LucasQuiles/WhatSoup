@@ -10,6 +10,8 @@ interface IdentityStepProps {
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
   errors: Record<string, string>
+  /** When true, the name field is locked because the instance was already created. */
+  nameLocked?: boolean
 }
 
 const TYPE_OPTIONS = [
@@ -45,7 +47,7 @@ function slugify(input: string): string {
 
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 
-const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
+const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocked }) => {
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const [showConfirmed, setShowConfirmed] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -122,22 +124,27 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors }) => {
             onChange={(e) => onChange({ name: slugify(e.target.value) })}
             placeholder="my-line"
             className="font-mono"
+            disabled={nameLocked}
             style={{
               ...inputStyle,
-              borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' ? 'var(--wizard-accent)' : 'var(--b2)',
+              borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' || nameLocked ? 'var(--wizard-accent)' : 'var(--b2)',
+              ...(nameLocked ? { opacity: 0.7, cursor: 'not-allowed' } : {}),
             }}
           />
-          {nameStatus === 'checking' && (
+          {!nameLocked && nameStatus === 'checking' && (
             <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
           )}
-          {nameStatus === 'available' && (
+          {(nameStatus === 'available' || nameLocked) && (
             <Check size={16} className="wizard-check" style={confirmCheckStyle} />
           )}
-          {nameStatus === 'taken' && (
+          {!nameLocked && nameStatus === 'taken' && (
             <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
           )}
         </div>
-        {nameStatus === 'taken' && (
+        {nameLocked && (
+          <div style={helperStyle}>Name is locked — instance already provisioned</div>
+        )}
+        {!nameLocked && nameStatus === 'taken' && (
           <div style={errorStyle}>Name already exists</div>
         )}
         {errors.name && (

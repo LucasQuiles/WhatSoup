@@ -17,7 +17,7 @@ const EmptyState: FC<EmptyStateProps> = ({ icon, title, description }) => {
       </div>
       <div
         className="font-sans font-semibold text-t3"
-        style={{ fontSize: 'var(--font-size-lg)', marginBottom: '6px' }}
+        style={{ fontSize: 'var(--font-size-lg)', marginBottom: 'var(--sp-1)' }}
       >
         {title}
       </div>
