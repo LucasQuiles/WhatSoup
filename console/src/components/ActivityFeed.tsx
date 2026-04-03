@@ -53,6 +53,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     if (typeFilter !== "all") {
       result = result.filter((e) => {
         const t = e.detail?.type;
+        if (!t) return false; // events without a detail type don't match any typed filter
         switch (typeFilter) {
           case "messages": return t === "message";
           case "connections": return t === "connection";
