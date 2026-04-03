@@ -125,6 +125,11 @@
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
   --feed-min-w: 240px;       /* activity feed min width */
+  --feed-col-time: 68px;     /* feed card time column width */
+  --feed-col-icon: 16px;     /* feed card icon column width */
+  --feed-indent: 76px;       /* feed content indent: time + gap */
+  --feed-inst-max: 80px;     /* feed instance tag max width */
+  --feed-preview-max: 120px; /* feed preview max-height before scroll */
   /* ═══ Wizard tokens ═══ */
   --stepper-line-w: 32px;    /* wizard stepper connector width */
   --stepper-dot: 8px;        /* wizard stepper dot size */
@@ -415,7 +420,7 @@ body::before {
 /* ── Metadata row (hover/focus only) ── */
 .fc-meta {
   margin-top: var(--sp-1);
-  padding-left: 76px;
+  padding-left: var(--feed-indent);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   color: var(--color-t5);
@@ -433,12 +438,12 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  min-height: 24px;
+  min-height: var(--sp-6);
 }
 
 .fc-time {
   flex-shrink: 0;
-  width: 68px;
+  width: var(--feed-col-time);
   text-align: right;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -447,7 +452,7 @@ body::before {
 
 .fc-icon {
   flex-shrink: 0;
-  width: 16px;
+  width: var(--feed-col-icon);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -484,14 +489,14 @@ body::before {
 /* ── Body text — multi-line content below the header ── */
 .fc-body-text {
   margin-top: var(--sp-1);
-  padding-left: 76px; /* align with icon: time(68) + gap(8) */
+  padding-left: var(--feed-indent);
   font-family: var(--font-mono);
   font-size: var(--font-size-data);
   color: var(--color-t3);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 120px;
+  max-height: var(--feed-preview-max);
   overflow-y: auto;
 }
 
@@ -509,7 +514,7 @@ body::before {
   display: flex;
   gap: var(--sp-1);
   margin-top: var(--sp-1);
-  padding-left: 76px;
+  padding-left: var(--feed-indent);
 }
 
 .fc-action {
@@ -539,7 +544,7 @@ body::before {
 }
 
 .fc-action:hover .fc-action__label {
-  max-width: 80px;
+  max-width: var(--feed-inst-max);
   opacity: 1;
   margin-left: var(--sp-1);
 }
@@ -761,7 +766,7 @@ body::before {
   border-color: var(--color-s-ok);
 }
 .c-btn-add:hover .c-btn-add-label {
-  max-width: 80px;
+  max-width: var(--feed-inst-max);
   opacity: 1;
 }
 
