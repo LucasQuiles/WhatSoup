@@ -204,8 +204,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
-    this.log.info({ chatJid }, 'Sending message');
-
     // Strip self-mentions — prevent the bot from @mentioning itself in outbound text.
     // This is Layer 2 of the bot self-awareness defense (see whatsapp-bot self-awareness spec).
     let cleaned = text;
@@ -242,6 +240,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         'sendMessage',
       );
     }
+    this.log.info({ chatJid, messageId: result?.key?.id }, 'Sending message');
     return { waMessageId: result?.key?.id ?? null };
   }
 

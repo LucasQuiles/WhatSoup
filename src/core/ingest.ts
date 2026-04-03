@@ -127,6 +127,13 @@ export function createIngestHandler(
         return;
       }
 
+      // 1b+. Feed-visible inbound log -- carries messageId + chatJid for preview enrichment.
+      // Guard: !isFromMe is guaranteed here (isFromMe returns above).
+      log.info(
+        { messageId: msg.messageId, chatJid: msg.chatJid, senderName: msg.senderName, contentType: msg.contentType },
+        'inbound message received',
+      );
+
       // 1c. Passive short-circuit — store message, journal as complete, no dispatch
       if (instanceType === 'passive') {
         if (durability) {
