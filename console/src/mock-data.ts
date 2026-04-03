@@ -36,7 +36,7 @@ function uptimeStr(seconds: number): string {
 export const MOCK_LINES: LineInstance[] = [
   {
     name: 'personal',
-    phone: '+1 656-622-5768',
+    phone: '+1 555-0100',
     group: 'Personal',
     mode: 'passive',
     status: 'online',
@@ -487,7 +487,7 @@ export const MOCK_LINES: LineInstance[] = [
 // ---------------------------------------------------------------------------
 
 export const MOCK_FEED: FeedEvent[] = [
-  { time: ago(12), mode: 'agent', text: 'q-agent: Session started — processing inbound from +1 656-622-5768' },
+  { time: ago(12), mode: 'agent', text: 'q-agent: Session started — processing inbound from +1 555-0100' },
   { time: ago(30), mode: 'chat', text: 'besbot: Reply sent to Maria Garcia (queue depth 2 -> 1)' },
   { time: ago(45), mode: 'passive', text: 'personal: 3 new messages from "Family Group"' },
   { time: ago(90), mode: 'chat', text: 'besbot: Incoming message queued from +1 323-555-0142' },
@@ -510,13 +510,13 @@ export const MOCK_FEED: FeedEvent[] = [
 
 export const MOCK_CHATS: Record<string, ChatItem[]> = {
   personal: [
-    { conversationKey: '16566225768-family', name: 'Family Group', lastMessagePreview: 'Mom: Don\'t forget Sunday dinner!', lastMessageAt: ago(120), unreadCount: 8, isGroup: true },
-    { conversationKey: '16566225768-sarah', name: 'Sarah Chen', lastMessagePreview: 'See you at 3pm', lastMessageAt: ago(600), unreadCount: 2, isGroup: false },
-    { conversationKey: '16566225768-marco', name: 'Marco Rossi', lastMessagePreview: 'The flight is confirmed for Thursday', lastMessageAt: ago(1800), unreadCount: 5, isGroup: false },
-    { conversationKey: '16566225768-gym', name: 'Gym Buddies', lastMessagePreview: 'Jake: Anyone up for 6am tomorrow?', lastMessageAt: ago(3600), unreadCount: 12, isGroup: true },
-    { conversationKey: '16566225768-priya', name: 'Priya Sharma', lastMessagePreview: 'Thanks for the recipe!', lastMessageAt: ago(7200), unreadCount: 0, isGroup: false },
-    { conversationKey: '16566225768-alex', name: 'Alex Thompson', lastMessagePreview: 'Let me check and get back to you', lastMessageAt: ago(14400), unreadCount: 1, isGroup: false },
-    { conversationKey: '16566225768-neighborhood', name: 'Neighborhood Watch', lastMessagePreview: 'Linda: Package stolen from my porch again', lastMessageAt: ago(21600), unreadCount: 19, isGroup: true },
+    { conversationKey: '15550100-family', name: 'Family Group', lastMessagePreview: 'Mom: Don\'t forget Sunday dinner!', lastMessageAt: ago(120), unreadCount: 8, isGroup: true },
+    { conversationKey: '15550100-sarah', name: 'Sarah Chen', lastMessagePreview: 'See you at 3pm', lastMessageAt: ago(600), unreadCount: 2, isGroup: false },
+    { conversationKey: '15550100-marco', name: 'Marco Rossi', lastMessagePreview: 'The flight is confirmed for Thursday', lastMessageAt: ago(1800), unreadCount: 5, isGroup: false },
+    { conversationKey: '15550100-gym', name: 'Gym Buddies', lastMessagePreview: 'Jake: Anyone up for 6am tomorrow?', lastMessageAt: ago(3600), unreadCount: 12, isGroup: true },
+    { conversationKey: '15550100-priya', name: 'Priya Sharma', lastMessagePreview: 'Thanks for the recipe!', lastMessageAt: ago(7200), unreadCount: 0, isGroup: false },
+    { conversationKey: '15550100-alex', name: 'Alex Thompson', lastMessagePreview: 'Let me check and get back to you', lastMessageAt: ago(14400), unreadCount: 1, isGroup: false },
+    { conversationKey: '15550100-neighborhood', name: 'Neighborhood Watch', lastMessagePreview: 'Linda: Package stolen from my porch again', lastMessageAt: ago(21600), unreadCount: 19, isGroup: true },
   ],
   work: [
     { conversationKey: '15550101-team', name: 'Engineering Team', lastMessagePreview: 'Dave: PR #482 is ready for review', lastMessageAt: ago(300), unreadCount: 6, isGroup: true },
@@ -624,19 +624,19 @@ function msg(
 }
 
 export const MOCK_MESSAGES: Record<string, Message[]> = {
-  '16566225768-family': [
-    msg(1001, '16566225768-family', 'Mom', '16505551234@s.whatsapp.net', 'Is everyone coming Sunday?', 7200, false),
-    msg(1002, '16566225768-family', 'You', '16566225768@s.whatsapp.net', 'I\'ll be there!', 7100, true),
-    msg(1003, '16566225768-family', 'Dad', '16505551235@s.whatsapp.net', 'I\'m making my famous lasagna', 6900, false),
-    msg(1004, '16566225768-family', 'Sister', '16505551236@s.whatsapp.net', 'Can I bring a friend?', 6600, false),
-    msg(1005, '16566225768-family', 'Mom', '16505551234@s.whatsapp.net', 'Of course! The more the merrier', 6500, false),
-    msg(1006, '16566225768-family', 'You', '16566225768@s.whatsapp.net', 'I\'ll bring wine', 6000, true),
-    msg(1007, '16566225768-family', 'Dad', '16505551235@s.whatsapp.net', 'Get that Malbec from last time', 5400, false),
-    msg(1008, '16566225768-family', 'Brother', '16505551237@s.whatsapp.net', 'Running late, save me a plate', 3600, false),
-    msg(1009, '16566225768-family', 'Mom', '16505551234@s.whatsapp.net', 'Dinner is at 6pm sharp', 1800, false),
-    msg(1010, '16566225768-family', 'Sister', '16505551236@s.whatsapp.net', 'My friend is vegetarian, is that ok?', 900, false),
-    msg(1011, '16566225768-family', 'Dad', '16505551235@s.whatsapp.net', 'I\'ll make a veggie option too', 600, false),
-    msg(1012, '16566225768-family', 'Mom', '16505551234@s.whatsapp.net', 'Don\'t forget Sunday dinner!', 120, false),
+  '15550100-family': [
+    msg(1001, '15550100-family', 'Mom', '16505551234@s.whatsapp.net', 'Is everyone coming Sunday?', 7200, false),
+    msg(1002, '15550100-family', 'You', '15550100@s.whatsapp.net', 'I\'ll be there!', 7100, true),
+    msg(1003, '15550100-family', 'Dad', '16505551235@s.whatsapp.net', 'I\'m making my famous lasagna', 6900, false),
+    msg(1004, '15550100-family', 'Sister', '16505551236@s.whatsapp.net', 'Can I bring a friend?', 6600, false),
+    msg(1005, '15550100-family', 'Mom', '16505551234@s.whatsapp.net', 'Of course! The more the merrier', 6500, false),
+    msg(1006, '15550100-family', 'You', '15550100@s.whatsapp.net', 'I\'ll bring wine', 6000, true),
+    msg(1007, '15550100-family', 'Dad', '16505551235@s.whatsapp.net', 'Get that Malbec from last time', 5400, false),
+    msg(1008, '15550100-family', 'Brother', '16505551237@s.whatsapp.net', 'Running late, save me a plate', 3600, false),
+    msg(1009, '15550100-family', 'Mom', '16505551234@s.whatsapp.net', 'Dinner is at 6pm sharp', 1800, false),
+    msg(1010, '15550100-family', 'Sister', '16505551236@s.whatsapp.net', 'My friend is vegetarian, is that ok?', 900, false),
+    msg(1011, '15550100-family', 'Dad', '16505551235@s.whatsapp.net', 'I\'ll make a veggie option too', 600, false),
+    msg(1012, '15550100-family', 'Mom', '16505551234@s.whatsapp.net', 'Don\'t forget Sunday dinner!', 120, false),
   ],
   '15550101-team': [
     msg(2001, '15550101-team', 'Dave Chen', '15551110001@s.whatsapp.net', 'PR #482 is ready — fleet module refactor', 3600, false),
@@ -667,15 +667,15 @@ export const MOCK_MESSAGES: Record<string, Message[]> = {
     msg(3012, 'besbot-maria', 'Besbot', '15550200@s.whatsapp.net', 'Your appointment is confirmed for Tuesday at 10am', 15, true),
   ],
   'q-owner': [
-    msg(4001, 'q-owner', 'Owner', '16566225768@s.whatsapp.net', 'Deploy the latest to staging', 7200, false),
+    msg(4001, 'q-owner', 'Owner', '15550100@s.whatsapp.net', 'Deploy the latest to staging', 7200, false),
     msg(4002, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Starting deployment of v3.2.1 to staging...', 7190, true),
     msg(4003, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Build completed. Running integration tests...', 6600, true),
     msg(4004, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'All 47 tests passed. Deploying to staging-1 and staging-2...', 6000, true),
     msg(4005, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Deployment complete. Health checks passing on both instances.\n\nstaging-1: v3.2.1 (healthy)\nstaging-2: v3.2.1 (healthy)\n\n14 tool calls, 2m 34s total.', 5400, true),
-    msg(4006, 'q-owner', 'Owner', '16566225768@s.whatsapp.net', 'Check if the enrichment pipeline is working', 3600, false),
+    msg(4006, 'q-owner', 'Owner', '15550100@s.whatsapp.net', 'Check if the enrichment pipeline is working', 3600, false),
     msg(4007, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Checking enrichment pipeline status across all chat instances...', 3590, true),
     msg(4008, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Found issue: devbot has 34 unprocessed messages in enrichment queue. All other instances are clear.\n\nRoot cause: Contact resolution service returned 429 (rate limited) at 11:42 UTC. Pipeline stalled.\n\nShall I restart the enrichment worker for devbot?', 3300, true),
-    msg(4009, 'q-owner', 'Owner', '16566225768@s.whatsapp.net', 'Yes, restart it', 1800, false),
+    msg(4009, 'q-owner', 'Owner', '15550100@s.whatsapp.net', 'Yes, restart it', 1800, false),
     msg(4010, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Restarting devbot enrichment worker...\n\nWorker restarted. Processing backlog: 34 messages.\nRate limit cooldown respected (60s delay between batches).\n\nWill report when complete.', 1790, true),
     msg(4011, 'q-owner', 'Q Agent', '15550202@s.whatsapp.net', 'Task completed — deployed v3.2.1 to staging', 5, true),
   ],
@@ -752,7 +752,7 @@ export const MOCK_ACCESS: Record<string, AccessEntry[]> = {
     { subjectType: 'group', subjectId: '120363210@g.us', subjectName: 'Sales Pipeline', status: 'allowed', updatedAt: '2026-01-01T00:00:00Z' },
   ],
   'q-agent': [
-    { subjectType: 'phone', subjectId: '+16566225768', subjectName: 'Owner', status: 'allowed', updatedAt: '2025-06-01T00:00:00Z' },
+    { subjectType: 'phone', subjectId: '+15550100', subjectName: 'Owner', status: 'allowed', updatedAt: '2025-06-01T00:00:00Z' },
     { subjectType: 'group', subjectId: '120363300@g.us', subjectName: 'Agent Alerts', status: 'allowed', updatedAt: '2025-06-01T00:00:00Z' },
     { subjectType: 'phone', subjectId: '+447700999999', subjectName: 'Unknown', status: 'blocked', updatedAt: '2026-03-31T18:00:00Z' },
     { subjectType: 'group', subjectId: '120363301@g.us', subjectName: 'Debug Channel', status: 'allowed', updatedAt: '2025-06-01T00:00:00Z' },
