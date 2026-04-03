@@ -24,7 +24,7 @@ const FeedIcon: FC<FeedIconProps> = ({ event }) => {
   switch (d.type) {
     case "connection": {
       if (d.state === "connected") return <Wifi size={ICON_SIZE} strokeWidth={STROKE} className="text-s-ok" />;
-      if (d.state === "disconnected" || (d.statusCode && !d.reconnecting && d.state !== "connected"))
+      if (d.state === "disconnected" || (d.statusCode && !d.reconnecting))
         return <WifiOff size={ICON_SIZE} strokeWidth={STROKE} className="text-s-crit" />;
       if (d.reconnecting) return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-s-warn" />;
       if (d.state === "connecting") return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-t4" />;
