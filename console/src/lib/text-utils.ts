@@ -38,6 +38,13 @@ export function resolveDisplayName(name: string | null | undefined): string {
   return name
 }
 
+/** Format large numbers compactly: 1234 → "1.2K", 2450000 → "2.4M" */
+export function formatCompact(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`
+  return `${(n / 1_000_000).toFixed(1)}M`
+}
+
 /** Format a phone-like JID for display. */
 export function formatPhone(raw: string): string {
   if (!raw || raw === 'unknown') return '—'

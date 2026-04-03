@@ -17,6 +17,7 @@ import {
   markOrphaned,
   sweepOrphanedSessions,
   getResumableSessionForChat,
+  accumulateSessionTokens,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
@@ -1306,6 +1307,12 @@ export class AgentRuntime implements Runtime {
         if (event.text) {
           queue.enqueueResultText(event.text);
         }
+        if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
+          const rowId = session?.getDbRowId() ?? null;
+          if (rowId !== null) {
+            accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+          }
+        }
         if (this.durability && conversationKey) {
           this.durability.upsertSessionCheckpoint(conversationKey, {
             activeTurnId: null,
@@ -2113,6 +2120,12 @@ export class AgentRuntime implements Runtime {
         if (event.text) {
           queue.enqueueResultText(event.text);
           this.turnHadVisibleOutput = true;
+        }
+        if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
+          const rowId = this.session?.getDbRowId() ?? null;
+          if (rowId !== null) {
+            accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+          }
         }
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput) {

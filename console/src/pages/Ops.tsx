@@ -1,13 +1,15 @@
 import { useState, useMemo, useCallback } from 'react'
+import { motion } from 'framer-motion'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
 import { formatTimeWithSeconds } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import FilterPill from '../components/FilterPill'
+import LinePicker from '../components/LinePicker'
 import type { LogEntry } from '../types'
 import {
-  Terminal, ChevronDown, Power,
+  Terminal, Power,
   AlertTriangle, CheckCircle2,
   Trash2, Link2, Loader2,
 } from 'lucide-react'
@@ -30,7 +32,6 @@ export default function Ops() {
   const { data: feed = [] } = useFeed()
   const [logFilter, setLogFilter] = useState<string>('all')
   const [selectedLine, setSelectedLine] = useState<string>('')
-  const [linePickerOpen, setLinePickerOpen] = useState(false)
 
   const activeLine = selectedLine || (lines[0]?.name ?? '')
   const { data: logs = [] } = useLogs(activeLine)
@@ -58,8 +59,16 @@ export default function Ops() {
     }
   }, [deleteTarget, toast, queryClient])
 
+  const ease = [0.22, 1, 0.36, 1] as const
+
   return (
-    <div className="flex-1 flex min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
+    <motion.div
+      className="flex-1 flex min-h-0 overflow-hidden"
+      style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5, ease }}
+    >
 
       {/* ═══ LEFT: Fleet Status (swapped from right) ═══ */}
       <div
@@ -126,7 +135,7 @@ export default function Ops() {
                     : 'var(--color-d2)',
                   borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
                 }}
-                onClick={() => { setSelectedLine(line.name); setLinePickerOpen(false) }}
+                onClick={() => setSelectedLine(line.name)}
               >
                 {/* Row 1: Name + mode + phone */}
                 <div className="flex items-center justify-between" style={{ marginBottom: 'var(--sp-2)' }}>
@@ -224,45 +233,12 @@ export default function Ops() {
         >
           <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
             <Terminal size={15} strokeWidth={1.75} className="text-m-agt" />
-            <div className="relative">
-              <button
-                onClick={() => setLinePickerOpen(!linePickerOpen)}
-                className="flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4"
-                style={{
-                  fontSize: 'var(--font-size-label)',
-                  letterSpacing: 'var(--tracking-pill)',
-                  padding: '5px var(--sp-3)',
-                  borderRadius: 'var(--radius-sm)',
-                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
-                }}
-              >
-                {currentLine && <StatusDot status={currentLine.status} size="sm" />}
-                <span className="font-medium">{activeLine ? displayInstanceName(activeLine) : 'Select line'}</span>
-                <ChevronDown size={11} className={`text-t4 transition-transform duration-200 ${linePickerOpen ? 'rotate-180' : ''}`} />
-              </button>
-
-              {linePickerOpen && (
-                <div
-                  className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto"
-                  style={{ minWidth: 'var(--dropdown-min-w)', background: 'var(--color-d6)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
-                >
-                  {lines.map(line => (
-                    <button
-                      key={line.name}
-                      onClick={() => { setSelectedLine(line.name); setLinePickerOpen(false) }}
-                      className={`w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer c-dropdown-item ${
-                        line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
-                      }`}
-                      style={{ fontSize: 'var(--font-size-sm)' }}
-                    >
-                      <StatusDot status={line.status} size="sm" />
-                      <span className="font-mono">{displayInstanceName(line.name)}</span>
-                      <ModeBadge mode={line.mode} />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <LinePicker
+              lines={lines}
+              activeLine={activeLine}
+              onSelect={setSelectedLine}
+              variant="compact"
+            />
           </div>
 
           <span className="c-heading">Logs</span>
@@ -368,6 +344,6 @@ export default function Ops() {
         onClose={() => setRelinkTarget(null)}
         onLinked={() => { setRelinkTarget(null); queryClient.invalidateQueries({ queryKey: ['lines'] }); toast.success('Instance re-linked!'); }}
       />
-    </div>
+    </motion.div>
   )
 }

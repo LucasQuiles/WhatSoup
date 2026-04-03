@@ -353,6 +353,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_phr_active_class ON pending_heal_reports (
   WHERE state != 'resolved';
 `;
 
+// ─── Migration 11: token usage tracking ──────────────────────────────────────
+
+// Add token columns to messages (per-response) and agent_sessions (per-session).
+// Using ALTER TABLE with idempotency guards (SQLite lacks ADD COLUMN IF NOT EXISTS).
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -381,6 +386,25 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   }],
   [9, (db: DatabaseSync) => { db.exec(MIGRATION_9); }],
   [10, (db: DatabaseSync) => { db.exec(MIGRATION_10); }],
+  [11, (db: DatabaseSync) => {
+    const msgCols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+    if (!msgCols.some(c => c.name === 'input_tokens')) {
+      db.exec('ALTER TABLE messages ADD COLUMN input_tokens INTEGER DEFAULT 0');
+    }
+    if (!msgCols.some(c => c.name === 'output_tokens')) {
+      db.exec('ALTER TABLE messages ADD COLUMN output_tokens INTEGER DEFAULT 0');
+    }
+    if (!msgCols.some(c => c.name === 'model_used')) {
+      db.exec("ALTER TABLE messages ADD COLUMN model_used TEXT");
+    }
+    const sesCols = db.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>;
+    if (!sesCols.some(c => c.name === 'total_input_tokens')) {
+      db.exec('ALTER TABLE agent_sessions ADD COLUMN total_input_tokens INTEGER DEFAULT 0');
+    }
+    if (!sesCols.some(c => c.name === 'total_output_tokens')) {
+      db.exec('ALTER TABLE agent_sessions ADD COLUMN total_output_tokens INTEGER DEFAULT 0');
+    }
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

@@ -9,6 +9,13 @@ const log = createChildLogger('fleet:discovery');
 // Types
 // ---------------------------------------------------------------------------
 
+export interface InstanceModels {
+  conversation?: string;
+  fallback?: string;
+  extraction?: string;
+  validation?: string;
+}
+
 export interface DiscoveredInstance {
   name: string;
   type: 'passive' | 'chat' | 'agent';
@@ -22,6 +29,8 @@ export interface DiscoveredInstance {
   socketPath: string | null;
   gui?: boolean;
   guiPort?: number;
+  models?: InstanceModels;
+  sandboxPerChat?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +106,8 @@ export class FleetDiscovery {
           socketPath,
           gui: raw.gui,
           guiPort: raw.guiPort,
+          models: raw.models ?? undefined,
+          sandboxPerChat: raw.agentOptions?.sandboxPerChat ?? undefined,
         });
       } catch (err) {
         log.warn(

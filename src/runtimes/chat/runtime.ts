@@ -271,6 +271,8 @@ export class ChatRuntime implements Runtime {
     // 7. LLM call with retry + fallback
     let responseText: string | null = null;
     let modelUsed: string = config.models.conversation;
+    let inputTokens = 0;
+    let outputTokens = 0;
     let llmDurationMs = 0;
 
     const llmStart = Date.now();
@@ -279,6 +281,8 @@ export class ChatRuntime implements Runtime {
     try {
       const result = await this.primaryProvider.generate(request);
       responseText = result.content;
+      inputTokens = result.inputTokens;
+      outputTokens = result.outputTokens;
       llmDurationMs = Date.now() - llmStart;
       log.info(
         { traceId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
@@ -292,6 +296,8 @@ export class ChatRuntime implements Runtime {
       try {
         const result = await this.primaryProvider.generate(request);
         responseText = result.content;
+        inputTokens = result.inputTokens;
+        outputTokens = result.outputTokens;
         llmDurationMs = Date.now() - llmStart;
         log.info(
           { traceId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
@@ -305,6 +311,8 @@ export class ChatRuntime implements Runtime {
           const result = await this.fallbackProvider.generate(fallbackRequest);
           responseText = result.content;
           modelUsed = config.models.fallback;
+          inputTokens = result.inputTokens;
+          outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
           log.info(
             { traceId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
@@ -393,7 +401,18 @@ export class ChatRuntime implements Runtime {
       log.error({ traceId, err }, 'failed to record rate limit response');
     }
 
-    // 12. Update message content in DB if media processed it differently
+    // 12. Persist token usage on the inbound message that triggered this response
+    if (inputTokens > 0 || outputTokens > 0) {
+      try {
+        this.db.raw
+          .prepare('UPDATE messages SET input_tokens = ?, output_tokens = ?, model_used = ? WHERE message_id = ?')
+          .run(inputTokens, outputTokens, modelUsed, msg.messageId);
+      } catch (err) {
+        log.error({ traceId, err, messageId: msg.messageId }, 'failed to persist token usage');
+      }
+    }
+
+    // 13. Update message content in DB if media processed it differently
     if (mediaContent !== msg.content) {
       try {
         this.db.raw

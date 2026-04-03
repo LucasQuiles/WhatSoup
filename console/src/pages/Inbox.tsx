@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import { useLines, useChats, useMessages, useTyping } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
+import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { api } from '../lib/api'
 import type { Message } from '../types'
-import StatusDot from '../components/StatusDot'
-import ModeBadge from '../components/ModeBadge'
 import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
+import LinePicker from '../components/LinePicker'
 import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Loader2 } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
@@ -18,9 +19,10 @@ export default function Inbox() {
   const toast = useToast()
   const [selectedLine, setSelectedLine] = useState<string>('')
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
-  const [linePickerOpen, setLinePickerOpen] = useState(false)
   const [msgText, setMsgText] = useState('')
   const [isSending, setIsSending] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
 
@@ -42,6 +44,16 @@ export default function Inbox() {
   // Clear message input when switching chats or lines
   useEffect(() => { setMsgText('') }, [selectedChat, selectedLine])
 
+  // Reset hasMore when chat changes
+  useEffect(() => { setHasMore(true) }, [selectedChat, selectedLine])
+
+  // Auto-focus textarea when a chat is selected
+  useEffect(() => {
+    if (selectedChat && textareaRef.current) {
+      textareaRef.current.focus()
+    }
+  }, [selectedChat])
+
   // Reset textarea height when text is cleared
   useEffect(() => {
     if (!msgText && textareaRef.current) {
@@ -61,6 +73,27 @@ export default function Inbox() {
 
   const currentLine = lines?.find(l => l.name === activeLine)
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
+
+  // Sticky scroll for messages area
+  const { scrollRef, showJump, handleScroll, jumpToBottom } = useStickyScroll(messages ?? [], selectedChat)
+
+  const handleLoadOlder = async () => {
+    if (!selectedChat || loadingOlder) return
+    const oldestPk = messages?.[messages.length - 1]?.pk
+    setLoadingOlder(true)
+    try {
+      const older = await api.getMessages(activeLine, selectedChat, oldestPk)
+      if (!older || older.length === 0) {
+        setHasMore(false)
+      } else {
+        queryClient.setQueryData<Message[]>(['messages', activeLine, selectedChat], (prev) => [...(prev ?? []), ...older])
+      }
+    } catch (e) {
+      toast.error(`Failed to load older messages: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
 
   // Track optimistic PKs for slide-in animation
   const [animatedPks, setAnimatedPks] = useState<Set<number>>(new Set())
@@ -98,8 +131,16 @@ export default function Inbox() {
     }
   }
 
+  const ease = [0.22, 1, 0.36, 1] as const
+
   return (
-    <div className="flex-1 flex min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
+    <motion.div
+      className="flex-1 flex min-h-0 overflow-hidden"
+      style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5, ease }}
+    >
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
@@ -113,43 +154,12 @@ export default function Inbox() {
         }}
       >
         {/* Line picker — toolbar pattern */}
-        <div className="relative">
-          <button
-            onClick={() => setLinePickerOpen(!linePickerOpen)}
-            className="w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover"
-            style={{ fontSize: 'var(--font-size-body)', borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
-          >
-            <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-              {currentLine && <StatusDot status={currentLine.status} size="sm" />}
-              <span className="font-medium">{activeLine || 'Select a line'}</span>
-              {currentLine && <ModeBadge mode={currentLine.mode} />}
-            </div>
-            <ChevronDown size={14} className={`text-t4 transition-transform duration-200 ${linePickerOpen ? 'rotate-180' : ''}`} />
-          </button>
-
-          {linePickerOpen && (
-            <div
-              className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide"
-              style={{ background: 'var(--color-d6)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)', borderTop: 'none', borderRadius: '0 0 var(--radius-md) var(--radius-md)', boxShadow: 'var(--shadow-md)' }}
-            >
-              {lines?.map(line => (
-                <button
-                  key={line.name}
-                  onClick={() => { setSelectedLine(line.name); setLinePickerOpen(false); setSelectedChat(null) }}
-                  className={`w-full flex items-center text-left cursor-pointer c-dropdown-item ${
-                    line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
-                  }`}
-                  style={{ padding: 'var(--sp-2) var(--sp-4)', gap: 'var(--sp-2)', fontSize: 'var(--font-size-body)' }}
-                >
-                  <StatusDot status={line.status} size="sm" />
-                  <span className="flex-1">{line.name}</span>
-                  <ModeBadge mode={line.mode} />
-                  <span className="c-label ml-auto">{line.phone}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <LinePicker
+          lines={lines ?? []}
+          activeLine={activeLine}
+          onSelect={name => { setSelectedLine(name); setSelectedChat(null) }}
+          variant="toolbar"
+        />
 
         {/* Chat list */}
         <div className="flex-1 overflow-auto scrollbar-hide">
@@ -206,12 +216,27 @@ export default function Inbox() {
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
-              {messages && messages.length > 0 && (
-                <div className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5" style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)' }}>
-                  <ChevronsUp size={14} strokeWidth={1.75} />
-                  <span style={{ fontSize: 'var(--font-size-sm)' }}>Load older messages</span>
-                </div>
+            <div
+              ref={scrollRef}
+              onScroll={handleScroll}
+              className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative"
+              style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+            >
+              {messages && messages.length > 0 && hasMore && (
+                <button
+                  onClick={handleLoadOlder}
+                  disabled={loadingOlder}
+                  className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
+                  style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)', background: 'none', border: 'none', width: '100%' }}
+                >
+                  {loadingOlder
+                    ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
+                    : <ChevronsUp size={14} strokeWidth={1.75} />
+                  }
+                  <span style={{ fontSize: 'var(--font-size-sm)' }}>
+                    {loadingOlder ? 'Loading…' : 'Load older messages'}
+                  </span>
+                </button>
               )}
               <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
                 {[...(messages ?? [])].reverse().map(msg => (
@@ -226,6 +251,25 @@ export default function Inbox() {
                     description="Messages will appear here."
                   />
                 </div>
+              )}
+
+              {showJump && (
+                <button
+                  onClick={jumpToBottom}
+                  className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-1 font-mono c-hover cursor-pointer"
+                  style={{
+                    padding: 'var(--sp-1h) var(--sp-3)',
+                    fontSize: 'var(--font-size-sm)',
+                    background: 'var(--color-d5)',
+                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b3)',
+                    borderRadius: 'var(--radius-md)',
+                    boxShadow: 'var(--shadow-md)',
+                    color: 'var(--color-t2)',
+                    zIndex: 10,
+                  }}
+                >
+                  <ChevronDown size={14} /> New messages
+                </button>
               )}
             </div>
 
@@ -393,6 +437,6 @@ export default function Inbox() {
           </div>
         )}
       </div>
-    </div>
+    </motion.div>
   )
 }

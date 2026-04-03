@@ -33,6 +33,20 @@ function phoneFromJid(jid: string | undefined | null): string {
   return at > 0 ? jid.slice(0, at) : jid;
 }
 
+/**
+ * Normalize a timestamp to ISO 8601 format.
+ * SQLite datetime('now') produces "YYYY-MM-DD HH:MM:SS" (UTC but no timezone marker).
+ * Agent runtimes produce ISO strings. This ensures a consistent format for the frontend.
+ */
+function normalizeTimestamp(ts: unknown): string | null {
+  if (!ts || typeof ts !== 'string') return null;
+  // Already ISO 8601 (has T and Z or timezone offset)
+  if (ts.includes('T')) return ts;
+  // SQLite datetime format "YYYY-MM-DD HH:MM:SS" — treat as UTC
+  const d = new Date(ts.replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 /** Safely traverse nested health snapshot using dot-separated keys. */
 function dig(obj: Record<string, unknown> | null | undefined, ...keys: string[]): unknown {
   let cur: unknown = obj;
@@ -133,10 +147,102 @@ function getLinkedStatus(configPath: string): 'linked' | 'unlinked' {
   }
 }
 
+interface ChatCounts {
+  chats: number;
+  groups: number;
+}
+
+const chatCountsCache = new Map<string, { counts: ChatCounts; cachedAt: number }>();
+
+function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): ChatCounts {
+  const now = Date.now();
+  const cached = chatCountsCache.get(inst.name);
+  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.counts;
+
+  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+    const row = db.prepare(`
+      SELECT
+        COUNT(DISTINCT conversation_key) as total,
+        COUNT(DISTINCT CASE WHEN conversation_key LIKE '%@g.us' OR conversation_key LIKE '%_at_g.us' THEN conversation_key END) as groups
+      FROM messages WHERE deleted_at IS NULL
+    `).get() as { total: number; groups: number } | undefined;
+    return { chats: (row?.total ?? 0) - (row?.groups ?? 0), groups: row?.groups ?? 0 };
+  });
+
+  const counts = result.ok ? result.data : { chats: 0, groups: 0 };
+  chatCountsCache.set(inst.name, { counts, cachedAt: now });
+  return counts;
+}
+
+interface TokenStats {
+  input: number;
+  output: number;
+}
+
+const tokenStatsCache = new Map<string, { stats: TokenStats; cachedAt: number }>();
+
+function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): TokenStats {
+  const now = Date.now();
+  const cached = tokenStatsCache.get(inst.name);
+  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.stats;
+
+  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+    // Sum tokens from messages (chat runtime)
+    let msgInput = 0, msgOutput = 0;
+    try {
+      const row = db.prepare(
+        'SELECT COALESCE(SUM(input_tokens), 0) as i, COALESCE(SUM(output_tokens), 0) as o FROM messages'
+      ).get() as { i: number; o: number } | undefined;
+      msgInput = row?.i ?? 0;
+      msgOutput = row?.o ?? 0;
+    } catch { /* column may not exist yet */ }
+
+    // Sum tokens from agent_sessions (agent runtime)
+    let sesInput = 0, sesOutput = 0;
+    try {
+      const row = db.prepare(
+        'SELECT COALESCE(SUM(total_input_tokens), 0) as i, COALESCE(SUM(total_output_tokens), 0) as o FROM agent_sessions'
+      ).get() as { i: number; o: number } | undefined;
+      sesInput = row?.i ?? 0;
+      sesOutput = row?.o ?? 0;
+    } catch { /* column may not exist yet */ }
+
+    return { input: msgInput + sesInput, output: msgOutput + sesOutput };
+  });
+
+  const stats = result.ok ? result.data : { input: 0, output: 0 };
+  tokenStatsCache.set(inst.name, { stats, cachedAt: now });
+  return stats;
+}
+
+const lastActiveCache = new Map<string, { ts: string | null; cachedAt: number }>();
+
+/** Most recent message timestamp for an instance — 60s cache. */
+function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): string | null {
+  const now = Date.now();
+  const cached = lastActiveCache.get(inst.name);
+  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.ts;
+
+  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+    const row = db.prepare(
+      'SELECT MAX(timestamp) as ts FROM messages WHERE deleted_at IS NULL'
+    ).get() as { ts: number | null } | undefined;
+    if (!row?.ts) return null;
+    return new Date(row.ts * 1000).toISOString();
+  });
+
+  const ts = result.ok ? result.data : null;
+  lastActiveCache.set(inst.name, { ts, cachedAt: now });
+  return ts;
+}
+
 interface EnrichOpts {
   messagesToday?: number;
   messageStats?: MessageStats;
   totalSessions?: number;
+  chatCounts?: ChatCounts;
+  tokenStats?: TokenStats;
+  lastMessageTime?: string | null;
 }
 
 /** Build the enriched LineInstance object the console expects. */
@@ -173,7 +279,12 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     messagesToday: opts.messagesToday ?? messagesTotal ?? 0,
     health: h,
     heartbeat: buildHeartbeat(poll),
-    lastActive: poll?.lastPollAt ?? null,
+    lastActive: normalizeTimestamp(
+      (dig(h, 'runtime', 'passive', 'lastActivityAt') as string | undefined)
+      ?? (dig(h, 'runtime', 'agent', 'lastSessionStartedAt') as string | undefined)
+      ?? opts.lastMessageTime
+      ?? null
+    ),
     unread: unread ?? 0,
     queueDepth: queueDepth ?? 0,
     enrichmentUnprocessed: enrichmentUnprocessed ?? 0,
@@ -184,6 +295,8 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     totalSessions: opts.totalSessions ?? 0,
     models: inst.models ?? null,
     sandboxPerChat: inst.sandboxPerChat ?? false,
+    chatCounts: opts.chatCounts ?? { chats: 0, groups: 0 },
+    tokenUsage: opts.tokenStats ?? { input: 0, output: 0 },
   };
 }
 
@@ -205,7 +318,10 @@ export function handleGetLines(
     const stats = getMessageStats(deps.dbReader, inst);
     const todayCount = stats.sent + stats.received;
     const totalSessions = getTotalSessions(deps.dbReader, inst);
-    return enrichInstance(inst, poll, { messagesToday: todayCount, messageStats: stats, totalSessions });
+    const chatCounts = getChatCounts(deps.dbReader, inst);
+    const tokenStats = getTokenStats(deps.dbReader, inst);
+    const lastMessageTime = getLastMessageTime(deps.dbReader, inst);
+    return enrichInstance(inst, poll, { messagesToday: todayCount, messageStats: stats, totalSessions, chatCounts, tokenStats, lastMessageTime });
   });
 
   jsonResponse(res, 200, lines);

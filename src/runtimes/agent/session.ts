@@ -110,6 +110,11 @@ export class SessionManager {
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
+  /** Return the agent_sessions DB row ID for the current session, or null if not yet created. */
+  getDbRowId(): number | null {
+    return this.dbRowId;
+  }
+
   trackToolStart(toolId: string): void {
     this.pendingToolIds.add(toolId);
   }

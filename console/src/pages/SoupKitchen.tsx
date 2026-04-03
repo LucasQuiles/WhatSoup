@@ -1,19 +1,20 @@
 import { type FC, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, Plus } from "lucide-react";
+import AddLineWizard from "../components/AddLineWizard";
 import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
 import { computeKpis } from "../mock-data";
-import type { Mode, LineInstance } from "../types";
+import type { Mode } from "../types";
 import KpiCard from "../components/KpiCard";
 import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
-import StatusDot from "../components/StatusDot";
 import ModeBadge from "../components/ModeBadge";
 import FilterPill from "../components/FilterPill";
+import LineTags from "../components/LineTags";
 import { formatRelative } from "../lib/format-time";
-import { formatPhone, displayInstanceName } from "../lib/text-utils";
-import AddLineWizard from "../components/AddLineWizard";
+import { formatPhone, displayInstanceName, formatCompact } from "../lib/text-utils";
+
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -26,28 +27,6 @@ const modeTextClass: Record<Mode, string> = {
   chat: "text-m-cht",
   agent: "text-m-agt",
 };
-
-function pipelineText(line: LineInstance): string {
-  if (line.mode === "passive") return "—";
-  if (line.mode === "chat") {
-    const parts: string[] = [];
-    if (line.queueDepth) parts.push(`queued: ${line.queueDepth}`);
-    if (line.enrichmentUnprocessed) parts.push(`enrich: ${line.enrichmentUnprocessed}`);
-    return parts.length ? parts.join(' | ') : 'idle';
-  }
-  if (line.mode === "agent") {
-    if (line.activeSessions) return `${line.activeSessions} session${line.activeSessions > 1 ? 's' : ''} active`;
-    return line.lastSessionStatus === 'auth_expired' ? 'auth expired' : 'idle';
-  }
-  return "—";
-}
-
-function pipelineColor(line: LineInstance): string {
-  if (line.mode === "passive") return (line.unread ?? 0) > 0 ? "text-s-warn" : "text-t5";
-  if (line.status === 'unreachable') return "text-s-crit";
-  if (line.status === 'degraded') return "text-s-warn";
-  return modeTextClass[line.mode];
-}
 
 
 const SoupKitchen: FC = () => {
@@ -305,16 +284,21 @@ const SoupKitchen: FC = () => {
                   style={{ borderBottom: "var(--bw) solid var(--b2)" }}
                 >
                   {[
-                    { label: "", w: "36px" },
-                    { label: "Line", w: undefined },
-                    { label: "Mode", w: "100px" },
-                    { label: "Pipeline", w: undefined },
-                    { label: "Unread", w: "72px" },
-                    { label: "Active", w: "80px" },
+                    { label: "Mode", w: "90px", center: false },
+                    { label: "Line", w: undefined, center: false },
+                    { label: "Chats", w: "60px", center: true },
+                    { label: "Groups", w: "64px", center: true },
+                    { label: "Unread", w: "64px", center: true },
+                    { label: "Sent", w: "68px", center: true },
+                    { label: "Recv", w: "68px", center: true },
+                    { label: "Tokens", w: "80px", center: true },
+                    { label: "Sessions", w: "72px", center: true },
+                    { label: "Tags", w: undefined, center: false },
+                    { label: "Active", w: "80px", center: true },
                   ].map((h) => (
                     <th
-                      key={h.label || "status"}
-                      className="text-left c-col-header c-cell"
+                      key={h.label}
+                      className={`c-col-header c-cell ${h.center ? "text-center" : "text-left"}`}
                       style={{
                         width: h.w,
                       }}
@@ -328,6 +312,8 @@ const SoupKitchen: FC = () => {
                 {filtered.map((line) => {
                   const isError = line.status === "unreachable";
                   const isDegraded = line.status === "degraded";
+                  const sent = line.messageStats?.sent ?? 0;
+                  const recv = line.messageStats?.received ?? 0;
                   return (
                     <tr
                       key={line.name}
@@ -342,9 +328,9 @@ const SoupKitchen: FC = () => {
                           : {}),
                       }}
                     >
-                      {/* Status */}
+                      {/* Mode */}
                       <td className="c-cell">
-                        <StatusDot status={line.status} size="md" />
+                        <ModeBadge mode={line.mode} />
                       </td>
 
                       {/* Line name + phone */}
@@ -356,47 +342,75 @@ const SoupKitchen: FC = () => {
                           >
                             {displayInstanceName(line.name)}
                           </span>
-                          <span
-                            className="c-label"
-                          >
+                          <span className="c-label">
                             {formatPhone(line.phone)}
                           </span>
                         </div>
                       </td>
 
-                      {/* Mode */}
-                      <td className="c-cell">
-                        <ModeBadge mode={line.mode} />
+                      {/* Chats */}
+                      <td className="c-cell text-center">
+                        <span className="c-data text-t2">{line.chatCounts?.chats ?? 0}</span>
                       </td>
 
-                      {/* Pipeline */}
-                      <td className="c-cell">
-                        <span
-                          className={`c-data ${pipelineColor(line)}`}
-                        >
-                          {pipelineText(line)}
-                        </span>
+                      {/* Groups */}
+                      <td className="c-cell text-center">
+                        <span className="c-data text-t4">{line.chatCounts?.groups ?? 0}</span>
                       </td>
 
                       {/* Unread */}
-                      <td className="c-cell">
+                      <td className="c-cell text-center">
                         {(line.unread ?? 0) > 0 ? (
-                          <span
-                            className="c-data text-s-warn font-medium"
-                          >
+                          <span className="c-data text-s-warn font-medium">
                             {line.unread}
                           </span>
                         ) : (
-                          <span className="c-data text-t5">
-                            —
-                          </span>
+                          <span className="c-data text-t5">0</span>
                         )}
                       </td>
 
-                      {/* Last Active */}
+                      {/* Sent (today) */}
+                      <td className="c-cell text-center">
+                        <span className="c-data text-s-ok">↑{sent}</span>
+                      </td>
+
+                      {/* Received (today) */}
+                      <td className="c-cell text-center">
+                        <span className="c-data text-m-cht">↓{recv}</span>
+                      </td>
+
+                      {/* Tokens (lifetime) */}
+                      <td className="c-cell text-center">
+                        {(line.tokenUsage?.input ?? 0) > 0 ? (
+                          <span className="c-data text-t2" title={`${(line.tokenUsage?.input ?? 0).toLocaleString()} in / ${(line.tokenUsage?.output ?? 0).toLocaleString()} out`}>
+                            {formatCompact((line.tokenUsage?.input ?? 0) + (line.tokenUsage?.output ?? 0))}
+                          </span>
+                        ) : (
+                          <span className="c-data text-t5">—</span>
+                        )}
+                      </td>
+
+                      {/* Sessions (lifetime, agent lines only) */}
+                      <td className="c-cell text-center">
+                        {line.mode === 'agent' ? (
+                          <span className="c-data text-m-agt font-medium">
+                            {line.totalSessions ?? 0}
+                          </span>
+                        ) : (
+                          <span className="c-data text-t5">—</span>
+                        )}
+                      </td>
+
+                      {/* Tags */}
                       <td className="c-cell">
+                        <LineTags line={line} />
+                      </td>
+
+                      {/* Last Active */}
+                      <td className="c-cell text-center">
                         <span
                           className={`c-data ${isError ? "text-s-crit" : "text-t4"}`}
+                          style={{ whiteSpace: 'nowrap' }}
                         >
                           {line.lastActive ? formatRelative(line.lastActive) : "—"}
                         </span>
@@ -408,7 +422,7 @@ const SoupKitchen: FC = () => {
                 {filtered.length === 0 && (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={11}
                       className="text-center text-t5 font-mono py-12"
                       style={{ fontSize: 'var(--font-size-data)' }}
                     >

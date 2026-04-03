@@ -7,7 +7,7 @@ export type AgentEvent =
   | { type: 'assistant_text'; text: string }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
   | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
-  | { type: 'result'; text: string | null }
+  | { type: 'result'; text: string | null; inputTokens?: number; outputTokens?: number }
   | { type: 'ignored' }
   | { type: 'unknown'; raw: unknown }
   | { type: 'parse_error'; line: string };
@@ -124,29 +124,33 @@ export function parseEvent(line: string): AgentEvent | null {
     // On successful turns the response was already delivered via assistant_text events —
     // re-rendering result.result would send every reply twice.
     const isError = event['is_error'] === true;
+    const rawUsage = event['usage'] as { input_tokens?: number; output_tokens?: number } | undefined;
+    const inputTokens = typeof rawUsage?.input_tokens === 'number' ? rawUsage.input_tokens : undefined;
+    const outputTokens = typeof rawUsage?.output_tokens === 'number' ? rawUsage.output_tokens : undefined;
+
     if (!isError) {
-      return { type: 'result', text: null };
+      return { type: 'result', text: null, inputTokens, outputTokens };
     }
 
     // Error result: extract the error message text.
     const content = event['content'];
     if (typeof content === 'string') {
-      return { type: 'result', text: content || null };
+      return { type: 'result', text: content || null, inputTokens, outputTokens };
     }
     if (Array.isArray(content)) {
       for (const block of content) {
         if (typeof block !== 'object' || block === null) continue;
         const b = block as Record<string, unknown>;
         if (b['type'] === 'text') {
-          return { type: 'result', text: String(b['text'] ?? '') || null };
+          return { type: 'result', text: String(b['text'] ?? '') || null, inputTokens, outputTokens };
         }
       }
     }
     const resultField = event['result'];
     if (typeof resultField === 'string') {
-      return { type: 'result', text: resultField || null };
+      return { type: 'result', text: resultField || null, inputTokens, outputTokens };
     }
-    return { type: 'result', text: null };
+    return { type: 'result', text: null, inputTokens, outputTokens };
   }
 
   return { type: 'unknown', raw: parsed };

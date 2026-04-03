@@ -6,9 +6,12 @@
 /** "just now", "3m ago", "2h ago", "1d ago" */
 export function formatRelative(iso: string): string {
   const now = Date.now();
-  const then = new Date(iso).getTime();
+  // Handle SQLite "YYYY-MM-DD HH:MM:SS" format (no T, no Z) — treat as UTC
+  const normalized = iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z';
+  const then = new Date(normalized).getTime();
   if (isNaN(then)) return "\u2014";
   const diffS = Math.floor((now - then) / 1000);
+  if (diffS < 0) return "just now";
   if (diffS < 60) return "just now";
   const diffM = Math.floor(diffS / 60);
   if (diffM < 60) return `${diffM}m ago`;

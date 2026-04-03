@@ -27,6 +27,8 @@ export function ensureAgentSchema(db: Database): void {
     ['chat_jid', 'TEXT'],
     ['message_count', 'INTEGER DEFAULT 0'],
     ['workspace_key', 'TEXT'],
+    ['total_input_tokens', 'INTEGER DEFAULT 0'],
+    ['total_output_tokens', 'INTEGER DEFAULT 0'],
   ] as [string, string][]) {
     try {
       db.raw.exec(`ALTER TABLE agent_sessions ADD COLUMN ${col} ${def}`);
@@ -123,6 +125,23 @@ export function incrementMessageCount(db: Database, rowId: number): void {
        WHERE id = ?`,
     )
     .run(rowId);
+}
+
+/** Accumulate token usage for a session row (adds to existing totals). */
+export function accumulateSessionTokens(
+  db: Database,
+  rowId: number,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  db.raw
+    .prepare(
+      `UPDATE agent_sessions
+       SET total_input_tokens = total_input_tokens + ?,
+           total_output_tokens = total_output_tokens + ?
+       WHERE id = ?`,
+    )
+    .run(inputTokens, outputTokens, rowId);
 }
 
 /** Update the status of an existing session row to any arbitrary status string. */

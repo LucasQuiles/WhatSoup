@@ -55,6 +55,16 @@ export interface LineInstance {
   group?: string;
   config?: Record<string, unknown>;
   linkedStatus?: 'linked' | 'unlinked';
+  totalSessions?: number;
+  models?: {
+    conversation?: string;
+    fallback?: string;
+    extraction?: string;
+    validation?: string;
+  } | null;
+  sandboxPerChat?: boolean;
+  chatCounts?: { chats: number; groups: number };
+  tokenUsage?: { input: number; output: number };
 }
 
 export interface ChatItem {
