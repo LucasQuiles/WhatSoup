@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
     "start:instance": "node --experimental-strip-types src/bootstrap.ts",
+    "fleet": "node --experimental-strip-types src/fleet/standalone.ts 9099",
+    "setup": "bash deploy/setup.sh",
     "auth": "node --experimental-strip-types src/transport/auth.ts",
     "auth:instance": "node --experimental-strip-types src/bootstrap-auth.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",

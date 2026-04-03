@@ -66,24 +66,36 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 ## Requirements
 
 - **Node.js >= 23.10** — uses native `--experimental-strip-types`, no transpilation
+- **Linux with systemd** — user units for process management (`systemctl --user`)
+- **GNOME Keyring** or environment variables for API keys
 - **ffmpeg** — video frame extraction in chat runtime (optional)
-- **SQLite** — via `node:sqlite`, bundled with Node 23+
 
 ## Quick Start
 
 ```bash
+# 1. Clone and install
+git clone https://github.com/LucasQuiles/WhatSoup.git
+cd WhatSoup
 npm install
-npm run typecheck
-npm test                  # ~2000 tests, real SQLite, real Unix sockets, no mocks
 
-# Single instance (needs WhatsApp auth)
-npm start
+# 2. Run setup (installs systemd unit, wrapper scripts, builds console)
+npm run setup
 
-# Multi-instance via systemd
-systemctl --user start whatsoup@<name>
+# 3. Start the fleet server
+npm run fleet
 
-# Fleet server (serves API + console)
-node --experimental-strip-types src/fleet/standalone.ts 9099
+# 4. Open http://localhost:9099 and create your first instance
+#    Click "Add Line" → choose a type → scan the QR code with WhatsApp
+```
+
+The setup script installs the systemd template unit, symlinks the wrapper script to `~/.local/bin`, builds the console, and checks for API keys in your keyring. After setup, `npm run fleet` is the only command you need — everything else is managed from the browser.
+
+For development:
+
+```bash
+npm run typecheck         # tsc --noEmit
+npm test                  # ~2000 tests, ~15s, real SQLite, no mocks
+cd console && npm run dev # Vite dev server with hot reload + API proxy
 ```
 
 ## Architecture
