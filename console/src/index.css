@@ -752,10 +752,11 @@ body::before {
   opacity: 1;
 }
 .c-btn-add {
-  padding: var(--sp-1);
+  padding: 0;
   gap: 0;
   min-width: 0;
-  aspect-ratio: 1;
+  width: var(--sp-7);
+  height: var(--sp-7);
   justify-content: center;
   overflow: hidden;
   white-space: nowrap;
