@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# WhatSoup Fleet Server — wrapper for systemd
+# Usage: whatsoup-fleet [port]
+
+PORT="${1:-9099}"
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_NODE="$HOME/.nvm/versions/node/v24.13.0/bin/node"
+NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
+if [ ! -x "$NODE" ]; then
+  NODE="$(command -v node || true)"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "FATAL: node not found. Set WHATSOUP_NODE or install node." >&2
+  exit 1
+fi
+
+export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"
+
+exec "$NODE" \
+  --disable-warning=ExperimentalWarning \
+  --experimental-strip-types \
+  "$REPO_ROOT/src/fleet/standalone.ts" "$PORT"

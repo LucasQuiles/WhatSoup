@@ -1,0 +1,14 @@
+[Unit]
+Description=WhatSoup Fleet Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/whatsoup-fleet 9099
+Restart=on-failure
+RestartSec=5
+Environment=NODE_OPTIONS=--experimental-strip-types
+
+[Install]
+WantedBy=default.target

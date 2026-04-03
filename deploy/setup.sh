@@ -88,6 +88,9 @@ mkdir -p "$BIN_DIR"
 ln -sf "$REPO_ROOT/deploy/whatsoup" "$BIN_DIR/whatsoup"
 chmod +x "$REPO_ROOT/deploy/whatsoup"
 echo "  ✓ whatsoup → $REPO_ROOT/deploy/whatsoup"
+ln -sf "$REPO_ROOT/deploy/whatsoup-fleet" "$BIN_DIR/whatsoup-fleet"
+chmod +x "$REPO_ROOT/deploy/whatsoup-fleet"
+echo "  ✓ whatsoup-fleet → $REPO_ROOT/deploy/whatsoup-fleet"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -99,8 +102,10 @@ fi
 echo "[4/6] Installing systemd user unit..."
 mkdir -p "$SYSTEMD_DIR"
 cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
+cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
 systemctl --user daemon-reload 2>/dev/null || true
 echo "  ✓ whatsoup@.service installed"
+echo "  ✓ whatsoup-fleet.service installed"
 
 # ── Step 5: Build console ───────────────────────────────────────────
 echo "[5/6] Building fleet console..."
@@ -145,4 +150,8 @@ echo ""
 echo "  3. Click 'Add Line' to create your first WhatsApp instance"
 echo ""
 echo "  4. Scan the QR code with WhatsApp → Linked Devices → Link a Device"
+echo ""
+echo "  To run the fleet server as a persistent background service:"
+echo "     systemctl --user enable --now whatsoup-fleet"
+echo "     systemctl --user status whatsoup-fleet"
 echo ""
