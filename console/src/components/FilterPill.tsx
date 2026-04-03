@@ -21,9 +21,9 @@ const FilterPill: FC<FilterPillProps> = ({
         isActive ? `${activeColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
       }`}
       style={{
-        fontSize: 'var(--font-size-label)',
+        fontSize: 'var(--font-size-sm)',
         letterSpacing: 'var(--tracking-pill)',
-        padding: 'var(--sp-0h) var(--sp-2)',
+        padding: 'var(--sp-1) var(--sp-2h)',
         borderRadius: 'var(--radius-sm)',
         border: isActive
           ? (activeBorder ?? 'var(--bw) solid var(--b4)')
