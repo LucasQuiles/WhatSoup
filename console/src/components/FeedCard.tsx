@@ -5,7 +5,7 @@ import FeedIcon from "./FeedIcon";
 import { formatTimeWithSeconds } from "../lib/format-time";
 
 // ---------------------------------------------------------------------------
-//  Reason labels
+//  Constants
 // ---------------------------------------------------------------------------
 
 const reasonLabel: Record<string, string> = {
@@ -17,10 +17,6 @@ const reasonLabel: Record<string, string> = {
   loggedOut: "logged out",
   Unknown: "disconnected",
 };
-
-// ---------------------------------------------------------------------------
-//  Instance mode → wash color for the instance tag
-// ---------------------------------------------------------------------------
 
 const modeWash: Record<Mode, string> = {
   passive: "var(--m-pas-wash)",
@@ -34,34 +30,23 @@ const modeColor: Record<Mode, string> = {
   agent: "var(--color-m-agt)",
 };
 
-// ---------------------------------------------------------------------------
-//  Severity edge — left border color encoding state
-// ---------------------------------------------------------------------------
-
 function edgeColor(event: FeedEvent): string {
   const d = event.detail;
   if (!d) return "var(--b1)";
   if (event.isError) return "var(--color-s-crit)";
-
   switch (d.type) {
     case "connection":
       if (d.state === "connected") return "var(--color-s-ok)";
       if (d.state === "connecting" || d.reconnecting) return "var(--color-s-warn)";
       if (d.state === "disconnected" || d.statusCode) return "var(--color-s-crit)";
       return "var(--b2)";
-    case "message":
-      return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
-    case "health":
-      return d.status === "online" ? "var(--color-s-ok)" : d.status === "unreachable" ? "var(--color-s-crit)" : "var(--color-s-warn)";
+    case "message": return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
+    case "health": return d.status === "online" ? "var(--color-s-ok)" : d.status === "unreachable" ? "var(--color-s-crit)" : "var(--color-s-warn)";
     case "tool_error": return "var(--color-s-crit)";
     case "session": return "var(--color-m-agt)";
     default: return "var(--b1)";
   }
 }
-
-// ---------------------------------------------------------------------------
-//  Strip backend prefixes from text
-// ---------------------------------------------------------------------------
 
 function cleanText(event: FeedEvent): string {
   let text = event.text;
@@ -73,151 +58,172 @@ function cleanText(event: FeedEvent): string {
 }
 
 // ---------------------------------------------------------------------------
-//  Card variants — each event type renders differently
+//  Card header — always present: time + icon + instance tag + type label
 // ---------------------------------------------------------------------------
 
-function ConnectionCard({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "connection" }> }) {
-  const code = d.statusCode;
-  const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
-
-  // Simple state labels
-  if (d.state === "connected") return <span className="fc-status fc-status--ok">connected</span>;
-  if (d.state === "connecting") return <span className="fc-status fc-status--muted">connecting\u2026</span>;
-  if (d.state === "disconnected") return <span className="fc-status fc-status--warn">disconnected</span>;
-  if (d.reconnecting && !code && !reason) return <span className="fc-status fc-status--muted">reconnecting\u2026</span>;
-
-  // Error with optional lifecycle suffix
-  if (!code && !reason) return <span className="fc-body">{cleanText(event)}</span>;
-
+function CardHeader({ event, label, labelClass }: {
+  event: FeedEvent;
+  label: string;
+  labelClass?: string;
+}) {
   return (
-    <div className="fc-conn-detail">
-      {code && <span className={`fc-code ${code >= 500 ? "fc-code--5xx" : code >= 400 ? "fc-code--4xx" : ""}`}>{code}</span>}
-      {reason && <span className={event.isError ? "fc-status fc-status--crit" : "fc-body"}>{reason}</span>}
-      {d.reconnecting && <span className="fc-lifecycle">{"\u2192"} reconnecting</span>}
-      {d.state === "connected" && <span className="fc-lifecycle fc-lifecycle--ok">{"\u2192"} reconnected</span>}
+    <div className="fc-header">
+      <span className="fc-time">{formatTimeWithSeconds(event.time)}</span>
+      <span className="fc-icon"><FeedIcon event={event} /></span>
+      {event.instance && (
+        <span className="fc-inst" style={{ backgroundColor: modeWash[event.mode], color: modeColor[event.mode] }}>
+          {event.instance}
+        </span>
+      )}
+      <span className={`fc-label ${labelClass ?? ""}`}>{label}</span>
     </div>
   );
 }
 
-function MessageCard({ d }: { d: Extract<FeedEvent["detail"], { type: "message" }> }) {
+// ---------------------------------------------------------------------------
+//  Card body variants — each type gets its own multi-line layout
+// ---------------------------------------------------------------------------
+
+function ConnectionBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "connection" }> }) {
+  if (d.state === "connected") return <CardHeader event={event} label="connected" labelClass="fc-label--ok" />;
+  if (d.state === "connecting") return <CardHeader event={event} label="connecting\u2026" labelClass="fc-label--muted" />;
+  if (d.state === "disconnected") return <CardHeader event={event} label="disconnected" labelClass="fc-label--warn" />;
+  if (d.reconnecting && !d.statusCode && !d.reason) return <CardHeader event={event} label="reconnecting\u2026" labelClass="fc-label--muted" />;
+
+  const code = d.statusCode;
+  const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
+
+  if (!code && !reason) {
+    return <CardHeader event={event} label={cleanText(event)} labelClass="fc-label--muted" />;
+  }
+
+  // Error with lifecycle — two-part header
+  let statusText = reason ?? "";
+  if (d.reconnecting) statusText += " \u2192 reconnecting";
+  if (d.state === "connected") statusText += " \u2192 reconnected";
+
+  return (
+    <CardHeader
+      event={event}
+      label={`${code ? `${code} ` : ""}${statusText}`}
+      labelClass={event.isError ? "fc-label--crit" : ""}
+    />
+  );
+}
+
+function MessageBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "message" }> }) {
   const isIn = d.direction === "inbound";
   const isNonText = d.contentType && d.contentType !== "text";
   const chatShort = d.chatJid ? d.chatJid.replace(/@.*/, "").slice(-8) : undefined;
 
-  return (
-    <div className="fc-msg">
-      <span className={`fc-dir ${isIn ? "fc-dir--in" : "fc-dir--out"}`}>
-        {isIn ? "\u2193 recv" : "\u2191 sent"}
-      </span>
-      {d.senderName && isIn && <span className="fc-sender">{d.senderName}</span>}
-      {!d.senderName && chatShort && <span className="fc-chat">{chatShort}</span>}
-      {isNonText && <span className="fc-content-type">[{d.contentType}]</span>}
-      {d.preview && <span className="fc-preview">{d.preview.length > 90 ? d.preview.slice(0, 87) + "\u2026" : d.preview}</span>}
-    </div>
-  );
-}
+  // Parse collapsed count from event text
+  const countMatch = event.text.match(/\u00d7(\d+)/);
+  const count = countMatch ? parseInt(countMatch[1], 10) : undefined;
 
-function ToolErrorCard({ d }: { d: Extract<FeedEvent["detail"], { type: "tool_error" }> }) {
-  return (
-    <div className="fc-tool-err">
-      <span className="fc-tool-name">{d.toolName}</span>
-      <span className="fc-error-body">{d.error}</span>
-    </div>
-  );
-}
+  const who = d.senderName ?? chatShort ?? "";
+  const countSuffix = count && count > 1 ? ` \u00d7${count}` : "";
 
-function SessionCard({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "session" }> }) {
-  const shortId = d.sessionId?.slice(0, 8);
-  return (
-    <div className="fc-session">
-      <span className={event.isError ? "fc-status fc-status--crit" : "fc-body"}>{d.action}</span>
-      {shortId && <span className="fc-session-id">{shortId}</span>}
-      {d.reason && <span className="fc-reason">{"\u2014"} {d.reason}</span>}
-    </div>
-  );
-}
-
-function HealthCard({ d }: { d: Extract<FeedEvent["detail"], { type: "health" }> }) {
-  const cls = d.status === "online" ? "fc-status--ok" : d.status === "unreachable" ? "fc-status--crit" : "fc-status--warn";
-  const label = d.status === "online" ? "came online"
-    : d.status === "unreachable" ? "connection lost"
-    : `degraded \u2014 ${d.error ?? "unknown"}`;
-  return <span className={`fc-status ${cls}`}>{label}</span>;
-}
-
-function ImportCard({ d }: { d: Extract<FeedEvent["detail"], { type: "import" }> }) {
   return (
     <>
-      <span className="fc-badge">import</span>
-      <span className="fc-body">
-        {d.table ?? ""}{d.skipped ? " (skipped)" : d.count !== undefined ? ` \u2014 ${d.count} rows` : ""}
-      </span>
+      <CardHeader
+        event={event}
+        label={`${who}${countSuffix}${isNonText ? ` [${d.contentType}]` : ""}`}
+        labelClass={isIn ? "fc-label--recv" : "fc-label--sent"}
+      />
+      {d.preview && (
+        <div className="fc-body-text">
+          {d.preview}
+        </div>
+      )}
     </>
   );
 }
 
+function ToolErrorBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "tool_error" }> }) {
+  return (
+    <>
+      <CardHeader event={event} label={d.toolName} labelClass="fc-label--crit" />
+      <div className="fc-body-text fc-body-text--error">
+        {d.error}
+      </div>
+    </>
+  );
+}
+
+function SessionBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "session" }> }) {
+  const shortId = d.sessionId?.slice(0, 8);
+  const label = `${d.action}${shortId ? ` [${shortId}]` : ""}`;
+  return (
+    <>
+      <CardHeader event={event} label={label} labelClass={event.isError ? "fc-label--crit" : "fc-label--agent"} />
+      {d.reason && <div className="fc-body-text fc-body-text--dim">{"\u2014"} {d.reason}</div>}
+    </>
+  );
+}
+
+function HealthBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "health" }> }) {
+  const cls = d.status === "online" ? "fc-label--ok" : d.status === "unreachable" ? "fc-label--crit" : "fc-label--warn";
+  const label = d.status === "online" ? "came online" : d.status === "unreachable" ? "connection lost" : `degraded \u2014 ${d.error ?? "unknown"}`;
+  return <CardHeader event={event} label={label} labelClass={cls} />;
+}
+
+function ImportBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "import" }> }) {
+  const suffix = d.skipped ? " (skipped)" : d.count !== undefined ? ` \u2014 ${d.count} rows` : "";
+  return <CardHeader event={event} label={`import ${d.table ?? ""}${suffix}`} />;
+}
+
+function GenericBody({ event }: { event: FeedEvent }) {
+  return <CardHeader event={event} label={cleanText(event)} />;
+}
+
 // ---------------------------------------------------------------------------
-//  Metadata row — disclosed on hover/focus
+//  Metadata row — hover/focus disclosure
 // ---------------------------------------------------------------------------
 
 function MetaRow({ event }: { event: FeedEvent }) {
   const d = event.detail;
   const parts: string[] = [];
-  parts.push(formatTimeWithSeconds(event.time));
   if (event.component) parts.push(event.component);
   if (d?.type === "message") {
-    if (d.messageId) parts.push(d.messageId);
+    if (d.messageId) parts.push(`id:${d.messageId}`);
     if (d.chatJid) parts.push(d.chatJid);
-  } else if (d?.type === "tool_error" || d?.type === "tool_use") {
-    if (d.toolId) parts.push(d.toolId);
+  } else if ((d?.type === "tool_error" || d?.type === "tool_use") && d.toolId) {
+    parts.push(d.toolId);
   } else if (d?.type === "session" && d.chatJid) {
     parts.push(d.chatJid);
   }
-  if (parts.length <= 1) return null;
+  if (!parts.length) return null;
   return <div className="fc-meta">{parts.join(" \u00b7 ")}</div>;
 }
 
 // ---------------------------------------------------------------------------
-//  Quick actions — contextual per event type
+//  Quick actions
 // ---------------------------------------------------------------------------
 
 function QuickActions({ event, onRestart }: { event: FeedEvent; onRestart?: (instance: string) => void }) {
   const d = event.detail;
-  if (!d || !event.instance) return null;
+  if (!d || !event.instance || !onRestart) return null;
 
-  // Connection errors: restart button
-  if (d.type === "connection" && event.isError && onRestart) {
-    return (
+  const showRestart = (d.type === "connection" && event.isError)
+    || (d.type === "health" && d.status === "unreachable");
+  if (!showRestart) return null;
+
+  return (
+    <div className="fc-actions">
       <button
         className="fc-action"
         onClick={(e) => { e.stopPropagation(); onRestart(event.instance!); }}
         title={`Restart ${event.instance}`}
       >
-        <RotateCw size={11} strokeWidth={2} />
-        <span>restart</span>
+        <RotateCw size={12} strokeWidth={2} />
+        restart
       </button>
-    );
-  }
-
-  // Health unreachable: restart button
-  if (d.type === "health" && d.status === "unreachable" && onRestart) {
-    return (
-      <button
-        className="fc-action"
-        onClick={(e) => { e.stopPropagation(); onRestart(event.instance!); }}
-        title={`Restart ${event.instance}`}
-      >
-        <RotateCw size={11} strokeWidth={2} />
-        <span>restart</span>
-      </button>
-    );
-  }
-
-  return null;
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
-//  Main card component
+//  Main card
 // ---------------------------------------------------------------------------
 
 interface FeedCardProps {
@@ -230,26 +236,22 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart }) => {
   const d = event.detail;
   const isErr = !!event.isError;
 
-  // Render the type-specific content
-  let content: React.ReactNode;
-  if (!d || d.type === "generic") {
-    content = <span className="fc-body">{cleanText(event)}</span>;
-  } else {
-    switch (d.type) {
-      case "connection": content = <ConnectionCard event={event} d={d} />; break;
-      case "message": content = <MessageCard d={d} />; break;
-      case "tool_error": content = <ToolErrorCard d={d} />; break;
-      case "session": content = <SessionCard event={event} d={d} />; break;
-      case "health": content = <HealthCard d={d} />; break;
-      case "import": content = <ImportCard d={d} />; break;
-      case "tool_use": content = <><span className="fc-badge">{d.toolName}</span></>; break;
-      default: content = <span className="fc-body">{cleanText(event)}</span>;
-    }
+  let body: React.ReactNode;
+  if (!d || d.type === "generic") body = <GenericBody event={event} />;
+  else switch (d.type) {
+    case "connection": body = <ConnectionBody event={event} d={d} />; break;
+    case "message": body = <MessageBody event={event} d={d} />; break;
+    case "tool_error": body = <ToolErrorBody event={event} d={d} />; break;
+    case "session": body = <SessionBody event={event} d={d} />; break;
+    case "health": body = <HealthBody event={event} d={d} />; break;
+    case "import": body = <ImportBody event={event} d={d} />; break;
+    case "tool_use": body = <CardHeader event={event} label={d.toolName} />; break;
+    default: body = <GenericBody event={event} />;
   }
 
   return (
     <div
-      className={`fc ${isErr ? "fc--error" : ""} ${d?.type === "tool_error" ? "fc--tall" : ""}`}
+      className={`fc ${isErr ? "fc--error" : ""}`}
       tabIndex={0}
       onMouseEnter={() => setExpanded(true)}
       onMouseLeave={() => setExpanded(false)}
@@ -257,30 +259,9 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart }) => {
       onBlur={() => setExpanded(false)}
       style={{ borderLeftColor: edgeColor(event) }}
     >
-      {/* Primary row */}
-      <div className="fc__primary">
-        <span className="fc__time">{formatTimeWithSeconds(event.time)}</span>
-        <span className="fc__icon"><FeedIcon event={event} /></span>
-
-        {/* Instance tag */}
-        {event.instance && (
-          <span
-            className="fc__inst"
-            style={{ backgroundColor: modeWash[event.mode], color: modeColor[event.mode] }}
-          >
-            {event.instance}
-          </span>
-        )}
-
-        {/* Type-specific content */}
-        <div className="fc__content">{content}</div>
-
-        {/* Quick actions (visible on hover) */}
-        {expanded && <QuickActions event={event} onRestart={onRestart} />}
-      </div>
-
-      {/* Metadata row — hover/focus only */}
+      {body}
       {expanded && <MetaRow event={event} />}
+      {expanded && <QuickActions event={event} onRestart={onRestart} />}
     </div>
   );
 };

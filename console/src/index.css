@@ -412,59 +412,10 @@ body::before {
   .fc { animation: none; }
 }
 
-/* ── Primary row ── */
-.fc__primary {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-data);
-  line-height: 1.5;
-  min-height: 22px;
-}
-
-.fc__time {
-  flex-shrink: 0;
-  width: 68px;
-  text-align: right;
-  color: var(--color-t5);
-  font-size: var(--font-size-sm);
-}
-
-.fc__icon {
-  flex-shrink: 0;
-  width: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Instance tag — colored pill using mode wash */
-.fc__inst {
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-label);
-  font-weight: 600;
-  letter-spacing: var(--tracking-pill);
-  padding: 1px var(--sp-1h);
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
-}
-
-/* Content area — flexible, wraps internal card variant */
-.fc__content {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-1);
-  overflow: hidden;
-}
-
 /* ── Metadata row (hover/focus only) ── */
 .fc-meta {
   margin-top: var(--sp-1);
-  padding-left: 92px; /* time(68) + gap(8) + icon(16) */
+  padding-left: 92px;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   color: var(--color-t5);
@@ -472,174 +423,111 @@ body::before {
   line-height: 1.5;
 }
 
-/* ── Quick actions ── */
+/* ══════════════════════════════════════════════════════════════════════════
+   fc card variant styles — type-specific rendering
+   ══════════════════════════════════════════════════════════════════════════ */
+
+
+/* ── Card header row ── */
+.fc-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 24px;
+}
+
+.fc-time {
+  flex-shrink: 0;
+  width: 68px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-t5);
+}
+
+.fc-icon {
+  flex-shrink: 0;
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fc-inst {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-label);
+  font-weight: 600;
+  letter-spacing: var(--tracking-pill);
+  padding: 1px var(--sp-1h);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.fc-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-data);
+  color: var(--color-t2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fc-label--ok    { color: var(--color-s-ok); font-weight: 500; }
+.fc-label--warn  { color: var(--color-s-warn); font-weight: 500; }
+.fc-label--crit  { color: var(--color-s-crit); font-weight: 500; }
+.fc-label--muted { color: var(--color-t4); }
+.fc-label--recv  { color: var(--color-m-cht); }
+.fc-label--sent  { color: var(--color-m-agt); }
+.fc-label--agent { color: var(--color-m-agt); }
+
+/* ── Body text — multi-line content below the header ── */
+.fc-body-text {
+  margin-top: var(--sp-1);
+  padding-left: 92px; /* time(68) + gap(8) + icon(16) */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-data);
+  color: var(--color-t3);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.fc-body-text--error {
+  color: var(--color-s-crit);
+  opacity: 0.85;
+}
+
+.fc-body-text--dim {
+  color: var(--color-t4);
+}
+
+/* ── Quick actions row ── */
+.fc-actions {
+  margin-top: var(--sp-1);
+  padding-left: 92px;
+}
+
 .fc-action {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  flex-shrink: 0;
   font-family: var(--font-mono);
-  font-size: var(--font-size-label);
+  font-size: var(--font-size-sm);
   font-weight: 500;
-  letter-spacing: var(--tracking-pill);
   color: var(--color-t4);
-  padding: 2px var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: var(--bw) solid var(--b2);
   background: var(--color-d4);
-  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
 }
 
 .fc-action:hover {
   color: var(--color-t1);
   border-color: var(--b3);
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   fc card variant styles — type-specific rendering
-   ══════════════════════════════════════════════════════════════════════════ */
-
-/* Status labels (connection/health one-liners) */
-.fc-status {
-  font-weight: 500;
-}
-.fc-status--ok   { color: var(--color-s-ok); }
-.fc-status--warn { color: var(--color-s-warn); }
-.fc-status--crit { color: var(--color-s-crit); }
-.fc-status--muted { color: var(--color-t4); }
-
-/* Body text */
-.fc-body {
-  color: var(--color-t3);
-}
-
-/* Connection detail: code + reason + lifecycle */
-.fc-conn-detail {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-.fc-code {
-  font-weight: 600;
-  padding: 0 var(--sp-1h);
-  border-radius: var(--radius-sm);
-  background: var(--color-d5);
-  border: var(--bw) solid var(--b2);
-  color: var(--color-t2);
-}
-.fc-code--5xx { color: var(--color-s-crit); background: var(--s-crit-wash); border-color: var(--s-crit-border); }
-.fc-code--4xx { color: var(--color-s-warn); background: var(--s-warn-wash); }
-
-.fc-lifecycle { color: var(--color-t4); }
-.fc-lifecycle--ok { color: var(--color-s-ok); }
-
-/* Message cards */
-.fc-msg {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  min-width: 0;
-  overflow: hidden;
-}
-
-.fc-dir {
-  flex-shrink: 0;
-  font-weight: 600;
-  font-size: var(--font-size-label);
-  letter-spacing: var(--tracking-pill);
-  padding: 1px var(--sp-1h);
-  border-radius: var(--radius-sm);
-}
-.fc-dir--in  { color: var(--color-m-cht); background: var(--m-cht-wash); }
-.fc-dir--out { color: var(--color-m-agt); background: var(--m-agt-wash); }
-
-.fc-sender {
-  font-weight: 500;
-  color: var(--color-t1);
-  white-space: nowrap;
-}
-
-.fc-chat {
-  color: var(--color-t4);
-  font-size: var(--font-size-sm);
-  white-space: nowrap;
-}
-
-.fc-content-type {
-  color: var(--color-t5);
-  font-size: var(--font-size-sm);
-}
-
-.fc-preview {
-  color: var(--color-t3);
-  font-size: var(--font-size-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-
-/* Tool error cards */
-.fc-tool-err {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-
-.fc-tool-name {
-  font-weight: 600;
-  font-size: var(--font-size-label);
-  letter-spacing: var(--tracking-pill);
-  padding: 1px var(--sp-1h);
-  border-radius: var(--radius-sm);
-  background: var(--color-d5);
-  border: var(--bw) solid var(--b2);
-  color: var(--color-t2);
-  align-self: flex-start;
-}
-
-.fc-error-body {
-  color: var(--color-s-crit);
-  font-size: var(--font-size-sm);
-  line-height: 1.5;
-  word-break: break-word;
-  white-space: pre-wrap;
-  opacity: 0.85;
-}
-
-/* Session cards */
-.fc-session {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.fc-session-id {
-  color: var(--color-t5);
-  font-size: var(--font-size-sm);
-  font-family: var(--font-mono);
-}
-
-.fc-reason {
-  color: var(--color-t4);
-  font-size: var(--font-size-sm);
-}
-
-/* Generic badge */
-.fc-badge {
-  font-weight: 500;
-  font-size: var(--font-size-label);
-  letter-spacing: var(--tracking-pill);
-  padding: 1px var(--sp-1h);
-  border-radius: var(--radius-sm);
-  background: var(--color-d4);
-  border: var(--bw) solid var(--b2);
-  color: var(--color-t3);
-  white-space: nowrap;
 }
 
 /* Shimmer animation for loading skeletons */
