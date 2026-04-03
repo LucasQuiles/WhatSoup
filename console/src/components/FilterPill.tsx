@@ -3,15 +3,16 @@ import { type FC, type ReactNode } from 'react'
 interface FilterPillProps {
   label: string
   isActive: boolean
-  activeColor?: string    // Tailwind text color class when active, e.g. "text-m-pas"
-  activeBorder?: string   // CSS border value when active, e.g. "var(--bw) solid var(--color-m-pas)"
+  activeColor?: string
+  activeBorder?: string
   onClick: () => void
-  suffix?: ReactNode      // Optional suffix element (e.g., count badge)
-  style?: React.CSSProperties  // Optional style overrides
+  count?: number
+  suffix?: ReactNode
+  style?: React.CSSProperties
 }
 
 const FilterPill: FC<FilterPillProps> = ({
-  label, isActive, activeColor = 'text-t2', activeBorder, onClick, suffix, style,
+  label, isActive, activeColor = 'text-t2', activeBorder, onClick, count, suffix, style,
 }) => {
   return (
     <button
@@ -28,10 +29,27 @@ const FilterPill: FC<FilterPillProps> = ({
         border: isActive
           ? (activeBorder ?? 'var(--bw) solid var(--b4)')
           : 'var(--bw) solid var(--b1)',
+        gap: 'var(--sp-1h)',
         ...style,
       }}
     >
       {label}
+      {count !== undefined && count > 0 && (
+        <span
+          className={`font-semibold leading-snug`}
+          style={{
+            fontSize: 'var(--font-size-label)',
+            minWidth: 'var(--sp-4)',
+            textAlign: 'center',
+            padding: '0 var(--sp-1)',
+            borderRadius: 'var(--radius-xs)',
+            backgroundColor: isActive ? 'var(--b3)' : 'var(--b2)',
+            color: isActive ? 'var(--color-t1)' : 'var(--color-t4)',
+          }}
+        >
+          {count}
+        </span>
+      )}
       {suffix}
     </button>
   )

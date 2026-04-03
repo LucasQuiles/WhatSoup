@@ -62,10 +62,18 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     [displayEvents, filter],
   );
 
-  const errorCount = useMemo(
-    () => displayEvents.filter((e) => e.isError).length,
-    [displayEvents],
-  );
+  const filterCounts = useMemo(() => {
+    const counts: Record<FeedFilter, number> = { all: displayEvents.length, msgs: 0, conn: 0, errors: 0, health: 0, sessions: 0 };
+    for (const e of displayEvents) {
+      const t = e.detail?.type;
+      if (t === "message") counts.msgs++;
+      if (t === "connection") counts.conn++;
+      if (t === "tool_error" || e.isError) counts.errors++;
+      if (t === "health") counts.health++;
+      if (t === "session") counts.sessions++;
+    }
+    return counts;
+  }, [displayEvents]);
 
   // Only the newest unresolved connection/health error per instance gets restart/stop
   const actionableKeys = useMemo(() => {
@@ -156,7 +164,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
           {filterConfig.map((f) => (
             <FilterPill
               key={f.key}
-              label={f.key === "errors" && errorCount > 0 ? `${f.label} (${errorCount})` : f.label}
+              label={f.label}
               isActive={filter === f.key}
               activeColor={f.key === "errors" ? "text-s-crit" : "text-t2"}
               activeBorder={
@@ -164,6 +172,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
                   ? `var(--bw) solid ${f.key === "errors" ? "var(--color-s-crit)" : "var(--b3)"}`
                   : undefined
               }
+              count={filterCounts[f.key]}
               onClick={() => setFilter(f.key)}
             />
           ))}

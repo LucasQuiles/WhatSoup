@@ -255,11 +255,7 @@ const SoupKitchen: FC = () => {
                         : undefined
                     }
                     onClick={() => setModeFilter(m)}
-                    suffix={
-                      <span className="text-t5">
-                        {modeCounts[m]}
-                      </span>
-                    }
+                    count={modeCounts[m]}
                   />
                 ))}
               </div>
