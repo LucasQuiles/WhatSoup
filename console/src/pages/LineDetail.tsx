@@ -381,6 +381,12 @@ const ENUM_OPTIONS: Record<string, string[]> = {
   model: ['', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
 }
 
+const FIELD_VALIDATORS: Record<string, (val: unknown) => string | null> = {
+  maxTokens: v => typeof v === 'number' && v < 256 ? 'Min 256' : typeof v === 'number' && v > 200000 ? 'Max 200,000' : null,
+  tokenBudget: v => typeof v === 'number' && v < 1000 ? 'Min 1,000' : typeof v === 'number' && v > 10000000 ? 'Max 10M' : null,
+  rateLimitPerHour: v => typeof v === 'number' && v < 1 ? 'Min 1' : typeof v === 'number' && v > 10000 ? 'Max 10,000' : null,
+}
+
 /* ═══ ConfigEditDialog — type-aware form for editing line config ═══ */
 function ConfigEditDialog({
   config,
@@ -627,6 +633,10 @@ function ConfigEditDialog({
   }
 
   const hasChanges = Object.keys(patch).length > 0
+  const hasErrors = Object.entries(patch).some(([key]) => {
+    const validator = FIELD_VALIDATORS[key]
+    return validator ? validator(currentValue(key)) !== null : false
+  })
 
   return (
     <div
@@ -699,6 +709,11 @@ function ConfigEditDialog({
                   )}
                 </label>
                 {renderField(key, originalValue)}
+                {FIELD_VALIDATORS[key]?.(currentValue(key)) && (
+                  <span className="font-mono" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)', display: 'block' }}>
+                    {FIELD_VALIDATORS[key]!(currentValue(key))}
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -722,7 +737,7 @@ function ConfigEditDialog({
           </button>
           <button
             onClick={handleSave}
-            disabled={saving || !hasChanges}
+            disabled={saving || !hasChanges || hasErrors}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
             style={{
               fontSize: 'var(--font-size-heading)',
