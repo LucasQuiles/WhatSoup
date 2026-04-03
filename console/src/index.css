@@ -261,6 +261,27 @@ body::before {
   100% { opacity: 1; transform: translateY(0); }
 }
 
+/* ═══ Feed entry animation ═══ */
+@keyframes feed-card-enter {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.feed-card-enter {
+  animation: feed-card-enter 150ms ease-out both;
+}
+
+.feed-card-enter:hover,
+.feed-card-enter:focus-visible {
+  background-color: var(--color-d3) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feed-card-enter {
+    animation: none;
+  }
+}
+
 /* Shimmer animation for loading skeletons */
 @keyframes shimmer {
   0% { background-position: -400px 0; }

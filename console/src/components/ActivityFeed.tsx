@@ -1,7 +1,7 @@
 import { type FC, useState, useMemo } from "react";
 import { Pause, Play, AlertTriangle } from "lucide-react";
-import { formatTime } from "../lib/format-time";
 import FilterPill from "./FilterPill";
+import FeedCard from "./FeedCard";
 import type { Mode, FeedEvent } from "../types";
 
 interface ActivityFeedProps {
@@ -10,208 +10,12 @@ interface ActivityFeedProps {
 
 const modeFilters: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
 
-const modeDotColor: Record<Mode, string> = {
-  passive: "bg-m-pas",
-  chat: "bg-m-cht",
-  agent: "bg-m-agt",
-};
-
 const modeTextColor: Record<string, string> = {
   all: "text-t2",
   passive: "text-m-pas",
   chat: "text-m-cht",
   agent: "text-m-agt",
 };
-
-const reasonLabel: Record<string, string> = {
-  unavailableService: "unavailable",
-  connectionClosed: "closed",
-  connectionLost: "lost",
-  connectionReplaced: "replaced",
-  timedOut: "timed out",
-  loggedOut: "logged out",
-  Unknown: "unknown",
-};
-
-function statusCodeColor(code?: number): string {
-  if (!code) return "text-t4";
-  if (code >= 500) return "text-s-crit";
-  if (code >= 400) return "text-s-warn";
-  return "text-t3";
-}
-
-function Badge({ children, color = "text-t3" }: { children: React.ReactNode; color?: string }) {
-  return (
-    <span
-      className={`inline-flex items-center font-mono font-medium ${color}`}
-      style={{
-        fontSize: "var(--font-size-label)",
-        letterSpacing: "var(--tracking-pill)",
-        padding: "0 var(--sp-1h)",
-        borderRadius: "var(--radius-sm)",
-        backgroundColor: "var(--color-d4)",
-        borderWidth: "var(--bw)",
-        borderStyle: "solid",
-        borderColor: "var(--b2)",
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
-function FeedCardContent({ event }: { event: FeedEvent }) {
-  const d = event.detail;
-  const isErr = event.isError;
-
-  const inst = event.instance ? (
-    <span className="text-t2 font-medium" style={{ marginRight: "var(--sp-1)" }}>
-      {event.instance}
-    </span>
-  ) : null;
-
-  if (!d || d.type === "generic") {
-    let text = event.instance && event.text.startsWith(`${event.instance}: `)
-      ? event.text.slice(event.instance.length + 2)
-      : event.text;
-    // Strip doubled [component] prefix — backend prepends it in text, but we show component separately
-    if (event.component && text.startsWith(`[${event.component}] `)) {
-      text = text.slice(event.component.length + 3);
-    }
-    return <>{inst}<span>{text}</span></>;
-  }
-
-  switch (d.type) {
-    case "connection": {
-      // State transitions (connecting, connected, disconnected)
-      if (d.state === "connected") {
-        return <>{inst}<span className="text-s-ok">connected</span></>;
-      }
-      if (d.state === "connecting") {
-        return <>{inst}<span className="text-t4">connecting</span></>;
-      }
-      if (d.state === "disconnected") {
-        return <>{inst}<span className="text-s-warn">disconnected</span></>;
-      }
-      if (d.reconnecting && !d.statusCode && !d.reason) {
-        return <>{inst}<span className="text-t4">reconnecting</span></>;
-      }
-      // Error with optional reconnect suffix (coalesced lifecycle)
-      const code = d.statusCode;
-      const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
-      if (!code && !reason) {
-        let text = event.instance && event.text.startsWith(`${event.instance}: `)
-          ? event.text.slice(event.instance.length + 2)
-          : event.text;
-        if (event.component && text.startsWith(`[${event.component}] `)) {
-          text = text.slice(event.component.length + 3);
-        }
-        return <>{inst}<span className="text-t4">{text}</span></>;
-      }
-      return (
-        <>
-          {inst}
-          {code && <Badge color={statusCodeColor(code)}>{code}</Badge>}
-          {reason && <span className={isErr ? "text-s-crit" : "text-t3"} style={{ marginLeft: "var(--sp-1)" }}>{reason}</span>}
-          {d.reconnecting && <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{"\u2192"} reconnecting</span>}
-          {d.state === "connected" && <span className="text-s-ok" style={{ marginLeft: "var(--sp-1)" }}>{"\u2192"} reconnected</span>}
-        </>
-      );
-    }
-    case "tool_error":
-      return (
-        <>
-          {inst}
-          <Badge>{d.toolName}</Badge>
-          <span
-            className="text-s-crit"
-            style={{
-              marginLeft: "var(--sp-1)",
-              wordBreak: "break-word",
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {d.error.length > 200 ? d.error.slice(0, 200) + "\u2026" : d.error}
-          </span>
-        </>
-      );
-    case "session": {
-      const shortId = d.sessionId ? d.sessionId.slice(0, 8) : undefined;
-      return (
-        <>
-          {inst}
-          <span className={isErr ? "text-s-crit" : "text-m-agt"}>{d.action}</span>
-          {shortId && <span className="text-t5" style={{ marginLeft: "var(--sp-1)" }}>{shortId}</span>}
-          {d.reason && <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{"\u2014"} {d.reason}</span>}
-        </>
-      );
-    }
-    case "health": {
-      const statusColor = d.status === "online" ? "text-s-ok" : d.status === "unreachable" ? "text-s-crit" : "text-s-warn";
-      const label = d.status === "online" ? "came online" : d.status === "unreachable" ? "connection lost" : `degraded \u2014 ${d.error ?? "unknown"}`;
-      return <>{inst}<span className={statusColor}>{label}</span></>;
-    }
-    case "message": {
-      const dirColor = d.direction === "inbound" ? "text-m-cht" : "text-m-agt";
-      const chatShort = d.chatJid ? d.chatJid.replace(/@.*/, "").slice(-8) : undefined;
-      const countMatch = event.text.match(/\u00d7(\d+)/);
-      const count = countMatch ? parseInt(countMatch[1], 10) : undefined;
-      const isNonText = d.contentType && d.contentType !== "text";
-      const preview = d.preview
-        ? (d.preview.length > 80 ? d.preview.slice(0, 77) + "\u2026" : d.preview)
-        : undefined;
-      return (
-        <>
-          {inst}
-          <Badge color={dirColor}>
-            {d.direction === "inbound" ? "recv" : "sent"}
-            {count && count > 1 ? ` \u00d7${count}` : ""}
-          </Badge>
-          {d.senderName && d.direction === "inbound" && (
-            <span className="text-t2 font-medium" style={{ marginLeft: "var(--sp-1)" }}>{d.senderName}</span>
-          )}
-          {!d.senderName && chatShort && (
-            <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>{chatShort}</span>
-          )}
-          {isNonText && (
-            <span className="text-t5" style={{ marginLeft: "var(--sp-1)" }}>[{d.contentType}]</span>
-          )}
-          {preview && (
-            <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>
-              {preview}
-            </span>
-          )}
-        </>
-      );
-    }
-    case "import":
-      return (
-        <>
-          {inst}
-          <Badge>import</Badge>
-          <span className="text-t3" style={{ marginLeft: "var(--sp-1)" }}>
-            {d.table}{d.skipped ? " (skipped)" : d.count !== undefined ? ` \u2014 ${d.count} rows` : ""}
-          </span>
-        </>
-      );
-    case "tool_use":
-      return (
-        <>
-          {inst}
-          <Badge>{d.toolName}</Badge>
-        </>
-      );
-    default: {
-      let text = event.instance && event.text.startsWith(`${event.instance}: `)
-        ? event.text.slice(event.instance.length + 2)
-        : event.text;
-      if (event.component && text.startsWith(`[${event.component}] `)) {
-        text = text.slice(event.component.length + 3);
-      }
-      return <>{inst}<span>{text}</span></>;
-    }
-  }
-}
 
 const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [paused, setPaused] = useState(false);
@@ -291,49 +95,9 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
       {/* Feed items */}
       <div className="flex-1 overflow-y-auto scrollbar-hide">
-        {filtered.map((event, i) => {
-          const isErr = event.isError;
-          return (
-            <div
-              key={`${event.time}-${event.mode}-${i}`}
-              className={`
-                flex items-baseline ${isErr ? "" : "c-row-hover"}
-              `}
-              style={{
-                gap: "var(--sp-2)",
-                padding: "var(--sp-2h) var(--sp-3)",
-                borderBottom: "var(--bw) solid var(--b1)",
-                ...(isErr
-                  ? { backgroundColor: "var(--s-crit-wash)" }
-                  : {}),
-              }}
-            >
-              {/* Time */}
-              <span
-                className={`font-mono flex-shrink-0 ${isErr ? "text-s-crit" : "text-t5"}`}
-                style={{ fontSize: "var(--font-size-xs)", minWidth: "40px" }}
-              >
-                {formatTime(event.time)}
-              </span>
-
-              {/* Mode dot */}
-              <span
-                className={`inline-block rounded-full flex-shrink-0 ${
-                  isErr ? "bg-s-crit" : modeDotColor[event.mode]
-                }`}
-                style={{ width: "var(--dot-feed)", height: "var(--dot-feed)", alignSelf: "center", marginTop: "-1px" }}
-              />
-
-              {/* Content */}
-              <span
-                className={`font-mono leading-normal flex items-center ${isErr ? "text-s-crit" : "text-t3"}`}
-                style={{ fontSize: "var(--font-size-sm)", gap: "var(--sp-1)" }}
-              >
-                <FeedCardContent event={event} />
-              </span>
-            </div>
-          );
-        })}
+        {filtered.map((event, i) => (
+          <FeedCard key={`${event.time}-${event.mode}-${i}`} event={event} />
+        ))}
 
         {filtered.length === 0 && (
           <div
