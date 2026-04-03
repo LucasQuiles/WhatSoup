@@ -364,6 +364,16 @@ const TYPE_COLOR: Record<string, string> = {
   boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
 }
 
+const AGENT_OPTION_FLAT: Record<string, 'string' | 'boolean' | 'enum'> = {
+  sessionScope: 'enum',
+  cwd: 'string',
+  instructionsPath: 'string',
+  sandboxPerChat: 'boolean',
+}
+const AGENT_OPTION_ENUMS: Record<string, string[]> = {
+  sessionScope: ['single', 'shared', 'per_chat'],
+}
+
 /* ═══ Enum options for known select fields ═══ */
 const ENUM_OPTIONS: Record<string, string[]> = {
   accessMode: ['self_only', 'allowlist', 'open_dm', 'groups_only'],
@@ -386,17 +396,47 @@ function ConfigEditDialog({
   const [patch, setPatch] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
 
-  const editableEntries = Object.entries(config).filter(
-    ([k]) => !CONFIG_EXCLUDE_KEYS.has(k),
-  )
+  const editableEntries: [string, unknown][] = React.useMemo(() => {
+    const entries: [string, unknown][] = []
+    for (const [k, v] of Object.entries(config)) {
+      if (CONFIG_EXCLUDE_KEYS.has(k)) continue
+      if (k === 'agentOptions' && typeof v === 'object' && v !== null && !Array.isArray(v)) {
+        const obj = v as Record<string, unknown>
+        const otherKeys: Record<string, unknown> = {}
+        for (const [sk, sv] of Object.entries(obj)) {
+          if (sk in AGENT_OPTION_FLAT) {
+            entries.push([`agentOptions.${sk}`, sv])
+          } else {
+            otherKeys[sk] = sv
+          }
+        }
+        if (Object.keys(otherKeys).length > 0) {
+          entries.push(['agentOptions (other)', otherKeys])
+        }
+      } else {
+        entries.push([k, v])
+      }
+    }
+    return entries
+  }, [config])
 
-  const currentValue = (key: string): unknown =>
-    key in patch ? patch[key] : config[key]
+  const currentValue = (key: string): unknown => {
+    if (key in patch) return patch[key]
+    if (key.includes('.')) {
+      const [parent, child] = key.split('.')
+      const obj = config[parent] as Record<string, unknown> | undefined
+      return obj?.[child]
+    }
+    return config[key]
+  }
 
   const setField = useCallback((key: string, value: unknown) => {
     setPatch(prev => {
       // If value matches original, remove from patch
-      if (value === config[key]) {
+      const originalValue = key.includes('.')
+        ? (() => { const [parent, child] = key.split('.'); return (config[parent] as Record<string, unknown> | undefined)?.[child] })()
+        : config[key]
+      if (value === originalValue) {
         const next = { ...prev }
         delete next[key]
         return next
@@ -412,7 +452,17 @@ function ConfigEditDialog({
     }
     setSaving(true)
     try {
-      await api.updateConfig(lineName, patch)
+      const apiPatch: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(patch)) {
+        if (key.includes('.')) {
+          const [parent, child] = key.split('.')
+          if (!apiPatch[parent]) apiPatch[parent] = {}
+          ;(apiPatch[parent] as Record<string, unknown>)[child] = value
+        } else {
+          apiPatch[key] = value
+        }
+      }
+      await api.updateConfig(lineName, apiPatch)
       toast.success('Configuration updated')
       await queryClient.invalidateQueries({ queryKey: ['lines', lineName] })
       onClose()
@@ -504,7 +554,11 @@ function ConfigEditDialog({
     }
 
     // String with known enum -> select
-    if (typeof originalValue === 'string' && key in ENUM_OPTIONS) {
+    const dotKey = key.includes('.') ? key.split('.')[1] : null
+    const enumOpts = key in ENUM_OPTIONS ? ENUM_OPTIONS[key]
+      : (dotKey && dotKey in AGENT_OPTION_ENUMS) ? AGENT_OPTION_ENUMS[dotKey]
+      : null
+    if (typeof originalValue === 'string' && enumOpts) {
       return (
         <select
           value={val as string}
@@ -521,7 +575,7 @@ function ConfigEditDialog({
             outline: 'none',
           }}
         >
-          {ENUM_OPTIONS[key].map(opt => (
+          {enumOpts.map(opt => (
             <option key={opt} value={opt}>{opt || '(default)'}</option>
           ))}
         </select>
