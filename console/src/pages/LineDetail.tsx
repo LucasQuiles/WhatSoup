@@ -426,22 +426,22 @@ function ConfigEditDialog({
     return entries
   }, [config])
 
-  const currentValue = (key: string): unknown => {
-    if (key in patch) return patch[key]
+  /** Resolve a config value, handling dotted keys like 'agentOptions.cwd'. */
+  const configValue = useCallback((key: string): unknown => {
     if (key.includes('.')) {
       const [parent, child] = key.split('.')
-      const obj = config[parent] as Record<string, unknown> | undefined
-      return obj?.[child]
+      return (config[parent] as Record<string, unknown> | undefined)?.[child]
     }
     return config[key]
-  }
+  }, [config])
+
+  const currentValue = (key: string): unknown =>
+    key in patch ? patch[key] : configValue(key)
 
   const setField = useCallback((key: string, value: unknown) => {
     setPatch(prev => {
-      // If value matches original, remove from patch
-      const originalValue = key.includes('.')
-        ? (() => { const [parent, child] = key.split('.'); return (config[parent] as Record<string, unknown> | undefined)?.[child] })()
-        : config[key]
+      // If value matches original, remove from patch (only dirty fields tracked)
+      const originalValue = configValue(key)
       if (value === originalValue) {
         const next = { ...prev }
         delete next[key]
@@ -449,7 +449,7 @@ function ConfigEditDialog({
       }
       return { ...prev, [key]: value }
     })
-  }, [config])
+  }, [configValue])
 
   const handleSave = async () => {
     if (Object.keys(patch).length === 0) {
