@@ -302,6 +302,112 @@ describe('FleetDbReader', () => {
     });
   });
 
+  // ── getMessagesByIds ────────────────────────────────────────────────────
+
+  describe('getMessagesByIds', () => {
+    let dbPath: string;
+    let db: DatabaseSync;
+    let msgReader: FleetDbReader;
+
+    beforeEach(() => {
+      dbPath = tmpFile();
+      db = new DatabaseSync(dbPath);
+      db.exec(MINIMAL_SCHEMA);
+      db.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550100001@s.whatsapp.net', '15550100001', '15550100001@s.whatsapp.net', 'Alice', 'msg-aaa', 'Hello world', 'text', 0, 1700000000);
+      db.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550100001@s.whatsapp.net', '15550100001', 'bot@s.whatsapp.net', null, 'msg-bbb', 'Hi Alice', 'text', 1, 1700000001);
+      db.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550100001@s.whatsapp.net', '15550100001', '15550100001@s.whatsapp.net', 'Alice', 'msg-ccc', 'Third message', 'text', 0, 1700000002);
+      msgReader = new FleetDbReader('self', db);
+    });
+
+    afterEach(() => {
+      db.close();
+      cleanup(dbPath);
+    });
+
+    it('returns matching messages by message_id', () => {
+      const result = msgReader.getMessagesByIds('self', dbPath, ['msg-aaa', 'msg-ccc']);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toHaveLength(2);
+        expect(result.data.map(r => r.message_id)).toContain('msg-aaa');
+        expect(result.data.map(r => r.message_id)).toContain('msg-ccc');
+        expect(result.data.find(r => r.message_id === 'msg-aaa')?.content).toBe('Hello world');
+        expect(result.data.find(r => r.message_id === 'msg-aaa')?.chat_jid).toBe('15550100001@s.whatsapp.net');
+      }
+    });
+
+    it('returns empty array for non-existent message_ids', () => {
+      const result = msgReader.getMessagesByIds('self', dbPath, ['nonexistent-id']);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.data).toHaveLength(0);
+    });
+
+    it('returns empty array for empty input', () => {
+      const result = msgReader.getMessagesByIds('self', dbPath, []);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.data).toHaveLength(0);
+    });
+  });
+
+  // ── getRecentMessagesByChat ─────────────────────────────────────────────
+
+  describe('getRecentMessagesByChat', () => {
+    let dbPath: string;
+    let db: DatabaseSync;
+    let msgReader: FleetDbReader;
+
+    beforeEach(() => {
+      dbPath = tmpFile();
+      db = new DatabaseSync(dbPath);
+      db.exec(MINIMAL_SCHEMA);
+      db.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550100001@s.whatsapp.net', '15550100001', '15550100001@s.whatsapp.net', 'msg-1', 'First', 'text', 0, 1700000000);
+      db.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550100001@s.whatsapp.net', '15550100001', '15550100001@s.whatsapp.net', 'msg-2', 'Second', 'text', 0, 1700000003);
+      db.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, content_type, is_from_me, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('15550100001@s.whatsapp.net', '15550100001', 'bot@s.whatsapp.net', 'msg-3', 'Reply', 'text', 1, 1700000005);
+      msgReader = new FleetDbReader('self', db);
+    });
+
+    afterEach(() => {
+      db.close();
+      cleanup(dbPath);
+    });
+
+    it('returns inbound messages near a timestamp', () => {
+      const result = msgReader.getRecentMessagesByChat('self', dbPath, '15550100001', 'inbound', 1700000002);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.length).toBeGreaterThanOrEqual(1);
+        expect(result.data.every(r => r.is_from_me === 0)).toBe(true);
+      }
+    });
+
+    it('returns outbound messages when direction is outbound', () => {
+      const result = msgReader.getRecentMessagesByChat('self', dbPath, '15550100001', 'outbound', 1700000005);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.length).toBeGreaterThanOrEqual(1);
+        expect(result.data.every(r => r.is_from_me === 1)).toBe(true);
+      }
+    });
+  });
+
   // ── error handling ──────────────────────────────────────────────────────
 
   describe('error handling', () => {

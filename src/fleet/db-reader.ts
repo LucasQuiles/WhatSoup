@@ -20,8 +20,10 @@ export interface ChatSummary {
 export interface MessageRow {
   pk: number;
   conversation_key: string;
+  chat_jid: string;
   sender_jid: string;
   sender_name: string | null;
+  message_id: string | null;
   content: string | null;
   content_type: string;
   timestamp: number;
@@ -131,8 +133,8 @@ export class FleetDbReader {
       params.push(opts.limit);
 
       return db.prepare(`
-        SELECT pk, conversation_key, sender_jid, sender_name,
-               content, content_type, timestamp, is_from_me, raw_message
+        SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
+               message_id, content, content_type, timestamp, is_from_me, raw_message
         FROM messages m
         WHERE m.conversation_key = ? AND m.deleted_at IS NULL ${wherePk}
           AND m.pk = (
@@ -166,6 +168,49 @@ export class FleetDbReader {
         requestedAt: r.requested_at,
         decidedAt: r.decided_at,
       }));
+    });
+  }
+
+  /** Fetch messages by a set of message_ids (for feed preview enrichment). */
+  getMessagesByIds(name: string, dbPath: string, messageIds: string[]): DbResult<MessageRow[]> {
+    if (messageIds.length === 0) return { ok: true, data: [] };
+    return this.query(name, dbPath, (db) => {
+      const placeholders = messageIds.map(() => '?').join(', ');
+      return db.prepare(`
+        SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
+               message_id, content, content_type, timestamp, is_from_me, raw_message
+        FROM messages
+        WHERE message_id IN (${placeholders})
+          AND deleted_at IS NULL
+      `).all(...messageIds) as unknown as MessageRow[];
+    });
+  }
+
+  /** Fetch recent messages by conversation + direction + time window (fallback for missing messageId). */
+  getRecentMessagesByChat(
+    name: string,
+    dbPath: string,
+    conversationKey: string,
+    direction: 'inbound' | 'outbound',
+    aroundTimestamp: number,
+    limit = 3,
+  ): DbResult<MessageRow[]> {
+    const isFromMe = direction === 'outbound' ? 1 : 0;
+    const windowSec = 5;
+    return this.query(name, dbPath, (db) => {
+      return db.prepare(`
+        SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
+               message_id, content, content_type, timestamp, is_from_me, raw_message
+        FROM messages
+        WHERE conversation_key = ? AND is_from_me = ? AND deleted_at IS NULL
+          AND timestamp BETWEEN ? AND ?
+        ORDER BY ABS(timestamp - ?) ASC
+        LIMIT ?
+      `).all(
+        conversationKey, isFromMe,
+        aroundTimestamp - windowSec, aroundTimestamp + windowSec,
+        aroundTimestamp, limit,
+      ) as unknown as MessageRow[];
     });
   }
 
