@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { useLines, useChats, useMessages, useTyping } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
@@ -22,6 +23,21 @@ export default function Inbox() {
   const [isSending, setIsSending] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinked = useRef(false);
+  useEffect(() => {
+    if (deepLinked.current) return;
+    const lineParam = searchParams.get('line');
+    const chatParam = searchParams.get('chat');
+    if (lineParam) {
+      deepLinked.current = true;
+      setSelectedLine(lineParam);
+      if (chatParam) setSelectedChat(chatParam);
+      // Clear params so back-navigation doesn't re-trigger
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   // Clear message input when switching chats or lines
   useEffect(() => { setMsgText('') }, [selectedChat, selectedLine])
