@@ -17,17 +17,32 @@ const modeTextColor: Record<string, string> = {
   agent: "text-m-agt",
 };
 
+type TypeFilter = "all" | "messages" | "connections" | "errors" | "health";
+
 const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [paused, setPaused] = useState(false);
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [errorsOnly, setErrorsOnly] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
   const filtered = useMemo(() => {
     let result = events;
     if (modeFilter !== "all") result = result.filter((e) => e.mode === modeFilter);
     if (errorsOnly) result = result.filter((e) => e.isError);
+    if (typeFilter !== "all") {
+      result = result.filter((e) => {
+        const t = e.detail?.type;
+        switch (typeFilter) {
+          case "messages": return t === "message";
+          case "connections": return t === "connection";
+          case "errors": return t === "tool_error";
+          case "health": return t === "health";
+          default: return true;
+        }
+      });
+    }
     return result;
-  }, [events, modeFilter, errorsOnly]);
+  }, [events, modeFilter, errorsOnly, typeFilter]);
 
   const errorCount = useMemo(() => events.filter((e) => e.isError).length, [events]);
 
@@ -70,6 +85,21 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
                     : undefined
                 }
                 onClick={() => setModeFilter(m)}
+              />
+            ))}
+
+            {/* Separator */}
+            <span className="text-t5" style={{ margin: "0 var(--sp-1)" }}>|</span>
+
+            {/* Type filters */}
+            {(["all", "messages", "connections", "errors", "health"] as TypeFilter[]).map((t) => (
+              <FilterPill
+                key={`type-${t}`}
+                label={t === "all" ? "All types" : t}
+                isActive={typeFilter === t}
+                activeColor="text-t2"
+                activeBorder={typeFilter === t ? "var(--bw) solid var(--b3)" : undefined}
+                onClick={() => setTypeFilter(t)}
               />
             ))}
           </div>
