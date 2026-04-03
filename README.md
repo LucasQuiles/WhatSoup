@@ -70,6 +70,8 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 - **GNOME Keyring** (`libsecret-tools`) or environment variables for API keys — `npm run setup` checks both
 - **ffmpeg** — video frame extraction in chat mode (optional)
 
+> **Pinned dependencies:** Due to the increase in recent supply chain attacks, all dependency versions in `package.json` are pinned to exact versions known to be safe at time of release. This minimizes the risk of compromised packages being pulled in by WhatSoup. If you choose to unpin or update these, do so at your own risk and with due diligence. Pinned versions will be updated in future releases with known good sources.
+
 ## Quick Start
 
 ```bash
