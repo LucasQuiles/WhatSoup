@@ -131,8 +131,16 @@ export default function LineDetail() {
 
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
 
+  const ease = [0.22, 1, 0.36, 1] as const
+
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden" style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}>
+    <motion.div
+      className="flex-1 flex flex-col min-h-0 overflow-hidden"
+      style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5, ease }}
+    >
       {/* ═══ Line Header ═══ */}
       <div
         className="flex items-center gap-4 c-toolbar flex-shrink-0"
@@ -325,7 +333,7 @@ export default function LineDetail() {
         onClose={() => setShowEditConfig(false)}
         onSaved={() => { setShowEditConfig(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success('Config saved'); }}
       />
-    </div>
+    </motion.div>
   )
 }
 
@@ -391,10 +399,12 @@ const FIELD_VALIDATORS: Record<string, (val: unknown) => string | null> = {
 function ConfigEditDialog({
   config,
   lineName,
+  adminPhonesDisplay,
   onClose,
 }: {
   config: Record<string, unknown>
   lineName: string
+  adminPhonesDisplay?: Record<string, string>
   onClose: () => void
 }) {
   const toast = useToast()
@@ -532,6 +542,7 @@ function ConfigEditDialog({
           placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
           validate={key === 'adminPhones' ? validatePhone : undefined}
           accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
+          displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
         />
       )
     }
@@ -1142,6 +1153,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
         <ConfigEditDialog
           config={rawConfig}
           lineName={line.name}
+          adminPhonesDisplay={(line as unknown as { adminPhonesDisplay?: Record<string, string> }).adminPhonesDisplay}
           onClose={() => setShowConfigEditor(false)}
         />
       )}

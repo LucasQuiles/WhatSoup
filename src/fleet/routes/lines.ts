@@ -68,6 +68,28 @@ interface MessageStats {
 
 const DAILY_CACHE_TTL = 60_000; // 60 seconds
 const messageStatsCache = new Map<string, { stats: MessageStats; cachedAt: number }>();
+const sessionCountCache = new Map<string, { count: number; cachedAt: number }>();
+
+/** Total lifetime agent sessions — 60s cache. */
+function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance): number {
+  if (inst.type !== 'agent') return 0;
+  const now = Date.now();
+  const cached = sessionCountCache.get(inst.name);
+  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.count;
+
+  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+    try {
+      const row = db.prepare('SELECT COUNT(*) as cnt FROM agent_sessions').get() as { cnt: number } | undefined;
+      return row?.cnt ?? 0;
+    } catch {
+      return 0; // table may not exist for non-agent instances
+    }
+  });
+
+  const count = result.ok ? result.data : 0;
+  sessionCountCache.set(inst.name, { count, cachedAt: now });
+  return count;
+}
 
 function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): MessageStats {
   const now = Date.now();
@@ -111,8 +133,14 @@ function getLinkedStatus(configPath: string): 'linked' | 'unlinked' {
   }
 }
 
+interface EnrichOpts {
+  messagesToday?: number;
+  messageStats?: MessageStats;
+  totalSessions?: number;
+}
+
 /** Build the enriched LineInstance object the console expects. */
-function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, messagesToday?: number, messageStats?: MessageStats): Record<string, unknown> {
+function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
   const h = poll?.health ?? null;
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
@@ -142,7 +170,7 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     phone: phoneFromJid(accountJid),
     uptime: formatUptime(uptimeSec),
     messagesTotal: messagesTotal ?? 0,
-    messagesToday: messagesToday ?? messagesTotal ?? 0,
+    messagesToday: opts.messagesToday ?? messagesTotal ?? 0,
     health: h,
     heartbeat: buildHeartbeat(poll),
     lastActive: poll?.lastPollAt ?? null,
@@ -151,8 +179,11 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     enrichmentUnprocessed: enrichmentUnprocessed ?? 0,
     activeSessions: activeSessions ?? 0,
     lastSessionStatus,
-    messageStats: messageStats ?? null,
+    messageStats: opts.messageStats ?? null,
     linkedStatus: getLinkedStatus(inst.configPath),
+    totalSessions: opts.totalSessions ?? 0,
+    models: inst.models ?? null,
+    sandboxPerChat: inst.sandboxPerChat ?? false,
   };
 }
 
@@ -173,7 +204,8 @@ export function handleGetLines(
     const poll = statuses.get(inst.name);
     const stats = getMessageStats(deps.dbReader, inst);
     const todayCount = stats.sent + stats.received;
-    return enrichInstance(inst, poll, todayCount, stats);
+    const totalSessions = getTotalSessions(deps.dbReader, inst);
+    return enrichInstance(inst, poll, { messagesToday: todayCount, messageStats: stats, totalSessions });
   });
 
   jsonResponse(res, 200, lines);
@@ -194,7 +226,8 @@ export async function handleGetLine(
 
   // Start with the enriched shape the console expects, then add detail fields
   const stats = getMessageStats(deps.dbReader, instance);
-  const enriched = enrichInstance(instance, poll, undefined, stats);
+  const totalSessions = getTotalSessions(deps.dbReader, instance);
+  const enriched = enrichInstance(instance, poll, { messageStats: stats, totalSessions });
 
   let instanceConfig: Record<string, unknown> = {};
   try {
@@ -205,6 +238,26 @@ export async function handleGetLine(
   // Compute real messagesToday for detail view (derived from stats)
   const todayCount = stats.sent + stats.received;
 
+  // Resolve LID admin phones to display-friendly phone numbers via lid_mappings DB.
+  const adminPhones = instanceConfig.adminPhones as string[] | undefined;
+  let adminPhonesDisplay: Record<string, string> | undefined;
+  if (adminPhones && adminPhones.some(p => String(p).length > 11)) {
+    const lidResult = deps.dbReader.query(instance.name, instance.dbPath, (db) => {
+      const rows = db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as { lid: string; phone_jid: string }[];
+      const map: Record<string, string> = {};
+      for (const row of rows) {
+        map[row.lid] = row.phone_jid.split('@')[0];
+      }
+      return map;
+    });
+    if (lidResult.ok) {
+      adminPhonesDisplay = {};
+      for (const phone of adminPhones) {
+        adminPhonesDisplay[phone] = lidResult.data[phone] ?? phone;
+      }
+    }
+  }
+
   jsonResponse(res, 200, {
     ...enriched,
     messagesToday: todayCount,
@@ -214,5 +267,6 @@ export async function handleGetLine(
     guiPort: instance.guiPort,
     dbStats: dbStats.ok ? dbStats.data : null,
     config: instanceConfig,
+    ...(adminPhonesDisplay ? { adminPhonesDisplay } : {}),
   });
 }

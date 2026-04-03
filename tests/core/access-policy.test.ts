@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Database } from '../../src/core/database.ts';
-import { shouldRespond, resolveLidPhone } from '../../src/core/access-policy.ts';
+import { shouldRespond } from '../../src/core/access-policy.ts';
+import { resolveLid, hydrateLidMappings, upsertLidMapping } from '../../src/core/lid-resolver.ts';
 import { extractPhone } from '../../src/core/access-list.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
 
@@ -602,61 +603,55 @@ describe('media implicit mention in known groups', () => {
 // resolveLidPhone — LID→phone reverse mapping
 // ---------------------------------------------------------------------------
 
-describe('resolveLidPhone', () => {
+describe('LID resolver', () => {
   const ADMIN_PHONE = '18455880337';
   const ADMIN_LID_NUM = '31478083756155';
   const NON_ADMIN_LID_NUM = '99999999999999';
 
   let tmpAuthDir: string;
+  let lidDb: Database;
 
   beforeAll(() => {
     tmpAuthDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-lid-test-'));
-    // Write a valid reverse mapping for the admin LID
+    // Write valid reverse mapping files (Baileys format)
     fs.writeFileSync(
       path.join(tmpAuthDir, `lid-mapping-${ADMIN_LID_NUM}_reverse.json`),
       JSON.stringify(ADMIN_PHONE),
     );
+    lidDb = new Database(':memory:');
+    lidDb.open();
   });
 
   afterAll(() => {
     fs.rmSync(tmpAuthDir, { recursive: true, force: true });
+    lidDb.close();
   });
 
-  it('returns the phone number for a known LID', () => {
-    const result = resolveLidPhone(ADMIN_LID_NUM, tmpAuthDir);
+  it('hydrates lid_mappings from Baileys filesystem files', () => {
+    const count = hydrateLidMappings(lidDb, tmpAuthDir);
+    expect(count).toBe(1);
+  });
+
+  it('resolves a known LID to a phone via DB', () => {
+    const result = resolveLid(lidDb, ADMIN_LID_NUM);
     expect(result).toBe(ADMIN_PHONE);
   });
 
-  it('returns null when no reverse mapping file exists', () => {
-    const result = resolveLidPhone(NON_ADMIN_LID_NUM, tmpAuthDir);
+  it('returns null for an unknown LID', () => {
+    const result = resolveLid(lidDb, NON_ADMIN_LID_NUM);
     expect(result).toBeNull();
   });
 
-  it('returns null for a malformed (non-string) mapping file', () => {
-    const malformedLid = '11111111111111';
-    fs.writeFileSync(
-      path.join(tmpAuthDir, `lid-mapping-${malformedLid}_reverse.json`),
-      JSON.stringify({ not: 'a phone' }),
-    );
-    const result = resolveLidPhone(malformedLid, tmpAuthDir);
-    expect(result).toBeNull();
+  it('upsertLidMapping updates existing entries', () => {
+    const newPhone = '19998887777';
+    upsertLidMapping(lidDb, ADMIN_LID_NUM, `${newPhone}@s.whatsapp.net`);
+    expect(resolveLid(lidDb, ADMIN_LID_NUM)).toBe(newPhone);
   });
 
-  it('returns null when mapping file contains an empty string', () => {
-    const emptyLid = '22222222222222';
-    fs.writeFileSync(
-      path.join(tmpAuthDir, `lid-mapping-${emptyLid}_reverse.json`),
-      JSON.stringify(''),
-    );
-    const result = resolveLidPhone(emptyLid, tmpAuthDir);
-    expect(result).toBeNull();
-  });
-
-  it('caches results so subsequent calls for the same LID skip the filesystem', () => {
-    // ADMIN_LID_NUM was already resolved above; delete the file and confirm cache hit
-    const reversePath = path.join(tmpAuthDir, `lid-mapping-${ADMIN_LID_NUM}_reverse.json`);
-    // File may or may not still exist due to cache — call again and confirm consistent result
-    const result = resolveLidPhone(ADMIN_LID_NUM, tmpAuthDir);
-    expect(result).toBe(ADMIN_PHONE);
+  it('hydrate uses INSERT OR IGNORE — does not overwrite upserted values', () => {
+    // Re-hydrate from the same auth dir (file still says ADMIN_PHONE)
+    hydrateLidMappings(lidDb, tmpAuthDir);
+    // The upserted value (19998887777) should persist — hydrate doesn't overwrite
+    expect(resolveLid(lidDb, ADMIN_LID_NUM)).toBe('19998887777');
   });
 });

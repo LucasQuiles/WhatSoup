@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants, existsSync } from 'node:fs';
+import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, readdirSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
@@ -31,6 +31,7 @@ import {
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
 import { lookupAccess, updateAccess, insertAllowed, extractPhone } from './core/access-list.ts';
+import { hydrateLidMappings, upsertLidMapping } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
@@ -127,6 +128,12 @@ if (config.accessMode !== 'self_only') {
   for (const phone of config.adminPhones) {
     insertAllowed(db, 'phone', phone);
   }
+}
+
+// 2a-2. Hydrate LID↔phone mappings from Baileys filesystem into DB.
+{
+  const hydrated = hydrateLidMappings(db, config.authDir);
+  if (hydrated > 0) log.info({ count: hydrated }, 'hydrated LID mappings from auth dir');
 }
 
 // 2b. Pre-connect recovery — runs synchronously before any connection attempt
@@ -341,11 +348,7 @@ connectionManager.on('historyMessages', (messages) => {
 connectionManager.on('jidAliasChanged', (conversationKey, newJid) => {
   try {
     runtime.handleJidAliasChanged?.(conversationKey, newJid);
-    // Persist mapping so it survives restarts
-    db.raw.prepare(
-      `INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))
-       ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, updated_at = datetime('now')`,
-    ).run(conversationKey, newJid);
+    upsertLidMapping(db, conversationKey, newJid);
     log.info({ conversationKey, newJid }, 'jidAliasChanged: updated delivery JID');
   } catch (err) {
     log.error({ err, conversationKey, newJid }, 'jidAliasChanged: failed to update delivery JID');

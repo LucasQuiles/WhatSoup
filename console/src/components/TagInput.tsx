@@ -8,9 +8,11 @@ interface TagInputProps {
   placeholder?: string
   validate?: (value: string) => boolean
   accentColor?: string  // CSS var for pill accent, e.g. 'var(--wizard-accent)'
+  /** Optional display labels for values. Map from value → display string. */
+  displayLabels?: Record<string, string>
 }
 
-const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, accentColor }) => {
+const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, accentColor, displayLabels }) => {
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -70,7 +72,7 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
                 gap: 'var(--sp-1)',
               }}
             >
-              {tag}
+              {displayLabels?.[tag] ?? tag}
               <button
                 type="button"
                 onClick={() => removeTag(i)}
