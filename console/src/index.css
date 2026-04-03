@@ -44,7 +44,7 @@
 
   /* ═══ Border radius ═══ */
   --radius-xs: 2px;   /* scrollbar thumbs, micro-elements */
-  --radius-sm: 4px;   /* badges, pills, inputs, pipeline nodes */
+  --radius-sm: 4px;   /* badges, pills, inputs, tags */
   --radius-md: 6px;   /* buttons, alert banners */
   --radius-lg: 10px;  /* cards, panels, table containers */
 

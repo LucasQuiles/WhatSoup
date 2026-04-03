@@ -976,8 +976,6 @@ export function computeKpis(lines: LineInstance[]): {
   needAttention: number;
   unread: number;
   agentSessions: number;
-  messagesToday: number;
-  avgResponseMs: number;
   totalSent: number;
   totalReceived: number;
   totalMedia: number;
@@ -986,7 +984,6 @@ export function computeKpis(lines: LineInstance[]): {
   let needAttention = 0;
   let unread = 0;
   let agentSessions = 0;
-  let messagesToday = 0;
   let totalSent = 0;
   let totalReceived = 0;
   let totalMedia = 0;
@@ -1001,8 +998,6 @@ export function computeKpis(lines: LineInstance[]): {
     if (rt?.passive) unread += rt.passive.unreadCount;
     if (rt?.agent) agentSessions += rt.agent.activeSessions;
 
-    messagesToday += line.messagesToday ?? 0;
-
     if (line.messageStats) {
       totalSent += line.messageStats.sent;
       totalReceived += line.messageStats.received;
@@ -1010,8 +1005,5 @@ export function computeKpis(lines: LineInstance[]): {
     }
   }
 
-  // Mock avg response — Phase 2 will compute from real latency data
-  const avgResponseMs = 247;
-
-  return { connected, needAttention, unread, agentSessions, messagesToday, avgResponseMs, totalSent, totalReceived, totalMedia };
+  return { connected, needAttention, unread, agentSessions, totalSent, totalReceived, totalMedia };
 }

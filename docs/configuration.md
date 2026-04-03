@@ -315,6 +315,46 @@ bot persona.
 
 ---
 
+## Database Migration History
+
+Migrations are applied automatically at startup by `src/core/database.ts`. Each migration is recorded in the `schema_migrations` table and is never re-applied.
+
+| Version | Description |
+|---------|-------------|
+| 1 | Full schema DDL (messages, chats, contacts, access_list, rate_limits, etc.) |
+| 2 | Durability tables (durability_queue, recovery_log) |
+| 3 | Chat sync tables (Wave 2) |
+| 4 | Labels tables (Wave 6) |
+| 5 | `raw_message` column on messages for `forward_message` support |
+| 6 | Blocklist and LID mapping persistence |
+| 7 | `groups` table for group metadata persistence |
+| 9 | `decryption_failures` table |
+| 10 | Self-healing control plane tables |
+| 11 | Token usage tracking: `input_tokens` + `output_tokens` on `messages`; `total_input_tokens` + `total_output_tokens` on `agent_sessions`. Uses `ALTER TABLE ... ADD COLUMN` with existence checks (idempotent). Chat runtime persists tokens per LLM response; agent runtime captures them from Claude Code stream result events. |
+
+---
+
+## Fleet API — Instance Fields from Config
+
+The `GET /api/lines` and `GET /api/lines/:name` endpoints expose two config fields not present in the `/health` response:
+
+| Field | Source | Description |
+|-------|--------|-------------|
+| `models` | `instance.json` → `models` object | Model overrides (conversation/extraction/validation/fallback), or `null` if not set in config. |
+| `sandboxPerChat` | `instance.json` → `agentOptions.sandboxPerChat` | `true` when per-chat workspace provisioning is active; `false` otherwise. |
+
+These are read-only in the API and used by the console (`LineTags` component) to display sandbox and fallback badges on fleet rows.
+
+Additional fleet-only fields computed by the control-plane with a 60s cache:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `chatCounts` | `{ chats: number, groups: number }` | Distinct DM and group conversation counts from the messages table. |
+| `tokenUsage` | `{ input: number, output: number }` | Lifetime token totals summed from `messages.input_tokens`/`output_tokens` (chat runtime) and `agent_sessions.total_input_tokens`/`total_output_tokens` (agent runtime). Requires Migration 11. |
+| `totalSessions` | `number` | Lifetime agent session count from `agent_sessions` table. Agent instances only; `0` for chat/passive. |
+
+---
+
 ## API Key Setup (GNOME Keyring)
 
 The `whatsoup` wrapper script loads API keys from GNOME Keyring at startup. Store them once:
