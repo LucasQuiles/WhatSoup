@@ -350,15 +350,12 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
-  flex-wrap: wrap;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
 }
 
-.feed-filters__sep {
-  width: var(--bw);
-  height: var(--sep-h);
-  background: var(--b2);
-  margin: 0 var(--sp-2);
-}
+.feed-filters__row::-webkit-scrollbar { display: none; }
 
 /* ── Stream ── */
 .feed-stream {

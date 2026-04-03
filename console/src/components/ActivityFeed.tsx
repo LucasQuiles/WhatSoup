@@ -1,27 +1,40 @@
 import { type FC, useState, useMemo } from "react";
+import { Pause, Play, Circle, Square } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { Pause, Play, AlertTriangle, Circle, Square } from "lucide-react";
+import { useToast } from "../hooks/toast-context";
+import { api } from "../lib/api";
 import FilterPill from "./FilterPill";
 import FeedCard from "./FeedCard";
 import ConfirmDialog from "./ConfirmDialog";
-import type { Mode, FeedEvent } from "../types";
-import { api } from "../lib/api";
-import { useToast } from "../hooks/toast-context";
+import type { FeedEvent } from "../types";
 
 interface ActivityFeedProps {
   events: FeedEvent[];
 }
 
-const modeFilters: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
+type FeedFilter = "all" | "msgs" | "conn" | "errors" | "health" | "sessions";
 
-const modeTextColor: Record<string, string> = {
-  all: "text-t2",
-  passive: "text-m-pas",
-  chat: "text-m-cht",
-  agent: "text-m-agt",
-};
+const filterConfig: { key: FeedFilter; label: string }[] = [
+  { key: "all", label: "all" },
+  { key: "msgs", label: "msgs" },
+  { key: "conn", label: "conn" },
+  { key: "errors", label: "errors" },
+  { key: "health", label: "health" },
+  { key: "sessions", label: "sessions" },
+];
 
-type TypeFilter = "all" | "messages" | "connections" | "errors" | "health";
+function matchesFilter(event: FeedEvent, filter: FeedFilter): boolean {
+  if (filter === "all") return true;
+  const t = event.detail?.type;
+  switch (filter) {
+    case "msgs": return t === "message";
+    case "conn": return t === "connection";
+    case "errors": return t === "tool_error" || !!event.isError;
+    case "health": return t === "health";
+    case "sessions": return t === "session";
+    default: return true;
+  }
+}
 
 /** Derive a stable key for a feed event (no array index). */
 function eventKey(event: FeedEvent): string {
@@ -34,39 +47,25 @@ function eventKey(event: FeedEvent): string {
 }
 
 const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
-  const [paused, setPaused] = useState(false);
-  const [snapshot, setSnapshot] = useState<FeedEvent[] | null>(null);
-  const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
-  const [errorsOnly, setErrorsOnly] = useState(false);
-  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
-
   const navigate = useNavigate();
   const toast = useToast();
+
+  const [paused, setPaused] = useState(false);
+  const [snapshot, setSnapshot] = useState<FeedEvent[] | null>(null);
+  const [filter, setFilter] = useState<FeedFilter>("all");
   const [stopTarget, setStopTarget] = useState<string | null>(null);
 
   const displayEvents = snapshot ?? events;
 
-  const filtered = useMemo(() => {
-    let result = displayEvents;
-    if (modeFilter !== "all") result = result.filter((e) => e.mode === modeFilter);
-    if (errorsOnly) result = result.filter((e) => e.isError);
-    if (typeFilter !== "all") {
-      result = result.filter((e) => {
-        const t = e.detail?.type;
-        if (!t) return false; // events without a detail type don't match any typed filter
-        switch (typeFilter) {
-          case "messages": return t === "message";
-          case "connections": return t === "connection";
-          case "errors": return t === "tool_error";
-          case "health": return t === "health";
-          default: return true;
-        }
-      });
-    }
-    return result;
-  }, [displayEvents, modeFilter, errorsOnly, typeFilter]);
+  const filtered = useMemo(
+    () => displayEvents.filter((e) => matchesFilter(e, filter)),
+    [displayEvents, filter],
+  );
 
-  const errorCount = useMemo(() => displayEvents.filter((e) => e.isError).length, [displayEvents]);
+  const errorCount = useMemo(
+    () => displayEvents.filter((e) => e.isError).length,
+    [displayEvents],
+  );
 
   // Only the newest unresolved connection/health error per instance gets restart/stop
   const actionableKeys = useMemo(() => {
@@ -76,10 +75,8 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
       const inst = event.instance;
       const d = event.detail;
       if (!inst || seen.has(inst)) continue;
-      // Skip if this instance already recovered (connected/online is newer than any error)
       if (d?.type === "connection" && d.state === "connected") { seen.add(inst); continue; }
       if (d?.type === "health" && d.status === "online") { seen.add(inst); continue; }
-      // Only connection errors and health unreachable/degraded are actionable
       const isConnErr = d?.type === "connection" && event.isError;
       const isHealthErr = d?.type === "health" && (d.status === "unreachable" || d.status === "degraded");
       if (isConnErr || isHealthErr) {
@@ -90,7 +87,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     return keys;
   }, [filtered]);
 
-  // Track in-flight actions per instance to prevent double-clicks
+  // Per-instance pending lock
   const [pendingInstances, setPendingInstances] = useState<Set<string>>(new Set());
 
   const handleRestart = (instance: string) => {
@@ -119,9 +116,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     setStopTarget(null);
   };
 
-  const handleNavigate = (path: string) => {
-    navigate(path);
-  };
+  const handleNavigate = (path: string) => { navigate(path); };
 
   const handleCopyResult = (success: boolean) => {
     if (success) toast.success("Copied to clipboard");
@@ -145,13 +140,8 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
         <button
           type="button"
           onClick={() => {
-            if (paused) {
-              setSnapshot(null);
-              setPaused(false);
-            } else {
-              setSnapshot(events);
-              setPaused(true);
-            }
+            if (paused) { setSnapshot(null); setPaused(false); }
+            else { setSnapshot(events); setPaused(true); }
           }}
           className="feed-toolbar__pause"
         >
@@ -160,57 +150,24 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
         </button>
       </div>
 
-      {/* ── Filter bar ── */}
+      {/* ── Filter bar — single compact row ── */}
       <div className="feed-filters">
         <div className="feed-filters__row">
-          {/* Mode filters */}
-          {modeFilters.map((m) => (
+          {filterConfig.map((f) => (
             <FilterPill
-              key={m}
-              label={m === "all" ? "All" : m}
-              isActive={modeFilter === m}
-              activeColor={modeTextColor[m]}
+              key={f.key}
+              label={f.key === "errors" && errorCount > 0 ? `${f.label} (${errorCount})` : f.label}
+              isActive={filter === f.key}
+              activeColor={f.key === "errors" ? "text-s-crit" : "text-t2"}
               activeBorder={
-                modeFilter === m
-                  ? `var(--bw) solid ${m === "passive" ? "var(--color-m-pas)" : m === "chat" ? "var(--color-m-cht)" : m === "agent" ? "var(--color-m-agt)" : "var(--b4)"}`
+                filter === f.key
+                  ? `var(--bw) solid ${f.key === "errors" ? "var(--color-s-crit)" : "var(--b3)"}`
                   : undefined
               }
-              onClick={() => setModeFilter(m)}
-            />
-          ))}
-
-          <span className="feed-filters__sep" />
-
-          {/* Type filters */}
-          {(["all", "messages", "connections", "errors", "health"] as TypeFilter[]).map((t) => (
-            <FilterPill
-              key={`type-${t}`}
-              label={t === "all" ? "All types" : t}
-              isActive={typeFilter === t}
-              activeColor="text-t2"
-              activeBorder={typeFilter === t ? "var(--bw) solid var(--b3)" : undefined}
-              onClick={() => setTypeFilter(t)}
+              onClick={() => setFilter(f.key)}
             />
           ))}
         </div>
-
-        {/* Error counter */}
-        {errorCount > 0 && (
-          <FilterPill
-            label=""
-            isActive={errorsOnly}
-            activeColor="text-s-crit"
-            activeBorder={errorsOnly ? "var(--bw) solid var(--color-s-crit)" : undefined}
-            onClick={() => setErrorsOnly((p) => !p)}
-            style={{ gap: "var(--sp-1)" }}
-            suffix={
-              <>
-                <AlertTriangle size={10} strokeWidth={2} />
-                <span>{errorCount}</span>
-              </>
-            }
-          />
-        )}
       </div>
 
       {/* ── Feed stream ── */}
@@ -232,7 +189,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
         {filtered.length === 0 && (
           <div className="feed-empty">
-            {errorsOnly ? "No errors" : "No activity"}
+            {filter === "errors" ? "No errors" : "No activity"}
           </div>
         )}
       </div>
