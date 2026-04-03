@@ -415,7 +415,6 @@ body::before {
 /* ── Metadata row (hover/focus only) ── */
 .fc-meta {
   margin-top: var(--sp-1);
-  padding-left: 92px;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   color: var(--color-t5);
@@ -484,7 +483,6 @@ body::before {
 /* ── Body text — multi-line content below the header ── */
 .fc-body-text {
   margin-top: var(--sp-1);
-  padding-left: 92px; /* time(68) + gap(8) + icon(16) */
   font-family: var(--font-mono);
   font-size: var(--font-size-data);
   color: var(--color-t3);
@@ -507,7 +505,6 @@ body::before {
 /* ── Quick actions row ── */
 .fc-actions {
   margin-top: var(--sp-1);
-  padding-left: 92px;
 }
 
 .fc-action {
