@@ -49,6 +49,11 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   };
 }
 
+const noopDbReader = {
+  getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+  getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+} as any;
+
 function makeDeps(overrides: Partial<FeedDeps> = {}): FeedDeps {
   return {
     discovery: {
@@ -57,6 +62,7 @@ function makeDeps(overrides: Partial<FeedDeps> = {}): FeedDeps {
     healthPoller: {
       getStatus: vi.fn(() => undefined),
     } as any,
+    dbReader: noopDbReader,
     ...overrides,
   };
 }
@@ -81,8 +87,7 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection', statusCode: 408, reason: '_streamError' });
     }
   });
@@ -93,8 +98,7 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection', statusCode: 503 });
     }
   });
@@ -102,8 +106,7 @@ describe('parsePinoLine', () => {
   it('identifies connection error — WhatsApp connection closed', () => {
     const result = parsePinoLine(makeLine({ msg: 'WhatsApp connection closed' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection' });
     }
   });
@@ -111,8 +114,7 @@ describe('parsePinoLine', () => {
   it('parses "Connecting to WhatsApp" as connection state', () => {
     const result = parsePinoLine(makeLine({ msg: 'Connecting to WhatsApp', component: 'connection' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection', state: 'connecting' });
     }
   });
@@ -120,8 +122,7 @@ describe('parsePinoLine', () => {
   it('parses "WhatsApp connected" as connection state', () => {
     const result = parsePinoLine(makeLine({ msg: 'WhatsApp connected', component: 'connection' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection', state: 'connected' });
     }
   });
@@ -129,8 +130,7 @@ describe('parsePinoLine', () => {
   it('parses "client disconnected" as connection state', () => {
     const result = parsePinoLine(makeLine({ msg: 'client disconnected', component: 'WhatSoupSocketServer' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection', state: 'disconnected' });
     }
   });
@@ -138,8 +138,7 @@ describe('parsePinoLine', () => {
   it('identifies reconnect scheduling', () => {
     const result = parsePinoLine(makeLine({ msg: 'Scheduling reconnect in 5s' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'connection', reconnecting: true });
     }
   });
@@ -150,8 +149,7 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'tool_error', toolName: 'send_message', error: 'timeout' });
     }
   });
@@ -162,8 +160,7 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({
         type: 'session',
         action: 'session spawn requested',
@@ -176,8 +173,7 @@ describe('parsePinoLine', () => {
   it('identifies session kill', () => {
     const result = parsePinoLine(makeLine({ msg: 'session kill complete' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'session' });
     }
   });
@@ -185,8 +181,7 @@ describe('parsePinoLine', () => {
   it('identifies agent idle', () => {
     const result = parsePinoLine(makeLine({ msg: 'agent idle timeout reached' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'session' });
     }
   });
@@ -197,18 +192,60 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'message', direction: 'outbound' });
     }
   });
 
-  it('identifies inbound message', () => {
-    const result = parsePinoLine(makeLine({ msg: 'inbound message from user' }), CTX);
+  it('parses outbound message with messageId', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'Sending message', chatJid: '15551234567@s.whatsapp.net', messageId: 'ABCD1234' }),
+      CTX,
+    );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
-      expect(result.detail).toMatchObject({ type: 'message', direction: 'inbound' });
+    if (result) {
+      expect(result.detail).toMatchObject({
+        type: 'message',
+        direction: 'outbound',
+        chatJid: '15551234567@s.whatsapp.net',
+        messageId: 'ABCD1234',
+      });
+    }
+  });
+
+  it('parses inbound message received with messageId, senderName, contentType', () => {
+    const result = parsePinoLine(
+      makeLine({
+        msg: 'inbound message received',
+        chatJid: '15550100001@s.whatsapp.net',
+        messageId: 'XYZ9876',
+        senderName: 'Alice',
+        contentType: 'text',
+      }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({
+        type: 'message',
+        direction: 'inbound',
+        chatJid: '15550100001@s.whatsapp.net',
+        messageId: 'XYZ9876',
+        senderName: 'Alice',
+        contentType: 'text',
+      });
+    }
+  });
+
+  it('does NOT match durability recovery log as inbound message', () => {
+    // Durability logs contain "inbound" but are not the exact phrase "inbound message received"
+    const result = parsePinoLine(
+      makeLine({ msg: 'inbound message recovery: replaying 3 events' }),
+      CTX,
+    );
+    // Should NOT produce a message event — falls through to generic or null
+    if (result) {
+      expect(result.detail?.type).not.toBe('message');
     }
   });
 
@@ -218,8 +255,7 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'import', table: 'messages', skipped: false });
     }
   });
@@ -227,22 +263,21 @@ describe('parsePinoLine', () => {
   it('identifies legacy skipping import', () => {
     const result = parsePinoLine(makeLine({ msg: 'legacy skipping table' }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'import', skipped: true });
     }
   });
 
-  it('returns noise for "Credentials saved"', () => {
-    expect(parsePinoLine(makeLine({ msg: 'Credentials saved' }), CTX)).toBe('noise');
+  it('returns null for "Credentials saved" (noise suppressed)', () => {
+    expect(parsePinoLine(makeLine({ msg: 'Credentials saved' }), CTX)).toBeNull();
   });
 
-  it('returns noise for "Health check OK"', () => {
-    expect(parsePinoLine(makeLine({ msg: 'Health check OK' }), CTX)).toBe('noise');
+  it('returns null for "Health check OK" (noise suppressed)', () => {
+    expect(parsePinoLine(makeLine({ msg: 'Health check OK' }), CTX)).toBeNull();
   });
 
-  it('returns noise for "health endpoint responded"', () => {
-    expect(parsePinoLine(makeLine({ msg: 'health endpoint responded' }), CTX)).toBe('noise');
+  it('returns null for "health endpoint responded" (noise suppressed)', () => {
+    expect(parsePinoLine(makeLine({ msg: 'health endpoint responded' }), CTX)).toBeNull();
   });
 
   it('returns null for non-business info line', () => {
@@ -253,8 +288,7 @@ describe('parsePinoLine', () => {
   it('returns generic for warn-level non-pattern message', () => {
     const result = parsePinoLine(makeLine({ msg: 'Unexpected internal state', level: 40 }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'generic' });
       expect(result.isError).toBe(true);
       expect(result.level).toBe('warn');
@@ -264,8 +298,7 @@ describe('parsePinoLine', () => {
   it('returns generic for error-level non-pattern message', () => {
     const result = parsePinoLine(makeLine({ msg: 'Fatal internal error', level: 50 }), CTX);
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.detail).toMatchObject({ type: 'generic' });
       expect(result.level).toBe('error');
     }
@@ -277,8 +310,7 @@ describe('parsePinoLine', () => {
       { instanceName: 'my-agent', instanceType: 'agent' },
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.instance).toBe('my-agent');
       expect(result.mode).toBe('agent');
       expect(result.text).toMatch(/^my-agent:/);
@@ -291,8 +323,7 @@ describe('parsePinoLine', () => {
       CTX,
     );
     expect(result).not.toBeNull();
-    expect(result).not.toBe('noise');
-    if (result && result !== 'noise') {
+    if (result) {
       expect(result.text).toContain('[agent-runner]');
       expect(result.component).toBe('agent-runner');
     }
@@ -394,10 +425,10 @@ describe('health transition events via handleGetFeed', () => {
 });
 
 // ---------------------------------------------------------------------------
-// noise summary aggregation via handleGetFeed
+// noise suppression via handleGetFeed
 // ---------------------------------------------------------------------------
 
-describe('noise summary aggregation via handleGetFeed', () => {
+describe('noise suppression via handleGetFeed', () => {
   let tmpDir: string;
   let logDir: string;
   let logFile: string;
@@ -413,11 +444,14 @@ describe('noise summary aggregation via handleGetFeed', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('collapses repeated "Credentials saved" into a summary', () => {
+  it('fully suppresses Credentials saved and Health check OK (no cards at all)', async () => {
     const lines = [
       makeLine({ msg: 'Credentials saved' }),
       makeLine({ msg: 'Credentials saved' }),
       makeLine({ msg: 'Credentials saved' }),
+      makeLine({ msg: 'Health check OK' }),
+      makeLine({ msg: 'Health check OK' }),
+      makeLine({ msg: 'session start', sessionId: 'abc' }),
     ].join('\n') + '\n';
     fs.writeFileSync(logFile, lines);
 
@@ -433,46 +467,28 @@ describe('noise summary aggregation via handleGetFeed', () => {
     handleGetFeed(mockReq(), res, deps);
 
     const body = res._body as any[];
-    // No raw "Credentials saved" events
-    const rawCredEvents = body.filter((e: any) => e.text?.includes('Credentials saved'));
-    expect(rawCredEvents).toHaveLength(0);
 
-    // A summary event should appear
-    const summaryEvent = body.find((e: any) => e.text?.includes('credentials refreshed'));
-    expect(summaryEvent).toBeDefined();
-    expect(summaryEvent.instance).toBe('delta');
+    // No "Credentials saved" or "Health check OK" cards at all — no raw, no summary
+    const credEvents = body.filter((e: any) =>
+      e.text?.toLowerCase().includes('credentials') || e.text?.toLowerCase().includes('credential'),
+    );
+    expect(credEvents).toHaveLength(0);
+
+    const healthCheckEvents = body.filter((e: any) =>
+      e.text?.toLowerCase().includes('health check'),
+    );
+    expect(healthCheckEvents).toHaveLength(0);
+
+    // The session event should still appear
+    const sessionEvent = body.find((e: any) => e.detail?.type === 'session');
+    expect(sessionEvent).toBeDefined();
+    expect(sessionEvent.instance).toBe('delta');
   });
 
-  it('collapses "Health check OK" into a summary with count', () => {
-    const lines = [
-      makeLine({ msg: 'Health check OK' }),
-      makeLine({ msg: 'Health check OK' }),
-    ].join('\n') + '\n';
-    fs.writeFileSync(logFile, lines);
-
-    const inst = fakeInstance({ name: 'epsilon', type: 'chat', logDir });
-    const instances = new Map([['epsilon', inst]]);
-
-    const deps = makeDeps({
-      discovery: { getInstances: vi.fn(() => instances) } as any,
-      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
-    });
-
-    const res = mockRes();
-    handleGetFeed(mockReq(), res, deps);
-
-    const body = res._body as any[];
-    const rawHealthEvents = body.filter((e: any) => e.text === 'Health check OK');
-    expect(rawHealthEvents).toHaveLength(0);
-
-    const summaryEvent = body.find((e: any) => e.text?.includes('health check ok'));
-    expect(summaryEvent).toBeDefined();
-  });
-
-  it('emits business events from log without collapsing them', () => {
+  it('emits business events from log without suppressing them', () => {
     const lines = [
       makeLine({ msg: 'session start', sessionId: 'abc' }),
-      makeLine({ msg: 'inbound message received', level: 30 }),
+      makeLine({ msg: 'inbound message received', level: 30, chatJid: '15550100001@s.whatsapp.net' }),
     ].join('\n') + '\n';
     fs.writeFileSync(logFile, lines);
 
@@ -506,5 +522,29 @@ describe('noise summary aggregation via handleGetFeed', () => {
     const res = mockRes();
     expect(() => handleGetFeed(mockReq(), res, deps)).not.toThrow();
     expect(res._status).toBe(200);
+  });
+
+  it('preserves two distinct messages in the same minute (dedupe by messageId)', () => {
+    const lines = [
+      makeLine({ msg: 'Sending message', chatJid: 'chat@s.whatsapp.net', messageId: 'msg-001' }),
+      makeLine({ msg: 'Sending message', chatJid: 'chat@s.whatsapp.net', messageId: 'msg-002' }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'theta', type: 'passive', logDir });
+    const instances = new Map([['theta', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq(), res, deps);
+
+    const body = res._body as any[];
+    const messageEvents = body.filter((e: any) => e.detail?.type === 'message' && e.detail?.direction === 'outbound');
+    // Both distinct messageIds must survive dedupe
+    expect(messageEvents).toHaveLength(2);
   });
 });

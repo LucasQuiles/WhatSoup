@@ -4,10 +4,13 @@ import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller } from '../health-poller.ts';
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { toIsoFromUnix } from '../time-utils.ts';
+import type { FleetDbReader } from '../db-reader.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 
 export interface FeedDeps {
   discovery: FleetDiscovery;
   healthPoller: HealthPoller;
+  dbReader: FleetDbReader;
 }
 
 type FeedDetail =
@@ -17,7 +20,7 @@ type FeedDetail =
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
   | { type: 'health'; status: string; previousStatus?: string; error?: string }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
-  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string }
+  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string }
   | { type: 'generic' };
 
 interface FeedEvent {
@@ -53,7 +56,7 @@ interface ParseContext {
   instanceType: 'passive' | 'chat' | 'agent';
 }
 
-export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | 'noise' | null {
+export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null {
   let obj: Record<string, unknown>;
   try { obj = JSON.parse(line); } catch { return null; }
 
@@ -161,18 +164,22 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | 'noi
         type: 'message',
         direction: 'outbound',
         chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+        messageId: typeof obj.messageId === 'string' ? obj.messageId : undefined,
       },
     };
   }
 
-  // 6. Inbound message
-  if (/inbound/i.test(msg)) {
+  // 6. Inbound message — exact match only to avoid matching durability recovery logs
+  if (/^inbound message received$/i.test(msg)) {
     return {
       ...base,
       detail: {
         type: 'message',
         direction: 'inbound',
         chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+        messageId: typeof obj.messageId === 'string' ? obj.messageId : undefined,
+        senderName: typeof obj.senderName === 'string' ? obj.senderName : undefined,
+        contentType: typeof obj.contentType === 'string' ? obj.contentType : undefined,
       },
     };
   }
@@ -189,8 +196,8 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | 'noi
     };
   }
 
-  // 8. Noise
-  if (NOISE_RE.test(msg)) return 'noise';
+  // 8. Noise — suppress entirely
+  if (NOISE_RE.test(msg)) return null;
 
   // 9. Non-business info → drop
   if (!isWarnOrAbove && !BUSINESS_RE.test(msg)) return null;
@@ -284,8 +291,8 @@ function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
   for (const e of events) {
     const d = e.detail;
     if (d?.type === 'connection' && e.instance) {
-      const sec = e.time.slice(0, 19); // ISO second precision
-      const key = `${e.instance}|${sec}`;
+      const bucket = Math.floor(Date.parse(e.time) / 10000); // 10-second window
+      const key = `${e.instance}|${bucket}`;
       const group = connGroups.get(key);
       if (group) group.push(e);
       else connGroups.set(key, [e]);
@@ -380,8 +387,10 @@ function collapseOutboundMessages(events: FeedEvent[]): FeedEvent[] {
   for (const e of events) {
     const d = e.detail;
     if (d?.type === 'message' && d.direction === 'outbound' && e.instance) {
-      const minute = e.time.slice(0, 16); // ISO minute precision
-      const key = `${e.instance}|${d.chatJid ?? '?'}|${minute}`;
+      const msgId = (d as { messageId?: string }).messageId;
+      const key = msgId
+        ? `${e.instance}|id:${msgId}`
+        : `${e.instance}|${d.chatJid ?? '?'}|${Math.floor(Date.parse(e.time) / 10000)}`;
       const bucket = buckets.get(key);
       if (bucket) {
         bucket.count++;
@@ -433,29 +442,10 @@ export function handleGetFeed(
     const logFile = findLatestLogFile(inst.logDir);
     if (!logFile) continue;
     const lines = readTailLines(logFile, 60);
-    const noiseCounts: Record<string, number> = {};
-
     for (const line of lines) {
-      let obj: Record<string, unknown>;
-      try { obj = JSON.parse(line); } catch { continue; }
-      const msg = typeof obj.msg === 'string' ? obj.msg : '';
-
       const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type });
-      if (result === 'noise') {
-        const key = msg.replace(/\s+/g, ' ').trim().toLowerCase();
-        noiseCounts[key] = (noiseCounts[key] ?? 0) + 1;
-      } else if (result) {
+      if (result) {
         events.push(result);
-      }
-    }
-
-    const now = new Date().toISOString();
-    for (const [key, count] of Object.entries(noiseCounts)) {
-      if (count > 0) {
-        let summary: string;
-        if (key.includes('credential')) summary = 'credentials refreshed';
-        else summary = `${key} (×${count})`;
-        events.push({ time: now, mode: inst.type, text: `${inst.name}: ${summary}`, instance: inst.name, detail: { type: 'generic' } });
       }
     }
   }
@@ -469,10 +459,14 @@ export function handleGetFeed(
   // 4. Collapse rapid outbound sends by instance + chatJid
   const collapsed = collapseOutboundMessages(coalesced);
 
-  // 5. Deduplicate identical events (same text within 1 minute)
+  // 5. Deduplicate identical events (messageId-aware)
   const seen = new Set<string>();
   const deduped = collapsed.filter(e => {
-    const key = `${e.text}|${e.time.slice(0, 16)}`; // dedupe within same minute
+    const d = e.detail;
+    const msgId = d?.type === 'message' ? (d as { messageId?: string }).messageId : undefined;
+    const key = msgId
+      ? `msg:${e.instance}|${msgId}`
+      : `${e.text}|${e.time.slice(0, 16)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

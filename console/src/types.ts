@@ -101,7 +101,7 @@ export type FeedDetail =
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
   | { type: 'health'; status: string; previousStatus?: string; error?: string }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
-  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string }
+  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string }
   | { type: 'generic' };
 
 export interface FeedEvent {
