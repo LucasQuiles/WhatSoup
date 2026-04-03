@@ -41,7 +41,10 @@ export class UpdateChecker {
         await this.execGit(['fetch', 'origin', 'main', '--quiet']);
         const remoteSha = await this.execGit(['rev-parse', '--short', 'origin/main']);
         this.state.remoteSha = remoteSha;
-        this.state.updateAvailable = localSha !== remoteSha;
+        // Only flag update if remote has commits we don't have (remote is ahead).
+        // `rev-list HEAD..origin/main` counts commits on remote not reachable from local.
+        const behind = await this.execGit(['rev-list', '--count', 'HEAD..origin/main']);
+        this.state.updateAvailable = parseInt(behind, 10) > 0;
       } catch (err) {
         log.warn({ err }, 'git fetch failed — skipping remote check');
         this.state.remoteSha = 'unknown';
