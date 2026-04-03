@@ -106,23 +106,31 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   const { phase, steps, error, instanceToggles, instanceStatus } = state
   const eventSourceRef = useRef<EventSource | null>(null)
 
+  // Only reset when the modal opens — NOT when lines changes (that would
+  // reset mid-update when the fleet restarts and health poller refetches).
+  const prevOpenRef = useRef(false)
   useEffect(() => {
-    if (open) {
+    if (open && !prevOpenRef.current) {
       dispatch({ type: 'reset', toggles: buildToggles(lines) })
     }
+    prevOpenRef.current = open
   }, [open, lines])
 
   const waitForFleetRestart = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
+    // Wait a beat for the old process to fully die before polling
+    let seenDown = false
     const poll = setInterval(async () => {
       try {
         const ver = await api.getVersion()
-        if (ver.sha !== currentSha) {
+        if (seenDown || ver.sha !== currentSha) {
+          // Fleet is back (either we saw it go down, or the SHA changed)
           clearInterval(poll)
           dispatch({ type: 'setPhase', phase: 'restart-instances' })
         }
       } catch {
-        // Fleet not back yet
+        // Fleet not responding — it's restarting
+        seenDown = true
       }
     }, 2000)
 
