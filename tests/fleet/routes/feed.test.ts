@@ -328,6 +328,19 @@ describe('parsePinoLine', () => {
       expect(result.component).toBe('agent-runner');
     }
   });
+
+  it('extracts conversationKey from chatJid on message events', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'Sending message', chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-ck-1' }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({
+        type: 'message', direction: 'outbound', conversationKey: '15550100001',
+      });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

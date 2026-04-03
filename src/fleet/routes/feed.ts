@@ -22,7 +22,7 @@ type FeedDetail =
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
   | { type: 'health'; status: string; previousStatus?: string; error?: string }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
-  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string }
+  | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
   | { type: 'generic' };
 
 interface FeedEvent {
@@ -160,28 +160,36 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
 
   // 5. Outbound message
   if (/^Sending message$/.test(msg)) {
+    const chatJid = typeof obj.chatJid === 'string' ? obj.chatJid : undefined;
+    let ck: string | undefined;
+    if (chatJid) { try { ck = toConversationKey(chatJid); } catch { /* invalid JID */ } }
     return {
       ...base,
       detail: {
         type: 'message',
         direction: 'outbound',
-        chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+        chatJid,
         messageId: typeof obj.messageId === 'string' ? obj.messageId : undefined,
+        conversationKey: ck,
       },
     };
   }
 
   // 6. Inbound message — exact match only to avoid matching durability recovery logs
   if (/^inbound message received$/i.test(msg)) {
+    const chatJid = typeof obj.chatJid === 'string' ? obj.chatJid : undefined;
+    let ck: string | undefined;
+    if (chatJid) { try { ck = toConversationKey(chatJid); } catch { /* invalid JID */ } }
     return {
       ...base,
       detail: {
         type: 'message',
         direction: 'inbound',
-        chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+        chatJid,
         messageId: typeof obj.messageId === 'string' ? obj.messageId : undefined,
         senderName: typeof obj.senderName === 'string' ? obj.senderName : undefined,
         contentType: typeof obj.contentType === 'string' ? obj.contentType : undefined,
+        conversationKey: ck,
       },
     };
   }
