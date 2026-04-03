@@ -10,6 +10,18 @@ const log = createChildLogger('fleet:update');
 
 let updateInProgress = false;
 
+/** Attempt to rollback to a previous SHA after a failed update step. Best-effort — logs but doesn't throw. */
+async function rollback(repoRoot: string, sha: string, writeSSE: (event: string, data: unknown) => void): Promise<void> {
+  try {
+    await execFileAsync('git', ['reset', '--hard', sha], { cwd: repoRoot, timeout: 15_000 });
+    writeSSE('progress', { step: 'rollback', status: 'done', message: `Rolled back to ${sha.slice(0, 7)}` });
+    log.info({ sha }, 'update rollback succeeded');
+  } catch (err) {
+    writeSSE('error', { step: 'rollback', message: `Rollback failed: ${(err as Error).message}` });
+    log.error({ err, sha }, 'update rollback failed');
+  }
+}
+
 export function handleGetVersion(
   _req: IncomingMessage,
   res: ServerResponse,
@@ -51,6 +63,16 @@ export async function handleUpdate(
       prePullSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, timeout: 5_000 })).stdout.trim();
     } catch { /* proceed without — install steps will run unconditionally */ }
 
+    // Pre-flight: reject if working tree is dirty (uncommitted changes would cause pull conflicts)
+    try {
+      const { stdout: porcelain } = await execFileAsync('git', ['status', '--porcelain'], { cwd: repoRoot, timeout: 5_000 });
+      if (porcelain.trim()) {
+        writeSSE('error', { step: 'pull', message: `Working tree has uncommitted changes — commit or stash before updating.\n${porcelain.trim()}` });
+        endOnce();
+        return;
+      }
+    } catch { /* git status failed — proceed anyway, pull will fail if truly dirty */ }
+
     // Step 1: git pull
     writeSSE('progress', { step: 'pull', status: 'running' });
     try {
@@ -87,6 +109,7 @@ export async function handleUpdate(
         writeSSE('progress', { step: 'install', status: 'done' });
       } catch (err: any) {
         writeSSE('error', { step: 'install', message: err.stderr?.trim() || err.message });
+        if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
         endOnce();
         return;
       }
@@ -105,6 +128,7 @@ export async function handleUpdate(
         writeSSE('progress', { step: 'console-install', status: 'done' });
       } catch (err: any) {
         writeSSE('error', { step: 'console-install', message: err.stderr?.trim() || err.message });
+        if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
         endOnce();
         return;
       }
@@ -112,17 +136,23 @@ export async function handleUpdate(
       writeSSE('progress', { step: 'console-install', status: 'skip', message: 'No console lockfile changes' });
     }
 
-    // Step 4: Console rebuild
-    writeSSE('progress', { step: 'console-build', status: 'running' });
-    try {
-      await execFileAsync('npx', ['vite', 'build'], {
-        cwd: `${repoRoot}/console`, timeout: 120_000,
-      });
-      writeSSE('progress', { step: 'console-build', status: 'done' });
-    } catch (err: any) {
-      writeSSE('error', { step: 'console-build', message: err.stderr?.trim() || err.message });
-      endOnce();
-      return;
+    // Step 4: Console rebuild (only if console/ files changed)
+    const consoleFilesChanged = !prePullSha || changedFiles.some(f => f.startsWith('console/'));
+    if (consoleFilesChanged) {
+      writeSSE('progress', { step: 'console-build', status: 'running' });
+      try {
+        await execFileAsync('npx', ['vite', 'build'], {
+          cwd: `${repoRoot}/console`, timeout: 120_000,
+        });
+        writeSSE('progress', { step: 'console-build', status: 'done' });
+      } catch (err: any) {
+        writeSSE('error', { step: 'console-build', message: err.stderr?.trim() || err.message });
+        if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
+        endOnce();
+        return;
+      }
+    } else {
+      writeSSE('progress', { step: 'console-build', status: 'skip', message: 'No console file changes' });
     }
 
     // Step 5: Restart fleet server via systemd

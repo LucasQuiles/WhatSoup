@@ -18,7 +18,11 @@ const MIME_TYPES: Record<string, string> = {
   '.map': 'application/json',
 };
 
-export function createStaticHandler(distDir: string, fleetToken?: string, version?: string) {
+/**
+ * @param getVersion — function returning current version (called per-request so it stays fresh
+ *   after git pull updates the code without restarting the fleet server).
+ */
+export function createStaticHandler(distDir: string, fleetToken?: string, getVersion?: () => string) {
   return (req: IncomingMessage, res: ServerResponse): boolean => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
@@ -29,6 +33,7 @@ export function createStaticHandler(distDir: string, fleetToken?: string, versio
     let filePath = path.join(distDir, safePath);
 
     // Helper: serve HTML with token injection when applicable
+    const version = getVersion?.();
     const serveHtml = (htmlPath: string) =>
       (fleetToken && version) ? serveHtmlWithMeta(htmlPath, fleetToken, version, res) : serveFile(htmlPath, res);
 

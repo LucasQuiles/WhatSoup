@@ -60,8 +60,8 @@ beforeAll(async () => {
   fs.writeFileSync(path.join(distDir, 'page.html'), HTML_CONTENT);
   fs.writeFileSync(path.join(distDir, 'script.js'), 'console.log(1);');
 
-  // Server WITH token + version injection
-  const handlerWithMeta = createStaticHandler(distDir, FLEET_TOKEN, VERSION);
+  // Server WITH token + version injection (getVersion is a getter function)
+  const handlerWithMeta = createStaticHandler(distDir, FLEET_TOKEN, () => VERSION);
   ({ server: serverWithMeta, port: portWithMeta } = await startServer(handlerWithMeta));
 
   // Server WITHOUT token/version (no injection)
@@ -115,7 +115,7 @@ describe('createStaticHandler — meta tag injection', () => {
 
   it('sanitizes dangerous characters in token (XSS prevention)', async () => {
     // Create a one-shot handler with evil input
-    const evilHandler = createStaticHandler(distDir, EVIL_INPUT, VERSION);
+    const evilHandler = createStaticHandler(distDir, EVIL_INPUT, () => VERSION);
     const { server, port } = await startServer(evilHandler);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/`);
@@ -132,7 +132,7 @@ describe('createStaticHandler — meta tag injection', () => {
   });
 
   it('sanitizes dangerous characters in version', async () => {
-    const evilHandler = createStaticHandler(distDir, FLEET_TOKEN, EVIL_INPUT);
+    const evilHandler = createStaticHandler(distDir, FLEET_TOKEN, () => EVIL_INPUT);
     const { server, port } = await startServer(evilHandler);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/`);

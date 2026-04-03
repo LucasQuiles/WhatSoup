@@ -16,7 +16,7 @@
  *  - err.message fallback when err.stderr is absent
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // vi.hoisted() — must run before vi.mock() factories so they can reference
@@ -87,13 +87,15 @@ function makeChecker(impl?: () => Promise<any>) {
 
 // Convenience: configure execFileAsync for the standard happy-path sequence.
 // Call this at the start of a test; it mutates execFileAsyncSpy.
-// Sequence: rev-parse HEAD (pre-pull) → git pull → diff prePullSha → vite build
+// Sequence: rev-parse HEAD → git status --porcelain → git pull → diff prePullSha → vite build
 function setupHappyPath({
   pullStdout = 'Already up to date.\n',
-  diffFiles = 'src/foo.ts\n',
+  diffFiles = 'src/foo.ts\nconsole/src/bar.ts\n',
+  dirtyFiles = '',
 } = {}) {
   execFileAsyncSpy
     .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })   // git rev-parse HEAD (pre-pull)
+    .mockResolvedValueOnce({ stdout: dirtyFiles, stderr: '' })     // git status --porcelain (dirty check)
     .mockResolvedValueOnce({ stdout: pullStdout, stderr: '' })     // git pull
     .mockResolvedValueOnce({ stdout: diffFiles, stderr: '' })      // git diff prePullSha --name-only (single call)
     .mockResolvedValueOnce({ stdout: '', stderr: '' });            // npx vite build
@@ -106,7 +108,14 @@ function setupHappyPath({
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+});
+
+// The systemctl restart step uses callback-based execFile (not promisified).
+// Its callback fires on the next event loop tick AFTER handleUpdate() resolves,
+// which means updateInProgress is still true when the test ends. Drain it here.
+afterEach(async () => {
+  await new Promise((r) => setImmediate(r));
 });
 
 // ---------------------------------------------------------------------------
@@ -184,7 +193,10 @@ describe('handleUpdate — happy path', () => {
   it('does not call checker.checkNow() when pull fails', async () => {
     const err: any = new Error('network error');
     err.stderr = 'fatal: cannot connect';
-    execFileAsyncSpy.mockRejectedValueOnce(err);
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' }) // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })          // git status --porcelain
+      .mockRejectedValueOnce(err);                                // git pull fails
 
     const { req, res } = makeReqRes();
     const checker = makeChecker();
@@ -206,10 +218,15 @@ describe('handleUpdate — happy path', () => {
 
 describe('handleUpdate — mutex (409 on concurrent request)', () => {
   it('returns 409 JSON when an update is already in progress', async () => {
+    // First two calls (rev-parse + porcelain) resolve immediately
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // git status --porcelain
+
     // Create a deferred promise so we can control when pull resolves
     let resolvePull!: (value: any) => void;
     const hangingPull = new Promise<any>((resolve) => { resolvePull = resolve; });
-    execFileAsyncSpy.mockReturnValueOnce(hangingPull);
+    execFileAsyncSpy.mockReturnValueOnce(hangingPull);              // git pull hangs
 
     const { req: req1, res: res1 } = makeReqRes();
     const { req: req2, res: res2 } = makeReqRes();
@@ -217,8 +234,9 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
     // Start first call — do NOT await yet
     const firstCall = handleUpdate(req1, res1, makeChecker(), '/repo');
 
-    // Yield a microtask so handleUpdate sets updateInProgress = true
-    await Promise.resolve();
+    // Yield microtasks so handleUpdate reaches the hanging pull and sets updateInProgress = true.
+    // Need enough yields for: enter function → rev-parse await → porcelain await → pull (hangs)
+    for (let i = 0; i < 10; i++) await Promise.resolve();
 
     // Second call — synchronous check of flag, should immediately 409
     await handleUpdate(req2, res2, makeChecker(), '/repo');
@@ -232,12 +250,13 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
 
     // Set up remaining mocks for the first call to complete
     execFileAsyncSpy
-      .mockResolvedValueOnce({ stdout: 'src/foo.ts\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'src/bar.ts\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' })   // diff
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                       // vite build
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     await firstCall; // drain so updateInProgress resets to false
+    // Extra drain: systemctl callback runs via setImmediate-like scheduling
+    await new Promise((r) => setImmediate(r));
   });
 });
 
@@ -251,6 +270,7 @@ describe('handleUpdate — git pull failure', () => {
     err.stderr = 'fatal: could not read from remote repository.';
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' }) // rev-parse HEAD (pre-pull)
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })          // git status --porcelain (clean)
       .mockRejectedValueOnce(err);                                // git pull fails
 
     const { req, res } = makeReqRes();
@@ -265,6 +285,7 @@ describe('handleUpdate — git pull failure', () => {
   it('uses err.message when err.stderr is absent', async () => {
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' }) // rev-parse HEAD (pre-pull)
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })          // git status --porcelain (clean)
       .mockRejectedValueOnce(new Error('ENOENT: git not found')); // git pull fails
 
     const { req, res } = makeReqRes();
@@ -280,6 +301,7 @@ describe('handleUpdate — git pull failure', () => {
     err.stderr = 'fatal: error';
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })          // git status --porcelain (clean)
       .mockRejectedValueOnce(err);
 
     const { req, res } = makeReqRes();
@@ -293,6 +315,7 @@ describe('handleUpdate — git pull failure', () => {
     err.stderr = 'fatal: error';
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })          // git status --porcelain (clean)
       .mockRejectedValueOnce(err);
 
     const { req, res } = makeReqRes();
@@ -313,9 +336,10 @@ describe('handleUpdate — git pull failure', () => {
 describe('handleUpdate — vite build failure', () => {
   it('emits SSE error event with step=console-build', async () => {
     execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })             // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                       // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Already up to date.\n', stderr: '' }) // pull
-      .mockResolvedValueOnce({ stdout: 'src/foo.ts\n', stderr: '' })          // diff root
-      .mockResolvedValueOnce({ stdout: 'src/bar.ts\n', stderr: '' });         // diff console
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }); // diff (console/ file triggers build)
 
     const buildErr: any = new Error('build failed');
     buildErr.stderr = 'error: [vite] Transform failed with 3 errors.';
@@ -335,9 +359,10 @@ describe('handleUpdate — vite build failure', () => {
 
   it('calls res.end after build failure', async () => {
     execFileAsyncSpy
-      .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'src/foo.ts\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'src/bar.ts\n', stderr: '' });
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })            // git status --porcelain
+      .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })       // pull
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }); // diff
     const buildErr: any = new Error('fail');
     buildErr.stderr = 'vite error';
     execFileAsyncSpy.mockRejectedValueOnce(buildErr);
@@ -351,9 +376,10 @@ describe('handleUpdate — vite build failure', () => {
 
   it('does not emit restart event after build failure', async () => {
     execFileAsyncSpy
-      .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'src/foo.ts\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'src/bar.ts\n', stderr: '' });
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })            // git status --porcelain
+      .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })       // pull
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }); // diff
     const buildErr: any = new Error('fail');
     buildErr.stderr = 'vite error';
     execFileAsyncSpy.mockRejectedValueOnce(buildErr);
@@ -415,7 +441,10 @@ describe('endOnce idempotency', () => {
   it('res.end called exactly once even when close event fires after pull error', async () => {
     const err: any = new Error('pull fail');
     err.stderr = 'fatal: bad';
-    execFileAsyncSpy.mockRejectedValueOnce(err);
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' }) // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })          // git status --porcelain
+      .mockRejectedValueOnce(err);
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
@@ -446,9 +475,12 @@ describe('endOnce idempotency', () => {
 
 describe('writeSSE skip after stream ended', () => {
   it('does not write to res after client disconnects mid-stream', async () => {
-    // Pull succeeds, then checker.checkNow triggers the close event (simulating
-    // the client disconnecting just after pull completes)
-    execFileAsyncSpy.mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' });
+    // rev-parse + porcelain succeed, pull succeeds, then checker.checkNow triggers
+    // the close event (simulating the client disconnecting just after pull completes)
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })       // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                 // git status --porcelain
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' }); // pull
     // Remaining calls resolve but should not cause writes after ended
     execFileAsyncSpy.mockResolvedValue({ stdout: '', stderr: '' });
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
@@ -493,27 +525,31 @@ describe('handleUpdate — lockfile change detection', () => {
   });
 
   it('runs root npm install when package-lock.json IS in diff', async () => {
-    // rev-parse → pull → diff (has root lockfile) → npm install root → vite build
+    // rev-parse → porcelain → pull → diff (has root lockfile) → npm install root
+    // No console/ files in diff → console-build is skipped
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
       .mockResolvedValueOnce({ stdout: 'package-lock.json\nsrc/x.ts\n', stderr: '' })          // diff
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install root
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // vite build
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // npm install root
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
+    await new Promise((r) => setImmediate(r)); // drain systemctl cb
 
     const events = parseSSE(res.chunks);
+    // debug removed
     expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'done')).toBeDefined();
-    // console lockfile NOT in diff → skip
     expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'skip')).toBeDefined();
   });
 
   it('runs console npm install when console/package-lock.json IS in diff', async () => {
+    // console/ file in diff → console-build runs
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
       .mockResolvedValueOnce({ stdout: 'console/package-lock.json\nsrc/y.ts\n', stderr: '' })  // diff
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install console
@@ -524,14 +560,15 @@ describe('handleUpdate — lockfile change detection', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    // root lockfile NOT in diff → skip
     expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
     expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
   });
 
   it('both root and console lockfiles changed — both installs run', async () => {
+    // console/ file in diff → console-build runs
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                                         // rev-parse
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                                // pull
       .mockResolvedValueOnce({ stdout: 'package-lock.json\nconsole/package-lock.json\n', stderr: '' })     // diff (both)
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // npm install root
@@ -548,9 +585,10 @@ describe('handleUpdate — lockfile change detection', () => {
   });
 
   it('does not false-match console/package-lock.json for root lockfile check', async () => {
-    // Only console lockfile changed — root should SKIP
+    // Only console lockfile changed — root should SKIP; console/ file in diff triggers build
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
       .mockResolvedValueOnce({ stdout: 'console/package-lock.json\n', stderr: '' })             // diff
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install console

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+// execFileSync removed — version now read dynamically from UpdateChecker
 import { createChildLogger } from '../logger.ts';
 import { jsonResponse, checkBearerAuth, parseRoute, parseQueryString, readBody } from '../lib/http.ts';
 import { FleetDiscovery } from './discovery.ts';
@@ -229,15 +229,12 @@ export function createFleetServer(deps: FleetDeps) {
   // Determine dist directory for static files
   const distDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');
 
-  // Read initial git SHA for HTML injection
-  let initialSha = 'unknown';
-  try {
-    initialSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot }).toString().trim();
-  } catch { /* git not available */ }
-
-  const staticHandler = createStaticHandler(distDir, deps.fleetToken, initialSha);
-
   const updateChecker = new UpdateChecker(repoRoot);
+
+  // Version getter reads from the update checker (refreshed after each git pull)
+  // so the HTML meta tag always reflects the current HEAD, not the startup SHA.
+  const getVersion = () => updateChecker.getState().sha || 'unknown';
+  const staticHandler = createStaticHandler(distDir, deps.fleetToken, getVersion);
   const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, log, updateChecker };
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
