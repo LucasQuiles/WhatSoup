@@ -236,7 +236,7 @@ const SoupKitchen: FC = () => {
           >
             <div className="flex items-center gap-4">
               <h2
-                className="c-heading"
+                className="c-heading-lg"
               >
                 Connections
               </h2>

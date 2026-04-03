@@ -312,7 +312,7 @@ body::before {
 
 .feed-toolbar__title {
   font-family: var(--font-sans);
-  font-size: var(--font-size-heading);
+  font-size: var(--font-size-lg);
   font-weight: var(--fw-semibold);
   color: var(--color-t1);
   letter-spacing: var(--tracking-tight);
