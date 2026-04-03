@@ -92,6 +92,11 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     navigate(path);
   };
 
+  const handleCopyResult = (success: boolean) => {
+    if (success) toast.success("Copied to clipboard");
+    else toast.error("Failed to copy");
+  };
+
   return (
     <div className={`feed-container ${paused ? "feed-container--paused" : ""}`}>
       {/* ── Toolbar ── */}
@@ -186,6 +191,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
             onRestart={handleRestart}
             onStop={handleStop}
             onNavigate={handleNavigate}
+            onCopyResult={handleCopyResult}
           />
         ))}
 

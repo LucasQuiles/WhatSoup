@@ -195,11 +195,12 @@ function MetaRow({ event }: { event: FeedEvent }) {
 //  Quick actions
 // ---------------------------------------------------------------------------
 
-function QuickActions({ event, onRestart, onStop, onNavigate }: {
+function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
   event: FeedEvent;
   onRestart?: (instance: string) => void;
   onStop?: (instance: string) => void;
   onNavigate?: (path: string) => void;
+  onCopyResult?: (success: boolean) => void;
 }) {
   const d = event.detail;
   const inst = event.instance;
@@ -214,7 +215,9 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
       onClick={(e) => {
         e.stopPropagation();
         const text = copyContent(event);
-        navigator.clipboard.writeText(text).catch(() => {});
+        navigator.clipboard.writeText(text)
+          .then(() => onCopyResult?.(true))
+          .catch(() => onCopyResult?.(false));
       }}
     >
       <Copy size={12} strokeWidth={2} />
@@ -292,10 +295,17 @@ function copyContent(event: FeedEvent): string {
     case "session": return `${d.action}${d.reason ? ` — ${d.reason}` : ""}`;
     case "connection": {
       const code = d.statusCode ? `${d.statusCode} ` : "";
-      const reason = d.reason ?? "";
-      return `${code}${reason}`.trim() || event.text;
+      const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : "";
+      let text = `${code}${reason}`.trim();
+      if (d.reconnecting) text += " \u2192 reconnecting";
+      if (d.state === "connected" && d.statusCode) text += " \u2192 reconnected";
+      return text || event.text;
     }
-    case "health": return d.status;
+    case "health": {
+      if (d.status === "online") return "came online";
+      if (d.status === "unreachable") return "connection lost";
+      return `degraded \u2014 ${d.error ?? "unknown"}`;
+    }
     default: return event.text;
   }
 }
@@ -309,9 +319,10 @@ interface FeedCardProps {
   onRestart?: (instance: string) => void;
   onStop?: (instance: string) => void;
   onNavigate?: (path: string) => void;
+  onCopyResult?: (success: boolean) => void;
 }
 
-const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate }) => {
+const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onCopyResult }) => {
   const [expanded, setExpanded] = useState(false);
   const d = event.detail;
   const isErr = !!event.isError;
@@ -344,7 +355,7 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate }) =
     >
       {body}
       {expanded && <MetaRow event={event} />}
-      {expanded && <QuickActions event={event} onRestart={onRestart} onStop={onStop} onNavigate={onNavigate} />}
+      {expanded && <QuickActions event={event} onRestart={onRestart} onStop={onStop} onNavigate={onNavigate} onCopyResult={onCopyResult} />}
     </div>
   );
 };

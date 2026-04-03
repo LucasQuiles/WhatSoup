@@ -164,7 +164,7 @@
   --dur-fast: 0.15s;        /* micro-interactions: hover, focus */
   --dur-norm: 0.2s;         /* standard UI transitions */
   --dur-slow: 0.3s;         /* border/color emphasis changes */
-  --ease: ease;             /* default easing */
+  /* --ease defined in @theme block: cubic-bezier(0.22, 1, 0.36, 1) */
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -553,13 +553,15 @@ body::before {
   margin-left: 0;
 }
 
-.fc-action:hover .fc-action__label {
+.fc-action:hover .fc-action__label,
+.fc-action:focus-visible .fc-action__label {
   max-width: var(--feed-inst-max);
   opacity: 1;
   margin-left: var(--sp-1);
 }
 
-.fc-action:hover {
+.fc-action:hover,
+.fc-action:focus-visible {
   color: var(--color-t1);
   border-color: var(--b3);
 }
