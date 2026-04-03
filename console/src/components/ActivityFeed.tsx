@@ -84,6 +84,12 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
       }
       const code = d.statusCode;
       const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
+      if (!code && !reason) {
+        const text = event.instance && event.text.startsWith(`${event.instance}: `)
+          ? event.text.slice(event.instance.length + 2)
+          : event.text;
+        return <>{inst}<span className="text-t4">{text}</span></>;
+      }
       return (
         <>
           {inst}
@@ -139,8 +145,19 @@ function FeedCardContent({ event }: { event: FeedEvent }) {
           </span>
         </>
       );
-    default:
-      return <span>{event.text}</span>;
+    case "tool_use":
+      return (
+        <>
+          {inst}
+          <Badge>{d.toolName}</Badge>
+        </>
+      );
+    default: {
+      const text = event.instance && event.text.startsWith(`${event.instance}: `)
+        ? event.text.slice(event.instance.length + 2)
+        : event.text;
+      return <>{inst}<span>{text}</span></>;
+    }
   }
 }
 
