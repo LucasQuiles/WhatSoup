@@ -263,9 +263,9 @@ body::before {
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Feed — operational activity surface
-   Design: surgical instrument panel. Each card is a horizontal strip with
-   a colored severity edge, fixed-width time column, icon gutter, and
-   layered content zones. Hover discloses metadata without layout shift.
+   Adaptive cards: each event type gets the vertical space it needs.
+   Font sizes use --font-size-data (12.5px) for primary, --font-size-sm
+   (11.2px) for secondary. Never uses --font-size-xs for content.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Container ── */
@@ -286,7 +286,7 @@ body::before {
   align-items: center;
   justify-content: space-between;
   flex-shrink: 0;
-  padding: 0 var(--sp-3);
+  padding: 0 var(--sp-4);
   min-height: var(--toolbar-h);
   background: var(--color-d3);
   border-bottom: var(--bw) solid var(--b1);
@@ -310,12 +310,11 @@ body::before {
   align-items: center;
   gap: var(--sp-1);
   font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
   color: var(--color-t5);
   cursor: pointer;
   padding: var(--sp-1) var(--sp-2);
   border-radius: var(--radius-sm);
-  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease;
 }
 
 .feed-toolbar__pause:hover {
@@ -329,7 +328,7 @@ body::before {
   align-items: center;
   justify-content: space-between;
   flex-shrink: 0;
-  padding: var(--sp-1h) var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
   background: var(--color-d2);
   border-bottom: var(--bw) solid var(--b2);
 }
@@ -338,13 +337,14 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
+  flex-wrap: wrap;
 }
 
 .feed-filters__sep {
   width: 1px;
-  height: 12px;
+  height: 14px;
   background: var(--b2);
-  margin: 0 var(--sp-1);
+  margin: 0 var(--sp-2);
 }
 
 /* ── Stream ── */
@@ -365,187 +365,282 @@ body::before {
   justify-content: center;
   padding: var(--sp-12) var(--sp-4);
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-data);
   color: var(--color-t5);
-  letter-spacing: var(--tracking-pill);
 }
 
-/* ══ Card ══ */
-@keyframes feed-card-enter {
+/* ══════════════════════════════════════════════════════════════════════════
+   fc — Feed Card
+   ══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes fc-enter {
   from { opacity: 0; transform: translateY(-2px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
-.feed-card {
+.fc {
   position: relative;
-  padding: var(--sp-1h) var(--sp-3) var(--sp-1h) var(--sp-2);
+  padding: var(--sp-2h) var(--sp-4) var(--sp-2h) var(--sp-3);
   border-bottom: var(--bw) solid var(--b1);
-  border-left: 2px solid transparent;
+  border-left: var(--bw-accent) solid transparent;
   outline: none;
-  animation: feed-card-enter 120ms ease-out both;
-  transition:
-    background-color var(--dur-fast) ease,
-    border-left-color var(--dur-fast) ease;
+  animation: fc-enter 120ms ease-out both;
+  transition: background-color var(--dur-fast) ease;
 }
 
-.feed-card:hover,
-.feed-card:focus-visible {
+.fc:hover,
+.fc:focus-visible {
   background-color: var(--color-d2);
 }
 
-.feed-card--error {
+.fc--error {
   background-color: var(--s-crit-wash);
 }
 
-.feed-card--error:hover,
-.feed-card--error:focus-visible {
+.fc--error:hover,
+.fc--error:focus-visible {
   background-color: rgba(252, 129, 129, 0.1);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .feed-card { animation: none; }
+/* Tool errors get more breathing room */
+.fc--tall {
+  padding-top: var(--sp-3);
+  padding-bottom: var(--sp-3);
 }
 
-/* ── Card row ── */
-.feed-card__row {
+@media (prefers-reduced-motion: reduce) {
+  .fc { animation: none; }
+}
+
+/* ── Primary row ── */
+.fc__primary {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  min-height: 18px;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  line-height: 1.4;
+  font-size: var(--font-size-data);
+  line-height: 1.5;
+  min-height: 22px;
 }
 
-.feed-card__time {
+.fc__time {
   flex-shrink: 0;
-  width: 62px;
-  color: var(--color-t5);
-  font-size: var(--font-size-xs);
-  letter-spacing: 0.01em;
+  width: 68px;
   text-align: right;
+  color: var(--color-t5);
+  font-size: var(--font-size-sm);
 }
 
-.feed-card__icon {
+.fc__icon {
   flex-shrink: 0;
-  width: 14px;
+  width: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.feed-card__instance {
+/* Instance tag — colored pill using mode wash */
+.fc__inst {
   flex-shrink: 0;
-  min-width: 56px;
-  max-width: 80px;
-  color: var(--color-t2);
-  font-weight: 500;
+  font-family: var(--font-mono);
   font-size: var(--font-size-label);
+  font-weight: 600;
   letter-spacing: var(--tracking-pill);
-  text-transform: uppercase;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 1px var(--sp-1h);
+  border-radius: var(--radius-sm);
   white-space: nowrap;
 }
 
-.feed-card__content {
+/* Content area — flexible, wraps internal card variant */
+.fc__content {
   flex: 1;
+  min-width: 0;
   display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  overflow: hidden;
+}
+
+/* ── Metadata row (hover/focus only) ── */
+.fc-meta {
+  margin-top: var(--sp-1);
+  padding-left: 92px; /* time(68) + gap(8) + icon(16) */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-t5);
+  user-select: all;
+  line-height: 1.5;
+}
+
+/* ── Quick actions ── */
+.fc-action {
+  display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-label);
+  font-weight: 500;
+  letter-spacing: var(--tracking-pill);
+  color: var(--color-t4);
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: var(--bw) solid var(--b2);
+  background: var(--color-d4);
+  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+
+.fc-action:hover {
+  color: var(--color-t1);
+  border-color: var(--b3);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   fc card variant styles — type-specific rendering
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Status labels (connection/health one-liners) */
+.fc-status {
+  font-weight: 500;
+}
+.fc-status--ok   { color: var(--color-s-ok); }
+.fc-status--warn { color: var(--color-s-warn); }
+.fc-status--crit { color: var(--color-s-crit); }
+.fc-status--muted { color: var(--color-t4); }
+
+/* Body text */
+.fc-body {
+  color: var(--color-t3);
+}
+
+/* Connection detail: code + reason + lifecycle */
+.fc-conn-detail {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.fc-code {
+  font-weight: 600;
+  padding: 0 var(--sp-1h);
+  border-radius: var(--radius-sm);
+  background: var(--color-d5);
+  border: var(--bw) solid var(--b2);
+  color: var(--color-t2);
+}
+.fc-code--5xx { color: var(--color-s-crit); background: var(--s-crit-wash); border-color: var(--s-crit-border); }
+.fc-code--4xx { color: var(--color-s-warn); background: var(--s-warn-wash); }
+
+.fc-lifecycle { color: var(--color-t4); }
+.fc-lifecycle--ok { color: var(--color-s-ok); }
+
+/* Message cards */
+.fc-msg {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
   min-width: 0;
   overflow: hidden;
 }
 
-/* ── Detail row ── */
-.feed-card__detail-row {
-  padding-left: 86px; /* time(62) + gap(8) + icon(14) + gap(2) */
-  margin-top: 1px;
+.fc-dir {
+  flex-shrink: 0;
+  font-weight: 600;
+  font-size: var(--font-size-label);
+  letter-spacing: var(--tracking-pill);
+  padding: 1px var(--sp-1h);
+  border-radius: var(--radius-sm);
+}
+.fc-dir--in  { color: var(--color-m-cht); background: var(--m-cht-wash); }
+.fc-dir--out { color: var(--color-m-agt); background: var(--m-agt-wash); }
+
+.fc-sender {
+  font-weight: 500;
+  color: var(--color-t1);
+  white-space: nowrap;
 }
 
-.feed-detail {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
+.fc-chat {
   color: var(--color-t4);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.fc-content-type {
+  color: var(--color-t5);
+  font-size: var(--font-size-sm);
+}
+
+.fc-preview {
+  color: var(--color-t3);
+  font-size: var(--font-size-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.5;
+  min-width: 0;
 }
 
-.feed-detail-error {
-  color: var(--color-s-crit);
-  opacity: 0.8;
+/* Tool error cards */
+.fc-tool-err {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
 }
 
-/* ── Meta row ── */
-.feed-card__meta {
-  padding-left: 86px;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
-  color: var(--color-t5);
-  letter-spacing: 0.01em;
-  overflow: hidden;
-  transition: opacity var(--dur-fast) ease;
-  line-height: 1.5;
-  user-select: all;
-}
-
-/* ══ Inline badges ══ */
-.feed-badge {
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--font-mono);
+.fc-tool-name {
+  font-weight: 600;
   font-size: var(--font-size-label);
-  font-weight: 500;
   letter-spacing: var(--tracking-pill);
-  padding: 0 var(--sp-1h);
+  padding: 1px var(--sp-1h);
   border-radius: var(--radius-sm);
-  white-space: nowrap;
-  line-height: 1.6;
-}
-
-.feed-badge-crit {
-  color: var(--color-s-crit);
-  background: var(--s-crit-wash);
-}
-
-.feed-badge-warn {
-  color: var(--color-s-warn);
-  background: var(--s-warn-wash);
-}
-
-.feed-badge-muted {
-  color: var(--color-t3);
-  background: var(--color-d4);
-  border: var(--bw) solid var(--b2);
-}
-
-.feed-badge-tool {
-  color: var(--color-t2);
   background: var(--color-d5);
   border: var(--bw) solid var(--b2);
+  color: var(--color-t2);
+  align-self: flex-start;
 }
 
-.feed-badge-recv {
-  color: var(--color-m-cht);
-  background: var(--m-cht-wash);
+.fc-error-body {
+  color: var(--color-s-crit);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+  opacity: 0.85;
 }
 
-.feed-badge-sent {
-  color: var(--color-m-agt);
-  background: var(--m-agt-wash);
+/* Session cards */
+.fc-session {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
 }
 
-/* ══ Text utilities ══ */
-.feed-text-primary { color: var(--color-t1); font-weight: 500; }
-.feed-text-secondary { color: var(--color-t3); }
-.feed-text-muted { color: var(--color-t4); }
-.feed-text-dim { color: var(--color-t5); font-size: var(--font-size-xs); }
-.feed-text-ok { color: var(--color-s-ok); }
-.feed-text-warn { color: var(--color-s-warn); }
-.feed-text-crit { color: var(--color-s-crit); }
-.feed-text-agent { color: var(--color-m-agt); }
+.fc-session-id {
+  color: var(--color-t5);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+}
+
+.fc-reason {
+  color: var(--color-t4);
+  font-size: var(--font-size-sm);
+}
+
+/* Generic badge */
+.fc-badge {
+  font-weight: 500;
+  font-size: var(--font-size-label);
+  letter-spacing: var(--tracking-pill);
+  padding: 1px var(--sp-1h);
+  border-radius: var(--radius-sm);
+  background: var(--color-d4);
+  border: var(--bw) solid var(--b2);
+  color: var(--color-t3);
+  white-space: nowrap;
+}
 
 /* Shimmer animation for loading skeletons */
 @keyframes shimmer {

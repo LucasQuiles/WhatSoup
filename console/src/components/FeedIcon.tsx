@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import type { FeedEvent } from "../types";
 
-const ICON_SIZE = 12;
+const ICON_SIZE = 14;
 const STROKE = 1.75;
 
 interface FeedIconProps {

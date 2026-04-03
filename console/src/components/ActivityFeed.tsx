@@ -3,6 +3,7 @@ import { Pause, Play, AlertTriangle, Circle } from "lucide-react";
 import FilterPill from "./FilterPill";
 import FeedCard from "./FeedCard";
 import type { Mode, FeedEvent } from "../types";
+import { api } from "../lib/api";
 
 interface ActivityFeedProps {
   events: FeedEvent[];
@@ -58,6 +59,10 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   }, [displayEvents, modeFilter, errorsOnly, typeFilter]);
 
   const errorCount = useMemo(() => displayEvents.filter((e) => e.isError).length, [displayEvents]);
+
+  const handleRestart = (instance: string) => {
+    api.restart(instance).catch(() => { /* toast handled upstream */ });
+  };
 
   return (
     <div className={`feed-container ${paused ? "feed-container--paused" : ""}`}>
@@ -147,7 +152,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
       {/* ── Feed stream ── */}
       <div className="feed-stream">
         {filtered.map((event) => (
-          <FeedCard key={eventKey(event)} event={event} />
+          <FeedCard key={eventKey(event)} event={event} onRestart={handleRestart} />
         ))}
 
         {filtered.length === 0 && (
