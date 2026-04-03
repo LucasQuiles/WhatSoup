@@ -104,7 +104,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     instanceStatus: {},
   }))
   const { phase, steps, error, instanceToggles, instanceStatus } = state
-  const eventSourceRef = useRef<EventSource | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Only reset when the modal opens — NOT when lines changes (that would
   // reset mid-update when the fleet restarts and health poller refetches).
@@ -117,25 +119,29 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   }, [open, lines])
 
   const waitForFleetRestart = useCallback(() => {
+    // Guard: if already polling, don't spawn duplicate intervals (RES-002)
+    if (pollRef.current) return
     dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
-    // Wait a beat for the old process to fully die before polling
     let seenDown = false
     const poll = setInterval(async () => {
       try {
         const ver = await api.getVersion()
         if (seenDown || ver.sha !== currentSha) {
-          // Fleet is back (either we saw it go down, or the SHA changed)
           clearInterval(poll)
+          pollRef.current = null
+          if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
           dispatch({ type: 'setPhase', phase: 'restart-instances' })
         }
       } catch {
-        // Fleet not responding — it's restarting
         seenDown = true
       }
     }, 2000)
+    pollRef.current = poll
 
-    setTimeout(() => {
+    timeoutRef.current = setTimeout(() => {
       clearInterval(poll)
+      pollRef.current = null
+      timeoutRef.current = null
       dispatch({ type: 'setPhase', phase: 'restart-instances' })
     }, 60_000)
   }, [currentSha])
@@ -149,9 +155,14 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       headers['Authorization'] = `Bearer ${token}`
     }
 
+    // Abort controller so handleClose can cancel the in-flight fetch (RES-006)
+    const controller = new AbortController()
+    abortRef.current = controller
+
     fetch('/api/update', {
       method: 'POST',
       headers,
+      signal: controller.signal,
     }).then(response => {
       if (!response.ok) {
         dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
@@ -227,7 +238,12 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   }, [instanceToggles, onClose])
 
   const handleClose = () => {
-    eventSourceRef.current?.close()
+    // Abort in-flight fetch stream (RES-006)
+    abortRef.current?.abort()
+    abortRef.current = null
+    // Clear any pending poll/timeout (RES-002)
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
     onClose()
     if (phase === 'restart-instances' || phase === 'done') {
       window.location.reload()

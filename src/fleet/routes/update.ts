@@ -121,8 +121,11 @@ export async function handleUpdate(
           step: 'restart',
           message: 'Fleet not managed by systemd. Restart manually: npm run fleet',
         });
-        endOnce();
       }
+      // Always release mutex + end response — on success the process is about
+      // to be killed by systemd, but if it survives (e.g. systemd is slow),
+      // the endpoint must not stay permanently locked.
+      endOnce();
     });
   } catch (err: any) {
     writeSSE('error', { step: 'unknown', message: err.message });
