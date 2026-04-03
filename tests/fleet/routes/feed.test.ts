@@ -87,6 +87,18 @@ describe('parsePinoLine', () => {
     }
   });
 
+  it('extracts statusCode from fullErrorNode when no top-level statusCode', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { tag: 'stream:error', attrs: { code: '503' } } }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    expect(result).not.toBe('noise');
+    if (result && result !== 'noise') {
+      expect(result.detail).toMatchObject({ type: 'connection', statusCode: 503 });
+    }
+  });
+
   it('identifies connection error — WhatsApp connection closed', () => {
     const result = parsePinoLine(makeLine({ msg: 'WhatsApp connection closed' }), CTX);
     expect(result).not.toBeNull();

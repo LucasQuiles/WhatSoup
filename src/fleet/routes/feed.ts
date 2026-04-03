@@ -86,11 +86,14 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | 'noi
 
   // 1. Connection error
   if (/stream errored out|WhatsApp connection closed/i.test(msg)) {
+    const directCode = typeof obj.statusCode === 'number' ? obj.statusCode : undefined;
+    const fullErr = obj.fullErrorNode as { attrs?: { code?: string } } | undefined;
+    const errCode = fullErr?.attrs?.code ? parseInt(fullErr.attrs.code, 10) : undefined;
     return {
       ...base,
       detail: {
         type: 'connection',
-        statusCode: typeof obj.statusCode === 'number' ? obj.statusCode : undefined,
+        statusCode: directCode ?? errCode,
         reason: typeof obj.reason === 'string' ? obj.reason : undefined,
       },
     };
