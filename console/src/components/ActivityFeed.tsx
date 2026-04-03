@@ -24,20 +24,23 @@ function eventKey(event: FeedEvent): string {
   const d = event.detail;
   const msgId = d?.type === "message" ? (d as { messageId?: string }).messageId : undefined;
   if (msgId) return `msg:${event.instance ?? ""}:${msgId}`;
-  return `${event.instance ?? ""}:${event.time}:${d?.type ?? "generic"}`;
+  // Include direction + chatJid to avoid collisions between inbound/outbound at same timestamp
+  const dir = d?.type === "message" ? (d as { direction?: string }).direction ?? "" : "";
+  const chat = d?.type === "message" ? (d as { chatJid?: string }).chatJid ?? "" : "";
+  return `${event.instance ?? ""}:${event.time}:${d?.type ?? "generic"}:${dir}:${chat}`;
 }
 
 const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [paused, setPaused] = useState(false);
+  const [snapshot, setSnapshot] = useState<FeedEvent[] | null>(null);
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
-  // Freeze displayed events when paused.
-  // useMemo with paused as dep: when paused becomes true, memoize the current events.
-  // While paused stays true and events change, the memo does not recompute.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const displayEvents = useMemo(() => events, [paused ? null : events]);
+  // Pause: capture snapshot on toggle, clear on resume. The snapshot is set
+  // in the onClick handler (not an effect), so it captures the exact events
+  // visible at the moment the user clicks pause.
+  const displayEvents = snapshot ?? events;
 
   const filtered = useMemo(() => {
     let result = displayEvents;
@@ -72,7 +75,17 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
           <span className="c-heading">Live Activity</span>
           <button
             type="button"
-            onClick={() => setPaused((p) => !p)}
+            onClick={() => {
+              if (paused) {
+                // Resume: clear snapshot, show live events
+                setSnapshot(null);
+                setPaused(false);
+              } else {
+                // Pause: capture current events as snapshot
+                setSnapshot(events);
+                setPaused(true);
+              }
+            }}
             className="flex items-center font-mono text-t5 hover:text-t3 c-hover cursor-pointer"
             style={{ fontSize: "var(--font-size-xs)", gap: "var(--sp-1)" }}
           >

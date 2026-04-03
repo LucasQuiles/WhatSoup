@@ -17,6 +17,7 @@ export interface ChatSummary {
   lastMessageSender: string | null;
 }
 
+/** Full message row — includes raw_message for chat view. */
 export interface MessageRow {
   pk: number;
   conversation_key: string;
@@ -30,6 +31,9 @@ export interface MessageRow {
   is_from_me: number;
   raw_message: string | null;
 }
+
+/** Feed-path message row — raw_message intentionally excluded. */
+export type FeedMessageRow = Omit<MessageRow, 'raw_message'>;
 
 export interface AccessEntry {
   subjectType: string;
@@ -172,7 +176,7 @@ export class FleetDbReader {
   }
 
   /** Fetch messages by a set of message_ids (for feed preview enrichment). */
-  getMessagesByIds(name: string, dbPath: string, messageIds: string[]): DbResult<MessageRow[]> {
+  getMessagesByIds(name: string, dbPath: string, messageIds: string[]): DbResult<FeedMessageRow[]> {
     if (messageIds.length === 0) return { ok: true, data: [] };
     return this.query(name, dbPath, (db) => {
       const placeholders = messageIds.map(() => '?').join(', ');
@@ -182,7 +186,7 @@ export class FleetDbReader {
         FROM messages
         WHERE message_id IN (${placeholders})
           AND deleted_at IS NULL
-      `).all(...messageIds) as unknown as MessageRow[];
+      `).all(...messageIds) as unknown as FeedMessageRow[];
     });
   }
 
@@ -194,7 +198,7 @@ export class FleetDbReader {
     direction: 'inbound' | 'outbound',
     aroundTimestamp: number,
     limit = 3,
-  ): DbResult<MessageRow[]> {
+  ): DbResult<FeedMessageRow[]> {
     const isFromMe = direction === 'outbound' ? 1 : 0;
     const windowSec = 5;
     return this.query(name, dbPath, (db) => {
@@ -210,7 +214,7 @@ export class FleetDbReader {
         conversationKey, isFromMe,
         aroundTimestamp - windowSec, aroundTimestamp + windowSec,
         aroundTimestamp, limit,
-      ) as unknown as MessageRow[];
+      ) as unknown as FeedMessageRow[];
     });
   }
 
