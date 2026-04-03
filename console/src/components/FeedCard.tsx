@@ -4,7 +4,7 @@ import FeedIcon from "./FeedIcon";
 import { formatTimeWithSeconds } from "../lib/format-time";
 
 // ---------------------------------------------------------------------------
-//  Local helpers (ported from ActivityFeed.tsx)
+//  Constants
 // ---------------------------------------------------------------------------
 
 const reasonLabel: Record<string, string> = {
@@ -17,40 +17,44 @@ const reasonLabel: Record<string, string> = {
   Unknown: "unknown",
 };
 
-function statusCodeColor(code?: number): string {
-  if (!code) return "text-t4";
-  if (code >= 500) return "text-s-crit";
-  if (code >= 400) return "text-s-warn";
-  return "text-t3";
+// ---------------------------------------------------------------------------
+//  Severity edge color — the 2px left border that encodes state at a glance
+// ---------------------------------------------------------------------------
+
+function severityColor(event: FeedEvent): string {
+  const d = event.detail;
+  if (!d) return "var(--b1)";
+
+  if (event.isError) return "var(--color-s-crit)";
+
+  switch (d.type) {
+    case "connection":
+      if (d.state === "connected") return "var(--color-s-ok)";
+      if (d.state === "connecting" || d.reconnecting) return "var(--color-s-warn)";
+      if (d.state === "disconnected") return "var(--color-s-crit)";
+      if (d.statusCode) return "var(--color-s-crit)";
+      return "var(--b2)";
+    case "message":
+      return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
+    case "health":
+      if (d.status === "online") return "var(--color-s-ok)";
+      if (d.status === "unreachable") return "var(--color-s-crit)";
+      return "var(--color-s-warn)";
+    case "tool_error":
+      return "var(--color-s-crit)";
+    case "session":
+      return "var(--color-m-agt)";
+    case "import":
+      return "var(--b2)";
+    default:
+      return "var(--b1)";
+  }
 }
 
-function Badge({
-  children,
-  color = "text-t3",
-}: {
-  children: React.ReactNode;
-  color?: string;
-}) {
-  return (
-    <span
-      className={`inline-flex items-center font-mono font-medium ${color}`}
-      style={{
-        fontSize: "var(--font-size-label)",
-        letterSpacing: "var(--tracking-pill)",
-        padding: "0 var(--sp-1h)",
-        borderRadius: "var(--radius-sm)",
-        backgroundColor: "var(--color-d4)",
-        borderWidth: "var(--bw)",
-        borderStyle: "solid",
-        borderColor: "var(--b2)",
-      }}
-    >
-      {children}
-    </span>
-  );
-}
+// ---------------------------------------------------------------------------
+//  Text helpers
+// ---------------------------------------------------------------------------
 
-/** Strip `${instance}: ` and `[${component}] ` prefixes that the backend prepends to text. */
 function cleanText(event: FeedEvent): string {
   let text = event.text;
   if (event.instance && text.startsWith(`${event.instance}: `)) {
@@ -62,175 +66,85 @@ function cleanText(event: FeedEvent): string {
   return text;
 }
 
+function statusCodeBadge(code: number): string {
+  if (code >= 500) return "feed-badge-crit";
+  if (code >= 400) return "feed-badge-warn";
+  return "feed-badge-muted";
+}
+
 // ---------------------------------------------------------------------------
-//  Line renderers
+//  Primary line — the main status content
 // ---------------------------------------------------------------------------
 
-/** Line 1: icon + badge + instance label + short status (always visible). */
-function renderLine1(event: FeedEvent): React.ReactNode {
+function renderPrimary(event: FeedEvent): React.ReactNode {
   const d = event.detail;
-  const isErr = event.isError;
-
-  const inst = event.instance ? (
-    <span className="text-t2 font-medium" style={{ marginRight: "var(--sp-1)" }}>
-      {event.instance}
-    </span>
-  ) : null;
 
   if (!d || d.type === "generic") {
-    return (
-      <>
-        {inst}
-        <span>{cleanText(event)}</span>
-      </>
-    );
+    return <span className="feed-text-secondary">{cleanText(event)}</span>;
   }
 
   switch (d.type) {
     case "connection": {
-      if (d.state === "connected") {
-        return (
-          <>
-            {inst}
-            <span className="text-s-ok">connected</span>
-          </>
-        );
-      }
-      if (d.state === "connecting") {
-        return (
-          <>
-            {inst}
-            <span className="text-t4">connecting</span>
-          </>
-        );
-      }
-      if (d.state === "disconnected") {
-        return (
-          <>
-            {inst}
-            <span className="text-s-warn">disconnected</span>
-          </>
-        );
-      }
-      if (d.reconnecting && !d.statusCode && !d.reason) {
-        return (
-          <>
-            {inst}
-            <span className="text-t4">reconnecting</span>
-          </>
-        );
-      }
+      if (d.state === "connected") return <span className="feed-text-ok">connected</span>;
+      if (d.state === "connecting") return <span className="feed-text-muted">connecting</span>;
+      if (d.state === "disconnected") return <span className="feed-text-warn">disconnected</span>;
+      if (d.reconnecting && !d.statusCode && !d.reason) return <span className="feed-text-muted">reconnecting</span>;
+
       const code = d.statusCode;
       const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
-      if (!code && !reason) {
-        return (
-          <>
-            {inst}
-            <span className="text-t4">{cleanText(event)}</span>
-          </>
-        );
-      }
+      if (!code && !reason) return <span className="feed-text-muted">{cleanText(event)}</span>;
+
       return (
         <>
-          {inst}
-          {code && <Badge color={statusCodeColor(code)}>{code}</Badge>}
-          {reason && (
-            <span
-              className={isErr ? "text-s-crit" : "text-t3"}
-              style={{ marginLeft: "var(--sp-1)" }}
-            >
-              {reason}
-            </span>
-          )}
-          {d.reconnecting && (
-            <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>
-              {"\u2192"} reconnecting
-            </span>
-          )}
-          {d.state === "connected" && (
-            <span className="text-s-ok" style={{ marginLeft: "var(--sp-1)" }}>
-              {"\u2192"} reconnected
-            </span>
-          )}
+          {code && <span className={`feed-badge ${statusCodeBadge(code)}`}>{code}</span>}
+          {reason && <span className={event.isError ? "feed-text-crit" : "feed-text-secondary"}>{reason}</span>}
+          {d.reconnecting && <span className="feed-text-muted">{"\u2192"} reconnecting</span>}
+          {d.state === "connected" && <span className="feed-text-ok">{"\u2192"} reconnected</span>}
         </>
       );
     }
 
     case "tool_error":
-      // Line 1 shows icon + tool name badge only — error body goes to line 2
-      return (
-        <>
-          {inst}
-          <Badge>{d.toolName}</Badge>
-        </>
-      );
+      return <span className="feed-badge feed-badge-tool">{d.toolName}</span>;
 
     case "session": {
       const shortId = d.sessionId ? d.sessionId.slice(0, 8) : undefined;
       return (
         <>
-          {inst}
-          <span className={isErr ? "text-s-crit" : "text-m-agt"}>{d.action}</span>
-          {shortId && (
-            <span className="text-t5" style={{ marginLeft: "var(--sp-1)" }}>
-              {shortId}
-            </span>
-          )}
+          <span className={event.isError ? "feed-text-crit" : "feed-text-agent"}>{d.action}</span>
+          {shortId && <span className="feed-text-dim">{shortId}</span>}
         </>
       );
     }
 
     case "health": {
-      const statusColor =
-        d.status === "online"
-          ? "text-s-ok"
-          : d.status === "unreachable"
-          ? "text-s-crit"
-          : "text-s-warn";
-      const label =
-        d.status === "online"
-          ? "came online"
-          : d.status === "unreachable"
-          ? "connection lost"
-          : `degraded \u2014 ${d.error ?? "unknown"}`;
-      return (
-        <>
-          {inst}
-          <span className={statusColor}>{label}</span>
-        </>
-      );
+      const cls = d.status === "online" ? "feed-text-ok"
+        : d.status === "unreachable" ? "feed-text-crit" : "feed-text-warn";
+      const label = d.status === "online" ? "came online"
+        : d.status === "unreachable" ? "connection lost"
+        : `degraded \u2014 ${d.error ?? "unknown"}`;
+      return <span className={cls}>{label}</span>;
     }
 
     case "message": {
-      const dirColor = d.direction === "inbound" ? "text-m-cht" : "text-m-agt";
-      const chatShort = d.chatJid
-        ? d.chatJid.replace(/@.*/, "").slice(-8)
-        : undefined;
+      const dirCls = d.direction === "inbound" ? "feed-badge-recv" : "feed-badge-sent";
       const countMatch = event.text.match(/\u00d7(\d+)/);
       const count = countMatch ? parseInt(countMatch[1], 10) : undefined;
       const isNonText = d.contentType && d.contentType !== "text";
+
       return (
         <>
-          {inst}
-          <Badge color={dirColor}>
-            {d.direction === "inbound" ? "recv" : "sent"}
+          <span className={`feed-badge ${dirCls}`}>
+            {d.direction === "inbound" ? "\u2193 recv" : "\u2191 sent"}
             {count && count > 1 ? ` \u00d7${count}` : ""}
-          </Badge>
+          </span>
           {d.senderName && d.direction === "inbound" && (
-            <span className="text-t2 font-medium" style={{ marginLeft: "var(--sp-1)" }}>
-              {d.senderName}
-            </span>
+            <span className="feed-text-primary">{d.senderName}</span>
           )}
-          {!d.senderName && chatShort && (
-            <span className="text-t4" style={{ marginLeft: "var(--sp-1)" }}>
-              {chatShort}
-            </span>
+          {!d.senderName && d.chatJid && (
+            <span className="feed-text-dim">{d.chatJid.replace(/@.*/, "").slice(-8)}</span>
           )}
-          {isNonText && (
-            <span className="text-t5" style={{ marginLeft: "var(--sp-1)" }}>
-              [{d.contentType}]
-            </span>
-          )}
+          {isNonText && <span className="feed-text-dim">[{d.contentType}]</span>}
         </>
       );
     }
@@ -238,131 +152,69 @@ function renderLine1(event: FeedEvent): React.ReactNode {
     case "import":
       return (
         <>
-          {inst}
-          <Badge>import</Badge>
-          <span className="text-t3" style={{ marginLeft: "var(--sp-1)" }}>
-            {d.table}
-            {d.skipped
-              ? " (skipped)"
-              : d.count !== undefined
-              ? ` \u2014 ${d.count} rows`
-              : ""}
+          <span className="feed-badge feed-badge-muted">import</span>
+          <span className="feed-text-secondary">
+            {d.table ?? ""}{d.skipped ? " (skipped)" : d.count !== undefined ? ` \u2014 ${d.count} rows` : ""}
           </span>
         </>
       );
 
     case "tool_use":
-      return (
-        <>
-          {inst}
-          <Badge>{d.toolName}</Badge>
-        </>
-      );
+      return <span className="feed-badge feed-badge-tool">{d.toolName}</span>;
 
-    default: {
-      return (
-        <>
-          {inst}
-          <span>{cleanText(event)}</span>
-        </>
-      );
-    }
+    default:
+      return <span className="feed-text-secondary">{cleanText(event)}</span>;
   }
 }
 
-/**
- * Line 2: detail / preview (conditional).
- * - tool_error  → full error text (CSS controls truncation vs expand via hover)
- * - message     → preview text
- * - session     → disconnect reason
- */
-function renderLine2(event: FeedEvent, hovered: boolean): React.ReactNode {
+// ---------------------------------------------------------------------------
+//  Detail line — preview, error body, reason
+// ---------------------------------------------------------------------------
+
+function renderDetail(event: FeedEvent, expanded: boolean): React.ReactNode {
   const d = event.detail;
   if (!d) return null;
 
   if (d.type === "tool_error") {
     return (
-      <span
-        className="text-s-crit font-mono"
-        style={{
-          fontSize: "var(--font-size-xs)",
-          wordBreak: "break-word",
-          whiteSpace: hovered ? "pre-wrap" : "nowrap",
-          overflow: hovered ? "visible" : "hidden",
-          textOverflow: hovered ? "clip" : "ellipsis",
-          display: "block",
-        }}
+      <div
+        className="feed-detail feed-detail-error"
+        style={expanded ? { whiteSpace: "pre-wrap", overflow: "visible", textOverflow: "clip" } : undefined}
       >
         {d.error}
-      </span>
+      </div>
     );
   }
 
   if (d.type === "message" && d.preview) {
-    return (
-      <span
-        className="text-t4 font-mono"
-        style={{
-          fontSize: "var(--font-size-xs)",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          display: "block",
-        }}
-      >
-        {d.preview}
-      </span>
-    );
+    return <div className="feed-detail">{d.preview}</div>;
   }
 
   if (d.type === "session" && d.reason) {
-    return (
-      <span
-        className="text-t4 font-mono"
-        style={{
-          fontSize: "var(--font-size-xs)",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          display: "block",
-        }}
-      >
-        {d.reason}
-      </span>
-    );
+    return <div className="feed-detail">\u2014 {d.reason}</div>;
   }
 
   return null;
 }
 
-/** Line 3 (metadata): timestamp · component · messageId · chatJid · toolId — only on hover/focus. */
-function renderMetadata(event: FeedEvent): React.ReactNode {
+// ---------------------------------------------------------------------------
+//  Metadata row — timestamp, component, IDs (hover/focus only)
+// ---------------------------------------------------------------------------
+
+function renderMeta(event: FeedEvent): string {
   const d = event.detail;
   const parts: string[] = [];
-
   parts.push(formatTimeWithSeconds(event.time));
-
   if (event.component) parts.push(event.component);
-
-  if (d) {
-    if (d.type === "message") {
-      if (d.messageId) parts.push(d.messageId);
-      if (d.chatJid) parts.push(d.chatJid);
-    } else if (d.type === "tool_error" || d.type === "tool_use") {
-      if (d.toolId) parts.push(d.toolId);
-    } else if (d.type === "session") {
-      if (d.chatJid) parts.push(d.chatJid);
-    }
+  if (d?.type === "message") {
+    if (d.messageId) parts.push(d.messageId);
+    if (d.chatJid) parts.push(d.chatJid);
+  } else if (d?.type === "tool_error" || d?.type === "tool_use") {
+    if (d.toolId) parts.push(d.toolId);
+  } else if (d?.type === "session" && d.chatJid) {
+    parts.push(d.chatJid);
   }
-
-  return (
-    <span
-      className="text-t5 font-mono"
-      style={{ fontSize: "var(--font-size-xs)" }}
-    >
-      {parts.join(" \u00b7 ")}
-    </span>
-  );
+  return parts.join(" \u00b7 ");
 }
 
 // ---------------------------------------------------------------------------
@@ -370,62 +222,55 @@ function renderMetadata(event: FeedEvent): React.ReactNode {
 // ---------------------------------------------------------------------------
 
 const FeedCard: FC<{ event: FeedEvent }> = ({ event }) => {
-  const [hovered, setHovered] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const isErr = !!event.isError;
-
-  const line2 = renderLine2(event, hovered);
+  const detail = renderDetail(event, expanded);
+  const meta = renderMeta(event);
 
   return (
     <div
-      className="feed-card-enter c-hover"
+      className={`feed-card ${isErr ? "feed-card--error" : ""}`}
       tabIndex={0}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onFocus={() => setHovered(true)}
-      onBlur={() => setHovered(false)}
-      style={{
-        padding: "var(--sp-2h) var(--sp-3)",
-        borderBottom: "var(--bw) solid var(--b1)",
-        outline: "none",
-        ...(isErr ? { backgroundColor: "var(--s-crit-wash)" } : {}),
-      }}
+      onMouseEnter={() => setExpanded(true)}
+      onMouseLeave={() => setExpanded(false)}
+      onFocus={() => setExpanded(true)}
+      onBlur={() => setExpanded(false)}
+      style={{ borderLeftColor: severityColor(event) }}
     >
-      {/* Line 1: icon + content */}
-      <div
-        className="flex items-center font-mono"
-        style={{
-          gap: "var(--sp-1)",
-          fontSize: "var(--font-size-sm)",
-          color: isErr ? "var(--color-s-crit)" : "var(--color-t3)",
-        }}
-      >
-        {/* Icon — 14px fixed width keeps content aligned */}
-        <span
-          className="flex-shrink-0 flex items-center"
-          style={{ width: 14, height: 14 }}
-        >
+      {/* Row: time | icon | content */}
+      <div className="feed-card__row">
+        <span className="feed-card__time">
+          {formatTimeWithSeconds(event.time)}
+        </span>
+
+        <span className="feed-card__icon">
           <FeedIcon event={event} />
         </span>
 
-        {/* Line-1 content */}
-        <span className="flex items-center" style={{ gap: "var(--sp-1)" }}>
-          {renderLine1(event)}
+        <span className="feed-card__instance">
+          {event.instance ?? ""}
+        </span>
+
+        <span className="feed-card__content">
+          {renderPrimary(event)}
         </span>
       </div>
 
-      {/* Line 2: detail/preview (conditional) */}
-      {line2 && (
-        <div style={{ paddingLeft: 22 }}>
-          {line2}
+      {/* Detail line — preview / error / reason */}
+      {detail && (
+        <div className="feed-card__detail-row">
+          {detail}
         </div>
       )}
 
-      {/* Line 3: metadata — only on hover/focus */}
-      {hovered && (
-        <div style={{ paddingLeft: 22, marginTop: "var(--sp-1)" }}>
-          {renderMetadata(event)}
-        </div>
-      )}
+      {/* Metadata — hover/focus only */}
+      <div
+        className="feed-card__meta"
+        style={{ opacity: expanded ? 0.6 : 0, height: expanded ? "auto" : 0 }}
+        aria-hidden={!expanded}
+      >
+        {meta}
+      </div>
     </div>
   );
 };

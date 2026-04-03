@@ -261,26 +261,291 @@ body::before {
   100% { opacity: 1; transform: translateY(0); }
 }
 
-/* ═══ Feed entry animation ═══ */
+/* ═══════════════════════════════════════════════════════════════════════════
+   Feed — operational activity surface
+   Design: surgical instrument panel. Each card is a horizontal strip with
+   a colored severity edge, fixed-width time column, icon gutter, and
+   layered content zones. Hover discloses metadata without layout shift.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Container ── */
+.feed-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-d1);
+}
+
+.feed-container--paused {
+  box-shadow: inset 0 0 0 1px rgba(246, 173, 85, 0.12);
+}
+
+/* ── Toolbar ── */
+.feed-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 0 var(--sp-3);
+  min-height: var(--toolbar-h);
+  background: var(--color-d3);
+  border-bottom: var(--bw) solid var(--b1);
+}
+
+.feed-toolbar__left {
+  display: flex;
+  align-items: center;
+}
+
+.feed-toolbar__title {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-heading);
+  font-weight: 600;
+  color: var(--color-t1);
+  letter-spacing: var(--tracking-tight);
+}
+
+.feed-toolbar__pause {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-t5);
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+
+.feed-toolbar__pause:hover {
+  color: var(--color-t3);
+  background: var(--color-d4);
+}
+
+/* ── Filter bar ── */
+.feed-filters {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: var(--sp-1h) var(--sp-3);
+  background: var(--color-d2);
+  border-bottom: var(--bw) solid var(--b2);
+}
+
+.feed-filters__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.feed-filters__sep {
+  width: 1px;
+  height: 12px;
+  background: var(--b2);
+  margin: 0 var(--sp-1);
+}
+
+/* ── Stream ── */
+.feed-stream {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--b2) transparent;
+}
+
+.feed-stream::-webkit-scrollbar { width: 4px; }
+.feed-stream::-webkit-scrollbar-track { background: transparent; }
+.feed-stream::-webkit-scrollbar-thumb { background: var(--b2); border-radius: 2px; }
+
+.feed-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-12) var(--sp-4);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-t5);
+  letter-spacing: var(--tracking-pill);
+}
+
+/* ══ Card ══ */
 @keyframes feed-card-enter {
   from { opacity: 0; transform: translateY(-2px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
-.feed-card-enter {
-  animation: feed-card-enter 150ms ease-out both;
+.feed-card {
+  position: relative;
+  padding: var(--sp-1h) var(--sp-3) var(--sp-1h) var(--sp-2);
+  border-bottom: var(--bw) solid var(--b1);
+  border-left: 2px solid transparent;
+  outline: none;
+  animation: feed-card-enter 120ms ease-out both;
+  transition:
+    background-color var(--dur-fast) ease,
+    border-left-color var(--dur-fast) ease;
 }
 
-.feed-card-enter:hover,
-.feed-card-enter:focus-visible {
-  background-color: var(--color-d3) !important;
+.feed-card:hover,
+.feed-card:focus-visible {
+  background-color: var(--color-d2);
+}
+
+.feed-card--error {
+  background-color: var(--s-crit-wash);
+}
+
+.feed-card--error:hover,
+.feed-card--error:focus-visible {
+  background-color: rgba(252, 129, 129, 0.1);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .feed-card-enter {
-    animation: none;
-  }
+  .feed-card { animation: none; }
 }
+
+/* ── Card row ── */
+.feed-card__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 18px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.feed-card__time {
+  flex-shrink: 0;
+  width: 62px;
+  color: var(--color-t5);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.01em;
+  text-align: right;
+}
+
+.feed-card__icon {
+  flex-shrink: 0;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.feed-card__instance {
+  flex-shrink: 0;
+  min-width: 56px;
+  max-width: 80px;
+  color: var(--color-t2);
+  font-weight: 500;
+  font-size: var(--font-size-label);
+  letter-spacing: var(--tracking-pill);
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feed-card__content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ── Detail row ── */
+.feed-card__detail-row {
+  padding-left: 86px; /* time(62) + gap(8) + icon(14) + gap(2) */
+  margin-top: 1px;
+}
+
+.feed-detail {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-t4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.5;
+}
+
+.feed-detail-error {
+  color: var(--color-s-crit);
+  opacity: 0.8;
+}
+
+/* ── Meta row ── */
+.feed-card__meta {
+  padding-left: 86px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-t5);
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  transition: opacity var(--dur-fast) ease;
+  line-height: 1.5;
+  user-select: all;
+}
+
+/* ══ Inline badges ══ */
+.feed-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-label);
+  font-weight: 500;
+  letter-spacing: var(--tracking-pill);
+  padding: 0 var(--sp-1h);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.feed-badge-crit {
+  color: var(--color-s-crit);
+  background: var(--s-crit-wash);
+}
+
+.feed-badge-warn {
+  color: var(--color-s-warn);
+  background: var(--s-warn-wash);
+}
+
+.feed-badge-muted {
+  color: var(--color-t3);
+  background: var(--color-d4);
+  border: var(--bw) solid var(--b2);
+}
+
+.feed-badge-tool {
+  color: var(--color-t2);
+  background: var(--color-d5);
+  border: var(--bw) solid var(--b2);
+}
+
+.feed-badge-recv {
+  color: var(--color-m-cht);
+  background: var(--m-cht-wash);
+}
+
+.feed-badge-sent {
+  color: var(--color-m-agt);
+  background: var(--m-agt-wash);
+}
+
+/* ══ Text utilities ══ */
+.feed-text-primary { color: var(--color-t1); font-weight: 500; }
+.feed-text-secondary { color: var(--color-t3); }
+.feed-text-muted { color: var(--color-t4); }
+.feed-text-dim { color: var(--color-t5); font-size: var(--font-size-xs); }
+.feed-text-ok { color: var(--color-s-ok); }
+.feed-text-warn { color: var(--color-s-warn); }
+.feed-text-crit { color: var(--color-s-crit); }
+.feed-text-agent { color: var(--color-m-agt); }
 
 /* Shimmer animation for loading skeletons */
 @keyframes shimmer {
