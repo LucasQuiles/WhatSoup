@@ -61,7 +61,6 @@
   --fw-normal: 400;
   --fw-medium: 500;
   --fw-semibold: 600;
-  --fw-bold: 800;
 }
 
 :root {
@@ -94,7 +93,6 @@
   --s-warn-soft: rgba(246,173,85, 0.19);
   --s-warn-border: rgba(246,173,85, 0.12);
   --s-crit-border: rgba(252,129,129, 0.1);
-  --s-crit-wash-hover: rgba(252,129,129, 0.1);
   --s-crit-ring: rgba(252,129,129, 0.3);
   --s-ok-ring: rgba(45,212,168, 0.3);
   /* ═══ Elevation shadows ═══ */
@@ -412,7 +410,7 @@ body::before {
 
 .fc--error:hover,
 .fc--error:focus-visible {
-  background-color: var(--s-crit-wash-hover);
+  background-color: var(--s-crit-border);
 }
 
 /* Tool errors get more breathing room */
@@ -599,7 +597,7 @@ body::before {
 /* Column header: mono 500 label 0.12em uppercase --t5 */
 @utility c-col-header {
   font-family: var(--font-mono);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   font-size: var(--font-size-label);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
@@ -609,7 +607,7 @@ body::before {
 /* Label: mono 500 label 0.06em --t4 */
 @utility c-label {
   font-family: var(--font-mono);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   font-size: var(--font-size-label);
   letter-spacing: var(--tracking-label);
   color: var(--color-t4);
@@ -618,7 +616,7 @@ body::before {
 /* Section label: mono 500 sm 0.12em uppercase --t4 */
 @utility c-section-label {
   font-family: var(--font-mono);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   font-size: var(--font-size-sm);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
@@ -628,7 +626,7 @@ body::before {
 /* Data value: mono 400 data --t2 */
 @utility c-data {
   font-family: var(--font-mono);
-  font-weight: 400;
+  font-weight: var(--fw-normal);
   font-size: var(--font-size-data);
   color: var(--color-t2);
 }
@@ -636,14 +634,14 @@ body::before {
 /* Section heading: sans 600 heading --t1 */
 @utility c-heading {
   font-family: var(--font-sans);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   font-size: var(--font-size-heading);
   color: var(--color-t1);
 }
 
 @utility c-heading-lg {
   font-family: var(--font-sans);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   font-size: var(--font-size-lg);
   color: var(--color-t1);
 }
@@ -651,7 +649,7 @@ body::before {
 /* Body text: sans 400 body --t2 */
 @utility c-body {
   font-family: var(--font-sans);
-  font-weight: 400;
+  font-weight: var(--fw-normal);
   font-size: var(--font-size-body);
   color: var(--color-t2);
 }
@@ -659,7 +657,7 @@ body::before {
 /* KPI value: mono 600 2xl tight (color set per-card) */
 @utility c-kpi-value {
   font-family: var(--font-mono);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   font-size: var(--font-size-2xl);
   letter-spacing: var(--tracking-tight);
   line-height: 1.1;
@@ -681,7 +679,7 @@ body::before {
   padding: var(--btn-pad-v) var(--msg-pad-h);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-data);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   border: var(--bw) solid var(--b2);
   background: var(--color-d4);
   color: var(--color-t2);
