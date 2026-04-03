@@ -132,7 +132,8 @@
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
   --sep-h: 14px;             /* filter separator height */
-  --input-h: 32px;           /* search input / icon button height */
+  --input-h: 32px;           /* search input height */
+  --input-btn: 28px;         /* square icon button — optically corrected */
   --feed-min-w: 240px;       /* activity feed min width */
   --feed-col-time: 68px;     /* feed card time column width */
   --feed-col-icon: 16px;     /* feed card icon column width */
@@ -756,8 +757,8 @@ body::before {
   padding: 0;
   gap: 0;
   min-width: 0;
-  width: calc(var(--input-h) - 2px);
-  height: calc(var(--input-h) - 2px);
+  width: var(--input-btn);
+  height: var(--input-btn);
   aspect-ratio: 1;
   justify-content: center;
   overflow: hidden;
