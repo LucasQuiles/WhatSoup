@@ -506,6 +506,8 @@ body::before {
 
 /* ── Quick actions row ── */
 .fc-actions {
+  display: flex;
+  gap: var(--sp-1);
   margin-top: var(--sp-1);
   padding-left: 76px;
 }
@@ -513,16 +515,33 @@ body::before {
 .fc-action {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
+  gap: 0;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: 500;
   color: var(--color-t4);
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--sp-1h);
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: var(--bw) solid var(--b2);
   background: var(--color-d4);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Label hidden by default, revealed on hover */
+.fc-action__label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width var(--dur-norm) ease, opacity var(--dur-fast) ease, margin var(--dur-norm) ease;
+  margin-left: 0;
+}
+
+.fc-action:hover .fc-action__label {
+  max-width: 80px;
+  opacity: 1;
+  margin-left: var(--sp-1);
 }
 
 .fc-action:hover {

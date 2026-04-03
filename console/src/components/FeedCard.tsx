@@ -225,6 +225,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
       }}
     >
       <Copy size={12} strokeWidth={2} />
+      <span className="fc-action__label">copy</span>
     </button>
   );
 
@@ -243,6 +244,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
         }}
       >
         <ExternalLink size={12} strokeWidth={2} />
+        <span className="fc-action__label">open</span>
       </button>
     );
   }
@@ -261,6 +263,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
           onClick={(e) => { e.stopPropagation(); onRestart(inst); }}
         >
           <RotateCw size={12} strokeWidth={2} />
+          <span className="fc-action__label">restart</span>
         </button>
       );
     }
@@ -280,6 +283,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate }: {
           onClick={(e) => { e.stopPropagation(); onStop(inst); }}
         >
           <Square size={12} strokeWidth={2} />
+          <span className="fc-action__label">stop</span>
         </button>
       );
     }
