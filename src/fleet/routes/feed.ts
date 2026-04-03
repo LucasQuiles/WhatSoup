@@ -534,18 +534,17 @@ export function handleGetFeed(
   }
 
   // 3. Coalesce connection lifecycle per instance
-  //    A reconnect cycle produces: error → reconnecting → connecting → connected
-  //    Collapse into one card per instance per time window (same second).
-  //    Also suppress stream-error duplicates when a richer connection-closed exists.
   const coalesced = coalesceConnectionEvents(events);
 
-  // 4. Collapse rapid outbound sends by instance + chatJid
+  // 4. Enrich message events with DB-backed content previews BEFORE collapsing,
+  //    so each individual message gets its own preview by messageId.
+  //    After collapsing, the merged card carries the last event's preview.
+  enrichMessagePreviews(coalesced, instances, deps.dbReader);
+
+  // 5. Collapse rapid outbound sends by instance + chatJid
   const collapsed = collapseOutboundMessages(coalesced);
 
-  // 4b. Enrich message events with DB-backed content previews
-  enrichMessagePreviews(collapsed, instances, deps.dbReader);
-
-  // 5. Deduplicate identical events (messageId-aware)
+  // 6. Deduplicate identical events (messageId-aware)
   const seen = new Set<string>();
   const deduped = collapsed.filter(e => {
     const d = e.detail;

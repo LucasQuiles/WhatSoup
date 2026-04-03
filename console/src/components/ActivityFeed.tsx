@@ -19,14 +19,28 @@ const modeTextColor: Record<string, string> = {
 
 type TypeFilter = "all" | "messages" | "connections" | "errors" | "health";
 
+/** Derive a stable key for a feed event (no array index). */
+function eventKey(event: FeedEvent): string {
+  const d = event.detail;
+  const msgId = d?.type === "message" ? (d as { messageId?: string }).messageId : undefined;
+  if (msgId) return `msg:${event.instance ?? ""}:${msgId}`;
+  return `${event.instance ?? ""}:${event.time}:${d?.type ?? "generic"}`;
+}
+
 const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [paused, setPaused] = useState(false);
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
+  // Freeze displayed events when paused.
+  // useMemo with paused as dep: when paused becomes true, memoize the current events.
+  // While paused stays true and events change, the memo does not recompute.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const displayEvents = useMemo(() => events, [paused ? null : events]);
+
   const filtered = useMemo(() => {
-    let result = events;
+    let result = displayEvents;
     if (modeFilter !== "all") result = result.filter((e) => e.mode === modeFilter);
     if (errorsOnly) result = result.filter((e) => e.isError);
     if (typeFilter !== "all") {
@@ -42,7 +56,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
       });
     }
     return result;
-  }, [events, modeFilter, errorsOnly, typeFilter]);
+  }, [displayEvents, modeFilter, errorsOnly, typeFilter]);
 
   const errorCount = useMemo(() => events.filter((e) => e.isError).length, [events]);
 
@@ -125,8 +139,8 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
       {/* Feed items */}
       <div className="flex-1 overflow-y-auto scrollbar-hide">
-        {filtered.map((event, i) => (
-          <FeedCard key={`${event.time}-${event.mode}-${i}`} event={event} />
+        {filtered.map((event) => (
+          <FeedCard key={eventKey(event)} event={event} />
         ))}
 
         {filtered.length === 0 && (

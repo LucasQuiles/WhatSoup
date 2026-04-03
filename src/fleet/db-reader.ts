@@ -178,7 +178,7 @@ export class FleetDbReader {
       const placeholders = messageIds.map(() => '?').join(', ');
       return db.prepare(`
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
-               message_id, content, content_type, timestamp, is_from_me, raw_message
+               message_id, content, content_type, timestamp, is_from_me
         FROM messages
         WHERE message_id IN (${placeholders})
           AND deleted_at IS NULL
@@ -200,7 +200,7 @@ export class FleetDbReader {
     return this.query(name, dbPath, (db) => {
       return db.prepare(`
         SELECT pk, conversation_key, chat_jid, sender_jid, sender_name,
-               message_id, content, content_type, timestamp, is_from_me, raw_message
+               message_id, content, content_type, timestamp, is_from_me
         FROM messages
         WHERE conversation_key = ? AND is_from_me = ? AND deleted_at IS NULL
           AND timestamp BETWEEN ? AND ?
