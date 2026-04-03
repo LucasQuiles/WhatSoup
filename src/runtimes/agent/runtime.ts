@@ -1337,8 +1337,21 @@ export class AgentRuntime implements Runtime {
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
+      let lastSessionStatus: string | null = null;
+      let lastSessionStartedAt: string | null = null;
+      let mostRecentStartMs = -1;
       for (const s of sessions) {
-        if (s.getStatus().active) activeSessions++;
+        const st = s.getStatus();
+        if (st.active) activeSessions++;
+        // Track the most recently started session for lastSession* fields
+        if (st.startedAt) {
+          const startMs = new Date(st.startedAt).getTime();
+          if (startMs > mostRecentStartMs) {
+            mostRecentStartMs = startMs;
+            lastSessionStatus = st.active ? 'active' : 'idle';
+            lastSessionStartedAt = st.startedAt;
+          }
+        }
       }
       let healthStatus: RuntimeHealth['status'] = 'healthy';
       // For per_chat: idle sessions (all inactive) are normal — not degraded.
@@ -1352,8 +1365,10 @@ export class AgentRuntime implements Runtime {
       return {
         status: healthStatus,
         details: {
-          sessionCount: sessions.length,
           activeSessions,
+          lastSessionStatus,
+          lastSessionStartedAt,
+          sessionCount: sessions.length,
           recentCrashes: this.recentCrashCount,
           lastCrashAt: this.lastCrashAt,
         },

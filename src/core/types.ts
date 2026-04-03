@@ -46,3 +46,25 @@ export interface RuntimeHealth {
   status: 'healthy' | 'degraded' | 'unhealthy';
   details: Record<string, unknown>;
 }
+
+export interface InstanceInfo {
+  name: string;
+  mode: 'passive' | 'chat' | 'agent';
+  accessMode: string;
+}
+
+export interface ChatRuntimeDetails {
+  queueDepth: number;
+  enrichmentUnprocessed: number;
+}
+
+export interface AgentRuntimeDetails {
+  activeSessions: number;
+  lastSessionStatus: string | null;
+  lastSessionStartedAt: string | null;
+}
+
+export interface PassiveRuntimeDetails {
+  unreadCount: number;
+  lastActivityAt: string | null;
+}

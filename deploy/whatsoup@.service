@@ -25,6 +25,9 @@ RestartMaxDelaySec=120
 # session.shutdown() can mark them as clean.
 KillMode=mixed
 TimeoutStopSec=15
+# Load instance-specific tokens (health API auth). The - prefix means
+# systemd won't fail if the file is missing (token simply won't be set).
+EnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env
 
 [Install]
 WantedBy=graphical-session.target

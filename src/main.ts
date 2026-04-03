@@ -5,7 +5,7 @@ import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
-import { deleteOldMessages } from './core/messages.ts';
+import { deleteOldMessages, getMessagesBySender } from './core/messages.ts';
 import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
@@ -19,7 +19,6 @@ import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
-import { getMessagesBySender } from './core/messages.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {

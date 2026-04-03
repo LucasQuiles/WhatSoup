@@ -71,23 +71,17 @@ export class PassiveRuntime implements Runtime {
     let unreadCount = 0;
     let lastActivityAt: string | null = null;
     try {
-      const unreadRow = this.db.raw.prepare(
-        'SELECT COALESCE(SUM(unread_count), 0) AS cnt FROM chats'
-      ).get() as { cnt: number };
-      unreadCount = unreadRow.cnt;
-
-      const activityRow = this.db.raw.prepare(
-        'SELECT MAX(updated_at) AS latest FROM chats'
-      ).get() as { latest: string | null };
-      lastActivityAt = activityRow.latest;
+      const row = this.db.raw
+        .prepare('SELECT COALESCE(SUM(unread_count), 0) as total, MAX(updated_at) as last_at FROM chats')
+        .get() as { total: number; last_at: string | null } | undefined;
+      if (row) {
+        unreadCount = row.total;
+        lastActivityAt = row.last_at;
+      }
     } catch {
-      // DB unavailable — return defaults
+      // DB error — fall back to safe defaults
     }
-
-    return {
-      status: 'healthy',
-      details: { unreadCount, lastActivityAt },
-    };
+    return { status: 'healthy', details: { unreadCount, lastActivityAt } };
   }
 
   async shutdown(): Promise<void> {
