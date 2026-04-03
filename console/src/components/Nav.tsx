@@ -6,14 +6,19 @@ import {
   Terminal,
   CheckCircle2,
   AlertTriangle,
+  Download,
 } from "lucide-react";
 
 interface NavProps {
   alertCount?: number;
   unreadCount?: number;
+  version?: string;
+  updateAvailable?: boolean;
+  remoteSha?: string;
+  onUpdateClick?: () => void;
 }
 
-const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
+const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick }) => {
   return (
     <nav
       className="bg-d1 flex items-center justify-between flex-shrink-0"
@@ -163,6 +168,28 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0 }) => {
               {alertCount} alert{alertCount !== 1 && "s"}
             </span>
           </>
+        )}
+        {version && version !== 'unknown' && (
+          updateAvailable && remoteSha ? (
+            <button
+              onClick={onUpdateClick}
+              className="flex items-center gap-1 c-hover cursor-pointer"
+              style={{
+                color: 'var(--color-m-cht)',
+                padding: '2px 6px',
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--m-cht-soft)',
+              }}
+              title={`Update available: ${version} → ${remoteSha}`}
+            >
+              <Download size={12} strokeWidth={2} />
+              <span>{version} → {remoteSha}</span>
+            </button>
+          ) : (
+            <span className="text-t5" title={`Version ${version}`}>
+              v{version}
+            </span>
+          )
         )}
       </div>
     </nav>
