@@ -752,7 +752,7 @@ body::before {
   opacity: 1;
 }
 .c-btn-add {
-  padding: 6px 10px;
+  padding: var(--sp-1) var(--sp-2h);
   gap: 0;
   min-width: 0;
   overflow: hidden;
