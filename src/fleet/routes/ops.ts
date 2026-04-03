@@ -213,6 +213,23 @@ export async function handleConfigUpdate(
     merged.adminPhones = [...new Set((patch.adminPhones as string[]).map((p: string) => normalizePhoneE164(p)))];
   }
 
+  // Cross-field constraint: sessionScope "single" requires accessMode "self_only"
+  const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
+  if (mergedAo?.sessionScope === 'single' && merged.accessMode !== 'self_only') {
+    jsonResponse(res, 400, { error: 'sessionScope "single" requires accessMode "self_only"' });
+    return;
+  }
+
+  // Validate pluginDirs paths are within home directory
+  if (Array.isArray(mergedAo?.pluginDirs)) {
+    for (const dir of mergedAo!.pluginDirs as unknown[]) {
+      if (typeof dir !== 'string' || !path.resolve(dir).startsWith(os.homedir() + path.sep)) {
+        jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
+        return;
+      }
+    }
+  }
+
   // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
   if (patch.claudeMd && merged.type === 'agent') {
     const ao = merged.agentOptions as Record<string, unknown> | undefined;

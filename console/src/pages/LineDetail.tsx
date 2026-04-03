@@ -709,7 +709,7 @@ function ConfigEditDialog({
                   )}
                 </label>
                 {renderField(key, originalValue)}
-                {FIELD_VALIDATORS[key]?.(currentValue(key)) && (
+                {key in patch && FIELD_VALIDATORS[key]?.(currentValue(key)) && (
                   <span className="font-mono" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)', display: 'block' }}>
                     {FIELD_VALIDATORS[key]!(currentValue(key))}
                   </span>
