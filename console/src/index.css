@@ -756,8 +756,8 @@ body::before {
   padding: 0;
   gap: 0;
   min-width: 0;
-  width: var(--input-h);
-  height: var(--input-h);
+  width: calc(var(--input-h) - 2px);
+  height: calc(var(--input-h) - 2px);
   justify-content: center;
   overflow: hidden;
   white-space: nowrap;
