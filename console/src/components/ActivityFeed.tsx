@@ -1,9 +1,12 @@
 import { type FC, useState, useMemo } from "react";
-import { Pause, Play, AlertTriangle, Circle } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Pause, Play, AlertTriangle, Circle, Square } from "lucide-react";
 import FilterPill from "./FilterPill";
 import FeedCard from "./FeedCard";
+import ConfirmDialog from "./ConfirmDialog";
 import type { Mode, FeedEvent } from "../types";
 import { api } from "../lib/api";
+import { useToast } from "../hooks/toast-context";
 
 interface ActivityFeedProps {
   events: FeedEvent[];
@@ -37,6 +40,10 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [stopTarget, setStopTarget] = useState<string | null>(null);
+
   const displayEvents = snapshot ?? events;
 
   const filtered = useMemo(() => {
@@ -61,7 +68,27 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const errorCount = useMemo(() => displayEvents.filter((e) => e.isError).length, [displayEvents]);
 
   const handleRestart = (instance: string) => {
-    api.restart(instance).catch(() => { /* toast handled upstream */ });
+    toast.info(`Restarting ${instance}...`);
+    api.restart(instance)
+      .then(() => toast.success(`${instance} restart requested`))
+      .catch((err: Error) => toast.error(`Failed to restart: ${err.message}`));
+  };
+
+  const handleStop = (instance: string) => {
+    setStopTarget(instance);
+  };
+
+  const confirmStop = () => {
+    if (!stopTarget) return;
+    toast.info(`Stopping ${stopTarget}...`);
+    api.stopInstance(stopTarget)
+      .then(() => toast.success(`${stopTarget} stop requested`))
+      .catch((err: Error) => toast.error(`Failed to stop: ${err.message}`));
+    setStopTarget(null);
+  };
+
+  const handleNavigate = (path: string) => {
+    navigate(path);
   };
 
   return (
@@ -152,7 +179,13 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
       {/* ── Feed stream ── */}
       <div className="feed-stream">
         {filtered.map((event) => (
-          <FeedCard key={eventKey(event)} event={event} onRestart={handleRestart} />
+          <FeedCard
+            key={eventKey(event)}
+            event={event}
+            onRestart={handleRestart}
+            onStop={handleStop}
+            onNavigate={handleNavigate}
+          />
         ))}
 
         {filtered.length === 0 && (
@@ -161,6 +194,18 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={!!stopTarget}
+        title="Stop line"
+        confirmLabel="Stop line"
+        confirmVariant="danger"
+        confirmIcon={<Square size={14} strokeWidth={2} />}
+        onConfirm={confirmStop}
+        onCancel={() => setStopTarget(null)}
+      >
+        Stop the <strong>{stopTarget}</strong> line? This will disconnect the WhatsApp session.
+      </ConfirmDialog>
     </div>
   );
 };
