@@ -114,9 +114,9 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
         );
       }
 
-      // cwd is required
-      if (typeof opts['cwd'] !== 'string' || (opts['cwd'] as string).trim() === '') {
-        throw new Error('agentOptions.cwd is required and must be a non-empty string');
+      // cwd is optional — empty/missing means "use homedir() at runtime"
+      if (opts['cwd'] !== undefined && typeof opts['cwd'] !== 'string') {
+        throw new Error('agentOptions.cwd must be a string when provided');
       }
 
       // instructionsPath is optional but must be a string when present

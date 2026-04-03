@@ -354,8 +354,8 @@ describe('loadInstance — agentOptions: sessionScope is required', () => {
   });
 });
 
-describe('loadInstance — agentOptions: cwd is required', () => {
-  it('rejects agent with agentOptions missing cwd', () => {
+describe('loadInstance — agentOptions: cwd is optional', () => {
+  it('accepts agent with agentOptions missing cwd (defaults to homedir at runtime)', () => {
     writeInstance(path.join(tmpDir, 'config'), 'no-cwd-agent', {
       name: 'no-cwd-agent',
       type: 'agent',
@@ -365,7 +365,39 @@ describe('loadInstance — agentOptions: cwd is required', () => {
         sessionScope: 'single',
       },
     });
-    expect(() => loadInstance('no-cwd-agent')).toThrow(/cwd/i);
+    loadInstance('no-cwd-agent');
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.agentOptions.cwd).toBeUndefined();
+  });
+
+  it('accepts agent with empty string cwd (defaults to homedir at runtime)', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'empty-cwd-agent', {
+      name: 'empty-cwd-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        cwd: '',
+      },
+    });
+    loadInstance('empty-cwd-agent');
+    const config = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(config.agentOptions.cwd).toBe('');
+  });
+
+  it('rejects agent with non-string cwd', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-cwd-agent', {
+      name: 'bad-cwd-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        cwd: 42,
+      },
+    });
+    expect(() => loadInstance('bad-cwd-agent')).toThrow(/cwd/i);
   });
 });
 
