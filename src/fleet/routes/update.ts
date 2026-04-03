@@ -66,8 +66,11 @@ export async function handleUpdate(
     // Pre-flight: reject if working tree is dirty (uncommitted changes would cause pull conflicts)
     try {
       const { stdout: porcelain } = await execFileAsync('git', ['status', '--porcelain'], { cwd: repoRoot, timeout: 5_000 });
-      if (porcelain.trim()) {
-        writeSSE('error', { step: 'pull', message: `Working tree has uncommitted changes — commit or stash before updating.\n${porcelain.trim()}` });
+      // Only block on tracked-file modifications (M, A, D, R, etc.) — untracked files (??) are
+      // safe for git pull and should not prevent updates.
+      const trackedChanges = porcelain.split('\n').filter(l => l.trim() && !l.startsWith('??'));
+      if (trackedChanges.length > 0) {
+        writeSSE('error', { step: 'pull', message: `Working tree has uncommitted changes — commit or stash before updating.\n${trackedChanges.join('\n')}` });
         endOnce();
         return;
       }

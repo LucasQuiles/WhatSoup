@@ -344,6 +344,7 @@ describe('handleUpdate — vite build failure', () => {
     const buildErr: any = new Error('build failed');
     buildErr.stderr = 'error: [vite] Transform failed with 3 errors.';
     execFileAsyncSpy.mockRejectedValueOnce(buildErr);                         // vite build
+    execFileAsyncSpy.mockResolvedValueOnce({ stdout: '', stderr: '' });      // rollback: git reset --hard
 
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
@@ -358,14 +359,14 @@ describe('handleUpdate — vite build failure', () => {
   });
 
   it('calls res.end after build failure', async () => {
+    const err2: any = new Error('fail'); err2.stderr = 'vite error';
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })            // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })       // pull
-      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }); // diff
-    const buildErr: any = new Error('fail');
-    buildErr.stderr = 'vite error';
-    execFileAsyncSpy.mockRejectedValueOnce(buildErr);
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }) // diff
+      .mockRejectedValueOnce(err2)                                  // vite build fails
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // rollback
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -375,14 +376,14 @@ describe('handleUpdate — vite build failure', () => {
   });
 
   it('does not emit restart event after build failure', async () => {
+    const err3: any = new Error('fail'); err3.stderr = 'vite error';
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })            // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })       // pull
-      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }); // diff
-    const buildErr: any = new Error('fail');
-    buildErr.stderr = 'vite error';
-    execFileAsyncSpy.mockRejectedValueOnce(buildErr);
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }) // diff
+      .mockRejectedValueOnce(err3)                                  // vite build fails
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // rollback
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -391,6 +392,78 @@ describe('handleUpdate — vite build failure', () => {
     const events = parseSSE(res.chunks);
     const restartEvents = events.filter((e) => e.data?.step === 'restart');
     expect(restartEvents).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rollback on post-pull failure
+// ---------------------------------------------------------------------------
+
+describe('handleUpdate — rollback', () => {
+  it('calls git reset --hard prePullSha after npm install fails', async () => {
+    const installErr: any = new Error('npm ERR! missing dep');
+    installErr.stderr = 'npm ERR! peer dep missing';
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234abc1234abc1234abc1234abc1234abc1234\n', stderr: '' }) // rev-parse HEAD (full SHA)
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // git status --porcelain
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                          // git pull
+      .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
+      .mockRejectedValueOnce(installErr)                                                              // npm install fails
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                             // git reset --hard (rollback)
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    // Rollback event emitted
+    const rollbackEvent = events.find((e) => e.data?.step === 'rollback' && e.data?.status === 'done');
+    expect(rollbackEvent).toBeDefined();
+    // Error event also present
+    const installError = events.find((e) => e.event === 'error' && e.data?.step === 'install');
+    expect(installError).toBeDefined();
+  });
+
+  it('emits rollback:error when git reset --hard fails', async () => {
+    const installErr: any = new Error('npm ERR!');
+    installErr.stderr = 'install failed';
+    const resetErr = new Error('git reset failed: permission denied');
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234abc1234abc1234abc1234abc1234abc1234\n', stderr: '' }) // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // git status --porcelain
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                          // git pull
+      .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
+      .mockRejectedValueOnce(installErr)                                                              // npm install fails
+      .mockRejectedValueOnce(resetErr);                                                               // git reset fails too
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    const rollbackError = events.find((e) => e.event === 'error' && e.data?.step === 'rollback');
+    expect(rollbackError).toBeDefined();
+    expect(rollbackError!.data.message).toContain('Rollback failed');
+  });
+
+  it('skips rollback when prePullSha is unavailable', async () => {
+    // rev-parse fails → prePullSha = null → no rollback attempted
+    const installErr: any = new Error('npm ERR!');
+    installErr.stderr = 'install failed';
+    execFileAsyncSpy
+      .mockRejectedValueOnce(new Error('git not found'))      // rev-parse fails
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })      // git status --porcelain
+      .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' }) // pull succeeds
+      .mockRejectedValueOnce(installErr);                     // npm install fails (no diff — runs unconditionally)
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    // No rollback event should exist
+    const rollbackEvents = events.filter((e) => e.data?.step === 'rollback');
+    expect(rollbackEvents).toHaveLength(0);
   });
 });
 
