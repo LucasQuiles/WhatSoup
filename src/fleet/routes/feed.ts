@@ -6,6 +6,8 @@ import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { toIsoFromUnix } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { createChildLogger } from '../../logger.ts';
+const log = createChildLogger('fleet:feed');
 
 export interface FeedDeps {
   discovery: FleetDiscovery;
@@ -291,7 +293,8 @@ function coalesceConnectionEvents(events: FeedEvent[]): FeedEvent[] {
   for (const e of events) {
     const d = e.detail;
     if (d?.type === 'connection' && e.instance) {
-      const bucket = Math.floor(Date.parse(e.time) / 10000); // 10-second window
+      const parsed = Date.parse(e.time);
+      const bucket = isNaN(parsed) ? e.time.slice(0, 19) : Math.floor(parsed / 10000); // 10-second window
       const key = `${e.instance}|${bucket}`;
       const group = connGroups.get(key);
       if (group) group.push(e);
@@ -390,7 +393,7 @@ function collapseOutboundMessages(events: FeedEvent[]): FeedEvent[] {
       const msgId = (d as { messageId?: string }).messageId;
       const key = msgId
         ? `${e.instance}|id:${msgId}`
-        : `${e.instance}|${d.chatJid ?? '?'}|${Math.floor(Date.parse(e.time) / 10000)}`;
+        : (() => { const parsed = Date.parse(e.time); return `${e.instance}|${d.chatJid ?? '?'}|${isNaN(parsed) ? e.time.slice(0, 16) : Math.floor(parsed / 10000)}`; })();
       const bucket = buckets.get(key);
       if (bucket) {
         bucket.count++;
@@ -444,53 +447,57 @@ function enrichMessagePreviews(
   }
 
   for (const [instName, msgEvents] of byInstance) {
-    const inst = instances.get(instName);
-    if (!inst) continue;
+    try {
+      const inst = instances.get(instName);
+      if (!inst) continue;
 
-    // 1. Batch lookup by messageId
-    const withIds = msgEvents.filter(e => (e.detail as any).messageId);
-    const ids = withIds.map(e => (e.detail as any).messageId as string);
-    const dbRows = new Map<string, { content: string | null; sender_name: string | null; content_type: string }>();
+      // 1. Batch lookup by messageId
+      const withIds = msgEvents.filter(e => (e.detail as any).messageId);
+      const ids = withIds.map(e => (e.detail as any).messageId as string);
+      const dbRows = new Map<string, { content: string | null; sender_name: string | null; content_type: string }>();
 
-    if (ids.length > 0) {
-      const result = dbReader.getMessagesByIds(instName, inst.dbPath, ids);
-      if (result.ok) {
-        for (const row of result.data) {
-          if (row.message_id) {
-            dbRows.set(row.message_id, { content: row.content, sender_name: row.sender_name, content_type: row.content_type });
+      if (ids.length > 0) {
+        const result = dbReader.getMessagesByIds(instName, inst.dbPath, ids);
+        if (result.ok) {
+          for (const row of result.data) {
+            if (row.message_id) {
+              dbRows.set(row.message_id, { content: row.content, sender_name: row.sender_name, content_type: row.content_type });
+            }
           }
         }
       }
-    }
 
-    // 2. Enrich events that matched by messageId
-    for (const e of withIds) {
-      const d = e.detail as any;
-      const row = dbRows.get(d.messageId);
-      if (row) {
-        d.preview = row.content ? row.content.slice(0, 120) : undefined;
-        d.senderName = d.senderName ?? row.sender_name ?? undefined;
-        d.contentType = d.contentType ?? row.content_type ?? undefined;
+      // 2. Enrich events that matched by messageId
+      for (const e of withIds) {
+        const d = e.detail as any;
+        const row = dbRows.get(d.messageId);
+        if (row) {
+          d.preview = row.content ? row.content.trim().slice(0, 120) : undefined;
+          d.senderName = d.senderName ?? row.sender_name ?? undefined;
+          d.contentType = d.contentType ?? row.content_type ?? undefined;
+        }
       }
-    }
 
-    // 3. Fallback for events without messageId
-    const withoutIds = msgEvents.filter(e => !(e.detail as any).messageId);
-    for (const e of withoutIds) {
-      const d = e.detail as any;
-      if (!d.chatJid) continue;
-      let ck: string;
-      try { ck = toConversationKey(d.chatJid); } catch { continue; }
-      const ts = Math.floor(Date.parse(e.time) / 1000);
-      if (isNaN(ts)) continue;
-      const result = dbReader.getRecentMessagesByChat(instName, inst.dbPath, ck, d.direction, ts, 1);
-      if (result.ok && result.data.length > 0) {
-        const row = result.data[0];
-        d.preview = row.content ? row.content.slice(0, 120) : undefined;
-        d.senderName = d.senderName ?? row.sender_name ?? undefined;
-        d.contentType = d.contentType ?? row.content_type ?? undefined;
-        d.messageId = d.messageId ?? row.message_id ?? undefined;
+      // 3. Fallback for events without messageId
+      const withoutIds = msgEvents.filter(e => !(e.detail as any).messageId);
+      for (const e of withoutIds) {
+        const d = e.detail as any;
+        if (!d.chatJid) continue;
+        let ck: string;
+        try { ck = toConversationKey(d.chatJid); } catch { continue; }
+        const ts = Math.floor(Date.parse(e.time) / 1000);
+        if (isNaN(ts)) continue;
+        const result = dbReader.getRecentMessagesByChat(instName, inst.dbPath, ck, d.direction, ts, 1);
+        if (result.ok && result.data.length > 0) {
+          const row = result.data[0];
+          d.preview = row.content ? row.content.trim().slice(0, 120) : undefined;
+          d.senderName = d.senderName ?? row.sender_name ?? undefined;
+          d.contentType = d.contentType ?? row.content_type ?? undefined;
+          d.messageId = d.messageId ?? row.message_id ?? undefined;
+        }
       }
+    } catch (err) {
+      log.warn({ err: (err as Error).message, instance: instName }, 'feed: preview enrichment failed for instance');
     }
   }
 }
