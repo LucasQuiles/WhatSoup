@@ -600,24 +600,23 @@ async function start(): Promise<void> {
 
     if (needsIntro) {
       // First boot or re-link — introduce the instance
+      // Persist introSent BEFORE sending to prevent duplicate intros if we crash mid-send
+      try {
+        const cfgPath = join(config.configRoot, 'config.json');
+        if (existsSync(cfgPath)) {
+          const raw = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+          raw.introSent = true;
+          writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+        }
+      } catch (e) { log.warn({ err: e }, 'failed to persist introSent flag'); }
+
       const titleName = config.botName.charAt(0).toUpperCase() + config.botName.slice(1);
       const introText = instanceType === 'agent'
         ? `Hey! *${titleName}* is online and ready. I'm an AI agent with tool access — I can research, write code, manage files, and help with tasks. Send me a message to get started.`
         : `Hey! *${titleName}* is online and ready. I'm an AI assistant — send me a message and I'll respond.`;
       setTimeout(() => {
         sendTracked(connectionManager, toPersonalJid(adminPhone), introText, durability, { replayPolicy: 'safe' })
-          .then(() => {
-            log.info({ chatJid: toPersonalJid(adminPhone) }, 'sent introduction');
-            // Mark intro as sent so restarts don't re-send
-            try {
-              const cfgPath = join(config.configRoot, 'config.json');
-              if (existsSync(cfgPath)) {
-                const raw = JSON.parse(readFileSync(cfgPath, 'utf-8'));
-                raw.introSent = true;
-                writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
-              }
-            } catch (e) { log.warn({ err: e }, 'failed to persist introSent flag'); }
-          })
+          .then(() => log.info({ chatJid: toPersonalJid(adminPhone) }, 'sent introduction'))
           .catch((err) => log.warn({ err }, 'failed to send introduction'));
       }, 3_000);
     } else if (instanceType === 'agent' && runtime instanceof AgentRuntime && config.toolUpdateMode !== 'minimal') {

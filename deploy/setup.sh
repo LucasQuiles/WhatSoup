@@ -12,22 +12,31 @@ echo "WhatSoup Setup"
 echo "=============="
 echo ""
 
-# 1. Install wrapper scripts
-echo "[1/4] Installing wrapper scripts to $BIN_DIR..."
+# 1. Install dependencies
+echo "[1/5] Installing dependencies..."
+if [ ! -d "$REPO_ROOT/node_modules" ]; then
+  (cd "$REPO_ROOT" && npm install --silent 2>/dev/null)
+  echo "  ✓ Root dependencies installed"
+else
+  echo "  ✓ Root dependencies already installed"
+fi
+
+# 2. Install wrapper scripts
+echo "[2/5] Installing wrapper scripts to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 ln -sf "$REPO_ROOT/deploy/whatsoup" "$BIN_DIR/whatsoup"
 chmod +x "$REPO_ROOT/deploy/whatsoup"
 echo "  ✓ whatsoup → $REPO_ROOT/deploy/whatsoup"
 
 # 2. Install systemd unit
-echo "[2/4] Installing systemd user unit..."
+echo "[3/5] Installing systemd user unit..."
 mkdir -p "$SYSTEMD_DIR"
 cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
 systemctl --user daemon-reload 2>/dev/null || true
 echo "  ✓ whatsoup@.service installed"
 
 # 3. Build console
-echo "[3/4] Building fleet console..."
+echo "[4/5] Building fleet console..."
 if [ -f "$REPO_ROOT/console/package.json" ]; then
   (cd "$REPO_ROOT/console" && npm install --silent 2>/dev/null && npx vite build 2>/dev/null)
   echo "  ✓ Console built to dist/"
@@ -36,7 +45,7 @@ else
 fi
 
 # 4. Check API keys
-echo "[4/4] Checking API keys..."
+echo "[5/5] Checking API keys..."
 check_key() {
   local service="$1"
   local required="$2"

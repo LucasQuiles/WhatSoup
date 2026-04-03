@@ -34,9 +34,12 @@ export function isAdminPhone(phone: string, adminPhones: Set<string>): boolean {
   if (adminPhones.has(phone)) return true;
 
   // Suffix match: either the phone ends with an admin entry or vice versa
+  // Minimum 7 digits required to prevent degenerate matches from misconfigured entries
   const digits = normalizePhone(phone);
+  if (digits.length < 7) return false;
   for (const admin of adminPhones) {
     const adminDigits = normalizePhone(admin);
+    if (adminDigits.length < 7) continue;
     if (digits.endsWith(adminDigits) || adminDigits.endsWith(digits)) {
       return true;
     }

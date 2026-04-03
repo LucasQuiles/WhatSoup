@@ -490,6 +490,7 @@ const activeAuthProcesses = new Map<string, ReturnType<typeof spawn>>();
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
 
 /** GET /api/lines/:name/auth — SSE stream of QR codes from the auth process. */
 export async function handleAuth(
@@ -501,9 +502,6 @@ export async function handleAuth(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
-  // Stop the running instance first so the lock file is released for auth
-  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* may not be running */ }
-
   // Kill any existing auth process for this instance before starting a new one
   const existing = activeAuthProcesses.get(params.name);
   if (existing) {
@@ -511,12 +509,16 @@ export async function handleAuth(
     activeAuthProcesses.delete(params.name);
   }
 
-  // SSE headers
+  // SSE headers — write BEFORE stopping the instance to avoid browser timeout
+  // during a slow systemd stop (up to TimeoutStopSec=15s)
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
   });
+
+  // Stop the running instance so the lock file is released for auth
+  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* may not be running */ }
 
   // Spawn auth process
   const child = spawn('node', ['--experimental-strip-types', 'src/bootstrap-auth.ts', params.name], {
@@ -557,7 +559,6 @@ export async function handleAuth(
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
-        const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
         writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
