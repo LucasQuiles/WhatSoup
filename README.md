@@ -226,6 +226,7 @@ Tests use real SQLite (`:memory:` or temp files) and real Unix sockets. No infra
 
 | Document | Description |
 |----------|-------------|
+| [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples |
 | [MCP Tool Reference](docs/tools.md) | All 127 tools with scopes, parameters, replay policies |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
