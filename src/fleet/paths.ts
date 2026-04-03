@@ -16,3 +16,31 @@ export function dataRoot(name: string): string {
 export function stateRoot(name: string): string {
   return path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name);
 }
+
+export interface InstancePaths {
+  configRoot: string;
+  dataRoot: string;
+  stateRoot: string;
+  authDir: string;
+  dbPath: string;
+  logDir: string;
+  lockPath: string;
+  mediaDir: string;
+}
+
+export function instancePaths(name: string): InstancePaths {
+  const cfg = path.join(configRoot(), name);
+  const data = dataRoot(name);
+  const state = stateRoot(name);
+
+  return {
+    configRoot: cfg,
+    dataRoot: data,
+    stateRoot: state,
+    authDir: path.join(cfg, 'auth'),
+    dbPath: path.join(data, 'bot.db'),
+    logDir: path.join(data, 'logs'),
+    lockPath: path.join(state, 'whatsoup.lock'),
+    mediaDir: path.join(data, 'media', 'tmp'),
+  };
+}

@@ -4,6 +4,7 @@ import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
 import { errorStyle, helperStyle, labelStyle, inputStyle, confirmCheckStyle } from './form-styles'
+import { validatePhone } from '../../lib/validation'
 
 interface IdentityStepProps {
   data: Record<string, unknown>
@@ -40,11 +41,6 @@ function slugify(input: string): string {
     .toLowerCase()
     .replace(/\s+/g, '-')
     .replace(/[^a-z0-9-]/g, '')
-}
-
-function validatePhone(value: string): boolean {
-  const digits = value.replace(/\D/g, '')
-  return digits.length >= 10 && digits.length <= 15
 }
 
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'

@@ -13,7 +13,7 @@ import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { extractPhone } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isControlPrefix, extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
+import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
 
@@ -25,7 +25,7 @@ const log = createChildLogger('ingest');
  * given runtime.
  *
  * Steps (in order):
- *   0. Control plane intercept — if isControlPrefix and sender is a controlPeer, store in
+ *   0. Control plane intercept — if extractProtocol matches and sender is a controlPeer, store in
  *      control_messages (NOT messages), journal as skipped, and return
  *   1. Store the message (always, even if later rejected)
  *   1b. Echo correlation — if isFromMe, call durabilityEngine.matchEcho and return
@@ -48,7 +48,7 @@ export function createIngestHandler(
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
       // 0. Control plane intercept — before any normal storage
-      if (msg.content && isControlPrefix(msg.content)) {
+      if (msg.content && extractProtocol(msg.content) !== null) {
         const phone = extractPhone(msg.senderJid);
         const isPeer = [...config.controlPeers.values()].includes(phone);
         if (isPeer) {

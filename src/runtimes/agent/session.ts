@@ -72,8 +72,6 @@ export class SessionManager {
   private watchdogWarn: ReturnType<typeof setTimeout> | null = null;
   private watchdogHard: ReturnType<typeof setTimeout> | null = null;
   private pendingToolIds: Set<string> = new Set();
-  /** @deprecated Alias for backward-compat in tests. */
-  private get turnWatchdog() { return this.watchdogHard; }
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */

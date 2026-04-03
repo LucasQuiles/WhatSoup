@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
+import { truncateForRerank } from '../../lib/text-utils.ts';
 import type { ToolDeclaration } from '../types.ts';
 
 const log = createChildLogger('knowledge-tools');
@@ -49,12 +50,6 @@ const MAX_TEXT_PER_RESULT = 600;
 
 /** Max total results to return (after rerank/dedup). */
 const MAX_RESULTS = 8;
-
-/** Truncate text to stay within reranker token limits. */
-function truncateForRerank(text: string, maxChars: number = 1800): string {
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + '…';
-}
 
 /** Truncate result text for output. */
 function truncateResult(text: string): string {

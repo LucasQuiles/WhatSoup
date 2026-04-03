@@ -1,9 +1,9 @@
-// CONSTRAINT: Only Node built-ins (fs, path, os). No config.ts, no logger.ts.
+// CONSTRAINT: Only Node built-ins + fleet/paths.ts. No config.ts, no logger.ts.
 // Exports: loadInstance(name: string): void
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import { configRoot as fleetConfigRoot, instancePaths, type InstancePaths } from './fleet/paths.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,17 +16,6 @@ type SessionScope = 'single' | 'shared' | 'per_chat';
 const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
 const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set(['single', 'shared', 'per_chat']);
-
-interface InstancePaths {
-  configRoot: string;
-  dataRoot: string;
-  stateRoot: string;
-  authDir: string;
-  dbPath: string;
-  logDir: string;
-  lockPath: string;
-  mediaDir: string;
-}
 
 interface AgentOptionsSandbox {
   allowedPaths?: unknown;
@@ -64,14 +53,6 @@ interface InstanceConfig {
   agentOptions?: AgentOptions;
   // Resolved paths (added by loader)
   paths: InstancePaths;
-}
-
-// ---------------------------------------------------------------------------
-// XDG helpers
-// ---------------------------------------------------------------------------
-
-function xdgDir(envVar: string, fallbackSuffix: string): string {
-  return process.env[envVar] ?? path.join(os.homedir(), fallbackSuffix);
 }
 
 // ---------------------------------------------------------------------------
@@ -183,35 +164,6 @@ function validateInstance(raw: Record<string, unknown>, name: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Path resolution
-// ---------------------------------------------------------------------------
-
-function resolvePaths(name: string): InstancePaths {
-  const configRoot = path.join(
-    xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances', name,
-  );
-  const dataRoot = path.join(
-    xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'instances', name,
-  );
-  const stateRoot = path.join(
-    xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name,
-  );
-
-  const authDir = path.join(configRoot, 'auth');
-
-  return {
-    configRoot,
-    dataRoot,
-    stateRoot,
-    authDir,
-    dbPath: path.join(dataRoot, 'bot.db'),
-    logDir: path.join(dataRoot, 'logs'),
-    lockPath: path.join(stateRoot, 'whatsoup.lock'),
-    mediaDir: path.join(dataRoot, 'media', 'tmp'),
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -220,9 +172,7 @@ export function loadInstance(name: string): void {
     throw new Error('Instance name is required');
   }
 
-  const instanceFile = path.join(
-    xdgDir('XDG_CONFIG_HOME', '.config'), 'whatsoup', 'instances', name, 'config.json',
-  );
+  const instanceFile = path.join(fleetConfigRoot(), name, 'config.json');
 
   // 2. Read file (throws ENOENT if missing)
   let raw: string;
@@ -246,7 +196,7 @@ export function loadInstance(name: string): void {
   validateInstance(parsed, name);
 
   // 5. Resolve paths
-  const paths = resolvePaths(name);
+  const paths = instancePaths(name);
 
   // 6. Build config — cast through unknown since validateInstance already
   // verified the required fields; TS cannot narrow from Record<string,unknown>

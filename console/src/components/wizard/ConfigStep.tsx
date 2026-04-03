@@ -4,6 +4,7 @@ import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
 import { helperStyle, labelStyle } from './form-styles'
+import { validatePhone } from '../../lib/validation'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -55,17 +56,12 @@ const ACCESS_OPTIONS = [
   },
 ]
 
-function validatePhone(value: string): boolean {
-  const digits = value.replace(/\D/g, '')
-  return digits.length >= 10 && digits.length <= 15
-}
-
 const detailPanelStyle: React.CSSProperties = {
   background: 'var(--color-d3)',
   borderRadius: 'var(--radius-md)',
   padding: 'var(--sp-4)',
   marginTop: 'var(--sp-3)',
-  transition: 'opacity 0.2s ease',
+  transition: 'opacity var(--dur-norm) var(--ease)',
 }
 
 const SEARCH_MODES = ['Memory', 'Entity'] as const
@@ -86,7 +82,7 @@ const tabStyle = (active: boolean): React.CSSProperties => ({
   borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
   color: active ? 'var(--color-t1)' : 'var(--color-t4)',
   background: 'none',
-  transition: 'border-color 0.2s ease, color 0.2s ease',
+  transition: 'border-color var(--dur-norm) var(--ease), color var(--dur-norm) var(--ease)',
 })
 
 const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
@@ -463,7 +459,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                     padding: 'var(--sp-2) var(--sp-4)',
                     fontSize: 'var(--font-size-data)',
                     cursor: 'pointer',
-                    transition: 'background 0.15s ease, color 0.15s ease',
+                    transition: 'background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease)',
                   }}
                 >
                   {mode}

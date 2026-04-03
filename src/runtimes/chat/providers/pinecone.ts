@@ -2,6 +2,7 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
+import { truncateForRerank } from '../../../lib/text-utils.ts';
 
 const logger = createChildLogger('pinecone-provider');
 
@@ -129,12 +130,6 @@ function fromPineconeHitEntity(hit: {
   };
 
   return { id: hit._id, score: hit._score, record };
-}
-
-/** Truncate text to stay within reranker token limits (~4 chars/token, 512 token cap). */
-function truncateForRerank(text: string, maxChars: number = 1800): string {
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + '…';
 }
 
 export class PineconeMemory {
