@@ -52,6 +52,8 @@ export async function handleUpdate(
         cwd: repoRoot, timeout: 60_000,
       });
       writeSSE('progress', { step: 'pull', status: 'done', message: stdout.trim() });
+      // Refresh cached version state so /api/version reflects the pull
+      await checker.checkNow();
     } catch (err: any) {
       writeSSE('error', { step: 'pull', message: err.stderr?.trim() || err.message });
       endOnce();

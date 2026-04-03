@@ -28,7 +28,7 @@ const STEP_LABELS: Record<string, string> = {
 
 const STEP_ORDER = ['pull', 'install', 'console-install', 'console-build', 'restart']
 
-type Phase = 'confirm' | 'updating' | 'restarting-fleet' | 'restart-instances' | 'error'
+type Phase = 'confirm' | 'updating' | 'restarting-fleet' | 'restart-instances' | 'done' | 'error'
 
 type InstanceStatusValue = 'pending' | 'restarting' | 'done' | 'error'
 
@@ -206,6 +206,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const restartSelectedInstances = useCallback(async () => {
     const selected = Object.entries(instanceToggles).filter(([, on]) => on).map(([name]) => name)
+    let allOk = true
     for (const name of selected) {
       dispatch({ type: 'instanceStatus', name, status: 'restarting' })
       try {
@@ -213,14 +214,22 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         dispatch({ type: 'instanceStatus', name, status: 'done' })
       } catch {
         dispatch({ type: 'instanceStatus', name, status: 'error' })
+        allOk = false
       }
     }
-  }, [instanceToggles])
+    if (allOk && selected.length > 0) {
+      dispatch({ type: 'setPhase', phase: 'done' })
+      setTimeout(() => {
+        onClose()
+        window.location.reload()
+      }, 2200)
+    }
+  }, [instanceToggles, onClose])
 
   const handleClose = () => {
     eventSourceRef.current?.close()
     onClose()
-    if (phase === 'restart-instances') {
+    if (phase === 'restart-instances' || phase === 'done') {
       window.location.reload()
     }
   }
@@ -265,7 +274,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
             <Download size={16} className="text-m-cht" />
             <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
-              {phase === 'restart-instances' ? 'Update Complete' : 'Update WhatSoup'}
+              {phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
             </span>
           </div>
           <button onClick={handleClose} className="c-btn c-btn-ghost">
@@ -395,6 +404,16 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                   Restart Selected
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Phase: done */}
+          {phase === 'done' && (
+            <div className="flex items-center justify-center" style={{ gap: 'var(--sp-2)', padding: 'var(--sp-4) 0' }}>
+              <Check size={20} className="text-s-ok" />
+              <span className="text-t2 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>
+                All instances restarted
+              </span>
             </div>
           )}
         </div>
