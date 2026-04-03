@@ -438,6 +438,15 @@ export async function handleCreateLine(
       }
       (body.agentOptions as Record<string, unknown>).cwd = safeCwd;
     }
+    // Confine pluginDirs to user home directory
+    if (Array.isArray(ao.pluginDirs)) {
+      for (const dir of ao.pluginDirs as unknown[]) {
+        if (typeof dir !== 'string' || !path.resolve(dir).startsWith(os.homedir() + path.sep)) {
+          jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
+          return;
+        }
+      }
+    }
   }
 
   // --- Build config — start with validated required fields, then merge optional fields ---

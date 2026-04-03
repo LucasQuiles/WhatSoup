@@ -372,11 +372,12 @@ const TYPE_COLOR: Record<string, string> = {
   boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
 }
 
-const AGENT_OPTION_FLAT: Record<string, 'string' | 'boolean' | 'enum'> = {
+const AGENT_OPTION_FLAT: Record<string, 'string' | 'boolean' | 'enum' | 'array'> = {
   sessionScope: 'enum',
   cwd: 'string',
   instructionsPath: 'string',
   sandboxPerChat: 'boolean',
+  pluginDirs: 'array',
 }
 const AGENT_OPTION_ENUMS: Record<string, string[]> = {
   sessionScope: ['single', 'shared', 'per_chat'],
