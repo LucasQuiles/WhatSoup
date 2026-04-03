@@ -29,7 +29,7 @@ describe('bootstrap', () => {
     process.argv = ['node', 'bootstrap.ts', 'loops'];
     await bootstrap();
     expect(mockLoadInstance).toHaveBeenCalledOnce();
-    expect(mockLoadInstance).toHaveBeenCalledWith('loops');
+    expect(mockLoadInstance).toHaveBeenCalledWith('loops', undefined);
   });
 
   it('throws when no instance name (no argv[2])', async () => {

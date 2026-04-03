@@ -251,8 +251,9 @@ describe('loadOrCreateFleetToken', () => {
 
   it('trims whitespace from stored token', async () => {
     tokenPath = path.join(tokenDir, 'whatsoup', 'fleet-token');
-    fs.writeFileSync(tokenPath, '  abc123  \n', { mode: 0o600 });
+    const validToken = 'a'.repeat(64);
+    fs.writeFileSync(tokenPath, `  ${validToken}  \n`, { mode: 0o600 });
     const token = await loadOrCreateFleetToken();
-    expect(token).toBe('abc123');
+    expect(token).toBe(validToken);
   });
 });

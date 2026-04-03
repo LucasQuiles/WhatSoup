@@ -60,6 +60,7 @@ function makeDeps(overrides: Partial<DataDeps> = {}): DataDeps {
       getMessages: vi.fn(() => ({ ok: true, data: [] })),
       getAccessList: vi.fn(() => ({ ok: true, data: [] })),
       getSummaryStats: vi.fn(),
+      query: vi.fn(() => ({ ok: true, data: [] })),
     } as any,
     ...overrides,
   };
@@ -82,7 +83,10 @@ describe('handleGetChats', () => {
     const chatData = [{ conversationKey: '123@s.whatsapp.net', messageCount: 10 }];
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst) } as any,
-      dbReader: { getChats: vi.fn(() => ({ ok: true, data: chatData })) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: chatData })),
+        query: vi.fn(() => ({ ok: true, data: chatData })),
+      } as any,
     });
 
     const res = mockRes();
@@ -96,7 +100,10 @@ describe('handleGetChats', () => {
     const inst = fakeInstance();
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst) } as any,
-      dbReader: { getChats: vi.fn(() => ({ ok: true, data: [] })) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: [] })),
+        query: vi.fn(() => ({ ok: true, data: [] })),
+      } as any,
     });
 
     const res = mockRes();
@@ -108,7 +115,10 @@ describe('handleGetChats', () => {
     const inst = fakeInstance();
     const deps = makeDeps({
       discovery: { getInstance: vi.fn(() => inst) } as any,
-      dbReader: { getChats: vi.fn(() => ({ ok: true, data: [] })) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: [] })),
+        query: vi.fn(() => ({ ok: true, data: [] })),
+      } as any,
     });
 
     const res = mockRes();

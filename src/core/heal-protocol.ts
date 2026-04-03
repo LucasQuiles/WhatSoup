@@ -8,6 +8,10 @@ export const CONTROL_PREFIXES = [
 
 export type ControlProtocol = 'LOOPS_HEAL' | 'HEAL_COMPLETE' | 'HEAL_ESCALATE';
 
+export function isControlPrefix(text: string): boolean {
+  return CONTROL_PREFIXES.some(p => text.startsWith(p));
+}
+
 export function extractProtocol(content: string): ControlProtocol | null {
   if (content.startsWith('[LOOPS_HEAL]')) return 'LOOPS_HEAL';
   if (content.startsWith('[HEAL_COMPLETE]')) return 'HEAL_COMPLETE';

@@ -29,7 +29,7 @@ describe('bootstrapAuth', () => {
     process.argv = ['node', 'bootstrap-auth.ts', 'personal'];
     await bootstrapAuth();
     expect(mockLoadInstance).toHaveBeenCalledOnce();
-    expect(mockLoadInstance).toHaveBeenCalledWith('personal');
+    expect(mockLoadInstance).toHaveBeenCalledWith('personal', { authOnly: true });
   });
 
   it('throws when no instance name (no argv[2])', async () => {

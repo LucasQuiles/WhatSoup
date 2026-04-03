@@ -78,6 +78,7 @@ function makeDeps(overrides: Partial<LinesDeps> = {}): LinesDeps {
       getChats: vi.fn(),
       getMessages: vi.fn(),
       getAccessList: vi.fn(),
+      query: vi.fn(() => ({ ok: true, data: [] })),
     } as any,
     ...overrides,
   };
@@ -119,9 +120,9 @@ describe('handleGetLines', () => {
     expect(body).toHaveLength(1);
     expect(body[0]).toMatchObject({
       name: 'alpha',
-      type: 'chat',
+      mode: 'chat',
       status: 'online',
-      lastPollAt: '2026-04-01T00:00:00.000Z',
+      lastActive: '2026-04-01T00:00:00.000Z',
       error: null,
     });
   });
@@ -141,7 +142,7 @@ describe('handleGetLines', () => {
 
     const body = JSON.parse(res._body);
     expect(body[0].status).toBe('unknown');
-    expect(body[0].lastPollAt).toBeNull();
+    expect(body[0].lastActive).toBeNull();
   });
 
   it('does not include dbStats in the list response', () => {
