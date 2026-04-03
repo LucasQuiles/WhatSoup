@@ -19,16 +19,10 @@ const reasonLabel: Record<string, string> = {
   Unknown: "disconnected",
 };
 
-const modeWash: Record<Mode, string> = {
-  passive: "var(--m-pas-wash)",
-  chat: "var(--m-cht-wash)",
-  agent: "var(--m-agt-wash)",
-};
-
-const modeColor: Record<Mode, string> = {
-  passive: "var(--color-m-pas)",
-  chat: "var(--color-m-cht)",
-  agent: "var(--color-m-agt)",
+const modeClass: Record<Mode, string> = {
+  passive: "fc-inst--passive",
+  chat: "fc-inst--chat",
+  agent: "fc-inst--agent",
 };
 
 function edgeColor(event: FeedEvent): string {
@@ -72,7 +66,7 @@ function CardHeader({ event, label, labelClass }: {
       <span className="fc-time">{formatTimeWithSeconds(event.time)}</span>
       <span className="fc-icon"><FeedIcon event={event} /></span>
       {event.instance && (
-        <span className="fc-inst" style={{ backgroundColor: modeWash[event.mode], color: modeColor[event.mode] }}>
+        <span className={`fc-inst ${modeClass[event.mode]}`}>
           {event.instance}
         </span>
       )}

@@ -44,7 +44,7 @@ export function formatWhatsAppText(text: string): (string | JSX.Element)[] {
       } else if (match[2] !== undefined) {
         parts.push(
           <code key={key++} className="font-mono" style={{
-            padding: '1px var(--sp-1)',
+            padding: 'var(--bw) var(--sp-1)',
             background: 'var(--color-d1)',
             borderRadius: 'var(--radius-sm)',
             fontSize: 'inherit',

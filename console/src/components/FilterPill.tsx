@@ -23,7 +23,7 @@ const FilterPill: FC<FilterPillProps> = ({
       style={{
         fontSize: 'var(--font-size-label)',
         letterSpacing: 'var(--tracking-pill)',
-        padding: '3px var(--sp-2)',
+        padding: 'var(--sp-0h) var(--sp-2)',
         borderRadius: 'var(--radius-sm)',
         border: isActive
           ? (activeBorder ?? 'var(--bw) solid var(--b4)')
