@@ -61,7 +61,8 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     return result;
   }, [displayEvents, modeFilter, errorsOnly, typeFilter]);
 
-  const errorCount = useMemo(() => events.filter((e) => e.isError).length, [events]);
+  // Use displayEvents (frozen when paused) so error count matches visible feed
+  const errorCount = useMemo(() => displayEvents.filter((e) => e.isError).length, [displayEvents]);
 
   return (
     <div className="flex flex-col h-full">
