@@ -527,6 +527,17 @@ body::before {
   border-color: var(--b3);
 }
 
+.fc-action--danger {
+  color: var(--color-s-crit);
+  border-color: var(--s-crit-border);
+}
+
+.fc-action--danger:hover {
+  color: var(--color-s-crit);
+  background: var(--s-crit-wash);
+  border-color: var(--s-crit-soft);
+}
+
 /* Shimmer animation for loading skeletons */
 @keyframes shimmer {
   0% { background-position: -400px 0; }

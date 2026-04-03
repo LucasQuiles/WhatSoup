@@ -1,5 +1,5 @@
 import { type FC, useState } from "react";
-import { RotateCw } from "lucide-react";
+import { RotateCw, Square, Copy, ExternalLink } from "lucide-react";
 import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
 import { formatTimeWithSeconds } from "../lib/format-time";
@@ -200,26 +200,109 @@ function MetaRow({ event }: { event: FeedEvent }) {
 //  Quick actions
 // ---------------------------------------------------------------------------
 
-function QuickActions({ event, onRestart }: { event: FeedEvent; onRestart?: (instance: string) => void }) {
+function QuickActions({ event, onRestart, onStop, onNavigate }: {
+  event: FeedEvent;
+  onRestart?: (instance: string) => void;
+  onStop?: (instance: string) => void;
+  onNavigate?: (path: string) => void;
+}) {
   const d = event.detail;
-  if (!d || !event.instance || !onRestart) return null;
+  const inst = event.instance;
+  const actions: React.ReactNode[] = [];
 
-  const showRestart = (d.type === "connection" && event.isError)
-    || (d.type === "health" && d.status === "unreachable");
-  if (!showRestart) return null;
-
-  return (
-    <div className="fc-actions">
-      <button
-        className="fc-action"
-        onClick={(e) => { e.stopPropagation(); onRestart(event.instance!); }}
-        title={`Restart ${event.instance}`}
-      >
-        <RotateCw size={12} strokeWidth={2} />
-        restart
-      </button>
-    </div>
+  // Copy — always available
+  actions.push(
+    <button
+      key="copy"
+      className="fc-action"
+      aria-label="Copy to clipboard"
+      title="Copy"
+      onClick={(e) => {
+        e.stopPropagation();
+        const text = copyContent(event);
+        navigator.clipboard.writeText(text).catch(() => {});
+      }}
+    >
+      <Copy size={12} strokeWidth={2} />
+    </button>
   );
+
+  // Jump to conversation — message events with conversationKey
+  if (d?.type === "message" && (d as { conversationKey?: string }).conversationKey && inst && onNavigate) {
+    const ck = (d as { conversationKey?: string }).conversationKey!;
+    actions.push(
+      <button
+        key="jump"
+        className="fc-action"
+        aria-label="Open conversation"
+        title="Open conversation"
+        onClick={(e) => {
+          e.stopPropagation();
+          onNavigate(`/inbox?line=${encodeURIComponent(inst)}&chat=${encodeURIComponent(ck)}`);
+        }}
+      >
+        <ExternalLink size={12} strokeWidth={2} />
+      </button>
+    );
+  }
+
+  // Restart — connection errors, health unreachable
+  if (inst && onRestart) {
+    const show = (d?.type === "connection" && event.isError)
+      || (d?.type === "health" && d.status === "unreachable");
+    if (show) {
+      actions.push(
+        <button
+          key="restart"
+          className="fc-action"
+          aria-label={`Restart ${inst}`}
+          title="Restart"
+          onClick={(e) => { e.stopPropagation(); onRestart(inst); }}
+        >
+          <RotateCw size={12} strokeWidth={2} />
+        </button>
+      );
+    }
+  }
+
+  // Stop line — connection errors, health unreachable
+  if (inst && onStop) {
+    const show = (d?.type === "connection" && event.isError)
+      || (d?.type === "health" && d.status === "unreachable");
+    if (show) {
+      actions.push(
+        <button
+          key="stop"
+          className="fc-action fc-action--danger"
+          aria-label={`Stop ${inst} line`}
+          title="Stop line"
+          onClick={(e) => { e.stopPropagation(); onStop(inst); }}
+        >
+          <Square size={12} strokeWidth={2} />
+        </button>
+      );
+    }
+  }
+
+  if (actions.length === 0) return null;
+  return <div className="fc-actions">{actions}</div>;
+}
+
+function copyContent(event: FeedEvent): string {
+  const d = event.detail;
+  if (!d) return event.text;
+  switch (d.type) {
+    case "message": return (d as { preview?: string }).preview ?? event.text;
+    case "tool_error": return d.error;
+    case "session": return `${d.action}${d.reason ? ` — ${d.reason}` : ""}`;
+    case "connection": {
+      const code = d.statusCode ? `${d.statusCode} ` : "";
+      const reason = d.reason ?? "";
+      return `${code}${reason}`.trim() || event.text;
+    }
+    case "health": return d.status;
+    default: return event.text;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,9 +312,11 @@ function QuickActions({ event, onRestart }: { event: FeedEvent; onRestart?: (ins
 interface FeedCardProps {
   event: FeedEvent;
   onRestart?: (instance: string) => void;
+  onStop?: (instance: string) => void;
+  onNavigate?: (path: string) => void;
 }
 
-const FeedCard: FC<FeedCardProps> = ({ event, onRestart }) => {
+const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate }) => {
   const [expanded, setExpanded] = useState(false);
   const d = event.detail;
   const isErr = !!event.isError;
@@ -256,12 +341,15 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart }) => {
       onMouseEnter={() => setExpanded(true)}
       onMouseLeave={() => setExpanded(false)}
       onFocus={() => setExpanded(true)}
-      onBlur={() => setExpanded(false)}
+      onBlur={(e) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+        setExpanded(false);
+      }}
       style={{ borderLeftColor: edgeColor(event) }}
     >
       {body}
       {expanded && <MetaRow event={event} />}
-      {expanded && <QuickActions event={event} onRestart={onRestart} />}
+      {expanded && <QuickActions event={event} onRestart={onRestart} onStop={onStop} onNavigate={onNavigate} />}
     </div>
   );
 };
