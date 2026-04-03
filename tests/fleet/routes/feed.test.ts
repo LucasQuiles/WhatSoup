@@ -548,3 +548,121 @@ describe('noise suppression via handleGetFeed', () => {
     expect(messageEvents).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// message preview enrichment via handleGetFeed
+// ---------------------------------------------------------------------------
+
+describe('message preview enrichment via handleGetFeed', () => {
+  it('enriches outbound message with preview via messageId lookup', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-test-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-out-1',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'enrich-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['enrich-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-out-1', content: 'Hello from the bot!', sender_name: null, content_type: 'text', pk: 1, conversation_key: '15550100001', chat_jid: '15550100001@s.whatsapp.net', sender_jid: 'bot', timestamp: 1700000000, is_from_me: 1, raw_message: null },
+      ] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const events = res._body as any[];
+    const msgEvent = events.find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent).toBeTruthy();
+    expect(msgEvent.detail.preview).toBe('Hello from the bot!');
+    expect(dbReader.getMessagesByIds).toHaveBeenCalledWith('enrich-test', '/unused', ['msg-out-1']);
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('falls back to conversationKey + timestamp when no messageId', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-fb-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'fb-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['fb-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-fallback', content: 'Fallback content', sender_name: null, content_type: 'text', pk: 1, conversation_key: '15550100001', chat_jid: '15550100001@s.whatsapp.net', sender_jid: 'bot', timestamp: 1700000000, is_from_me: 1, raw_message: null },
+      ] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const events = res._body as any[];
+    const msgEvent = events.find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent).toBeTruthy();
+    expect(msgEvent.detail.preview).toBe('Fallback content');
+    // Verify fallback used derived conversationKey (not raw chatJid)
+    expect(dbReader.getRecentMessagesByChat).toHaveBeenCalledWith(
+      'fb-test', '/unused',
+      '15550100001',  // derived via toConversationKey('15550100001@s.whatsapp.net')
+      'outbound',
+      expect.any(Number),
+      1,
+    );
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('gracefully handles missing DB rows (best-effort)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-miss-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-missing',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'miss-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['miss-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const events = res._body as any[];
+    const msgEvent = events.find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent).toBeTruthy();
+    expect(msgEvent.detail.preview).toBeUndefined();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+});

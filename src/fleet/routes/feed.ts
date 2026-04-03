@@ -420,6 +420,82 @@ function collapseOutboundMessages(events: FeedEvent[]): FeedEvent[] {
 }
 
 // ---------------------------------------------------------------------------
+// Preview enrichment
+// ---------------------------------------------------------------------------
+
+/**
+ * Enrich message-type events with DB-backed content previews.
+ * Uses messageId-first lookup, falls back to conversationKey + timestamp.
+ * Best-effort: outbound previews may lag until Baileys echo persistence.
+ */
+function enrichMessagePreviews(
+  events: FeedEvent[],
+  instances: Map<string, DiscoveredInstance>,
+  dbReader: FleetDbReader,
+): void {
+  const byInstance = new Map<string, FeedEvent[]>();
+  for (const e of events) {
+    const d = e.detail;
+    if (d?.type === 'message' && e.instance) {
+      const list = byInstance.get(e.instance);
+      if (list) list.push(e);
+      else byInstance.set(e.instance, [e]);
+    }
+  }
+
+  for (const [instName, msgEvents] of byInstance) {
+    const inst = instances.get(instName);
+    if (!inst) continue;
+
+    // 1. Batch lookup by messageId
+    const withIds = msgEvents.filter(e => (e.detail as any).messageId);
+    const ids = withIds.map(e => (e.detail as any).messageId as string);
+    const dbRows = new Map<string, { content: string | null; sender_name: string | null; content_type: string }>();
+
+    if (ids.length > 0) {
+      const result = dbReader.getMessagesByIds(instName, inst.dbPath, ids);
+      if (result.ok) {
+        for (const row of result.data) {
+          if (row.message_id) {
+            dbRows.set(row.message_id, { content: row.content, sender_name: row.sender_name, content_type: row.content_type });
+          }
+        }
+      }
+    }
+
+    // 2. Enrich events that matched by messageId
+    for (const e of withIds) {
+      const d = e.detail as any;
+      const row = dbRows.get(d.messageId);
+      if (row) {
+        d.preview = row.content ? row.content.slice(0, 120) : undefined;
+        d.senderName = d.senderName ?? row.sender_name ?? undefined;
+        d.contentType = d.contentType ?? row.content_type ?? undefined;
+      }
+    }
+
+    // 3. Fallback for events without messageId
+    const withoutIds = msgEvents.filter(e => !(e.detail as any).messageId);
+    for (const e of withoutIds) {
+      const d = e.detail as any;
+      if (!d.chatJid) continue;
+      let ck: string;
+      try { ck = toConversationKey(d.chatJid); } catch { continue; }
+      const ts = Math.floor(Date.parse(e.time) / 1000);
+      if (isNaN(ts)) continue;
+      const result = dbReader.getRecentMessagesByChat(instName, inst.dbPath, ck, d.direction, ts, 1);
+      if (result.ok && result.data.length > 0) {
+        const row = result.data[0];
+        d.preview = row.content ? row.content.slice(0, 120) : undefined;
+        d.senderName = d.senderName ?? row.sender_name ?? undefined;
+        d.contentType = d.contentType ?? row.content_type ?? undefined;
+        d.messageId = d.messageId ?? row.message_id ?? undefined;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
@@ -458,6 +534,9 @@ export function handleGetFeed(
 
   // 4. Collapse rapid outbound sends by instance + chatJid
   const collapsed = collapseOutboundMessages(coalesced);
+
+  // 4b. Enrich message events with DB-backed content previews
+  enrichMessagePreviews(collapsed, instances, deps.dbReader);
 
   // 5. Deduplicate identical events (messageId-aware)
   const seen = new Set<string>();
