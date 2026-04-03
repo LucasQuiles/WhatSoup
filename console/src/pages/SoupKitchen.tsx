@@ -255,12 +255,8 @@ const SoupKitchen: FC = () => {
                         : undefined
                     }
                     onClick={() => setModeFilter(m)}
-                    style={{ padding: "5px var(--sp-3)", gap: "var(--sp-1h)" }}
                     suffix={
-                      <span
-                        className="text-t5"
-                        style={{ fontSize: "var(--font-size-xs)", opacity: 0.7 }}
-                      >
+                      <span className="text-t5">
                         {modeCounts[m]}
                       </span>
                     }
