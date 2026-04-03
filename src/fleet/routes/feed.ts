@@ -32,17 +32,146 @@ interface FeedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Noise suppression — collapse repeated events into counts
+// Log parsing
 // ---------------------------------------------------------------------------
 
-/** Messages to suppress (show as a single "N messages sent" summary). */
-const SUPPRESS_RE = /^(Sending message|Credentials saved|Health check OK|health endpoint responded)$/i;
+/** Pino numeric level → warn/error threshold. */
+const WARN_LEVEL = 40;
+
+/** Messages that are pure noise — collapse into counts. */
+const NOISE_RE = /^(Credentials saved|Health check OK|health endpoint responded)$/i;
 
 /** Messages that are genuinely interesting for the activity feed. */
 const BUSINESS_RE = /session|reply|inbound.*from|queue|enrichment|access|group|connect|disconnect|started|stopped|crashed|error|failed|restart|degraded|pipeline|processed|received/i;
 
-/** Pino numeric level → warn/error threshold. */
-const WARN_LEVEL = 40;
+const PINO_LEVEL_MAP: Record<number, 'info' | 'warn' | 'error'> = {
+  10: 'info', 20: 'info', 30: 'info', 40: 'warn', 50: 'error', 60: 'error',
+};
+
+interface ParseContext {
+  instanceName: string;
+  instanceType: 'passive' | 'chat' | 'agent';
+}
+
+export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | 'noise' | null {
+  let obj: Record<string, unknown>;
+  try { obj = JSON.parse(line); } catch { return null; }
+
+  const msg = typeof obj.msg === 'string' ? obj.msg : '';
+  if (!msg) return null;
+
+  const pinoLevel = typeof obj.level === 'number' ? obj.level : 30;
+  const level = PINO_LEVEL_MAP[pinoLevel] ?? 'info';
+  const isWarnOrAbove = pinoLevel >= WARN_LEVEL;
+
+  const rawTs = obj.time ?? obj.timestamp;
+  const time = typeof rawTs === 'number'
+    ? toIsoFromUnix(rawTs)
+    : typeof rawTs === 'string'
+      ? rawTs
+      : new Date().toISOString();
+
+  const component = (obj.component ?? obj.name ?? obj.module ?? '') as string;
+  const prefix = component ? `[${component}] ` : '';
+
+  const base: Omit<FeedEvent, 'detail'> = {
+    time,
+    mode: ctx.instanceType,
+    text: `${ctx.instanceName}: ${prefix}${msg}`,
+    instance: ctx.instanceName,
+    ...(component ? { component } : {}),
+    level,
+    ...(isWarnOrAbove ? { isError: true } : {}),
+  };
+
+  // 1. Connection error
+  if (/stream errored out|WhatsApp connection closed/i.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'connection',
+        statusCode: typeof obj.statusCode === 'number' ? obj.statusCode : undefined,
+        reason: typeof obj.reason === 'string' ? obj.reason : undefined,
+      },
+    };
+  }
+
+  // 2. Reconnect
+  if (/Scheduling reconnect/i.test(msg)) {
+    return { ...base, detail: { type: 'connection', reconnecting: true } };
+  }
+
+  // 3. Tool error
+  if (/tool error reported/i.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'tool_error',
+        toolName: typeof obj.toolName === 'string' ? obj.toolName : '',
+        toolId: typeof obj.toolId === 'string' ? obj.toolId : undefined,
+        error: typeof obj.error === 'string' ? obj.error : String(obj.error ?? ''),
+      },
+    };
+  }
+
+  // 4. Session
+  if (/agent idle|proactive resume|session.*spawn|session.*start|session.*kill|session.*end/i.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'session',
+        action: msg,
+        sessionId: typeof obj.sessionId === 'string' ? obj.sessionId : undefined,
+        chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+      },
+    };
+  }
+
+  // 5. Outbound message
+  if (/^Sending message$/.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'message',
+        direction: 'outbound',
+        chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+      },
+    };
+  }
+
+  // 6. Inbound message
+  if (/inbound/i.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'message',
+        direction: 'inbound',
+        chatJid: typeof obj.chatJid === 'string' ? obj.chatJid : undefined,
+      },
+    };
+  }
+
+  // 7. Import
+  if (/legacy import|warm-start import|legacy DB has no|legacy.*skipping/i.test(msg)) {
+    return {
+      ...base,
+      detail: {
+        type: 'import',
+        table: typeof obj.table === 'string' ? obj.table : undefined,
+        skipped: /skipping/i.test(msg),
+      },
+    };
+  }
+
+  // 8. Noise
+  if (NOISE_RE.test(msg)) return 'noise';
+
+  // 9. Non-business info → drop
+  if (!isWarnOrAbove && !BUSINESS_RE.test(msg)) return null;
+
+  // 10. Generic fallback
+  return { ...base, detail: { type: 'generic' } };
+}
 
 // ---------------------------------------------------------------------------
 // Health-change events (synthesized from poller status)
@@ -66,11 +195,37 @@ function synthesizeHealthEvents(
 
     if (prevStatus && prevStatus !== currStatus) {
       if (currStatus === 'online' && prevStatus !== 'online') {
-        events.push({ time: now, mode: inst.type, text: `${inst.name}: came online` });
+        events.push({
+          time: now,
+          mode: inst.type,
+          text: `${inst.name}: came online`,
+          instance: inst.name,
+          component: 'health',
+          level: 'info',
+          detail: { type: 'health', status: currStatus, previousStatus: prevStatus },
+        });
       } else if (currStatus === 'unreachable') {
-        events.push({ time: now, mode: inst.type, text: `${inst.name}: connection lost`, isError: true });
+        events.push({
+          time: now,
+          mode: inst.type,
+          text: `${inst.name}: connection lost`,
+          isError: true,
+          instance: inst.name,
+          component: 'health',
+          level: 'error',
+          detail: { type: 'health', status: currStatus, previousStatus: prevStatus, error: poll.error ?? undefined },
+        });
       } else if (currStatus === 'degraded') {
-        events.push({ time: now, mode: inst.type, text: `${inst.name}: degraded — ${poll.error ?? 'enrichment stale'}`, isError: true });
+        events.push({
+          time: now,
+          mode: inst.type,
+          text: `${inst.name}: degraded — ${poll.error ?? 'enrichment stale'}`,
+          isError: true,
+          instance: inst.name,
+          component: 'health',
+          level: 'warn',
+          detail: { type: 'health', status: currStatus, previousStatus: prevStatus, error: poll.error ?? undefined },
+        });
       }
     }
 
@@ -107,66 +262,30 @@ export function handleGetFeed(
   for (const inst of instances.values()) {
     const logFile = findLatestLogFile(inst.logDir);
     if (!logFile) continue;
-    const lines = readTailLines(logFile, 60); // read more lines for better coverage
-
-    // Track suppressed message counts per instance
-    const suppressedCounts: Record<string, number> = {};
+    const lines = readTailLines(logFile, 60);
+    const noiseCounts: Record<string, number> = {};
 
     for (const line of lines) {
       let obj: Record<string, unknown>;
-      try {
-        obj = JSON.parse(line);
-      } catch {
-        continue;
-      }
-
-      const level = typeof obj.level === 'number' ? obj.level : 30;
+      try { obj = JSON.parse(line); } catch { continue; }
       const msg = typeof obj.msg === 'string' ? obj.msg : '';
-      if (!msg) continue;
 
-      const isWarnOrAbove = level >= WARN_LEVEL;
-
-      // Suppress noisy messages — count instead of including
-      if (SUPPRESS_RE.test(msg)) {
+      const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type });
+      if (result === 'noise') {
         const key = msg.replace(/\s+/g, ' ').trim().toLowerCase();
-        suppressedCounts[key] = (suppressedCounts[key] ?? 0) + 1;
-        continue;
+        noiseCounts[key] = (noiseCounts[key] ?? 0) + 1;
+      } else if (result) {
+        events.push(result);
       }
-
-      // Only keep warn/error or business-relevant messages
-      if (!isWarnOrAbove && !BUSINESS_RE.test(msg)) continue;
-
-      const rawTs = obj.time ?? obj.timestamp;
-      const time = typeof rawTs === 'number'
-        ? toIsoFromUnix(rawTs)
-        : typeof rawTs === 'string'
-          ? rawTs
-          : new Date().toISOString();
-
-      const component = (obj.component ?? obj.name ?? obj.module ?? '') as string;
-      const prefix = component ? `[${component}] ` : '';
-
-      events.push({
-        time,
-        mode: inst.type,
-        text: `${inst.name}: ${prefix}${msg}`,
-        ...(isWarnOrAbove ? { isError: true } : {}),
-      });
     }
 
-    // Emit summaries for suppressed noisy messages
     const now = new Date().toISOString();
-    for (const [key, count] of Object.entries(suppressedCounts)) {
+    for (const [key, count] of Object.entries(noiseCounts)) {
       if (count > 0) {
         let summary: string;
-        if (key.includes('sending')) summary = `${count} messages sent`;
-        else if (key.includes('credential')) summary = `credentials refreshed`;
+        if (key.includes('credential')) summary = 'credentials refreshed';
         else summary = `${key} (×${count})`;
-        events.push({
-          time: now,
-          mode: inst.type,
-          text: `${inst.name}: ${summary}`,
-        });
+        events.push({ time: now, mode: inst.type, text: `${inst.name}: ${summary}`, instance: inst.name, detail: { type: 'generic' } });
       }
     }
   }
