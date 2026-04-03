@@ -68,13 +68,21 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
   const errorCount = useMemo(() => displayEvents.filter((e) => e.isError).length, [displayEvents]);
 
-  // Only the newest error card per instance gets restart/stop actions
+  // Only the newest unresolved connection/health error per instance gets restart/stop
   const actionableKeys = useMemo(() => {
     const seen = new Set<string>();
     const keys = new Set<string>();
     for (const event of filtered) {
       const inst = event.instance;
-      if (inst && event.isError && !seen.has(inst)) {
+      const d = event.detail;
+      if (!inst || seen.has(inst)) continue;
+      // Skip if this instance already recovered (connected/online is newer than any error)
+      if (d?.type === "connection" && d.state === "connected") { seen.add(inst); continue; }
+      if (d?.type === "health" && d.status === "online") { seen.add(inst); continue; }
+      // Only connection errors and health unreachable/degraded are actionable
+      const isConnErr = d?.type === "connection" && event.isError;
+      const isHealthErr = d?.type === "health" && (d.status === "unreachable" || d.status === "degraded");
+      if (isConnErr || isHealthErr) {
         seen.add(inst);
         keys.add(eventKey(event));
       }
@@ -82,32 +90,32 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
     return keys;
   }, [filtered]);
 
-  // Track in-flight instance actions to prevent double-clicks
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  // Track in-flight actions per instance to prevent double-clicks
+  const [pendingInstances, setPendingInstances] = useState<Set<string>>(new Set());
 
   const handleRestart = (instance: string) => {
-    if (pendingAction) return;
-    setPendingAction(instance);
+    if (pendingInstances.has(instance)) return;
+    setPendingInstances((s) => new Set(s).add(instance));
     toast.info(`Restarting ${instance}...`);
     api.restart(instance)
       .then(() => toast.success(`${instance} restart requested`))
       .catch((err: Error) => toast.error(`Failed to restart: ${err.message}`))
-      .finally(() => setPendingAction(null));
+      .finally(() => setPendingInstances((s) => { const n = new Set(s); n.delete(instance); return n; }));
   };
 
   const handleStop = (instance: string) => {
-    if (pendingAction) return;
+    if (pendingInstances.has(instance)) return;
     setStopTarget(instance);
   };
 
   const confirmStop = () => {
     if (!stopTarget) return;
-    setPendingAction(stopTarget);
+    setPendingInstances((s) => new Set(s).add(stopTarget));
     toast.info(`Stopping ${stopTarget}...`);
     api.stopInstance(stopTarget)
       .then(() => toast.success(`${stopTarget} stop requested`))
       .catch((err: Error) => toast.error(`Failed to stop: ${err.message}`))
-      .finally(() => setPendingAction(null));
+      .finally(() => setPendingInstances((s) => { const n = new Set(s); n.delete(stopTarget); return n; }));
     setStopTarget(null);
   };
 
