@@ -132,6 +132,7 @@
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
   --sep-h: 14px;             /* filter separator height */
+  --input-h: 32px;           /* search input / icon button height */
   --feed-min-w: 240px;       /* activity feed min width */
   --feed-col-time: 68px;     /* feed card time column width */
   --feed-col-icon: 16px;     /* feed card icon column width */
@@ -755,8 +756,8 @@ body::before {
   padding: 0;
   gap: 0;
   min-width: 0;
-  width: var(--sp-7);
-  height: var(--sp-7);
+  width: var(--input-h);
+  height: var(--input-h);
   justify-content: center;
   overflow: hidden;
   white-space: nowrap;
