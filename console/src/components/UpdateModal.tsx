@@ -1,5 +1,6 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import type { LineInstance } from '../types'
 
@@ -96,6 +97,7 @@ function buildToggles(lines: LineInstance[]): Record<string, boolean> {
 }
 
 const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines }) => {
+  const queryClient = useQueryClient()
   const [state, dispatch] = useReducer(reducer, undefined, () => ({
     phase: 'confirm' as Phase,
     steps: makeInitialSteps(),
@@ -130,6 +132,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           clearInterval(poll)
           pollRef.current = null
           if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
+          // Fleet is back — invalidate all cached queries so the dashboard
+          // immediately shows fresh data without a page reload
+          queryClient.invalidateQueries()
           dispatch({ type: 'setPhase', phase: 'restart-instances' })
         }
       } catch {
@@ -142,9 +147,10 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       clearInterval(poll)
       pollRef.current = null
       timeoutRef.current = null
+      queryClient.invalidateQueries()
       dispatch({ type: 'setPhase', phase: 'restart-instances' })
     }, 60_000)
-  }, [currentSha])
+  }, [currentSha, queryClient])
 
   const startUpdate = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'updating' })
@@ -232,7 +238,6 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       dispatch({ type: 'setPhase', phase: 'done' })
       setTimeout(() => {
         onClose()
-        window.location.reload()
       }, 2200)
     }
   }, [instanceToggles, onClose])
@@ -245,9 +250,6 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
     onClose()
-    if (phase === 'restart-instances' || phase === 'done') {
-      window.location.reload()
-    }
   }
 
   if (!open) return null
