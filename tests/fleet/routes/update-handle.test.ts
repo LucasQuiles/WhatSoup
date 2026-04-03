@@ -87,15 +87,15 @@ function makeChecker(impl?: () => Promise<any>) {
 
 // Convenience: configure execFileAsync for the standard happy-path sequence.
 // Call this at the start of a test; it mutates execFileAsyncSpy.
+// Sequence: rev-parse HEAD (pre-pull) → git pull → diff prePullSha → vite build
 function setupHappyPath({
   pullStdout = 'Already up to date.\n',
-  rootDiff = 'src/foo.ts\n',
-  consoleDiff = 'src/bar.ts\n',
+  diffFiles = 'src/foo.ts\n',
 } = {}) {
   execFileAsyncSpy
-    .mockResolvedValueOnce({ stdout: pullStdout, stderr: '' })   // git pull
-    .mockResolvedValueOnce({ stdout: rootDiff, stderr: '' })      // git diff (root)
-    .mockResolvedValueOnce({ stdout: consoleDiff, stderr: '' })   // git diff (console)
+    .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })   // git rev-parse HEAD (pre-pull)
+    .mockResolvedValueOnce({ stdout: pullStdout, stderr: '' })     // git pull
+    .mockResolvedValueOnce({ stdout: diffFiles, stderr: '' })      // git diff prePullSha --name-only (single call)
     .mockResolvedValueOnce({ stdout: '', stderr: '' });            // npx vite build
   execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 }
@@ -249,7 +249,9 @@ describe('handleUpdate — git pull failure', () => {
   it('emits SSE error event with step=pull', async () => {
     const err: any = new Error('network unreachable');
     err.stderr = 'fatal: could not read from remote repository.';
-    execFileAsyncSpy.mockRejectedValueOnce(err);
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' }) // rev-parse HEAD (pre-pull)
+      .mockRejectedValueOnce(err);                                // git pull fails
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
@@ -261,7 +263,9 @@ describe('handleUpdate — git pull failure', () => {
   });
 
   it('uses err.message when err.stderr is absent', async () => {
-    execFileAsyncSpy.mockRejectedValueOnce(new Error('ENOENT: git not found'));
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' }) // rev-parse HEAD (pre-pull)
+      .mockRejectedValueOnce(new Error('ENOENT: git not found')); // git pull fails
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
@@ -274,7 +278,9 @@ describe('handleUpdate — git pull failure', () => {
   it('calls res.end after pull error (stream is closed)', async () => {
     const err: any = new Error('bad');
     err.stderr = 'fatal: error';
-    execFileAsyncSpy.mockRejectedValueOnce(err);
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })
+      .mockRejectedValueOnce(err);
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
@@ -285,7 +291,9 @@ describe('handleUpdate — git pull failure', () => {
   it('does not emit install, build, or restart events after pull failure', async () => {
     const err: any = new Error('bad');
     err.stderr = 'fatal: error';
-    execFileAsyncSpy.mockRejectedValueOnce(err);
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })
+      .mockRejectedValueOnce(err);
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
@@ -471,70 +479,27 @@ describe('writeSSE skip after stream ended', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleUpdate — lockfile change detection', () => {
-  it('skips root npm install when package-lock.json not in diff', async () => {
-    setupHappyPath({ rootDiff: 'src/index.ts\n' });
+  // New sequence: rev-parse(pre-pull) → pull → diff(prePullSha, single call) → vite build
+  // Lockfile checks use line-level matching on the single diff output.
+
+  it('skips both installs when no lockfiles in diff', async () => {
+    setupHappyPath({ diffFiles: 'src/index.ts\nsrc/other.ts\n' });
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    const installSkip = events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip');
-    expect(installSkip).toBeDefined();
-    expect(installSkip!.data.message).toMatch(/No lockfile/i);
+    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
+    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'skip')).toBeDefined();
   });
 
   it('runs root npm install when package-lock.json IS in diff', async () => {
+    // rev-parse → pull → diff (has root lockfile) → npm install root → vite build
     execFileAsyncSpy
-      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })    // pull
-      .mockResolvedValueOnce({ stdout: 'package-lock.json\nsrc/x.ts\n', stderr: '' }) // diff root
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                         // npm install root
-      .mockResolvedValueOnce({ stdout: 'src/bar.ts\n', stderr: '' })             // diff console
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });                         // vite build
-    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
-
-    const { req, res } = makeReqRes();
-    await handleUpdate(req, res, makeChecker(), '/repo');
-
-    const events = parseSSE(res.chunks);
-    const installDone = events.find((e) => e.data?.step === 'install' && e.data?.status === 'done');
-    expect(installDone).toBeDefined();
-  });
-
-  it('skips console npm install when console/package-lock.json not in diff', async () => {
-    setupHappyPath({ consoleDiff: 'src/other.ts\n' });
-    const { req, res } = makeReqRes();
-    await handleUpdate(req, res, makeChecker(), '/repo');
-
-    const events = parseSSE(res.chunks);
-    const skip = events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'skip');
-    expect(skip).toBeDefined();
-    expect(skip!.data.message).toMatch(/No console lockfile/i);
-  });
-
-  it('runs console npm install when console/package-lock.json IS in diff', async () => {
-    execFileAsyncSpy
-      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })           // pull
-      .mockResolvedValueOnce({ stdout: 'src/foo.ts\n', stderr: '' })                   // diff root (no root lockfile)
-      .mockResolvedValueOnce({ stdout: 'console/package-lock.json\nsrc/y.ts\n', stderr: '' }) // diff console
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                // npm install console
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });                               // vite build
-    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
-
-    const { req, res } = makeReqRes();
-    await handleUpdate(req, res, makeChecker(), '/repo');
-
-    const events = parseSSE(res.chunks);
-    const done = events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done');
-    expect(done).toBeDefined();
-  });
-
-  it('both root and console lockfiles changed — both installs run', async () => {
-    execFileAsyncSpy
-      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                  // root lockfile
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                      // npm install root
-      .mockResolvedValueOnce({ stdout: 'console/package-lock.json\n', stderr: '' })           // console lockfile
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                      // npm install console
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                     // vite build
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
+      .mockResolvedValueOnce({ stdout: 'package-lock.json\nsrc/x.ts\n', stderr: '' })          // diff
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install root
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // vite build
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -542,6 +507,62 @@ describe('handleUpdate — lockfile change detection', () => {
 
     const events = parseSSE(res.chunks);
     expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'done')).toBeDefined();
+    // console lockfile NOT in diff → skip
+    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'skip')).toBeDefined();
+  });
+
+  it('runs console npm install when console/package-lock.json IS in diff', async () => {
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
+      .mockResolvedValueOnce({ stdout: 'console/package-lock.json\nsrc/y.ts\n', stderr: '' })  // diff
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install console
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // vite build
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    // root lockfile NOT in diff → skip
+    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
+    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
+  });
+
+  it('both root and console lockfiles changed — both installs run', async () => {
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                                         // rev-parse
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                                // pull
+      .mockResolvedValueOnce({ stdout: 'package-lock.json\nconsole/package-lock.json\n', stderr: '' })     // diff (both)
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // npm install root
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // npm install console
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                                   // vite build
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'done')).toBeDefined();
+    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
+  });
+
+  it('does not false-match console/package-lock.json for root lockfile check', async () => {
+    // Only console lockfile changed — root should SKIP
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
+      .mockResolvedValueOnce({ stdout: 'console/package-lock.json\n', stderr: '' })             // diff
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install console
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // vite build
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    // Root should be SKIPPED — console/package-lock.json should NOT trigger root install
+    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
     expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
   });
 });

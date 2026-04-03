@@ -45,6 +45,12 @@ export async function handleUpdate(
   };
 
   try {
+    // Save pre-pull SHA so we can diff the full range after pull (not just HEAD~1)
+    let prePullSha: string | null = null;
+    try {
+      prePullSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, timeout: 5_000 })).stdout.trim();
+    } catch { /* proceed without — install steps will run unconditionally */ }
+
     // Step 1: git pull
     writeSSE('progress', { step: 'pull', status: 'running' });
     try {
@@ -60,44 +66,50 @@ export async function handleUpdate(
       return;
     }
 
+    // Diff the full pull range once (not HEAD~1 which misses multi-commit pulls)
+    let changedFiles: string[] = [];
+    if (prePullSha) {
+      try {
+        const { stdout: diffOut } = await execFileAsync(
+          'git', ['diff', prePullSha, '--name-only'],
+          { cwd: repoRoot, timeout: 10_000 },
+        );
+        changedFiles = diffOut.split('\n').map(f => f.trim()).filter(Boolean);
+      } catch { /* diff failed — changedFiles stays empty, install steps run unconditionally */ }
+    }
+
     // Step 2: Root npm install (if root lockfile changed)
     writeSSE('progress', { step: 'install', status: 'running' });
-    try {
-      const { stdout: diffOut } = await execFileAsync(
-        'git', ['diff', 'HEAD~1', '--name-only'],
-        { cwd: repoRoot, timeout: 10_000 },
-      );
-      if (diffOut.includes('package-lock.json')) {
+    const rootLockfileChanged = !prePullSha || changedFiles.includes('package-lock.json');
+    if (rootLockfileChanged) {
+      try {
         await execFileAsync('npm', ['install'], { cwd: repoRoot, timeout: 120_000 });
         writeSSE('progress', { step: 'install', status: 'done' });
-      } else {
-        writeSSE('progress', { step: 'install', status: 'skip', message: 'No lockfile changes' });
+      } catch (err: any) {
+        writeSSE('error', { step: 'install', message: err.stderr?.trim() || err.message });
+        endOnce();
+        return;
       }
-    } catch {
-      await execFileAsync('npm', ['install'], { cwd: repoRoot, timeout: 120_000 });
-      writeSSE('progress', { step: 'install', status: 'done' });
+    } else {
+      writeSSE('progress', { step: 'install', status: 'skip', message: 'No lockfile changes' });
     }
 
     // Step 3: Console npm install (if console lockfile changed)
     writeSSE('progress', { step: 'console-install', status: 'running' });
-    try {
-      const { stdout: diffOut } = await execFileAsync(
-        'git', ['diff', 'HEAD~1', '--name-only'],
-        { cwd: repoRoot, timeout: 10_000 },
-      );
-      if (diffOut.includes('console/package-lock.json')) {
+    const consoleLockfileChanged = !prePullSha || changedFiles.includes('console/package-lock.json');
+    if (consoleLockfileChanged) {
+      try {
         await execFileAsync('npm', ['install'], {
           cwd: `${repoRoot}/console`, timeout: 120_000,
         });
         writeSSE('progress', { step: 'console-install', status: 'done' });
-      } else {
-        writeSSE('progress', { step: 'console-install', status: 'skip', message: 'No console lockfile changes' });
+      } catch (err: any) {
+        writeSSE('error', { step: 'console-install', message: err.stderr?.trim() || err.message });
+        endOnce();
+        return;
       }
-    } catch {
-      await execFileAsync('npm', ['install'], {
-        cwd: `${repoRoot}/console`, timeout: 120_000,
-      });
-      writeSSE('progress', { step: 'console-install', status: 'done' });
+    } else {
+      writeSSE('progress', { step: 'console-install', status: 'skip', message: 'No console lockfile changes' });
     }
 
     // Step 4: Console rebuild
