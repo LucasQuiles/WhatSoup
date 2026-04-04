@@ -47,6 +47,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
+import { generateMcpConfigFile } from './providers/mcp-bridge.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 
@@ -644,15 +645,7 @@ export class AgentRuntime implements Runtime {
         new URL('.', import.meta.url).pathname,
         '../../../deploy/mcp/whatsoup-proxy.ts',
       );
-      const mcpConfig = {
-        mcpServers: {
-          'whatsoup': {
-            command: 'node',
-            args: ['--experimental-strip-types', mcpServerScript],
-            env: { WHATSOUP_SOCKET: socketPath },
-          },
-        },
-      };
+      const mcpConfig = generateMcpConfigFile('claude-cli', socketPath, mcpServerScript);
       writeFileSync(join(agentCwd, '.mcp.json'), JSON.stringify(mcpConfig, null, 2));
       log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
     }
