@@ -16,7 +16,7 @@ import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiEvent } from './providers/gemini-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
-import { parseOpenCodeEvent } from './providers/opencode-parser.ts';
+import { parseOpenCodeEvent, resetParserState as resetOpenCodeParserState } from './providers/opencode-parser.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -254,8 +254,14 @@ export class SessionManager {
   }
 
   private handleProviderEvent(event: AgentEvent): void {
+    // Debug: log all events for non-Claude providers
+    if (this.provider !== 'claude-cli') {
+      log.debug({ provider: this.provider, eventType: event.type, sessionId: (event as any).sessionId, dbRowId: this.dbRowId }, 'handleProviderEvent');
+    }
+
     if (event.type === 'init' && this.dbRowId !== null) {
       this.sessionId = event.sessionId;
+      log.info({ provider: this.provider, chatJid: this.chatJid, sessionId: event.sessionId }, 'provider: captured sessionId');
       updateSessionId(this.db, this.dbRowId, event.sessionId);
 
       // Codex app-server: capture threadId from thread/started notification
@@ -370,7 +376,19 @@ export class SessionManager {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
       case 'opencode-cli':
-        log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
+        if (this.sessionId && !this.sessionId.startsWith('opencode-cli-')) {
+          // Resume previous session for multi-turn memory
+          log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'opencode: resuming session');
+          return [
+            'run',
+            '--format', 'json',
+            '--pure',
+            '--session', this.sessionId,
+            ...(this.model ? ['-m', this.model] : []),
+            prompt,
+          ];
+        }
+        log.info({ chatJid: this.chatJid, provider: this.provider }, 'opencode: fresh session');
         return [
           'run',
           '--format', 'json',
@@ -774,6 +792,12 @@ export class SessionManager {
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
       this.stdoutBuffer = '';
 
+      // Reset provider-specific parser state — module-level flags (like OpenCode's
+      // _firstStepSeen) persist across turns since the module stays loaded.
+      if (this.provider === 'opencode-cli') {
+        resetOpenCodeParserState();
+      }
+
       // Spawn-per-turn providers: kill any existing process and spawn a new one
       // with the user prompt appended as a CLI argument.
       if (this.child) {
@@ -835,8 +859,13 @@ export class SessionManager {
 
       // For spawn-per-turn, process exit is normal (one turn = one process).
       // Emit any remaining buffered output, then mark the turn as complete.
+      // Use setImmediate to let pending stdout data chunks drain before we process.
       child.on('exit', (code, signal) => {
         if (this.child !== child) return; // superseded
+
+        // Defer drain to next tick — stdout 'data' events may still be queued
+        // in the event loop after the 'exit' event fires.
+        setImmediate(() => {
 
         // Drain buffered output
         if (this.stdoutBuffer.trim() !== '') {
@@ -844,7 +873,12 @@ export class SessionManager {
             const trimmed = line.trim();
             if (trimmed) {
               const event = parse(trimmed);
-              if (event) this.handleProviderEvent(event);
+              if (event) {
+                if (this.provider !== 'claude-cli') {
+                  log.debug({ provider: this.provider, eventType: event.type }, 'spawn-per-turn exit drain');
+                }
+                this.handleProviderEvent(event);
+              }
             }
           }
           this.stdoutBuffer = '';
@@ -856,6 +890,7 @@ export class SessionManager {
         if (code !== 0 && code !== null) {
           log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
         }
+        }); // end setImmediate
       });
     } else {
       // Persistent process: pipe turns via stdin (JSONL for Claude, JSON-RPC for Codex/Gemini)
