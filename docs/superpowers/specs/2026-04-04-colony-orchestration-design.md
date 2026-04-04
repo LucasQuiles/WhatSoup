@@ -905,16 +905,378 @@ BRIC is not a magic memory layer. It is a hook-integrated enrichment and condens
 
 ---
 
-## 11. Open Questions
+## 11. Schema Discipline
+
+### 11.1 Event Schema
+
+All typed events share a common envelope:
+
+```
+event_id:         TEXT PRIMARY KEY (ULID — sortable, unique)
+event_type:       TEXT NOT NULL (from typed event enum)
+workstream_id:    TEXT NOT NULL (scoped workstream identity)
+bead_id:          TEXT (nullable — not all events are bead-scoped)
+agent_id:         TEXT (nullable — daemon events have no agent)
+timestamp:        TEXT NOT NULL (ISO 8601)
+payload:          TEXT NOT NULL (JSON — schema varies by event_type)
+processing_level: TEXT NOT NULL DEFAULT 'pending' 
+                  CHECK (processing_level IN ('pending','logged','condensed','enriched'))
+idempotency_key:  TEXT UNIQUE (event_type + workstream_id + bead_id + content_hash)
+```
+
+**Versioning:** Each event_type has a `schema_version` field inside its JSON payload. Consumers check version before processing. Unknown versions are logged and skipped, not rejected.
+
+**Idempotency:** The `idempotency_key` prevents duplicate processing. If a hook fires twice for the same underlying change, the second insert is a no-op (INSERT OR IGNORE).
+
+**Partial write / retry:** Events are written in a single INSERT. If the write fails, the hook retries once. If it fails again, the event is written to a fallback JSONL file (`events-fallback.jsonl`) for recovery during the next Deacon cycle.
+
+### 11.2 State Ledger Schema
+
+```
+workstream_id:      TEXT PRIMARY KEY
+repo:               TEXT NOT NULL
+branch:             TEXT NOT NULL
+mission_id:         TEXT NOT NULL
+scope_region:       TEXT (package/module path pattern)
+bead_lineage:       TEXT (JSON array of bead IDs in chain)
+active_beads:       TEXT NOT NULL (JSON: {bead_id: status})
+latest_commit:      TEXT
+diff_summary:       TEXT
+changed_files:      TEXT (JSON array)
+hotspots:           TEXT (JSON array)
+linked_artifacts:   TEXT (JSON array of {path, type, checksum})
+linked_findings:    TEXT (JSON array of finding IDs)
+decision_anchors:   TEXT (JSON array of structured anchor objects)
+unresolved:         TEXT (JSON array of question strings)
+provenance:         TEXT (JSON: pointers to Git objects, artifact files, vector IDs)
+last_enriched_at:   TEXT (ISO 8601)
+vector_refs:        TEXT (JSON array of vector entry IDs)
+schema_version:     INTEGER NOT NULL DEFAULT 1
+created_at:         TEXT NOT NULL
+updated_at:         TEXT NOT NULL
+```
+
+**Versioning:** `schema_version` field on each row. Migrations are additive (new nullable columns). Old rows are upgraded on first read.
+
+**Dedupe:** `workstream_id` is the primary key. Upserts use `INSERT OR REPLACE`. No duplicate workstreams.
+
+### 11.3 Finding Schema
+
+```
+finding_id:       TEXT PRIMARY KEY (ULID)
+workstream_id:    TEXT NOT NULL
+source_bead_id:   TEXT (nullable)
+source_agent_id:  TEXT
+finding_type:     TEXT NOT NULL CHECK (finding_type IN 
+                  ('in_scope','exploratory','boundary_crossing','backpressure','duplicate_candidate'))
+evidence:         TEXT NOT NULL (JSON: observations, file refs, line ranges)
+confidence:       REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0)
+affected_scope:   TEXT (package/module/file pattern)
+suspected_domain: TEXT
+related_findings: TEXT (JSON array of finding IDs)
+suggested_actions: TEXT (JSON array)
+promotion_state:  TEXT NOT NULL DEFAULT 'open' CHECK (promotion_state IN 
+                  ('open','promoted','deferred','suppressed','merged','escalated','archived'))
+suppression_reason: TEXT (nullable — required when suppressed or deferred)
+created_at:       TEXT NOT NULL
+updated_at:       TEXT NOT NULL
+resolved_at:      TEXT
+schema_version:   INTEGER NOT NULL DEFAULT 1
+```
+
+### 11.4 Migration Strategy
+
+- All schema changes are additive: new columns with defaults, new tables, new indexes
+- Never drop or rename columns in production
+- Migration scripts live in `colony/migrations/` with sequential numbering
+- Each migration is idempotent (re-running is safe)
+- Schema version tracked in `schema_meta` table
+
+---
+
+## 12. Conflict Reconciliation
+
+When layers disagree:
+
+| Conflict | Resolution Rule |
+|----------|----------------|
+| Bead says status X, SQLite says status Y | **Bead wins.** Bead files are the authoritative execution record. SQLite is updated to match. Log the discrepancy. |
+| Artifact content differs from bead description | **Artifact wins** for content (it's the work product). Bead wins for status and scope. |
+| SQLite ledger has stale commit hash | **Git wins.** Refresh the ledger from actual Git state. |
+| Vector recall contradicts current bead state | **Bead wins.** Vector recall is advisory. Flag the stale vector entry for reindexing. |
+| Two findings claim to be the same issue | **Merge conservatively.** Keep both with a `duplicate_candidate` link. Machine adjudication or human review decides which survives. |
+| Decision anchor in journal conflicts with bead correction history | **Bead correction history wins.** It is the accumulator. Journal is advisory context. |
+
+**General rule:** When in doubt, the more structured and proximate source wins. Beads > SQLite > artifacts > vector recall. Discrepancies are logged as reconciliation events and trigger ledger refresh.
+
+---
+
+## 13. State Lifecycle and Garbage Collection
+
+### 13.1 Workstream Lifecycle
+
+```
+active → completing → archived → (optionally) purged
+
+active:     beads executing, findings open, ledger updating
+completing: all beads terminal, final synthesize pass running
+archived:   ledger frozen, findings resolved or deferred, vector entries retained
+purged:     SQLite rows deleted, vector entries removed, only Git artifacts remain
+```
+
+### 13.2 Retention Rules
+
+| What | Active retention | Archive trigger | Purge trigger |
+|------|-----------------|-----------------|---------------|
+| State ledger rows | Indefinite while workstream active | Workstream completes + 7 days | 90 days after archive |
+| Event rows | 30 days | Older events → batched condensation, then delete originals | Condensed summaries retained 90 days |
+| Finding records | Indefinite while open | Finding resolved/archived | 90 days after resolution |
+| Vector entries | Indefinite while workstream active | Superseded by newer entry for same scope | 90 days after supersession |
+| Fallback JSONL | Until successfully replayed | Replay succeeds | Immediate after replay |
+| BRIC distilled artifacts | Indefinite while workstream active | Workstream archives | 30 days after archive |
+
+### 13.3 Salience Decay
+
+Active findings have a salience score. Salience decays when:
+- No new evidence is added for 7 days (score *= 0.8)
+- Related workstreams complete without referencing the finding (score *= 0.7)
+- Finding is explicitly deferred (score = 0.1, held at floor)
+
+Findings below salience 0.05 are auto-archived (not deleted — archived with full history).
+
+### 13.4 Ledger Forking
+
+When a workstream spawns a sub-workstream (e.g., a discovery finding becomes a new campaign):
+- New workstream gets a fresh ledger
+- Parent workstream links to child via `provenance` field
+- Child inherits relevant decision anchors and findings by reference (pointers, not copies)
+- Parent and child evolve independently
+
+---
+
+## 14. Promotion and Suppression Policy
+
+### 14.1 Automatic Promotion (finding → executable task)
+
+A finding is auto-promoted when ALL of:
+- `finding_type` is `in_scope`
+- `confidence` >= 0.7
+- Evidence includes at least one file/line anchor
+- No conflicting open finding exists for the same scope
+- The finding pattern matches a known-successful remediation pattern
+- Active mission allows follow-on work in the affected scope
+
+### 14.2 Machine Adjudication Required
+
+A finding requires machine adjudication when ANY of:
+- `finding_type` is `exploratory` or `boundary_crossing`
+- `confidence` < 0.7 but > 0.3
+- Evidence is indirect (inference, not direct observation)
+- Affected scope overlaps with another agent's active bead
+- The finding pattern is novel (no prior match in operational memory)
+
+Machine adjudication flow: BRIC enriches → lower-tier agent classifies → higher-tier agent decides (promote / defer / suppress / merge / escalate).
+
+### 14.3 Suppression Rules
+
+A finding is suppressed when ANY of:
+- Duplicate of an already-promoted task (linked, not deleted)
+- Below confidence 0.3 with no corroborating evidence
+- Outside all active missions AND no severity indicator
+- Explicitly marked by a higher-tier agent as noise
+
+Suppressed findings are retained with `suppression_reason`. They can be resurfaced if new corroborating evidence appears.
+
+### 14.4 Human Escalation Threshold
+
+A finding reaches human escalation when ALL of:
+- Machine adjudication was attempted (at least 2 tiers)
+- No tier could safely resolve (insufficient evidence, novel domain, policy ambiguity)
+- Severity is non-trivial (not a minor code style observation)
+- OR: the same pattern has been escalated to machine adjudication 3+ times without resolution
+
+---
+
+## 15. Backpressure Response Behavior
+
+Backpressure is not just a signal — it triggers concrete control actions:
+
+| Signal | Threshold | Response |
+|--------|-----------|----------|
+| Task stuck (same bead, repeated retries) | 3 retries without new evidence | Pause retries. Route to higher-tier agent for diagnosis. Increase evidence threshold for next attempt. |
+| Oscillating state (bead bouncing between states) | 3 round-trips | Freeze bead. Create diagnostic finding. Escalate to Conductor. |
+| Rising escalation rate | >50% of findings escalating in one cycle | Slow promotion rate. Increase BRIC enrichment depth. Trigger scheduled discovery audit of the affected scope. |
+| Queue starvation | No pending work for >30 minutes while agents are idle | Trigger scheduled discovery beads. Notify human if no discoverable work exists. |
+| Repeated human intervention on same class | Same issue type escalated to human 3+ times | Create a policy review finding. Flag as recurring pattern. Machine layers should attempt automated resolution next time. |
+| Low-confidence finding accumulation | >10 open findings below confidence 0.5 | Trigger BRIC clustering pass. Merge duplicates. Suppress noise. Raise evidence bar for new findings in that scope. |
+| Review loop disagreement | Same bead rejected by reviewer 3+ times | Escalate to higher-tier adjudicator. If still unresolved, freeze and escalate to human. |
+
+---
+
+## 16. Failure Containment and Degraded Modes
+
+### 16.1 Component Failure Matrix
+
+| Component down | Impact | Degraded mode |
+|---------------|--------|---------------|
+| **BRIC unavailable** | No pre-hook enrichment, no post-hook condensation | Agents rehydrate from SQLite ledger + bead files + artifacts only. No vector updates. Append-only logging continues to fallback JSONL. Work continues with reduced context quality. |
+| **SQLite locked/corrupted** | No state ledger, no event writes | CRITICAL. Deacon detects via health check. All workers paused. Deacon attempts WAL recovery. If unrecoverable, alert human. Bead files (Git) are the recovery point. |
+| **Vector indexing lagging** | Stale semantic recall | Agents get current deterministic state but older vector context. Flag as degraded in state packet. Work continues. |
+| **Event hooks failing** | Events not captured | Fallback to JSONL append. Deacon batch-replays on recovery. No immediate data loss, but real-time enrichment paused. |
+| **BRIC produces nonsense** | Bad enrichment artifacts | Enrichment fields are advisory, not authoritative. Agents fall back to deterministic state. Bad artifacts flagged and quarantined. BRIC processing paused for review. |
+| **Review loops disagree repeatedly** | Bead cannot advance | Freeze after 3 cycles. Escalate to higher tier, then human. Bead marked `stuck` with full disagreement history. |
+| **Task oscillating between states** | Wasted compute | Freeze after 3 round-trips. Diagnostic finding created. No further retries until root cause addressed. |
+
+### 16.2 General Degradation Principle
+
+The system degrades by shedding enrichment layers while preserving authoritative state:
+
+```
+Full mode:    beads + artifacts + SQLite + BRIC enrichment + vector recall
+Reduced:      beads + artifacts + SQLite + append-only logging
+Minimal:      beads + artifacts + Git history only
+Emergency:    bead files in Git (the last resort recovery point)
+```
+
+Each level sheds the least-authoritative layer first. Work can continue at every level above emergency, with progressively reduced context quality.
+
+---
+
+## 17. Cost and Throughput Budgets
+
+| Resource | Budget | Enforcement |
+|----------|--------|-------------|
+| Hook frequency (high-value events) | Max 60/hour per workstream | Event deduplication + rate limiter in hook runner |
+| Hook frequency (medium-value events) | Batched every 5 minutes | Timer-based condensation, not per-event |
+| BRIC enrichment concurrency | Max 2 concurrent enrichment runs | Semaphore in Deacon |
+| Vector indexing batch size | Max 50 records per batch | Batched writes to Pinecone |
+| Review loop depth | Max 3 cycles per bead per loop level | Hard limit in Conductor policy |
+| Max retries per bead | 3 at L0, 2 at L1, 2 at L2 | tmup task retry config |
+| Per-workstream cost ceiling | $50 USD (configurable) | Deacon tracks cumulative cost from Conductor session outputs |
+| Per-agent context assembly | Max 100K tokens per state packet | BRIC truncates and summarizes above limit |
+| Conductor session timeout | 30 min (DISPATCH/EVALUATE), 60 min (SYNTHESIZE) | Deacon SIGTERM + SIGKILL |
+| Worker session timeout | Calibrated by Cynefin: CLEAR=5min, COMPLICATED=15min, COMPLEX=30min | tmup heartbeat + dead-claim recovery |
+| Discovery budget | Max 20% of total workstream compute | Deacon tracks discovery vs execution bead ratio |
+| Findings store max open | 100 open findings per workstream | Auto-archive lowest-salience findings above limit |
+
+---
+
+## 18. Security and Privacy Boundaries
+
+### 18.1 Storage Rules
+
+| Content type | May store verbatim | Must summarize | Must redact |
+|-------------|-------------------|----------------|-------------|
+| Source code diffs | Yes (in artifacts, Git) | N/A | Strip credentials if detected |
+| Bead files | Yes | N/A | No secrets in bead fields |
+| Decision anchors | Yes (structured + narrative) | N/A | No credential references |
+| Transcripts | Extracts only (not full transcripts) | Full transcripts → BRIC summary | Strip API keys, tokens, passwords |
+| Tool logs | Yes (in append-only JSONL) | N/A | Strip environment variables containing secrets |
+| Test output | Yes (in artifacts) | N/A | Strip connection strings |
+| Vector summaries | Yes (semantic summaries) | Full content → embedding + abstract | No raw credentials in vector metadata |
+
+### 18.2 Retention Limits
+
+| Store | Max retention |
+|-------|---------------|
+| Append-only event JSONL | 30 days (then condense or purge) |
+| SQLite state ledger | 90 days after workstream archive |
+| Vector entries | 90 days after supersession |
+| BRIC distilled artifacts | 30 days after workstream archive |
+| Git-backed artifacts (beads, specs) | Indefinite (Git history) |
+
+### 18.3 Access Rules
+
+- Only agents dispatched within a workstream may read that workstream's state packet
+- BRIC may read any workstream for cross-workstream clustering (read-only)
+- The Deacon may read all workstreams for health monitoring (read-only)
+- Human has full access to all stores
+
+---
+
+## 19. Success Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Handoff reconstruction accuracy | >80% of decision anchors recoverable by fresh Conductor | Sample 10 handoffs, measure anchor recovery rate |
+| Repeated context rebuild reduction | >50% reduction vs baseline (no ledger/BRIC) | Compare context assembly time and completeness with/without system |
+| In-scope follow-on task generation precision | >70% of auto-promoted tasks are valid and useful | Sample promoted tasks, measure human agreement rate |
+| Exploratory finding false positive rate | <30% of exploratory findings are noise | Sample findings, measure suppression rate after adjudication |
+| Escalation precision | >80% of human escalations are genuinely needed | Track human action rate on escalated items |
+| Stuck-task recovery rate | >90% of stuck tasks recovered without human intervention | Track stuck → resolved without human touch |
+| Duplicate-finding merge quality | >80% of merge proposals are correct | Sample merged findings, measure split rate |
+| Retrieval usefulness by layer | Each layer contributes to >50% of state packets | Track which layers are actually consulted in rehydration |
+| Human interruption reduction | >60% reduction in human escalations per workstream over 30 days | Compare escalation rate week 1 vs week 4 |
+| System cost per workstream | <$50 USD average per completed workstream | Track from Conductor session cost outputs |
+
+---
+
+## 20. Reference Paths
+
+### 20.1 Golden Path
+
+```
+1. Codex worker completes implementation bead
+2. Post-hook emits bead_completed event (typed, high-value)
+3. BRIC receives: diff, commit hash, transcript extract, test results, changed files
+4. BRIC condenses: extracts decisions, evidence anchors, follow-on findings
+5. BRIC updates: SQLite state ledger, vector store, distilled artifact
+6. Worker reports adjacent finding: "import anomaly in neighboring module"
+7. Finding created: in_scope, confidence 0.8, evidence includes file refs
+8. Auto-promotion check: in_scope + confidence >= 0.7 + file anchor + active mission allows → PROMOTED
+9. Orchestrator creates follow-on bead from promoted finding
+10. Claude worker receives next bead with full state packet (assembled from ledger + artifacts + beads)
+11. Claude reviews promoted task, implements fix
+12. Post-hook captures second bead_completed event
+13. Cycle continues
+```
+
+### 20.2 Degraded Path (BRIC Unavailable)
+
+```
+1. Codex worker completes implementation bead
+2. Post-hook emits bead_completed event
+3. BRIC is down — event falls back to append-only JSONL
+4. Minimal SQLite update: bead status change, commit hash, changed files (from Git directly)
+5. No vector update, no enrichment artifacts
+6. Worker reports adjacent finding (same as golden path)
+7. Finding created with lower enrichment: no BRIC clustering, no related-case matching
+8. Auto-promotion check: passes on evidence quality alone (file refs present)
+9. Orchestrator creates follow-on bead
+10. Claude receives state packet assembled from ledger + artifacts only (no BRIC enrichment)
+11. State packet flagged: "degraded — BRIC offline, reduced context quality"
+12. Claude proceeds with reduced but functional context
+13. When BRIC recovers: Deacon triggers batch replay of JSONL backlog
+14. Enrichment catches up, vector store updated, ledger refreshed
+```
+
+### 20.3 Failure Path (Review Loop Disagreement)
+
+```
+1. Claude reviews Codex implementation, finds issues
+2. Codex revises based on findings
+3. Claude reviews again, finds different issues
+4. Codex revises again
+5. Claude reviews third time — still disagrees (3 cycles exhausted)
+6. Bead frozen with status: stuck
+7. Full disagreement history preserved in bead corrections
+8. Escalation to higher-tier adjudicator (Opus)
+9. If adjudicator resolves: bead unfreezes, work continues
+10. If adjudicator cannot resolve: human escalation with full evidence bundle
+11. Human decides, resolution recorded as decision anchor
+12. Pattern recorded in operational memory for future similar cases
+```
+
+---
+
+## 21. Open Questions
 
 1. **Local model triage:** What model is appropriate for the daemon triage layer? What's the decision boundary between "triage can handle this" and "spawn Opus"?
 
-2. **BRIC operational model:** Is BRIC always-on (daemon) or on-demand (service)? What's its resource footprint?
+2. **Merge coordination timing:** When does the Refinery pattern become necessary? How many concurrent workers before merge conflicts become the bottleneck?
 
-3. **Conductor journal format:** Exact schema for structured decision anchors. How much narrative is enough without becoming lossy compression?
+3. **Discovery budget calibration:** 20% cap is a starting point. How do we measure whether discovery is producing value vs noise?
 
-4. **Merge coordination timing:** When does the Refinery pattern become necessary? How many concurrent workers before merge conflicts become the bottleneck?
+4. **Cross-workstream learning:** When should operational memory from one workstream inform another? What's the contamination risk?
 
-5. **Discovery budget:** How much agent time should go to discovery vs execution? Yegge says 40% for code health. What's right for us?
-
-6. **Backpressure thresholds:** At what point does a stuck pattern trigger escalation vs continued retry? How many retries before a finding becomes "evidence about policy limits"?
+5. **BRIC cold start:** How does the system bootstrap when there's no prior operational memory? What's the minimum viable state packet for the first workstream?
