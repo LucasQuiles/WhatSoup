@@ -917,6 +917,9 @@ export class SessionManager {
       child.stdin.end();
 
       child.on('error', (err: NodeJS.ErrnoException) => {
+        // Release the pessimistic budget reservation — response will never arrive
+        this.budget?.cancelPending();
+
         if (err.code === 'ENOENT') {
           // Binary not installed — configuration error, not a transient crash
           this.active = false;
@@ -980,6 +983,8 @@ export class SessionManager {
 
         // Non-zero exit on spawn-per-turn = error for this turn, but session stays active
         if (code !== 0 && code !== null) {
+          // Release pessimistic budget reservation if the turn crashed without a result event
+          this.budget?.cancelPending();
           log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
         }
         }); // end setImmediate

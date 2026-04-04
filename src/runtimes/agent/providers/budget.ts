@@ -43,6 +43,9 @@ export class ProviderBudget {
   // Per-chat tracking
   private chatRequestWindows: Map<string, number[]> = new Map();
 
+  // Pessimistic counting: track in-flight requests that haven't received a response yet
+  private pendingRequests = 0;
+
   constructor(providerId: string, config: BudgetConfig = {}) {
     this.providerId = providerId;
     this.config = config;
@@ -54,11 +57,91 @@ export class ProviderBudget {
    * Call before making API requests.
    */
   checkBudget(chatId?: string): { allowed: boolean; reason?: string } {
+    const result = this.evaluateBudget(chatId);
+
+    // Pessimistic: reserve a slot for this in-flight request when allowed
+    if (result.allowed && this.config.requestsPerMinute) {
+      this.pendingRequests++;
+    }
+
+    return result;
+  }
+
+  /**
+   * Record a completed request with token usage.
+   * Call after receiving API response.
+   */
+  recordUsage(tokens: { input?: number; output?: number }, chatId?: string): void {
+    const now = Date.now();
+    const totalTokens = (tokens.input ?? 0) + (tokens.output ?? 0);
+
+    // Response arrived — no longer pending
+    if (this.pendingRequests > 0) {
+      this.pendingRequests--;
+    }
+
+    this.requestWindow.push(now);
+    this.tokenWindow.timestamps.push(now);
+    this.tokenWindow.tokenCounts.push(totalTokens);
+    this.dailyTokens += totalTokens;
+
+    if (chatId) {
+      const chatWindow = this.chatRequestWindows.get(chatId) ?? [];
+      chatWindow.push(now);
+      this.chatRequestWindows.set(chatId, chatWindow);
+    }
+  }
+
+  /**
+   * Get current budget snapshot for monitoring/alerting.
+   */
+  getSnapshot(): BudgetSnapshot {
+    this.pruneWindows();
+    const recentTokens = this.tokenWindow.tokenCounts.reduce((a, b) => a + b, 0);
+    // Use peek mode to avoid side-effects (checkBudget increments pendingRequests)
+    const check = this.peekBudget();
+
+    return {
+      requestsLastMinute: this.requestWindow.length,
+      tokensLastMinute: recentTokens,
+      estimatedDailySpendUsd: this.estimateSpendUsd(this.dailyTokens),
+      isThrottled: !check.allowed,
+      throttleReason: check.reason ?? null,
+    };
+  }
+
+  /**
+   * Reset daily counters (called automatically at midnight).
+   */
+  resetDaily(): void {
+    this.dailyTokens = 0;
+    this.dailyResetTime = this.getNextMidnight();
+  }
+
+  /**
+   * Cancel a pending request reservation (for error/timeout paths
+   * where the response never arrives).
+   */
+  cancelPending(): void {
+    if (this.pendingRequests > 0) {
+      this.pendingRequests--;
+    }
+  }
+
+  // --- Internal ---
+
+  /** Read-only budget check — no side effects (does not increment pendingRequests). */
+  private peekBudget(chatId?: string): { allowed: boolean; reason?: string } {
+    return this.evaluateBudget(chatId);
+  }
+
+  /** Core budget evaluation logic (pure check, no side effects). */
+  private evaluateBudget(chatId?: string): { allowed: boolean; reason?: string } {
     this.pruneWindows();
     this.checkDailyReset();
 
-    // Check requests per minute
-    if (this.config.requestsPerMinute && this.requestWindow.length >= this.config.requestsPerMinute) {
+    // Check requests per minute (include in-flight pending requests)
+    if (this.config.requestsPerMinute && this.requestWindow.length + this.pendingRequests >= this.config.requestsPerMinute) {
       return { allowed: false, reason: `Rate limit: ${this.config.requestsPerMinute} req/min for ${this.providerId}` };
     }
 
@@ -89,54 +172,11 @@ export class ProviderBudget {
     return { allowed: true };
   }
 
-  /**
-   * Record a completed request with token usage.
-   * Call after receiving API response.
-   */
-  recordUsage(tokens: { input?: number; output?: number }, chatId?: string): void {
-    const now = Date.now();
-    const totalTokens = (tokens.input ?? 0) + (tokens.output ?? 0);
-
-    this.requestWindow.push(now);
-    this.tokenWindow.timestamps.push(now);
-    this.tokenWindow.tokenCounts.push(totalTokens);
-    this.dailyTokens += totalTokens;
-
-    if (chatId) {
-      const chatWindow = this.chatRequestWindows.get(chatId) ?? [];
-      chatWindow.push(now);
-      this.chatRequestWindows.set(chatId, chatWindow);
-    }
-  }
-
-  /**
-   * Get current budget snapshot for monitoring/alerting.
-   */
-  getSnapshot(): BudgetSnapshot {
-    this.pruneWindows();
-    const recentTokens = this.tokenWindow.tokenCounts.reduce((a, b) => a + b, 0);
-    const check = this.checkBudget();
-
-    return {
-      requestsLastMinute: this.requestWindow.length,
-      tokensLastMinute: recentTokens,
-      estimatedDailySpendUsd: this.estimateSpendUsd(this.dailyTokens),
-      isThrottled: !check.allowed,
-      throttleReason: check.reason ?? null,
-    };
-  }
-
-  /**
-   * Reset daily counters (called automatically at midnight).
-   */
-  resetDaily(): void {
-    this.dailyTokens = 0;
-    this.dailyResetTime = this.getNextMidnight();
-  }
-
-  // --- Internal ---
-
   private pruneWindows(): void {
+    // Safety: pendingRequests should never go negative
+    if (this.pendingRequests < 0) {
+      this.pendingRequests = 0;
+    }
     const oneMinuteAgo = Date.now() - 60_000;
 
     this.requestWindow = this.requestWindow.filter(t => t > oneMinuteAgo);

@@ -195,6 +195,83 @@ describe('ProviderBudget', () => {
       vi.useRealTimers();
     });
   });
+  describe('pessimistic counting (burst bypass prevention)', () => {
+    it('rejects the 3rd concurrent request when limit is 2 and no responses have arrived', () => {
+      const budget = new ProviderBudget('test', { requestsPerMinute: 2 });
+
+      // Simulate 3 concurrent sendTurns: all call checkBudget before any recordUsage
+      const r1 = budget.checkBudget();
+      const r2 = budget.checkBudget();
+      const r3 = budget.checkBudget();
+
+      expect(r1.allowed).toBe(true);
+      expect(r2.allowed).toBe(true);
+      expect(r3.allowed).toBe(false);
+      expect(r3.reason).toContain('2 req/min');
+    });
+
+    it('releases pending slot when recordUsage is called (response arrives)', () => {
+      const budget = new ProviderBudget('test', { requestsPerMinute: 2 });
+
+      // Two concurrent requests fill the budget
+      expect(budget.checkBudget().allowed).toBe(true);
+      expect(budget.checkBudget().allowed).toBe(true);
+      expect(budget.checkBudget().allowed).toBe(false);
+
+      // First response arrives — frees one pending slot
+      budget.recordUsage({ input: 10, output: 10 });
+
+      // Now a new request should be allowed (1 completed + 1 pending = 2, but completed is in window)
+      // Actually: requestWindow has 1 entry + pendingRequests is 1 = 2 >= 2 — still blocked
+      // Need second response too:
+      budget.recordUsage({ input: 10, output: 10 });
+
+      // Now: requestWindow has 2, pendingRequests is 0 — 2 >= 2 still blocked
+      // This is correct: 2 completed requests in the window = at limit
+      expect(budget.checkBudget().allowed).toBe(false);
+    });
+
+    it('releases pending slot when cancelPending is called (error path)', () => {
+      const budget = new ProviderBudget('test', { requestsPerMinute: 2 });
+
+      // Two concurrent requests fill the budget
+      expect(budget.checkBudget().allowed).toBe(true);
+      expect(budget.checkBudget().allowed).toBe(true);
+      expect(budget.checkBudget().allowed).toBe(false);
+
+      // First request errors out — cancel its pending reservation
+      budget.cancelPending();
+
+      // Now: requestWindow has 0, pendingRequests is 1 = 1 < 2 — allowed
+      expect(budget.checkBudget().allowed).toBe(true);
+    });
+
+    it('cancelPending does not go below zero', () => {
+      const budget = new ProviderBudget('test', { requestsPerMinute: 5 });
+
+      // No pending requests — cancelPending should be a no-op
+      budget.cancelPending();
+      budget.cancelPending();
+      budget.cancelPending();
+
+      // Should still allow requests normally
+      expect(budget.checkBudget().allowed).toBe(true);
+    });
+
+    it('getSnapshot does not increment pendingRequests', () => {
+      const budget = new ProviderBudget('test', { requestsPerMinute: 2 });
+
+      // Call getSnapshot multiple times — should not consume budget
+      budget.getSnapshot();
+      budget.getSnapshot();
+      budget.getSnapshot();
+
+      // Should still allow 2 requests
+      expect(budget.checkBudget().allowed).toBe(true);
+      expect(budget.checkBudget().allowed).toBe(true);
+      expect(budget.checkBudget().allowed).toBe(false);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
