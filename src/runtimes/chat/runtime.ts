@@ -22,6 +22,7 @@ import { EnrichmentPoller } from './enrichment/poller.ts';
 import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay } from '../../core/retry.ts';
+import { emitAlert } from '../../lib/emit-alert.ts';
 
 const log = createChildLogger('conversation');
 
@@ -326,6 +327,12 @@ export class ChatRuntime implements Runtime {
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
+          emitAlert(
+            this.botName,
+            'llm_total_failure',
+            `All LLM providers failed for ${this.botName} (primary: ${this.primaryProvider.name}, fallback: ${this.fallbackProvider.name})`,
+            `model=${modelUsed} traceId=${traceId} error=${(fallbackErr as Error)?.message ?? 'unknown'}`,
+          );
         }
       }
     }

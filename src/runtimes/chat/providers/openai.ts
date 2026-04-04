@@ -3,6 +3,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import type { LLMProvider, GenerateRequest, GenerateResponse, ChatMessage } from './types.ts';
+import { classifyApiError, extractStatusCode } from './api-error-classifier.ts';
 
 const logger = createChildLogger('openai-provider');
 
@@ -57,11 +58,16 @@ export function createOpenAIProvider(): LLMProvider {
           { signal: controller.signal },
         );
       } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          logger.error({ model, provider: 'openai' }, 'OpenAI request timed out');
+        const elapsed_ms = Date.now() - startMs;
+        const errorType = classifyApiError(err);
+        const statusCode = extractStatusCode(err);
+        logger.error(
+          { errorType, statusCode, provider: 'openai', model, elapsed_ms, err },
+          'llm_api_error',
+        );
+        if (errorType === 'timeout') {
           throw new AppError('OpenAI request timed out', 'LLM_TIMEOUT', err);
         }
-        logger.error({ model, provider: 'openai', err }, 'OpenAI request failed');
         throw new AppError('OpenAI request failed', 'LLM_UNAVAILABLE', err);
       } finally {
         clearTimeout(timeout);
