@@ -239,7 +239,7 @@ export async function handleConfigUpdate(
     if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
       try {
         const claudeDir = path.join(ao.cwd, '.claude');
-        fs.mkdirSync(claudeDir, { recursive: true });
+        fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
         fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string, 'utf-8');
       } catch (err) {
         jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
@@ -534,10 +534,10 @@ export async function handleCreateLine(
   // --- Create directories ---
   const createdExtras: string[] = [];
   try {
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true });
-    fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true });
-    fs.mkdirSync(stateRoot(name), { recursive: true });
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
 
     // --- Write config.json ---
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
@@ -559,7 +559,7 @@ export async function handleCreateLine(
         typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
       const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
       const claudeDir = path.join(cwd, '.claude');
-      fs.mkdirSync(claudeDir, { recursive: true });
+      fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
       fs.writeFileSync(claudeMdPath, body.claudeMd as string, 'utf-8');
       createdExtras.push(claudeMdPath);
@@ -630,7 +630,9 @@ export async function handleAuth(
   // Stop the running instance so the lock file is released for auth
   try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* may not be running */ }
 
-  // Spawn auth process
+  // Auth bootstrap is an admin-only operation that needs full environment access
+  // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
+  // and does not process untrusted input, so full env inheritance is acceptable.
   const child = spawn('node', ['--experimental-strip-types', 'src/bootstrap-auth.ts', params.name], {
     cwd: process.cwd(),
     env: { ...process.env },

@@ -225,6 +225,11 @@ export const config = {
   systemPrompt: (instance?.systemPrompt as string | undefined) ?? DEFAULT_SYSTEM_PROMPT,
 
 
+  // Agent provider selection — read from agentOptions.provider / agentOptions.providerConfig
+  // Defaults to 'claude-cli' for backward compatibility when not specified.
+  agentProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['provider'] as string | undefined) ?? 'claude-cli',
+  agentProviderConfig: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
+
   // Access mode (from instance config, defaults to allowlist for backward compat)
   accessMode: (() => {
     const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;

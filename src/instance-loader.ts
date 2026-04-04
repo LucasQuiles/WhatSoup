@@ -33,6 +33,10 @@ interface AgentOptions {
   perUserDirs?: unknown;
   sandboxPerChat?: boolean;
   enabledPlugins?: Record<string, boolean>;
+  /** Provider identifier — maps to the registry. Defaults to 'claude-cli'. */
+  provider?: string;
+  /** Provider-specific configuration overrides. */
+  providerConfig?: Record<string, unknown>;
 }
 
 interface InstanceConfig {
@@ -139,6 +143,20 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
       // sandboxPerChat requires sessionScope 'per_chat'
       if (opts['sandboxPerChat'] === true && opts['sessionScope'] !== 'per_chat') {
         throw new Error('agentOptions.sandboxPerChat requires sessionScope "per_chat"');
+      }
+
+      // provider is optional but must be a non-empty string when present
+      if (opts['provider'] !== undefined) {
+        if (typeof opts['provider'] !== 'string' || (opts['provider'] as string).trim() === '') {
+          throw new Error('agentOptions.provider must be a non-empty string when provided');
+        }
+      }
+
+      // providerConfig is optional but must be a plain object when present
+      if (opts['providerConfig'] !== undefined) {
+        if (typeof opts['providerConfig'] !== 'object' || Array.isArray(opts['providerConfig']) || opts['providerConfig'] === null) {
+          throw new Error('agentOptions.providerConfig must be an object when provided');
+        }
       }
 
       // @check CHK-060 // @traces CON-007.AC-01

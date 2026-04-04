@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-04-04T06:40:54.096Z","session_id":"85808b9c-967d-47d8-a23e-4e186c429d40","model":"auto-gemini-3"}
+{"type":"message","timestamp":"2026-04-04T06:40:54.098Z","role":"user","content":"What is 2+2? Reply in one word."}
+{"type":"message","timestamp":"2026-04-04T06:40:56.467Z","role":"assistant","content":"Four","delta":true}
+{"type":"result","timestamp":"2026-04-04T06:40:57.044Z","status":"success","stats":{"total_tokens":12138,"input_tokens":11986,"output_tokens":51,"cached":0,"input":11986,"duration_ms":2948,"tool_calls":0}}

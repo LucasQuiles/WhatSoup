@@ -91,7 +91,7 @@ export async function loadOrCreateFleetToken(): Promise<string> {
     return raw;
   } catch {
     const token = crypto.randomBytes(32).toString('hex');
-    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(tokenPath, token, { mode: 0o600 });
     log.info({ tokenPath }, 'generated new fleet token');
     return token;

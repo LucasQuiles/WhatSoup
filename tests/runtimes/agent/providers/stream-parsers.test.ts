@@ -1,0 +1,354 @@
+// tests/runtimes/agent/providers/stream-parsers.test.ts
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
+import { parseGeminiEvent } from '../../../../src/runtimes/agent/providers/gemini-parser.ts';
+
+const FIXTURES_DIR = resolve(
+  import.meta.dirname,
+  '../../../../src/runtimes/agent/providers/__tests__/fixtures',
+);
+
+function readFixtureLines(filename: string): string[] {
+  return readFileSync(resolve(FIXTURES_DIR, filename), 'utf8').split('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Codex stream parser
+// ---------------------------------------------------------------------------
+
+describe('Codex stream parser', () => {
+  describe('codex-output.jsonl (simple 2+2 response)', () => {
+    const lines = readFixtureLines('codex-output.jsonl');
+
+    it('parses thread.started → init event with sessionId', () => {
+      const event = parseCodexEvent(lines[0]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: '019d572a-d8da-7fa3-8c55-6bad7ff0f8b9',
+      });
+    });
+
+    it('parses turn.started → ignored event', () => {
+      const event = parseCodexEvent(lines[1]!);
+      expect(event).toEqual({ type: 'ignored' });
+    });
+
+    it('parses item.completed agent_message → assistant_text with text', () => {
+      const event = parseCodexEvent(lines[2]!);
+      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+    });
+
+    it('parses turn.completed → result with token counts and null text', () => {
+      const event = parseCodexEvent(lines[3]!);
+      expect(event).toEqual({
+        type: 'result',
+        text: null,
+        inputTokens: 38365,
+        outputTokens: 564,
+      });
+    });
+
+    it('returns null for empty/whitespace-only lines', () => {
+      // The fixture has a trailing newline producing an empty last line
+      const lastLine = lines[lines.length - 1]!;
+      expect(lastLine.trim()).toBe('');
+      expect(parseCodexEvent(lastLine)).toBeNull();
+    });
+  });
+
+  describe('codex-output3.jsonl (tool use: shell commands + file changes)', () => {
+    const lines = readFixtureLines('codex-output3.jsonl').filter((l) => l.trim() !== '');
+
+    it('parses thread.started', () => {
+      const event = parseCodexEvent(lines[0]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: '019d572c-139c-7562-a122-00cb52893dfb',
+      });
+    });
+
+    it('parses turn.started → ignored', () => {
+      expect(parseCodexEvent(lines[1]!)).toEqual({ type: 'ignored' });
+    });
+
+    it('parses first item.completed agent_message → assistant_text', () => {
+      const event = parseCodexEvent(lines[2]!);
+      expect(event).toMatchObject({ type: 'assistant_text' });
+      expect((event as { type: string; text: string }).text).toContain("output.txt");
+    });
+
+    it('parses item.started command_execution → tool_use with command input', () => {
+      // lines[3] is item.started for item_1 (sed command)
+      const event = parseCodexEvent(lines[3]!);
+      expect(event).toMatchObject({
+        type: 'tool_use',
+        toolName: 'command_execution',
+        toolId: 'item_1',
+      });
+      const toolUse = event as { type: 'tool_use'; toolInput: Record<string, unknown> };
+      expect(typeof toolUse.toolInput['command']).toBe('string');
+    });
+
+    it('parses item.started for a second command_execution → tool_use', () => {
+      // lines[4] is item.started for item_2
+      const event = parseCodexEvent(lines[4]!);
+      expect(event).toMatchObject({
+        type: 'tool_use',
+        toolName: 'command_execution',
+        toolId: 'item_2',
+      });
+    });
+
+    it('parses item.completed command_execution (exit 0) → tool_result isError=false', () => {
+      // lines[5] is item.completed for item_2 — status completed, exit_code 0
+      const event = parseCodexEvent(lines[5]!);
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'item_2',
+        isError: false,
+      });
+      const result = event as { type: 'tool_result'; content: string };
+      expect(result.content).toContain('test.txt');
+    });
+
+    it('parses item.completed command_execution with aggregated_output → tool_result content', () => {
+      // lines[6] is item.completed for item_1 (sed output with SKILL.md content)
+      const event = parseCodexEvent(lines[6]!);
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'item_1',
+        isError: false,
+      });
+      const result = event as { type: 'tool_result'; content: string };
+      expect(result.content.length).toBeGreaterThan(0);
+    });
+
+    it('parses item.started file_change → tool_use', () => {
+      // lines[11] is item.started for item_6 (file_change)
+      const fileChangeLine = lines.find((l) => {
+        try {
+          const p = JSON.parse(l) as Record<string, unknown>;
+          const item = p['item'] as Record<string, unknown> | undefined;
+          return p['type'] === 'item.started' && item?.['type'] === 'file_change';
+        } catch {
+          return false;
+        }
+      });
+      expect(fileChangeLine).toBeDefined();
+      const event = parseCodexEvent(fileChangeLine!);
+      expect(event).toMatchObject({
+        type: 'tool_use',
+        toolName: 'file_change',
+        toolId: 'item_6',
+      });
+      const toolUse = event as { type: 'tool_use'; toolInput: Record<string, unknown> };
+      expect(Array.isArray(toolUse.toolInput['changes'])).toBe(true);
+    });
+
+    it('parses item.completed file_change → tool_result isError=false', () => {
+      const fileChangeLine = lines.find((l) => {
+        try {
+          const p = JSON.parse(l) as Record<string, unknown>;
+          const item = p['item'] as Record<string, unknown> | undefined;
+          return p['type'] === 'item.completed' && item?.['type'] === 'file_change';
+        } catch {
+          return false;
+        }
+      });
+      expect(fileChangeLine).toBeDefined();
+      const event = parseCodexEvent(fileChangeLine!);
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'item_6',
+        isError: false,
+      });
+    });
+  });
+
+  describe('edge cases', () => {
+    it('returns null for empty string', () => {
+      expect(parseCodexEvent('')).toBeNull();
+    });
+
+    it('returns null for whitespace-only string', () => {
+      expect(parseCodexEvent('   \t  ')).toBeNull();
+    });
+
+    it('returns parse_error for malformed JSON', () => {
+      const event = parseCodexEvent('{not valid json');
+      expect(event).toEqual({ type: 'parse_error', line: '{not valid json' });
+    });
+
+    it('parses turn.failed → result with error text', () => {
+      const line = JSON.stringify({
+        type: 'turn.failed',
+        error: { message: 'context window exceeded' },
+        usage: { input_tokens: 100, output_tokens: 5 },
+      });
+      const event = parseCodexEvent(line);
+      expect(event).toMatchObject({ type: 'result', inputTokens: 100, outputTokens: 5 });
+      const result = event as { type: 'result'; text: string | null };
+      expect(result.text).toBeTruthy();
+      expect(result.text).toContain('context window exceeded');
+    });
+
+    it('parses turn.failed with no error fields → fallback text', () => {
+      const line = JSON.stringify({ type: 'turn.failed' });
+      const event = parseCodexEvent(line);
+      expect(event).toMatchObject({ type: 'result' });
+      const result = event as { type: 'result'; text: string | null };
+      expect(result.text).toBe('Codex CLI turn failed');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gemini stream parser
+// ---------------------------------------------------------------------------
+
+describe('Gemini stream parser', () => {
+  describe('gemini-output.jsonl (simple 2+2 response)', () => {
+    const lines = readFixtureLines('gemini-output.jsonl').filter((l) => l.trim() !== '');
+
+    it('parses {type:"init", session_id} → init with sessionId', () => {
+      const event = parseGeminiEvent(lines[0]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: '85808b9c-967d-47d8-a23e-4e186c429d40',
+      });
+    });
+
+    it('parses {type:"message", role:"user"} → unknown (not assistant delta)', () => {
+      // lines[1] is the user message
+      const event = parseGeminiEvent(lines[1]!);
+      expect(event).toMatchObject({ type: 'unknown' });
+    });
+
+    it('parses {type:"message", role:"assistant", delta:true} → assistant_text', () => {
+      // lines[2] is assistant delta
+      const event = parseGeminiEvent(lines[2]!);
+      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+    });
+
+    it('parses {type:"result", status:"success", stats} → result with tokens and null text', () => {
+      // lines[3] is the result
+      const event = parseGeminiEvent(lines[3]!);
+      expect(event).toEqual({
+        type: 'result',
+        text: null,
+        inputTokens: 11986,
+        outputTokens: 51,
+      });
+    });
+  });
+
+  describe('tool_use and tool_result events', () => {
+    it('parses tool_use event → tool_use with toolName/toolId/toolInput', () => {
+      const line = JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'bash',
+        tool_id: 'call_abc123',
+        input: { command: 'ls -la' },
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toEqual({
+        type: 'tool_use',
+        toolName: 'bash',
+        toolId: 'call_abc123',
+        toolInput: { command: 'ls -la' },
+      });
+    });
+
+    it('parses tool_use with no input → empty toolInput object', () => {
+      const line = JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'noop',
+        tool_id: 'call_noop',
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toMatchObject({ type: 'tool_use', toolInput: {} });
+    });
+
+    it('parses tool_result with status success → isError=false', () => {
+      const line = JSON.stringify({
+        type: 'tool_result',
+        tool_id: 'call_abc123',
+        status: 'success',
+        output: 'file1.txt\nfile2.txt',
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toEqual({
+        type: 'tool_result',
+        isError: false,
+        toolId: 'call_abc123',
+        content: 'file1.txt\nfile2.txt',
+      });
+    });
+
+    it('parses tool_result with error status → isError=true', () => {
+      const line = JSON.stringify({
+        type: 'tool_result',
+        tool_id: 'call_fail',
+        status: 'error',
+        output: 'command not found',
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toMatchObject({ type: 'tool_result', isError: true, toolId: 'call_fail' });
+    });
+  });
+
+  describe('result event variations', () => {
+    it('parses result with failed status → result with error text', () => {
+      const line = JSON.stringify({
+        type: 'result',
+        status: 'failed',
+        error: { message: 'quota exceeded' },
+        stats: { input_tokens: 500, output_tokens: 10 },
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toMatchObject({ type: 'result', inputTokens: 500, outputTokens: 10 });
+      const result = event as { type: 'result'; text: string | null };
+      expect(result.text).toContain('quota exceeded');
+    });
+
+    it('parses result with no stats → result with undefined tokens', () => {
+      const line = JSON.stringify({ type: 'result', status: 'success' });
+      const event = parseGeminiEvent(line);
+      expect(event).toEqual({ type: 'result', text: null });
+    });
+  });
+
+  describe('edge cases', () => {
+    it('returns null for empty string', () => {
+      expect(parseGeminiEvent('')).toBeNull();
+    });
+
+    it('returns null for whitespace-only string', () => {
+      expect(parseGeminiEvent('  \n  ')).toBeNull();
+    });
+
+    it('returns parse_error for malformed JSON', () => {
+      const event = parseGeminiEvent('{not valid json');
+      expect(event).toEqual({ type: 'parse_error', line: '{not valid json' });
+    });
+
+    it('parses error event → result with error text', () => {
+      const line = JSON.stringify({
+        type: 'error',
+        error: { message: 'rate limit hit' },
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toMatchObject({ type: 'result' });
+      const result = event as { type: 'result'; text: string | null };
+      expect(result.text).toContain('rate limit hit');
+    });
+
+    it('parses unknown event type → unknown', () => {
+      const line = JSON.stringify({ type: 'heartbeat', ts: 1234 });
+      const event = parseGeminiEvent(line);
+      expect(event).toMatchObject({ type: 'unknown' });
+    });
+  });
+});

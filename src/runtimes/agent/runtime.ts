@@ -166,7 +166,7 @@ function relocateMediaToWorkspace(content: string, workspacePath: string): strin
 
   const mediaDestDir = join(workspacePath, 'media');
   if (!createdMediaDirs.has(mediaDestDir)) {
-    mkdirSync(mediaDestDir, { recursive: true });
+    mkdirSync(mediaDestDir, { recursive: true, mode: 0o700 });
     createdMediaDirs.add(mediaDestDir);
   }
 
@@ -594,7 +594,7 @@ export class AgentRuntime implements Runtime {
     if (this.sandbox) {
       const cwd = this.cwd ?? homedir();
       const claudeDir = join(cwd, '.claude');
-      mkdirSync(claudeDir, { recursive: true });
+      mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
       // Resolve allowedPaths to absolute paths before writing
       const resolvedPolicy = {
@@ -623,7 +623,7 @@ export class AgentRuntime implements Runtime {
     if (!this.sandboxPerChat) {
       const agentCwd = this.cwd ?? homedir();
       const claudeDir = join(agentCwd, '.claude');
-      mkdirSync(claudeDir, { recursive: true });
+      mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
       const socketPath = join(claudeDir, 'whatsoup.sock');
 
       const globalSession: SessionContext = { tier: 'global' };
@@ -1442,7 +1442,7 @@ export class AgentRuntime implements Runtime {
 
     // Use a workspace at <cwd>/heal/ for the control session
     const controlCwd = this.cwd ? join(this.cwd, 'heal') : join(homedir(), 'heal');
-    mkdirSync(controlCwd, { recursive: true });
+    mkdirSync(controlCwd, { recursive: true, mode: 0o700 });
 
     // Create or reuse control session
     if (!this.controlSession) {

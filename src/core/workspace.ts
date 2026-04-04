@@ -85,14 +85,14 @@ export function writeSandboxArtifacts(
   policy: Record<string, unknown>,
   hookPath: string,
 ): void {
-  writeFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2));
+  writeFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2), { mode: 0o600 });
 
   const settings = {
     hooks: {
       PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
     },
   };
-  writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
+  writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -106,7 +106,7 @@ export function writePermissionsSettings(
   claudeDir: string,
   settings: PermissionsSettings,
 ): void {
-  mkdirSync(claudeDir, { recursive: true });
+  mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
   const settingsPath = join(claudeDir, 'settings.json');
 
   let existing: Record<string, unknown> = {};
@@ -123,7 +123,7 @@ export function writePermissionsSettings(
     // null or {} = reset to global inheritance; non-empty object = override
     merged.enabledPlugins = settings.enabledPlugins ?? {};
   }
-  writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+  writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -146,7 +146,7 @@ export function ensurePermissionsSettings(
   const defaults = defaultSettingsJson(type);
   if (!defaults) return;
 
-  mkdirSync(claudeDir, { recursive: true });
+  mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
   const settingsPath = join(claudeDir, 'settings.json');
 
   if (existsSync(settingsPath)) {
@@ -155,17 +155,17 @@ export function ensurePermissionsSettings(
       // Apply enabledPlugins from config — always overwrite to stay in sync
       if (enabledPlugins) {
         existing.enabledPlugins = enabledPlugins;
-        writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+        writeFileSync(settingsPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
       }
       if (existing.permissions) return; // Already has permissions — don't overwrite
       // Has settings (e.g. hooks) but no permissions — add them
       const merged = { ...existing, permissions: defaults.permissions };
-      writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+      writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
     } catch {
       // Corrupt file — overwrite with defaults
       const out: Record<string, unknown> = { ...defaults };
       if (enabledPlugins) out.enabledPlugins = enabledPlugins;
-      writeFileSync(settingsPath, JSON.stringify(out, null, 2));
+      writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
     }
     return;
   }
@@ -173,7 +173,7 @@ export function ensurePermissionsSettings(
   // No settings.json at all — write defaults + enabledPlugins if provided
   const out: Record<string, unknown> = { ...defaults };
   if (enabledPlugins) out.enabledPlugins = enabledPlugins;
-  writeFileSync(settingsPath, JSON.stringify(out, null, 2));
+  writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -185,7 +185,7 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
 
   // 1. Ensure .claude/ directory exists
   const claudeDir = join(workspacePath, '.claude');
-  mkdirSync(claudeDir, { recursive: true });
+  mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
   // 2. Write sandbox-policy.json and settings.json via shared helper
   const mcpAllowlist = opts.chatScopedToolNames
