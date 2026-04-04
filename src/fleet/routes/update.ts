@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { jsonResponse } from '../../lib/http.ts';
+import { createSSEWriter } from '../sse-helpers.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { UpdateChecker } from '../update-checker.ts';
 
@@ -48,13 +49,8 @@ export async function handleUpdate(
     'Connection': 'keep-alive',
   });
 
-  let ended = false;
-  const endOnce = () => { if (!ended) { ended = true; res.end(); updateInProgress = false; } };
+  const { writeSSE, endOnce } = createSSEWriter(res, () => { updateInProgress = false; });
   _req.on('close', endOnce);
-
-  const writeSSE = (event: string, data: unknown) => {
-    if (!ended) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
 
   try {
     // Save pre-pull SHA so we can diff the full range after pull (not just HEAD~1)

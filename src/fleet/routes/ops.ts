@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
@@ -641,21 +642,14 @@ export async function handleAuth(
   activeAuthProcesses.set(params.name, child);
 
   // Guard against double res.end() — declared before any event handlers
-  let ended = false;
-  const endOnce = () => {
-    if (!ended) {
-      ended = true;
-      activeAuthProcesses.delete(params.name);
-      clearTimeout(authTimer);
-      res.end();
-    }
-  };
-  const writeSSE = (event: string, data: unknown) => {
-    if (!ended) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
+  let authTimer: ReturnType<typeof setTimeout>;
+  const { writeSSE, endOnce } = createSSEWriter(res, () => {
+    activeAuthProcesses.delete(params.name);
+    clearTimeout(authTimer);
+  });
 
   // Wall-clock timeout — prevents auth process from hanging forever
-  const authTimer = setTimeout(() => {
+  authTimer = setTimeout(() => {
     writeSSE('error', { message: 'Authentication timed out. QR codes expire after ~60 seconds. Please retry.' });
     child.kill('SIGTERM');
     endOnce();
