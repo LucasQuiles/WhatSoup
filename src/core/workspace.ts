@@ -1,8 +1,9 @@
 // src/core/workspace.ts
 // Pure functions for mapping chat JIDs to workspace paths.
 
-import { mkdirSync, writeFileSync, symlinkSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, symlinkSync, unlinkSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { defaultSettingsJson, type PermissionsSettings } from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 
@@ -92,6 +93,87 @@ export function writeSandboxArtifacts(
     },
   };
   writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
+}
+
+/**
+ * Write or update the permissions block in settings.json, preserving existing
+ * keys (hooks, env, etc.). Creates the .claude/ directory if needed.
+ *
+ * @param claudeDir  Absolute path to the .claude/ directory.
+ * @param settings   The permissions settings object to merge in.
+ */
+export function writePermissionsSettings(
+  claudeDir: string,
+  settings: PermissionsSettings,
+): void {
+  mkdirSync(claudeDir, { recursive: true });
+  const settingsPath = join(claudeDir, 'settings.json');
+
+  let existing: Record<string, unknown> = {};
+  if (existsSync(settingsPath)) {
+    try {
+      existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    } catch {
+      // Corrupt file — overwrite entirely
+    }
+  }
+
+  const merged: Record<string, unknown> = { ...existing, permissions: settings.permissions };
+  if (settings.enabledPlugins !== undefined) {
+    // null or {} = reset to global inheritance; non-empty object = override
+    merged.enabledPlugins = settings.enabledPlugins ?? {};
+  }
+  writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+}
+
+/**
+ * Ensure a settings.json with a permissions block exists in claudeDir.
+ * - If settings.json doesn't exist, writes the default for the instance type.
+ * - If settings.json exists but has no permissions block, adds the default.
+ * - If settings.json already has a permissions block, does nothing (preserves custom settings).
+ * - For non-agent types, does nothing.
+ *
+ * This is the safety-net called from AgentRuntime.start() to prevent
+ * Claude Code's "sensitive file" blocks on instances without sandbox config.
+ */
+export function ensurePermissionsSettings(
+  claudeDir: string,
+  type: string,
+  enabledPlugins?: Record<string, boolean>,
+): void {
+  if (type !== 'agent') return;
+
+  const defaults = defaultSettingsJson(type);
+  if (!defaults) return;
+
+  mkdirSync(claudeDir, { recursive: true });
+  const settingsPath = join(claudeDir, 'settings.json');
+
+  if (existsSync(settingsPath)) {
+    try {
+      const existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      // Apply enabledPlugins from config — always overwrite to stay in sync
+      if (enabledPlugins) {
+        existing.enabledPlugins = enabledPlugins;
+        writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+      }
+      if (existing.permissions) return; // Already has permissions — don't overwrite
+      // Has settings (e.g. hooks) but no permissions — add them
+      const merged = { ...existing, permissions: defaults.permissions };
+      writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+    } catch {
+      // Corrupt file — overwrite with defaults
+      const out: Record<string, unknown> = { ...defaults };
+      if (enabledPlugins) out.enabledPlugins = enabledPlugins;
+      writeFileSync(settingsPath, JSON.stringify(out, null, 2));
+    }
+    return;
+  }
+
+  // No settings.json at all — write defaults + enabledPlugins if provided
+  const out: Record<string, unknown> = { ...defaults };
+  if (enabledPlugins) out.enabledPlugins = enabledPlugins;
+  writeFileSync(settingsPath, JSON.stringify(out, null, 2));
 }
 
 /**
