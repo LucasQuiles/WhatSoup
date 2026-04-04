@@ -82,59 +82,69 @@ interface MessageStats {
 }
 
 const DAILY_CACHE_TTL = 60_000; // 60 seconds
-const messageStatsCache = new Map<string, { stats: MessageStats; cachedAt: number }>();
-const sessionCountCache = new Map<string, { count: number; cachedAt: number }>();
+
+/**
+ * Generic cache-with-TTL helper. Returns the cached value if fresh, otherwise
+ * calls queryFn, stores the result, and returns it.
+ */
+function cachedQuery<T>(
+  cache: Map<string, { data: T; cachedAt: number }>,
+  key: string,
+  ttl: number,
+  queryFn: () => T,
+): T {
+  const now = Date.now();
+  const cached = cache.get(key);
+  if (cached && now - cached.cachedAt < ttl) return cached.data;
+  const data = queryFn();
+  cache.set(key, { data, cachedAt: now });
+  return data;
+}
+
+const messageStatsCache = new Map<string, { data: MessageStats; cachedAt: number }>();
+const sessionCountCache = new Map<string, { data: number; cachedAt: number }>();
 
 /** Total lifetime agent sessions — 60s cache. */
 function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance): number {
   if (inst.type !== 'agent') return 0;
-  const now = Date.now();
-  const cached = sessionCountCache.get(inst.name);
-  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.count;
-
-  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    try {
-      const row = db.prepare('SELECT COUNT(*) as cnt FROM agent_sessions').get() as { cnt: number } | undefined;
-      return row?.cnt ?? 0;
-    } catch {
-      return 0; // table may not exist for non-agent instances
-    }
+  return cachedQuery(sessionCountCache, inst.name, DAILY_CACHE_TTL, () => {
+    const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+      try {
+        const row = db.prepare('SELECT COUNT(*) as cnt FROM agent_sessions').get() as { cnt: number } | undefined;
+        return row?.cnt ?? 0;
+      } catch {
+        return 0; // table may not exist for non-agent instances
+      }
+    });
+    return result.ok ? result.data : 0;
   });
-
-  const count = result.ok ? result.data : 0;
-  sessionCountCache.set(inst.name, { count, cachedAt: now });
-  return count;
 }
 
 function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): MessageStats {
-  const now = Date.now();
-  const cached = messageStatsCache.get(inst.name);
-  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.stats;
+  return cachedQuery(messageStatsCache, inst.name, DAILY_CACHE_TTL, () => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const startSec = Math.floor(startOfDay.getTime() / 1000);
 
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const startSec = Math.floor(startOfDay.getTime() / 1000);
+    const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+      const rows = db.prepare(
+        'SELECT content_type, is_from_me, COUNT(*) as cnt FROM messages WHERE timestamp >= ? GROUP BY content_type, is_from_me',
+      ).all(startSec) as { content_type: string; is_from_me: number; cnt: number }[];
+      return rows;
+    });
 
-  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    const rows = db.prepare(
-      'SELECT content_type, is_from_me, COUNT(*) as cnt FROM messages WHERE timestamp >= ? GROUP BY content_type, is_from_me',
-    ).all(startSec) as { content_type: string; is_from_me: number; cnt: number }[];
-    return rows;
-  });
-
-  const stats: MessageStats = { sent: 0, received: 0, images: 0, audio: 0, documents: 0 };
-  if (result.ok) {
-    for (const row of result.data) {
-      if (row.is_from_me === 1) stats.sent += row.cnt;
-      else stats.received += row.cnt;
-      if (row.content_type === 'image') stats.images += row.cnt;
-      else if (row.content_type === 'audio') stats.audio += row.cnt;
-      else if (row.content_type === 'document') stats.documents += row.cnt;
+    const stats: MessageStats = { sent: 0, received: 0, images: 0, audio: 0, documents: 0 };
+    if (result.ok) {
+      for (const row of result.data) {
+        if (row.is_from_me === 1) stats.sent += row.cnt;
+        else stats.received += row.cnt;
+        if (row.content_type === 'image') stats.images += row.cnt;
+        else if (row.content_type === 'audio') stats.audio += row.cnt;
+        else if (row.content_type === 'document') stats.documents += row.cnt;
+      }
     }
-  }
-
-  messageStatsCache.set(inst.name, { stats, cachedAt: now });
-  return stats;
+    return stats;
+  });
 }
 
 function getLinkedStatus(configPath: string): 'linked' | 'unlinked' {
@@ -153,26 +163,21 @@ interface ChatCounts {
   groups: number;
 }
 
-const chatCountsCache = new Map<string, { counts: ChatCounts; cachedAt: number }>();
+const chatCountsCache = new Map<string, { data: ChatCounts; cachedAt: number }>();
 
 function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): ChatCounts {
-  const now = Date.now();
-  const cached = chatCountsCache.get(inst.name);
-  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.counts;
-
-  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    const row = db.prepare(`
-      SELECT
-        COUNT(DISTINCT conversation_key) as total,
-        COUNT(DISTINCT CASE WHEN conversation_key LIKE '%@g.us' OR conversation_key LIKE '%_at_g.us' THEN conversation_key END) as groups
-      FROM messages WHERE deleted_at IS NULL
-    `).get() as { total: number; groups: number } | undefined;
-    return { chats: (row?.total ?? 0) - (row?.groups ?? 0), groups: row?.groups ?? 0 };
+  return cachedQuery(chatCountsCache, inst.name, DAILY_CACHE_TTL, () => {
+    const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+      const row = db.prepare(`
+        SELECT
+          COUNT(DISTINCT conversation_key) as total,
+          COUNT(DISTINCT CASE WHEN conversation_key LIKE '%@g.us' OR conversation_key LIKE '%_at_g.us' THEN conversation_key END) as groups
+        FROM messages WHERE deleted_at IS NULL
+      `).get() as { total: number; groups: number } | undefined;
+      return { chats: (row?.total ?? 0) - (row?.groups ?? 0), groups: row?.groups ?? 0 };
+    });
+    return result.ok ? result.data : { chats: 0, groups: 0 };
   });
-
-  const counts = result.ok ? result.data : { chats: 0, groups: 0 };
-  chatCountsCache.set(inst.name, { counts, cachedAt: now });
-  return counts;
 }
 
 interface TokenStats {
@@ -180,61 +185,51 @@ interface TokenStats {
   output: number;
 }
 
-const tokenStatsCache = new Map<string, { stats: TokenStats; cachedAt: number }>();
+const tokenStatsCache = new Map<string, { data: TokenStats; cachedAt: number }>();
 
 function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): TokenStats {
-  const now = Date.now();
-  const cached = tokenStatsCache.get(inst.name);
-  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.stats;
+  return cachedQuery(tokenStatsCache, inst.name, DAILY_CACHE_TTL, () => {
+    const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+      // Sum tokens from messages (chat runtime)
+      let msgInput = 0, msgOutput = 0;
+      try {
+        const row = db.prepare(
+          'SELECT COALESCE(SUM(input_tokens), 0) as i, COALESCE(SUM(output_tokens), 0) as o FROM messages'
+        ).get() as { i: number; o: number } | undefined;
+        msgInput = row?.i ?? 0;
+        msgOutput = row?.o ?? 0;
+      } catch { /* column may not exist yet */ }
 
-  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    // Sum tokens from messages (chat runtime)
-    let msgInput = 0, msgOutput = 0;
-    try {
-      const row = db.prepare(
-        'SELECT COALESCE(SUM(input_tokens), 0) as i, COALESCE(SUM(output_tokens), 0) as o FROM messages'
-      ).get() as { i: number; o: number } | undefined;
-      msgInput = row?.i ?? 0;
-      msgOutput = row?.o ?? 0;
-    } catch { /* column may not exist yet */ }
+      // Sum tokens from agent_sessions (agent runtime)
+      let sesInput = 0, sesOutput = 0;
+      try {
+        const row = db.prepare(
+          'SELECT COALESCE(SUM(total_input_tokens), 0) as i, COALESCE(SUM(total_output_tokens), 0) as o FROM agent_sessions'
+        ).get() as { i: number; o: number } | undefined;
+        sesInput = row?.i ?? 0;
+        sesOutput = row?.o ?? 0;
+      } catch { /* column may not exist yet */ }
 
-    // Sum tokens from agent_sessions (agent runtime)
-    let sesInput = 0, sesOutput = 0;
-    try {
-      const row = db.prepare(
-        'SELECT COALESCE(SUM(total_input_tokens), 0) as i, COALESCE(SUM(total_output_tokens), 0) as o FROM agent_sessions'
-      ).get() as { i: number; o: number } | undefined;
-      sesInput = row?.i ?? 0;
-      sesOutput = row?.o ?? 0;
-    } catch { /* column may not exist yet */ }
-
-    return { input: msgInput + sesInput, output: msgOutput + sesOutput };
+      return { input: msgInput + sesInput, output: msgOutput + sesOutput };
+    });
+    return result.ok ? result.data : { input: 0, output: 0 };
   });
-
-  const stats = result.ok ? result.data : { input: 0, output: 0 };
-  tokenStatsCache.set(inst.name, { stats, cachedAt: now });
-  return stats;
 }
 
-const lastActiveCache = new Map<string, { ts: string | null; cachedAt: number }>();
+const lastActiveCache = new Map<string, { data: string | null; cachedAt: number }>();
 
 /** Most recent message timestamp for an instance — 60s cache. */
 function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): string | null {
-  const now = Date.now();
-  const cached = lastActiveCache.get(inst.name);
-  if (cached && now - cached.cachedAt < DAILY_CACHE_TTL) return cached.ts;
-
-  const result = dbReader.query(inst.name, inst.dbPath, (db) => {
-    const row = db.prepare(
-      'SELECT MAX(timestamp) as ts FROM messages WHERE deleted_at IS NULL'
-    ).get() as { ts: number | null } | undefined;
-    if (!row?.ts) return null;
-    return new Date(row.ts * 1000).toISOString();
+  return cachedQuery(lastActiveCache, inst.name, DAILY_CACHE_TTL, () => {
+    const result = dbReader.query(inst.name, inst.dbPath, (db) => {
+      const row = db.prepare(
+        'SELECT MAX(timestamp) as ts FROM messages WHERE deleted_at IS NULL'
+      ).get() as { ts: number | null } | undefined;
+      if (!row?.ts) return null;
+      return new Date(row.ts * 1000).toISOString();
+    });
+    return result.ok ? result.data : null;
   });
-
-  const ts = result.ok ? result.data : null;
-  lastActiveCache.set(inst.name, { ts, cachedAt: now });
-  return ts;
 }
 
 interface EnrichOpts {
