@@ -154,6 +154,9 @@ export class SessionManager {
   private providerReadyResolve: (() => void) | null = null;
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
+  /** JSON-RPC request ID of the thread/start call when resuming a Codex thread.
+   *  Used to detect error responses and trigger fallback to a fresh thread. */
+  private codexResumeThreadStartReqId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */
   private readonly onResumeFailed: (() => void) | undefined;
   /** Called when the session crashes unexpectedly (not for resume failures). */
@@ -333,11 +336,12 @@ export class SessionManager {
     child: ReturnType<typeof spawn>,
     method: string,
     params: Record<string, unknown>,
-  ): void {
+  ): string {
     const id = `ws-${++this.codexRequestSeq}`;
     const msg = JSON.stringify({ jsonrpc: '2.0', method, params, id });
     child.stdin!.write(msg + '\n');
     log.debug({ method, id, chatJid: this.chatJid }, 'codex: sent JSON-RPC request');
+    return id;
   }
 
   /**
@@ -570,7 +574,10 @@ export class SessionManager {
         threadStartParams.threadId = resumeSessionId;
         log.info({ chatJid: this.chatJid, resumeThreadId: resumeSessionId }, 'codex: attempting thread resume');
       }
-      this.sendCodexRequest(child, 'thread/start', threadStartParams);
+      const threadStartId = this.sendCodexRequest(child, 'thread/start', threadStartParams);
+      if (resumeSessionId) {
+        this.codexResumeThreadStartReqId = threadStartId;
+      }
     }
 
     // Gemini ACP: send initialize + session/new after spawn
@@ -621,6 +628,36 @@ export class SessionManager {
             const msg = JSON.parse(line) as Record<string, unknown>;
             if (msg['jsonrpc'] === '2.0' && msg['id'] !== undefined && typeof msg['method'] === 'string') {
               this.handleCodexServerRequest(msg);
+              continue;
+            }
+            // Detect error response to a resume thread/start request.
+            // When the app-server rejects a threadId, it returns an error
+            // response instead of a result — clear the stale ID and retry fresh.
+            if (
+              msg['jsonrpc'] === '2.0' &&
+              msg['id'] !== undefined &&
+              msg['error'] !== undefined &&
+              this.codexResumeThreadStartReqId !== null &&
+              String(msg['id']) === this.codexResumeThreadStartReqId
+            ) {
+              const errorObj = msg['error'] as Record<string, unknown>;
+              const errorMsg = typeof errorObj === 'object' && errorObj !== null
+                ? String((errorObj as Record<string, unknown>)['message'] ?? 'unknown')
+                : String(errorObj);
+              log.warn({ chatJid: this.chatJid, reqId: msg['id'], error: errorMsg }, 'codex: thread resume rejected — retrying with fresh thread');
+              this.codexResumeThreadStartReqId = null;
+              // Clear the stale thread ID so it won't be retried again
+              if (this.dbRowId !== null) {
+                updateSessionId(this.db, this.dbRowId, '');
+              }
+              // Send a fresh thread/start without threadId
+              this.sendCodexRequest(child, 'thread/start', {
+                cwd: this.configuredCwd ?? homedir(),
+                approvalPolicy: 'never' as const,
+                sandbox: 'danger-full-access' as const,
+                persistExtendedHistory: true,
+                ...(this.systemPrompt ? { baseInstructions: this.systemPrompt } : {}),
+              });
               continue;
             }
           } catch {

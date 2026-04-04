@@ -157,6 +157,14 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
         if (typeof opts['providerConfig'] !== 'object' || Array.isArray(opts['providerConfig']) || opts['providerConfig'] === null) {
           throw new Error('agentOptions.providerConfig must be an object when provided');
         }
+
+        // providerConfig.budget is optional; when present it must be a plain object
+        const pc = opts['providerConfig'] as Record<string, unknown>;
+        if (pc['budget'] !== undefined) {
+          if (typeof pc['budget'] !== 'object' || Array.isArray(pc['budget']) || pc['budget'] === null) {
+            throw new Error('agentOptions.providerConfig.budget must be an object when provided');
+          }
+        }
       }
 
       // @check CHK-060 // @traces CON-007.AC-01
