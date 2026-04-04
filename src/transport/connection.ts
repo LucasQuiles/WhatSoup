@@ -16,6 +16,7 @@ import {
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
+import { emitAlert } from '../lib/emit-alert.ts';
 import { WhatSoupError } from '../errors.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
@@ -772,6 +773,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const elapsedMs = Date.now() - this.firstFailureAt;
     if (elapsedMs > ConnectionManager.MAX_FAILURE_DURATION_MS) {
       this.log.fatal({ elapsedMs }, 'Connection failed for over 30 minutes — emitting exhausted');
+      emitAlert(
+        config.botName,
+        'connection_exhausted',
+        `whatsoup@${config.botName} connection exhausted after ${Math.round(elapsedMs / 60_000)}min`,
+        `Reconnect phases exhausted. Elapsed: ${Math.round(elapsedMs / 1000)}s`,
+      );
       this.emit('exhausted');
       return;
     }
