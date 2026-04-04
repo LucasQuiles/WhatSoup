@@ -23,6 +23,7 @@ import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
+import { jitteredDelay } from '../core/retry.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
 
@@ -802,8 +803,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       this.reconnectAttempts += 1;
-      const backoffMs = Math.min(
-        ConnectionManager.BASE_BACKOFF_MS * Math.pow(2, this.reconnectAttempts - 1),
+      const backoffMs = jitteredDelay(
+        ConnectionManager.BASE_BACKOFF_MS,
+        this.reconnectAttempts - 1,
         ConnectionManager.MAX_BACKOFF_MS,
       );
 

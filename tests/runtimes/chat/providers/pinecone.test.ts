@@ -214,12 +214,14 @@ describe('PineconeMemory', () => {
 
     it('throws AppError with code PINECONE_UNAVAILABLE on upsert failure', async () => {
       mockUpsertRecords.mockRejectedValueOnce(new Error('write failed'));
+      mockUpsertRecords.mockRejectedValueOnce(new Error('write failed'));
       await expect(memory.upsert([makeMemoryRecord()])).rejects.toMatchObject({
         code: 'PINECONE_UNAVAILABLE',
       });
     });
 
     it('throws AppError (not generic Error) on upsert failure', async () => {
+      mockUpsertRecords.mockRejectedValueOnce(new Error('write failed'));
       mockUpsertRecords.mockRejectedValueOnce(new Error('write failed'));
       await expect(memory.upsert([makeMemoryRecord()])).rejects.toBeInstanceOf(AppError);
     });

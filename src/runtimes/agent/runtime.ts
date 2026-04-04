@@ -47,6 +47,7 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
+import { jitteredDelay } from '../../core/retry.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -58,8 +59,10 @@ const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** Max consecutive crashes before auto-respawn gives up and waits for user action. */
 const AUTO_RESPAWN_MAX_CRASHES = 3;
-/** Delay (ms) before attempting auto-respawn after a crash. */
-const AUTO_RESPAWN_DELAY_MS = 2_000;
+/** Base delay (ms) before attempting auto-respawn after a crash. Actual delay uses exponential backoff. */
+const AUTO_RESPAWN_BASE_MS = 2_000;
+/** Maximum respawn delay (ms) — caps the exponential backoff. */
+const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
 
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
@@ -1932,7 +1935,7 @@ export class AgentRuntime implements Runtime {
           }).catch((err) => {
             log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
           });
-        }, AUTO_RESPAWN_DELAY_MS);
+        }, jitteredDelay(AUTO_RESPAWN_BASE_MS, this.recentCrashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS));
       }
     } else if (this.recentCrashCount > AUTO_RESPAWN_MAX_CRASHES) {
       log.error({ mapKey, crashes: this.recentCrashCount }, 'auto-respawn exhausted — emitting alert');

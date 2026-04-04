@@ -35,6 +35,14 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
+// Mock jitteredDelay to remove randomness — return deterministic exponential backoff
+vi.mock('../../src/core/retry.ts', () => ({
+  jitteredDelay: (baseMs: number, attempt: number, maxMs: number = 30_000) => {
+    const exp = baseMs * Math.pow(2, attempt);
+    return Math.min(exp, maxMs);
+  },
+}));
+
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({
     info: vi.fn(),

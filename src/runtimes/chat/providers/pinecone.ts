@@ -4,36 +4,53 @@ import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { emitAlert } from '../../../lib/emit-alert.ts';
+import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 
 const logger = createChildLogger('pinecone-provider');
 
-/** Consecutive failure tracking per operation for degradation alerts */
-const consecutiveFailures: Record<string, number> = {};
 const FAILURE_ALERT_THRESHOLD = 3;
+const RETRY_DELAY_MS = 500;
+
+/** Per-operation circuit breakers (threshold=3, reset after 30s) */
+const breakers: Record<string, CircuitBreaker> = {};
+
+function getBreaker(operation: string): CircuitBreaker {
+  if (!breakers[operation]) {
+    breakers[operation] = new CircuitBreaker(operation, FAILURE_ALERT_THRESHOLD, 30_000, logger);
+  }
+  return breakers[operation];
+}
 
 function trackFailure(operation: string, err: unknown): void {
-  const key = operation;
-  consecutiveFailures[key] = (consecutiveFailures[key] ?? 0) + 1;
-  const count = consecutiveFailures[key];
+  const breaker = getBreaker(operation);
+  breaker.recordFailure();
   const message = err instanceof Error ? err.message : String(err);
 
   logger.warn(
-    { operation, error: message, consecutiveFailures: count },
+    { operation, error: message },
     'pinecone_api_error',
   );
 
-  if (count >= FAILURE_ALERT_THRESHOLD) {
+  if (breaker.isOpen()) {
     emitAlert(
       config.botName,
       'pinecone_degraded',
-      `Pinecone ${operation} has ${count} consecutive failures`,
+      `Pinecone ${operation} circuit breaker tripped`,
       `Last error: ${message}`,
     );
   }
 }
 
 function trackSuccess(operation: string): void {
-  consecutiveFailures[operation] = 0;
+  getBreaker(operation).recordSuccess();
+}
+
+function isBreakerOpen(operation: string): boolean {
+  return getBreaker(operation).isOpen();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export interface MemoryRecord {
@@ -176,9 +193,13 @@ export class PineconeMemory {
     filters: Record<string, unknown>,
     topK: number,
   ): Promise<SearchResult[]> {
-    const startMs = Date.now();
-    try {
-      const response = await this.index.searchRecords({
+    if (isBreakerOpen('search')) {
+      logger.warn('pinecone search circuit breaker open — skipping');
+      return [];
+    }
+
+    const doSearch = () =>
+      this.index.searchRecords({
         query: {
           topK,
           inputs: { text: query },
@@ -187,6 +208,9 @@ export class PineconeMemory {
         fields: ['*'],
       });
 
+    const startMs = Date.now();
+    try {
+      const response = await doSearch();
       const results = (response.result.hits ?? []).map(fromPineconeHit);
       const durationMs = Date.now() - startMs;
       logger.info(
@@ -196,13 +220,27 @@ export class PineconeMemory {
       trackSuccess('search');
       return results;
     } catch (err) {
-      const durationMs = Date.now() - startMs;
-      trackFailure('search', err);
-      logger.error(
-        { err, query: query.slice(0, 100), topK, filter: filters, durationMs },
-        'Pinecone search failed — returning empty results',
-      );
-      return [];
+      // One retry after a short delay to catch transient blips
+      await sleep(RETRY_DELAY_MS);
+      try {
+        const response = await doSearch();
+        const results = (response.result.hits ?? []).map(fromPineconeHit);
+        const durationMs = Date.now() - startMs;
+        logger.info(
+          { topScores: results.slice(0, 3).map((r) => r.score), durationMs, retried: true },
+          'Pinecone search complete (after retry)',
+        );
+        trackSuccess('search');
+        return results;
+      } catch (retryErr) {
+        const durationMs = Date.now() - startMs;
+        trackFailure('search', retryErr);
+        logger.error(
+          { err: retryErr, query: query.slice(0, 100), topK, filter: filters, durationMs },
+          'Pinecone search failed — returning empty results',
+        );
+        return [];
+      }
     }
   }
 
@@ -228,10 +266,13 @@ export class PineconeMemory {
   }
 
   async searchEntities(query: string): Promise<EntitySearchResult[]> {
-    const startMs = Date.now();
-    try {
-      // Phase 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
-      const response = await this.index.searchRecords({
+    if (isBreakerOpen('searchEntities')) {
+      logger.warn('pinecone searchEntities circuit breaker open — skipping');
+      return [];
+    }
+
+    const doSearch = () =>
+      this.index.searchRecords({
         query: {
           topK: config.pineconeTopK,
           inputs: { text: query },
@@ -239,6 +280,18 @@ export class PineconeMemory {
         },
         fields: ['*'],
       });
+
+    const startMs = Date.now();
+    try {
+      // Phase 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
+      let response: Awaited<ReturnType<typeof doSearch>>;
+      try {
+        response = await doSearch();
+      } catch (firstErr) {
+        // One retry after short delay
+        await sleep(RETRY_DELAY_MS);
+        response = await doSearch();
+      }
 
       const hits = response.result.hits ?? [];
       let mapped = hits.map(fromPineconeHitEntity);
@@ -315,11 +368,17 @@ export class PineconeMemory {
   async upsert(records: MemoryRecord[]): Promise<void> {
     if (records.length === 0) return;
 
+    if (isBreakerOpen('upsert')) {
+      logger.warn('pinecone upsert circuit breaker open — skipping');
+      throw new AppError('Pinecone circuit breaker open', 'PINECONE_UNAVAILABLE');
+    }
+
     const pineconeRecords = records.map(toPineconeRecord);
     const startMs = Date.now();
+    const doUpsert = () => this.index.upsertRecords({ records: pineconeRecords });
 
     try {
-      await this.index.upsertRecords({ records: pineconeRecords });
+      await doUpsert();
       const durationMs = Date.now() - startMs;
       logger.info(
         { count: records.length, ids: records.map((r) => r.id), durationMs },
@@ -327,9 +386,21 @@ export class PineconeMemory {
       );
       trackSuccess('upsert');
     } catch (err) {
-      trackFailure('upsert', err);
-      logger.error({ err, count: records.length }, 'Pinecone upsert failed');
-      throw new AppError('Pinecone upsert failed', 'PINECONE_UNAVAILABLE', err);
+      // One retry after short delay
+      await sleep(RETRY_DELAY_MS);
+      try {
+        await doUpsert();
+        const durationMs = Date.now() - startMs;
+        logger.info(
+          { count: records.length, ids: records.map((r) => r.id), durationMs, retried: true },
+          'Pinecone upsert complete (after retry)',
+        );
+        trackSuccess('upsert');
+      } catch (retryErr) {
+        trackFailure('upsert', retryErr);
+        logger.error({ err: retryErr, count: records.length }, 'Pinecone upsert failed');
+        throw new AppError('Pinecone upsert failed', 'PINECONE_UNAVAILABLE', retryErr);
+      }
     }
   }
 
