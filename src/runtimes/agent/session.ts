@@ -866,9 +866,17 @@ export class SessionManager {
 
       let payload: string;
       if (this.provider === 'codex-cli') {
-        // Codex app-server: JSON-RPC turn/start request
+        // Codex app-server: wait for threadId from thread/started response
+        // (spawnSession sends initialize + thread/start, response arrives async on stdout)
         if (!this.codexThreadId) {
-          throw new Error('Codex threadId not captured. Wait for thread/started before sending turns.');
+          const waitStart = Date.now();
+          const THREAD_WAIT_MS = 15_000;
+          while (!this.codexThreadId && Date.now() - waitStart < THREAD_WAIT_MS) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          if (!this.codexThreadId) {
+            throw new Error('Codex threadId not captured after 15s. app-server may have failed to initialize.');
+          }
         }
         const id = `ws-${++this.codexRequestSeq}`;
         payload = JSON.stringify({
