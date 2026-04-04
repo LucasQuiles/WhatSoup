@@ -1,7 +1,7 @@
 import { type FC } from 'react'
 import { Pencil, Loader2, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
-import { getProviderConfigFields } from '../../lib/providers'
+import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -185,11 +185,11 @@ const ReviewStep: FC<ReviewStepProps> = ({
           <>
             <KV label="CWD" value={agentOptions.cwd || 'Not set'} />
             <KV label="Session scope" value={agentOptions.sessionScope ?? 'single'} />
-            <KV label="Provider" value={agentOptions.provider ?? 'claude-cli'} />
-            {agentOptions.provider && agentOptions.provider !== 'claude-cli' &&
+            <KV label="Provider" value={agentOptions.provider ?? DEFAULT_PROVIDER_ID} />
+            {agentOptions.provider && agentOptions.provider !== DEFAULT_PROVIDER_ID &&
               getProviderConfigFields(agentOptions.provider).map(field => {
                 const v = agentOptions.providerConfig?.[field.key]
-                return v !== undefined && v !== ''
+                return v != null && v !== ''
                   ? <KV key={field.key} label={field.label} value={String(v)} />
                   : null
               })

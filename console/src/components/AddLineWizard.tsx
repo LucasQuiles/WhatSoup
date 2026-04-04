@@ -8,6 +8,7 @@ import ReviewStep from './wizard/ReviewStep'
 import LinkStep from './wizard/LinkStep'
 import ConfirmDialog from './ConfirmDialog'
 import { api } from '../lib/api'
+import { DEFAULT_PROVIDER_ID } from '../lib/providers'
 
 interface AddLineWizardProps {
   onClose: () => void
@@ -141,7 +142,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       },
       mcp: { send_media: true },
       perUserDirs: { enabled: false, basePath: 'users' },
-      provider: 'claude-cli',
+      provider: DEFAULT_PROVIDER_ID,
       providerConfig: {},
     },
     models: {

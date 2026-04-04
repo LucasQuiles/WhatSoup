@@ -1,8 +1,9 @@
 import { type FC, useState, useCallback, useEffect } from 'react'
-import { X, Save, Loader2, Settings } from 'lucide-react'
+import { X, Save, Loader2, Settings, AlertTriangle } from 'lucide-react'
 import ModelAuthStep from './wizard/ModelAuthStep'
 import ConfigStep from './wizard/ConfigStep'
 import { api } from '../lib/api'
+import { DEFAULT_PROVIDER_ID } from '../lib/providers'
 
 interface EditConfigModalProps {
   lineName: string
@@ -115,11 +116,19 @@ const EditConfigModal: FC<EditConfigModalProps> = ({ lineName, open, onClose, on
               <Loader2 size={24} className="animate-spin text-t4" />
             </div>
           ) : activeTab === 'config' ? (
-            <ConfigStep data={formData} onChange={patchForm} errors={{}} isEditing />
+            <ConfigStep data={formData} onChange={patchForm} errors={{}} />
           ) : (
             <ModelAuthStep data={formData} onChange={patchForm} errors={{}} />
           )}
         </div>
+
+        {/* Restart notice for provider changes */}
+        {!loading && ((formData.agentOptions as Record<string, unknown> | undefined)?.provider ?? DEFAULT_PROVIDER_ID) !== DEFAULT_PROVIDER_ID && (
+          <div className="flex items-center" style={{ gap: 'var(--sp-2)', padding: 'var(--sp-2) var(--sp-4)', fontSize: 'var(--font-size-xs)', color: 'var(--color-s-warn)', background: 'var(--s-warn-wash)' }}>
+            <AlertTriangle size={12} style={{ flexShrink: 0 }} />
+            <span>Non-default provider selected. A restart is required after saving for changes to take effect.</span>
+          </div>
+        )}
 
         {/* Footer */}
         <div

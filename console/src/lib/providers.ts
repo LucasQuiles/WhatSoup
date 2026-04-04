@@ -3,8 +3,6 @@
 //  See: src/runtimes/agent/providers/types.ts
 // ---------------------------------------------------------------------------
 
-export type ProviderId = string;
-
 export interface ProviderDef {
   id: string;
   displayName: string;
@@ -18,6 +16,8 @@ export interface ConfigFieldDef {
   inputType: 'text' | 'number';
 }
 
+export const DEFAULT_PROVIDER_ID = 'claude-cli';
+
 export const PROVIDERS: ProviderDef[] = [
   { id: 'claude-cli',    displayName: 'Claude Code',    type: 'cli' },
   { id: 'codex-cli',     displayName: 'Codex CLI',      type: 'cli' },
@@ -27,34 +27,39 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'anthropic-api', displayName: 'Anthropic API',  type: 'api' },
 ];
 
+// Precomputed maps for O(1) lookups and stable references
+const _providerMap = new Map<string, ProviderDef>(PROVIDERS.map(p => [p.id, p]));
+const _configFieldsCache = new Map<string, ConfigFieldDef[]>();
+
 export function getProvider(id: string): ProviderDef | undefined {
-  return PROVIDERS.find(p => p.id === id);
+  return _providerMap.get(id);
 }
 
-/** Config fields that appear in the UI for a given provider. claude-cli needs none (handled by existing UI). */
+/** Config fields for the UI per provider. Default provider returns [] (handled by existing agentOptions UI). */
 export function getProviderConfigFields(providerId: string): ConfigFieldDef[] {
-  const provider = getProvider(providerId);
-  if (!provider) return [];
+  const cached = _configFieldsCache.get(providerId);
+  if (cached) return cached;
 
-  // claude-cli is the default — its config is handled by existing agentOptions UI
-  if (providerId === 'claude-cli') return [];
+  const provider = getProvider(providerId);
+  if (!provider || providerId === DEFAULT_PROVIDER_ID) {
+    const empty: ConfigFieldDef[] = [];
+    _configFieldsCache.set(providerId, empty);
+    return empty;
+  }
 
   const fields: ConfigFieldDef[] = [];
-
-  // All non-default providers get a model field
   fields.push({ key: 'model', label: 'Model', placeholder: modelPlaceholder(providerId), inputType: 'text' });
 
-  // API providers get additional fields
   if (provider.type === 'api') {
     fields.push({ key: 'baseUrl', label: 'Base URL', placeholder: 'https://api.openai.com/v1', inputType: 'text' });
     fields.push({ key: 'apiKeyService', label: 'Keyring Service', placeholder: 'openai', inputType: 'text' });
   }
 
-  // Anthropic-specific
   if (providerId === 'anthropic-api') {
     fields.push({ key: 'maxTokens', label: 'Max Tokens', placeholder: '16384', inputType: 'number' });
   }
 
+  _configFieldsCache.set(providerId, fields);
   return fields;
 }
 

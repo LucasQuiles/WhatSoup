@@ -5,14 +5,13 @@ import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
 import { helperStyle, labelStyle } from './form-styles'
 import { validatePhone } from '../../lib/validation'
-import { PROVIDERS, getProviderConfigFields } from '../../lib/providers'
+import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
   onChange: (patch: Record<string, unknown>) => void
   errors: Record<string, string>
   onSkip?: () => void
-  isEditing?: boolean
 }
 
 interface AgentOptions {
@@ -172,7 +171,7 @@ You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
 `
 }
 
-const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEditing }) => {
+const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
   const type = (data.type as string) ?? 'chat'
   const accessMode = (data.accessMode as string) ?? 'self_only'
   const allowedContacts = (data.allowedContacts as string[]) ?? []
@@ -273,11 +272,13 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEdi
 
   const handleProviderConfigOption = useCallback(
     (key: string, value: unknown) => {
+      const normalized = (value === undefined || value === '') ? undefined : value
+      if (agentOptions.providerConfig?.[key] === normalized) return
       const current = { ...(agentOptions.providerConfig ?? {}) }
-      if (value === undefined || value === '') {
+      if (normalized === undefined) {
         delete current[key]
       } else {
-        current[key] = value
+        current[key] = normalized
       }
       onChange({
         agentOptions: {
@@ -291,7 +292,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEdi
 
   const handleProviderChange = useCallback(
     (newProvider: string) => {
-      // Reset providerConfig when switching providers (fields differ)
+      if (newProvider === (agentOptions.provider ?? DEFAULT_PROVIDER_ID)) return
       onChange({
         agentOptions: {
           ...agentOptions,
@@ -301,6 +302,11 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEdi
       })
     },
     [agentOptions, onChange],
+  )
+
+  const providerConfigFields = useMemo(
+    () => getProviderConfigFields(agentOptions.provider ?? DEFAULT_PROVIDER_ID),
+    [agentOptions.provider],
   )
 
   const [activeTab, setActiveTab] = useState<string>('access')
@@ -464,10 +470,9 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEdi
             </SelectInput>
           </Field>
 
-          {/* Provider selection */}
           <Field label="Provider" helper="AI backend for this agent instance" confirmed>
             <SelectInput
-              value={agentOptions.provider ?? 'claude-cli'}
+              value={agentOptions.provider ?? DEFAULT_PROVIDER_ID}
               onChange={(e) => handleProviderChange(e.target.value)}
               confirmed
             >
@@ -477,8 +482,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEdi
             </SelectInput>
           </Field>
 
-          {/* Provider-specific config fields */}
-          {getProviderConfigFields(agentOptions.provider ?? 'claude-cli').map(field => {
+          {providerConfigFields.map(field => {
             const fieldValue = agentOptions.providerConfig?.[field.key]
             const hasValue = fieldValue !== undefined && fieldValue !== ''
             return (
@@ -510,19 +514,6 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEdi
               </Field>
             )
           })}
-
-          {/* Restart notice — only relevant when editing a running instance */}
-          {isEditing && (agentOptions.provider ?? 'claude-cli') !== 'claude-cli' && (
-            <div style={{
-              fontSize: 'var(--font-size-xs)',
-              color: 'var(--color-s-warn)',
-              padding: 'var(--sp-2) var(--sp-3)',
-              background: 'var(--s-warn-wash)',
-              borderRadius: 'var(--radius-sm)',
-            }}>
-              Non-default provider selected. Running instances require a restart after changing providers.
-            </div>
-          )}
 
           {/* Sandbox per chat */}
           <CheckboxField

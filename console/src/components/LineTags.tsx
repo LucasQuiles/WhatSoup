@@ -1,7 +1,7 @@
 import { type FC } from 'react'
 import { Shield, ShieldAlert, ShieldOff, Lock, Cpu, Layers } from 'lucide-react'
 import type { LineInstance } from '../types'
-import { getProvider } from '../lib/providers'
+import { getProvider, DEFAULT_PROVIDER_ID } from '../lib/providers'
 
 interface LineTagsProps {
   line: LineInstance
@@ -39,7 +39,7 @@ function getModelTag(line: LineInstance): TagDef | null {
 function getProviderTag(line: LineInstance): TagDef | null {
   if (line.mode !== 'agent') return null
   const provider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
-  if (!provider || provider === 'claude-cli') return null
+  if (!provider || provider === DEFAULT_PROVIDER_ID) return null
   const displayName = getProvider(provider)?.displayName ?? provider
   return { label: displayName, icon: Layers, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
 }
@@ -82,7 +82,6 @@ const LineTags: FC<LineTagsProps> = ({ line }) => {
   const modelTag = getModelTag(line)
   if (modelTag) tags.push(modelTag)
 
-  // Provider badge (agent lines with non-default provider)
   const providerTag = getProviderTag(line)
   if (providerTag) tags.push(providerTag)
 
