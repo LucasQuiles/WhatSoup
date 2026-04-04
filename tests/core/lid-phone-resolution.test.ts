@@ -63,7 +63,6 @@ vi.mock('../../src/logger.ts', () => ({
 import { Database } from '../../src/core/database.ts';
 import {
   extractLocal,
-  extractPhone,
   resolvePhoneFromJid,
   lookupAccess,
   insertPending,
@@ -177,11 +176,6 @@ describe('extractLocal', () => {
     expect(extractLocal('123456789@newsletter')).toBe('123456789_at_newsletter');
   });
 
-  it('deprecated extractPhone alias works identically', () => {
-    expect(extractPhone('15184194479@s.whatsapp.net')).toBe(extractLocal('15184194479@s.whatsapp.net'));
-    expect(extractPhone('31478083756155@lid')).toBe(extractLocal('31478083756155@lid'));
-    expect(extractPhone('31478083756155:2@lid')).toBe(extractLocal('31478083756155:2@lid'));
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

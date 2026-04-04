@@ -106,12 +106,6 @@ export function extractLocal(jid: string): string {
 }
 
 /**
- * @deprecated Use `extractLocal()` for local parts or `resolvePhoneFromJid()` for identity checks.
- * Kept as alias to avoid breaking external callers during migration.
- */
-export const extractPhone = extractLocal;
-
-/**
  * Resolve a JID to an actual phone number, handling LID→phone translation.
  *
  * For personal JIDs (`@s.whatsapp.net`), returns the phone digits directly.

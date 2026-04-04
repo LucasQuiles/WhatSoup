@@ -123,7 +123,7 @@ vi.mock('../../../src/config.ts', () => ({
   },
 }));
 
-// extractPhone is a pure function — no need to mock, but mock the module so
+// extractLocal is a pure function — no need to mock, but mock the module so
 // vi.mock doesn't try to load the real database-importing module chain.
 vi.mock('../../../src/core/access-list.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/core/access-list.ts')>();

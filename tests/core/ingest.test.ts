@@ -40,7 +40,6 @@ vi.mock('../../src/core/access-policy.ts', () => ({
 }));
 
 vi.mock('../../src/core/access-list.ts', () => ({
-  extractPhone: vi.fn((jid: string) => jid.split('@')[0]),
   extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
   resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
   lookupAccess: vi.fn(),
@@ -58,7 +57,7 @@ import { DurabilityEngine } from '../../src/core/durability.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand, sendApprovalRequest } from '../../src/core/admin.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
-import { extractPhone } from '../../src/core/access-list.ts';
+import { extractLocal } from '../../src/core/access-list.ts';
 import { getMessagesBySender } from '../../src/core/messages.ts';
 
 // ---------------------------------------------------------------------------
@@ -70,7 +69,7 @@ const mockParseAdminCommand = vi.mocked(parseAdminCommand);
 const mockHandleAdminCommand = vi.mocked(handleAdminCommand);
 const mockSendApprovalRequest = vi.mocked(sendApprovalRequest);
 const mockShouldRespond = vi.mocked(shouldRespond);
-const mockExtractPhone = vi.mocked(extractPhone);
+const mockExtractLocal = vi.mocked(extractLocal);
 
 // ---------------------------------------------------------------------------
 // Temp DB helpers
@@ -172,7 +171,7 @@ function setHappyPath(): void {
   mockShouldRespond.mockReturnValue({ respond: true, reason: 'dm_allowed', accessStatus: 'allowed' });
   mockHandleAdminCommand.mockResolvedValue(undefined);
   mockSendApprovalRequest.mockResolvedValue(undefined);
-  mockExtractPhone.mockImplementation((jid: string) => jid.split('@')[0]);
+  mockExtractLocal.mockImplementation((jid: string) => jid.split('@')[0]);
 }
 
 beforeEach(() => {
@@ -402,7 +401,7 @@ describe('REQ-002.AC-03: dispatch to runtime', () => {
     const handler = makeIngest(db, messenger, runtime);
 
     mockShouldRespond.mockReturnValue({ respond: false, reason: 'unknown', accessStatus: 'unknown' });
-    mockExtractPhone.mockReturnValue('17779990000');
+    mockExtractLocal.mockReturnValue('17779990000');
 
     const msg = makeIncomingMessage({ senderJid: '17779990000@s.whatsapp.net', senderName: 'Bob', content: 'hi' });
     await runIngest(handler, msg);

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { Database } from '../../src/core/database.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
 import { resolveLid, hydrateLidMappings, upsertLidMapping } from '../../src/core/lid-resolver.ts';
-import { extractPhone } from '../../src/core/access-list.ts';
+import { extractLocal } from '../../src/core/access-list.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -117,31 +117,31 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 }
 
 // ---------------------------------------------------------------------------
-// extractPhone unit tests
+// extractLocal unit tests
 // ---------------------------------------------------------------------------
 
-describe('extractPhone', () => {
+describe('extractLocal', () => {
   it('strips @s.whatsapp.net suffix', () => {
-    expect(extractPhone('15184194479@s.whatsapp.net')).toBe('15184194479');
+    expect(extractLocal('15184194479@s.whatsapp.net')).toBe('15184194479');
   });
 
   it('strips @lid suffix', () => {
-    expect(extractPhone('81536414179557@lid')).toBe('81536414179557');
+    expect(extractLocal('81536414179557@lid')).toBe('81536414179557');
   });
 
   it('returns plain phone unchanged when no @ present', () => {
-    expect(extractPhone('15184194479')).toBe('15184194479');
+    expect(extractLocal('15184194479')).toBe('15184194479');
   });
 
   it('handles colon-device suffix in LID format', () => {
-    // extractPhone strips at the @ boundary; toConversationKey also strips the :device
+    // extractLocal strips at the @ boundary; toConversationKey also strips the :device
     // '81536414179557:2@lid' → '81536414179557' (toConversationKey strips :device too)
-    expect(extractPhone('81536414179557:2@lid')).toBe('81536414179557');
+    expect(extractLocal('81536414179557:2@lid')).toBe('81536414179557');
   });
 
   it('returns empty string for bare @ (degenerate input)', () => {
     // toConversationKey('@s.whatsapp.net') → '' (local part is '')
-    expect(extractPhone('@s.whatsapp.net')).toBe('');
+    expect(extractLocal('@s.whatsapp.net')).toBe('');
   });
 });
 

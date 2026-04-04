@@ -66,9 +66,8 @@ vi.mock('../../src/core/access-policy.ts', () => ({
   shouldRespond: vi.fn().mockReturnValue({ respond: true, reason: 'dm_allowed', accessStatus: 'allowed' }),
 }));
 
-// Real extractPhone implementation (strips @domain suffix)
+// Real extractLocal implementation (strips @domain suffix)
 vi.mock('../../src/core/access-list.ts', () => ({
-  extractPhone: vi.fn((jid: string) => jid.split('@')[0]),
   extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
   resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
   lookupAccess: vi.fn(),
