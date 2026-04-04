@@ -15,7 +15,7 @@ import { parseEvent } from './stream-parser.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
-import { parseOpenCodeEvent, resetParserState as resetOpenCodeParserState } from './providers/opencode-parser.ts';
+import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
 import { buildBaseChildEnv } from './providers/child-env.ts';
 
 const log = createChildLogger('session-manager');
@@ -144,6 +144,13 @@ export class SessionManager {
   private geminiSessionId: string | null = null;
   /** Monotonic counter for Gemini ACP JSON-RPC request IDs. */
   private geminiRequestSeq = 0;
+  /**
+   * Deferred promise that resolves when the provider's init event fires
+   * (i.e. codexThreadId or geminiSessionId is captured). Replaces busy-wait
+   * polling loops with an event-driven ready signal.
+   */
+  private providerReadyPromise: Promise<void> | null = null;
+  private providerReadyResolve: (() => void) | null = null;
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */
@@ -162,6 +169,9 @@ export class SessionManager {
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
 
   private durability: DurabilityEngine | null = null;
+
+  /** Per-session OpenCode parser — avoids shared module-level state across chats. */
+  private readonly openCodeParser: OpenCodeParser = createOpenCodeParser();
 
   constructor(opts: SessionManagerOptions) {
     this.db = opts.db;
@@ -238,7 +248,7 @@ export class SessionManager {
     switch (this.provider) {
       case 'codex-cli': return parseCodexEvent;
       case 'gemini-cli': return parseGeminiAcpEvent;
-      case 'opencode-cli': return parseOpenCodeEvent;
+      case 'opencode-cli': return (line: string) => this.openCodeParser.parse(line);
       case 'claude-cli':
       default: return parseEvent;
     }
@@ -265,6 +275,12 @@ export class SessionManager {
       if (this.provider === 'gemini-cli' && event.sessionId) {
         this.geminiSessionId = event.sessionId;
         log.info({ chatJid: this.chatJid, geminiSessionId: this.geminiSessionId }, 'gemini: captured sessionId');
+      }
+
+      // Resolve the provider-ready promise for Codex/Gemini persistent sessions
+      if (this.providerReadyResolve) {
+        this.providerReadyResolve();
+        this.providerReadyResolve = null;
       }
 
       if (this.provider === 'claude-cli') {
@@ -502,6 +518,13 @@ export class SessionManager {
       this.durability.upsertSessionCheckpoint(conversationKey, {
         claudePid: pid || undefined,
         sessionStatus: 'active',
+      });
+    }
+
+    // Create deferred ready promise for providers that need async init
+    if (this.provider === 'codex-cli' || this.provider === 'gemini-cli') {
+      this.providerReadyPromise = new Promise<void>((resolve) => {
+        this.providerReadyResolve = resolve;
       });
     }
 
@@ -785,10 +808,10 @@ export class SessionManager {
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
       this.stdoutBuffer = '';
 
-      // Reset provider-specific parser state — module-level flags (like OpenCode's
-      // _firstStepSeen) persist across turns since the module stays loaded.
+      // Reset provider-specific parser state so the next turn's first step_start
+      // is correctly recognized as an init event.
       if (this.provider === 'opencode-cli') {
-        resetOpenCodeParserState();
+        this.openCodeParser.reset();
       }
 
       // Spawn-per-turn providers: kill any existing process and spawn a new one

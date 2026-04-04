@@ -14,119 +14,140 @@
 import type { AgentEvent } from '../stream-parser.ts';
 import { type JsonObject, isRecord, stringifyValue } from './parser-utils.ts';
 
-// Module-level flag: tracks whether the first step_start has been seen.
-let _firstStepSeen = false;
-
-/** Reset parser state (use between test cases). */
-export function resetParserState(): void {
-  _firstStepSeen = false;
+export interface OpenCodeParser {
+  parse: (line: string) => AgentEvent | null;
+  reset: () => void;
 }
 
 /**
- * Parse a single JSONL line from OpenCode `run --format json` into an AgentEvent.
+ * Create an isolated OpenCode parser instance.
  *
- * Returns null for empty/whitespace-only lines.
- * Returns { type: 'parse_error', line } for malformed JSON.
- * Never throws.
+ * Each instance tracks its own `firstStepSeen` flag, so concurrent sessions
+ * (different chats) do not interfere with each other.
  */
-export function parseOpenCodeEvent(line: string): AgentEvent | null {
-  if (line.trim() === '') {
-    return null;
-  }
+export function createOpenCodeParser(): OpenCodeParser {
+  let firstStepSeen = false;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return { type: 'parse_error', line };
-  }
-
-  if (!isRecord(parsed)) {
-    return { type: 'unknown', raw: parsed };
-  }
-
-  const eventType = parsed['type'];
-
-  // ── step_start ──────────────────────────────────────────────────────────────
-  // First step_start → emit init with the session ID.
-  // Subsequent step_starts follow tool-call rounds and are ignored.
-  if (eventType === 'step_start') {
-    if (!_firstStepSeen) {
-      _firstStepSeen = true;
-      return { type: 'init', sessionId: String(parsed['sessionID'] ?? '') };
-    }
-    return { type: 'ignored' };
-  }
-
-  // ── text ────────────────────────────────────────────────────────────────────
-  if (eventType === 'text') {
-    const part = parsed['part'];
-    if (isRecord(part)) {
-      return { type: 'assistant_text', text: String(part['text'] ?? '') };
-    }
-    return { type: 'ignored' };
-  }
-
-  // ── tool_use ─────────────────────────────────────────────────────────────────
-  // OpenCode emits completed tool calls with both input and output in a single event.
-  // Emit tool_result since the tool has already completed and both sides are available.
-  if (eventType === 'tool_use') {
-    const part = parsed['part'];
-    if (!isRecord(part)) {
-      return { type: 'unknown', raw: parsed };
-    }
-
-    const callID = String(part['callID'] ?? '');
-    const state = part['state'];
-
-    if (!isRecord(state)) {
-      return {
-        type: 'tool_result',
-        isError: false,
-        toolId: callID,
-        content: '',
-      };
-    }
-
-    const status = String(state['status'] ?? '');
-    const isError = status !== 'completed';
-    const content = stringifyValue(state['output']);
-
-    return {
-      type: 'tool_result',
-      isError,
-      toolId: callID,
-      content,
-    };
-  }
-
-  // ── step_finish ─────────────────────────────────────────────────────────────
-  if (eventType === 'step_finish') {
-    const part = parsed['part'];
-    if (!isRecord(part)) {
-      return { type: 'ignored' };
-    }
-
-    const reason = String(part['reason'] ?? '');
-
-    if (reason === 'stop') {
-      const tokens = part['tokens'];
-      let inputTokens: number | undefined;
-      let outputTokens: number | undefined;
-
-      if (isRecord(tokens)) {
-        const inp = tokens['input'];
-        const out = tokens['output'];
-        if (typeof inp === 'number') inputTokens = inp;
-        if (typeof out === 'number') outputTokens = out;
+  return {
+    parse(line: string): AgentEvent | null {
+      if (line.trim() === '') {
+        return null;
       }
 
-      return { type: 'result', text: null, inputTokens, outputTokens };
-    }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return { type: 'parse_error', line };
+      }
 
-    // reason="tool-calls": more steps follow
-    return { type: 'ignored' };
-  }
+      if (!isRecord(parsed)) {
+        return { type: 'unknown', raw: parsed };
+      }
 
-  return { type: 'unknown', raw: parsed };
+      const eventType = parsed['type'];
+
+      // ── step_start ──────────────────────────────────────────────────────────
+      // First step_start → emit init with the session ID.
+      // Subsequent step_starts follow tool-call rounds and are ignored.
+      if (eventType === 'step_start') {
+        if (!firstStepSeen) {
+          firstStepSeen = true;
+          return { type: 'init', sessionId: String(parsed['sessionID'] ?? '') };
+        }
+        return { type: 'ignored' };
+      }
+
+      // ── text ──────────────────────────────────────────────────────────────────
+      if (eventType === 'text') {
+        const part = parsed['part'];
+        if (isRecord(part)) {
+          return { type: 'assistant_text', text: String(part['text'] ?? '') };
+        }
+        return { type: 'ignored' };
+      }
+
+      // ── tool_use ────────────────────────────────────────────────────────────
+      // OpenCode emits completed tool calls with both input and output in a single event.
+      // Emit tool_result since the tool has already completed and both sides are available.
+      if (eventType === 'tool_use') {
+        const part = parsed['part'];
+        if (!isRecord(part)) {
+          return { type: 'unknown', raw: parsed };
+        }
+
+        const callID = String(part['callID'] ?? '');
+        const state = part['state'];
+
+        if (!isRecord(state)) {
+          return {
+            type: 'tool_result',
+            isError: false,
+            toolId: callID,
+            content: '',
+          };
+        }
+
+        const status = String(state['status'] ?? '');
+        const isError = status !== 'completed';
+        const content = stringifyValue(state['output']);
+
+        return {
+          type: 'tool_result',
+          isError,
+          toolId: callID,
+          content,
+        };
+      }
+
+      // ── step_finish ─────────────────────────────────────────────────────────
+      if (eventType === 'step_finish') {
+        const part = parsed['part'];
+        if (!isRecord(part)) {
+          return { type: 'ignored' };
+        }
+
+        const reason = String(part['reason'] ?? '');
+
+        if (reason === 'stop') {
+          const tokens = part['tokens'];
+          let inputTokens: number | undefined;
+          let outputTokens: number | undefined;
+
+          if (isRecord(tokens)) {
+            const inp = tokens['input'];
+            const out = tokens['output'];
+            if (typeof inp === 'number') inputTokens = inp;
+            if (typeof out === 'number') outputTokens = out;
+          }
+
+          return { type: 'result', text: null, inputTokens, outputTokens };
+        }
+
+        // reason="tool-calls": more steps follow
+        return { type: 'ignored' };
+      }
+
+      return { type: 'unknown', raw: parsed };
+    },
+
+    reset() {
+      firstStepSeen = false;
+    },
+  };
+}
+
+// ── Backward-compatible module-level API ──────────────────────────────────────
+// Kept so that existing tests and any other callsites continue to work.
+// New code should use createOpenCodeParser() for per-session isolation.
+const _defaultParser = createOpenCodeParser();
+
+/** @deprecated Use createOpenCodeParser() for per-session isolation. */
+export function parseOpenCodeEvent(line: string): AgentEvent | null {
+  return _defaultParser.parse(line);
+}
+
+/** @deprecated Use createOpenCodeParser().reset() for per-session isolation. */
+export function resetParserState(): void {
+  _defaultParser.reset();
 }

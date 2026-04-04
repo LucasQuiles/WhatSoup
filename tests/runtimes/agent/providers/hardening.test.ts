@@ -68,7 +68,7 @@ describe('Provider hardening', () => {
       const sessionContent = readFileSync(SESSION_FILE, 'utf8');
       expect(sessionContent).toMatch(/parseCodexEvent/);
       expect(sessionContent).toMatch(/parseGeminiAcpEvent/);
-      expect(sessionContent).toMatch(/parseOpenCodeEvent/);
+      expect(sessionContent).toMatch(/createOpenCodeParser/);
     });
 
     it('session.ts getParser covers all registered providers', () => {
