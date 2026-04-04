@@ -534,3 +534,54 @@ describe('cross-provider integration', () => {
     }
   });
 });
+
+// ─── Edge case tests (from oracle council audit) ───
+
+describe('edge cases: input sanitization', () => {
+  it('NaN from non-numeric input is rejected (does not store NaN)', () => {
+    // Simulates the fixed NumberInput handler: Number("abc") = NaN → treated as undefined → deleted
+    let opts: Record<string, unknown> = { provider: 'anthropic-api', providerConfig: { maxTokens: 8192 } };
+    const raw = 'abc';
+    const n = Number(raw);
+    const sanitized = Number.isNaN(n) ? undefined : n;
+    opts = simulateConfigFieldChange(opts, 'maxTokens', sanitized);
+    expect(opts.providerConfig).toEqual({});
+    expect((opts.providerConfig as Record<string, unknown>).maxTokens).toBeUndefined();
+  });
+
+  it('whitespace-only text input is treated as empty (trimmed)', () => {
+    // Simulates the fixed TextInput handler: "   ".trim() = "" → undefined → deleted
+    let opts: Record<string, unknown> = { provider: 'openai-api', providerConfig: {} };
+    const raw = '   ';
+    const trimmed = raw.trim() || undefined;
+    opts = simulateConfigFieldChange(opts, 'baseUrl', trimmed);
+    expect(opts.providerConfig).toEqual({});
+    expect((opts.providerConfig as Record<string, unknown>).baseUrl).toBeUndefined();
+  });
+
+  it('zero is a valid number value (not deleted)', () => {
+    let opts: Record<string, unknown> = { provider: 'anthropic-api', providerConfig: {} };
+    opts = simulateConfigFieldChange(opts, 'maxTokens', 0);
+    // 0 is not undefined or '', so it should be stored
+    expect((opts.providerConfig as Record<string, unknown>).maxTokens).toBe(0);
+  });
+
+  it('empty string provider ID returns no config fields', () => {
+    expect(getProvider('')).toBeUndefined();
+    expect(getProviderConfigFields('')).toHaveLength(0);
+  });
+
+  it('displayName is never the same as id (human-readable check)', () => {
+    for (const p of PROVIDERS) {
+      expect(p.displayName).not.toBe(p.id);
+    }
+  });
+});
+
+// ─── Test fidelity notes ───
+// IMPORTANT: The simulate* helpers in this file replicate the LOGIC of the
+// React component handlers but are NOT connected to the actual handlers.
+// These tests verify the state-update algorithm is correct, NOT that the
+// React components correctly call that algorithm. Component-level integration
+// tests (using React Testing Library) are needed to close that gap.
+// See: ConfigStep.tsx lines 273-303 for the actual handlers.

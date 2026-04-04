@@ -477,29 +477,38 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </Field>
 
           {/* Provider-specific config fields */}
-          {getProviderConfigFields(agentOptions.provider ?? 'claude-cli').map(field => (
-            <Field
-              key={field.key}
-              label={field.label}
-              confirmed={!!(agentOptions.providerConfig?.[field.key])}
-            >
-              {field.inputType === 'number' ? (
-                <NumberInput
-                  value={(agentOptions.providerConfig?.[field.key] as number) ?? ''}
-                  onChange={(e) => handleProviderConfigOption(field.key, e.target.value ? Number(e.target.value) : undefined)}
-                  placeholder={field.placeholder}
-                  confirmed={!!(agentOptions.providerConfig?.[field.key])}
-                />
-              ) : (
-                <TextInput
-                  value={(agentOptions.providerConfig?.[field.key] as string) ?? ''}
-                  onChange={(e) => handleProviderConfigOption(field.key, e.target.value || undefined)}
-                  placeholder={field.placeholder}
-                  confirmed={!!(agentOptions.providerConfig?.[field.key])}
-                />
-              )}
-            </Field>
-          ))}
+          {getProviderConfigFields(agentOptions.provider ?? 'claude-cli').map(field => {
+            const fieldValue = agentOptions.providerConfig?.[field.key]
+            const hasValue = fieldValue !== undefined && fieldValue !== ''
+            return (
+              <Field
+                key={field.key}
+                label={field.label}
+                confirmed={hasValue}
+              >
+                {field.inputType === 'number' ? (
+                  <NumberInput
+                    value={(fieldValue as number) ?? ''}
+                    onChange={(e) => {
+                      const raw = e.target.value
+                      if (!raw) { handleProviderConfigOption(field.key, undefined); return }
+                      const n = Number(raw)
+                      handleProviderConfigOption(field.key, Number.isNaN(n) ? undefined : n)
+                    }}
+                    placeholder={field.placeholder}
+                    confirmed={hasValue}
+                  />
+                ) : (
+                  <TextInput
+                    value={(fieldValue as string) ?? ''}
+                    onChange={(e) => handleProviderConfigOption(field.key, e.target.value.trim() || undefined)}
+                    placeholder={field.placeholder}
+                    confirmed={hasValue}
+                  />
+                )}
+              </Field>
+            )
+          })}
 
           {/* Restart notice when provider != default */}
           {(agentOptions.provider ?? 'claude-cli') !== 'claude-cli' && (
