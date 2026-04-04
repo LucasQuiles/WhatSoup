@@ -14,7 +14,6 @@ import { createSession, incrementMessageCount, updateSessionId, updateSessionSta
 import { parseEvent } from './stream-parser.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
-import { parseGeminiEvent } from './providers/gemini-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 import { parseOpenCodeEvent, resetParserState as resetOpenCodeParserState } from './providers/opencode-parser.ts';
 
@@ -256,7 +255,7 @@ export class SessionManager {
   private handleProviderEvent(event: AgentEvent): void {
     // Debug: log all events for non-Claude providers
     if (this.provider !== 'claude-cli') {
-      log.debug({ provider: this.provider, eventType: event.type, sessionId: (event as any).sessionId, dbRowId: this.dbRowId }, 'handleProviderEvent');
+      log.debug({ provider: this.provider, eventType: event.type, sessionId: event.type === 'init' ? event.sessionId : undefined, dbRowId: this.dbRowId }, 'handleProviderEvent');
     }
 
     if (event.type === 'init' && this.dbRowId !== null) {
@@ -627,7 +626,7 @@ export class SessionManager {
           const trimmed = line.trim();
           if (trimmed) {
             const event = parse(trimmed);
-            if (event) this.onEvent(event);
+            if (event) this.handleProviderEvent(event);
           }
         }
         this.stdoutBuffer = '';

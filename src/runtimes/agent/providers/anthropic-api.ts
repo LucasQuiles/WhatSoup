@@ -73,6 +73,7 @@ export class AnthropicApiProvider implements ProviderSession {
   private active = false;
   private model: string;
   private apiKey: string = '';
+  private baseUrl: string;
   private abortController: AbortController | null = null;
   private config: ProviderConfig['providerConfig'];
 
@@ -83,6 +84,7 @@ export class AnthropicApiProvider implements ProviderSession {
   constructor(config?: ProviderConfig['providerConfig']) {
     this.config = config;
     this.model = config?.model ?? 'claude-sonnet-4-20250514';
+    this.baseUrl = (config?.baseUrl as string | undefined) ?? 'https://api.anthropic.com/v1';
   }
 
   // ── ProviderSession interface ─────────────────────────────────────────────
@@ -236,7 +238,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
     let response: Response;
     try {
-      response = await fetch('https://api.anthropic.com/v1/messages', {
+      response = await fetch(`${this.baseUrl}/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
