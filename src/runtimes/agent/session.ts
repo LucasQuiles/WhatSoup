@@ -15,6 +15,7 @@ import { parseEvent } from './stream-parser.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiEvent } from './providers/gemini-parser.ts';
+import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -147,6 +148,10 @@ export class SessionManager {
   private codexThreadId: string | null = null;
   /** Monotonic counter for Codex JSON-RPC request IDs. */
   private codexRequestSeq = 0;
+  /** Gemini ACP session ID captured from session/new response. */
+  private geminiSessionId: string | null = null;
+  /** Monotonic counter for Gemini ACP JSON-RPC request IDs. */
+  private geminiRequestSeq = 0;
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */
@@ -187,10 +192,11 @@ export class SessionManager {
 
   /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */
   private get isSpawnPerTurn(): boolean {
-    // Claude CLI and Codex app-server are persistent subprocesses.
-    // Others (gemini, opencode) still spawn per turn.
+    // Claude CLI, Codex app-server, and Gemini ACP are persistent subprocesses.
+    // Others (opencode) still spawn per turn.
     return this.provider !== 'claude-cli'
-      && this.provider !== 'codex-cli';
+      && this.provider !== 'codex-cli'
+      && this.provider !== 'gemini-cli';
   }
 
   private getProviderBinary(): string {
@@ -213,12 +219,7 @@ export class SessionManager {
           ...(model ? ['--model', model] : []),
         ];
       case 'gemini-cli':
-        return [
-          '-p',
-          '--output-format', 'stream-json',
-          '--yolo',
-          ...(model ? ['-m', model] : []),
-        ];
+        return ['--acp'];
       case 'opencode-cli':
         return [
           'run',
@@ -244,7 +245,7 @@ export class SessionManager {
   private getParser(): (line: string) => AgentEvent | null {
     switch (this.provider) {
       case 'codex-cli': return parseCodexEvent;
-      case 'gemini-cli': return parseGeminiEvent;
+      case 'gemini-cli': return parseGeminiAcpEvent;
       case 'opencode-cli':
         // OpenCode's JSON format (step_start/text/step_finish) differs from Claude's.
         // A dedicated parser should be implemented. For now, fall through to Claude
@@ -264,6 +265,12 @@ export class SessionManager {
       if (this.provider === 'codex-cli' && event.sessionId) {
         this.codexThreadId = event.sessionId;
         log.info({ chatJid: this.chatJid, codexThreadId: this.codexThreadId }, 'codex: captured threadId');
+      }
+
+      // Gemini ACP: capture sessionId from session/new response
+      if (this.provider === 'gemini-cli' && event.sessionId) {
+        this.geminiSessionId = event.sessionId;
+        log.info({ chatJid: this.chatJid, geminiSessionId: this.geminiSessionId }, 'gemini: captured sessionId');
       }
 
       if (this.provider === 'claude-cli') {
@@ -363,27 +370,7 @@ export class SessionManager {
     const prompt = this.buildSpawnPerTurnPrompt(text);
 
     switch (this.provider) {
-      // codex-cli is now persistent (app-server), not spawn-per-turn.
-
-      case 'gemini-cli':
-        if (this.sessionId && !this.sessionId.startsWith('gemini-cli-')) {
-          log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'gemini: resuming session');
-          return [
-            '-p', prompt,
-            '--output-format', 'stream-json',
-            '--yolo',
-            ...(this.model ? ['-m', this.model] : []),
-            '--resume', this.sessionId,
-          ];
-        }
-
-        log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
-        return [
-          '-p', prompt,
-          '--output-format', 'stream-json',
-          '--yolo',
-          ...(this.model ? ['-m', this.model] : []),
-        ];
+      // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
       case 'opencode-cli':
         log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
@@ -525,6 +512,17 @@ export class SessionManager {
         persistExtendedHistory: true,
         ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
       });
+    }
+
+    // Gemini ACP: send initialize + session/new after spawn
+    if (this.provider === 'gemini-cli') {
+      this.geminiSessionId = null;
+      this.geminiRequestSeq = 0;
+      const initReq = buildInitializeRequest(++this.geminiRequestSeq);
+      child.stdin!.write(initReq);
+      const sessionReq = buildSessionNewRequest(++this.geminiRequestSeq, cwd, [], systemPrompt || undefined);
+      child.stdin!.write(sessionReq);
+      log.info({ chatJid: this.chatJid }, 'gemini: sent initialize + session/new');
     }
 
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
@@ -863,9 +861,32 @@ export class SessionManager {
         }
       });
     } else {
-      // Persistent process: pipe turns via stdin (JSONL for Claude, JSON-RPC for Codex)
+      // Persistent process: pipe turns via stdin (JSONL for Claude, JSON-RPC for Codex/Gemini)
       if (this.child === null) {
         throw new Error('No active session. Call spawnSession() first.');
+      }
+
+      // Gemini ACP: wait for sessionId from session/new response, then write session/prompt
+      if (this.provider === 'gemini-cli') {
+        if (!this.geminiSessionId) {
+          const waitStart = Date.now();
+          while (!this.geminiSessionId && Date.now() - waitStart < 15_000) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          if (!this.geminiSessionId) {
+            throw new Error('Gemini sessionId not captured after 15s.');
+          }
+        }
+        const req = buildSessionPromptRequest(++this.geminiRequestSeq, this.geminiSessionId, text);
+        this.child.stdin!.write(req);
+        if (this.dbRowId !== null) {
+          incrementMessageCount(this.db, this.dbRowId);
+        }
+        this.clearTurnWatchdog();
+        this.armWatchdog();
+        this.messageCount += 1;
+        this.lastMessageAt = new Date().toISOString();
+        return;
       }
 
       let payload: string;

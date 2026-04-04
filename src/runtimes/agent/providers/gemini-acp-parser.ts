@@ -414,8 +414,13 @@ export function buildSessionNewRequest(
   id: number,
   cwd: string,
   mcpServers: JsonObject[] = [],
+  systemPrompt?: string,
 ): string {
-  return buildAcpRequest(id, 'session/new', { cwd, mcpServers });
+  return buildAcpRequest(id, 'session/new', {
+    cwd,
+    mcpServers,
+    ...(systemPrompt ? { systemPrompt } : {}),
+  });
 }
 
 /** Build the ACP `session/prompt` request for a text turn. */

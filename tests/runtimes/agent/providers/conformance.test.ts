@@ -75,7 +75,7 @@ const PROVIDERS: ProviderConfig[] = [
   {
     id: 'gemini-cli',
     binary: 'gemini',
-    resumeArgs: ['--resume', 'gemini-session-1'],
+    resumeArgs: [],
     sessionId: 'gemini-session-1',
   },
 ];
@@ -219,6 +219,52 @@ class ProviderHarness {
         return true;
       }
 
+      if (this.provider.id === 'gemini-cli') {
+        // Handle JSON-RPC requests from the Gemini ACP persistent adapter
+        const method = payload['method'] as string | undefined;
+        if (method === 'initialize') {
+          // Respond with initialize result
+          queueMicrotask(() => {
+            this.emitLine(child, JSON.stringify({
+              jsonrpc: '2.0',
+              id: payload['id'],
+              result: { protocolVersion: 1, capabilities: {} },
+            }));
+          });
+          cb?.(null);
+          return true;
+        }
+        if (method === 'session/new') {
+          // Capture systemPrompt from session/new params
+          const sessionNewParams = payload['params'] as Record<string, unknown> | undefined;
+          if (sessionNewParams?.['systemPrompt']) {
+            this._baseInstructions = String(sessionNewParams['systemPrompt']);
+          }
+          // Respond with sessionId
+          queueMicrotask(() => {
+            this.emitLine(child, JSON.stringify({
+              jsonrpc: '2.0',
+              id: payload['id'],
+              result: { sessionId: this.provider.sessionId },
+            }));
+          });
+          cb?.(null);
+          return true;
+        }
+        if (method === 'session/prompt') {
+          // Extract text from the prompt array
+          const params = payload['params'] as Record<string, unknown>;
+          const prompt = params['prompt'] as Array<{ type: string; text?: string }>;
+          const text = prompt?.find((p) => p.type === 'text')?.text ?? '';
+          queueMicrotask(() => this.runTurn(child, text, undefined, this._baseInstructions ?? ''));
+          cb?.(null);
+          return true;
+        }
+        // Unknown Gemini ACP request — ignore
+        cb?.(null);
+        return true;
+      }
+
       // Claude-cli: stream-json user message
       const text = ((payload as { message?: { content?: Array<{ text?: string }> } }).message?.content?.[0]?.text) ?? '';
       queueMicrotask(() => this.runTurn(child, text, undefined, this.extractSystemPrompt(args)));
@@ -240,7 +286,7 @@ class ProviderHarness {
         this.emitLine(child, this.buildInitEvent(this.provider.sessionId));
       });
     }
-    // Codex init is handled via stdin.write (initialize + thread/start requests)
+    // Codex and Gemini ACP init are handled via stdin.write (initialize + thread/start / session/new requests)
 
     return child;
   }
@@ -256,7 +302,7 @@ class ProviderHarness {
     this.sessions.set(sessionId, state);
 
     // Spawn-per-turn providers emit init events per turn
-    const isPersistent = this.provider.id === 'claude-cli' || this.provider.id === 'codex-cli';
+    const isPersistent = this.provider.id === 'claude-cli' || this.provider.id === 'codex-cli' || this.provider.id === 'gemini-cli';
     if (!isPersistent) {
       this.emitLine(child, this.buildInitEvent(sessionId));
     }
@@ -269,7 +315,7 @@ class ProviderHarness {
 
     this.emitLine(child, this.buildResultEvent());
 
-    // Spawn-per-turn providers exit after each turn
+    // Spawn-per-turn providers exit after each turn; persistent providers stay alive
     if (!isPersistent) {
       child.emit('exit', 0, null);
     }
@@ -389,11 +435,14 @@ class ProviderHarness {
           },
         });
       case 'gemini-cli':
+        // ACP session/update notification with agent_message_chunk
         return JSON.stringify({
-          type: 'message',
-          role: 'assistant',
-          delta: true,
-          text,
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: this.provider.sessionId,
+            update: { type: 'agent_message_chunk', chunk: text },
+          },
         });
     }
   }
@@ -416,10 +465,14 @@ class ProviderHarness {
           },
         });
       case 'gemini-cli':
+        // ACP session/prompt final response with stopReason
         return JSON.stringify({
-          type: 'result',
-          status: 'success',
-          stats: { input_tokens: 12, output_tokens: 6 },
+          jsonrpc: '2.0',
+          id: 'gws-turn',
+          result: {
+            stopReason: 'end_turn',
+            usage: { input_tokens: 12, output_tokens: 6 },
+          },
         });
     }
   }
@@ -500,7 +553,7 @@ describe('agent provider conformance', () => {
 
       const statusAfterSecondTurn = session.getStatus();
 
-      const isPersistent = provider.id === 'claude-cli' || provider.id === 'codex-cli';
+      const isPersistent = provider.id === 'claude-cli' || provider.id === 'codex-cli' || provider.id === 'gemini-cli';
       if (isPersistent) {
         // Persistent providers use a single subprocess for all turns
         expect(activeHarness.spawnCalls).toHaveLength(1);
@@ -541,6 +594,10 @@ describe('agent provider conformance', () => {
         // in the thread/start JSON-RPC request, not as a CLI arg.
         // The harness captures it and the test verifies the response.
         // If BLUE was returned, the system prompt was correctly forwarded.
+        expect(assistantTexts.at(-1)).toBe('BLUE');
+      } else if (provider.id === 'gemini-cli') {
+        // Gemini ACP: persistent mode, system prompt is not passed as CLI args.
+        // Verify the response was correct (system prompt honored).
         expect(assistantTexts.at(-1)).toBe('BLUE');
       } else {
         const serializedArgs = (lastSpawn?.args ?? []).join('\n');
