@@ -32,6 +32,7 @@ interface AgentOptions {
   mcp?: unknown;
   perUserDirs?: unknown;
   sandboxPerChat?: boolean;
+  enabledPlugins?: Record<string, boolean>;
 }
 
 interface InstanceConfig {

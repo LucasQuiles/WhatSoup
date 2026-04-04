@@ -148,6 +148,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
   chatJidToWorkspace: mockChatJidToWorkspace,
   provisionWorkspace: mockProvisionWorkspace,
   writeSandboxArtifacts: vi.fn(),
+  ensurePermissionsSettings: vi.fn(),
 }));
 
 // Mock WhatSoupSocketServer so tests don't bind real Unix sockets.
@@ -289,6 +290,21 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(ensureAgentSchema).toHaveBeenCalledWith(db);
+  });
+
+  it('start() calls ensurePermissionsSettings with agent type', async () => {
+    const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+
+    expect(ensurePermissionsSettings).toHaveBeenCalledWith(
+      expect.stringContaining('.claude'),
+      'agent',
+      undefined, // no enabledPlugins configured
+    );
   });
 
   it('handleMessage ignores null content', async () => {
