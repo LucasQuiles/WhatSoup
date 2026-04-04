@@ -76,6 +76,49 @@ describe('ProviderBudget', () => {
 
       expect(budget.checkBudget().allowed).toBe(false);
     });
+
+    it('denies at $0.01 cap with exactly 1000 tokens at $10/M rate', () => {
+      // $0.01 cap, $10/M tokens → 1000 tokens = $0.01 exactly
+      const budget = new ProviderBudget('test', {
+        dailySpendCapUsd: 0.01,
+        costPerMillionTokens: 10,
+      });
+
+      expect(budget.checkBudget().allowed).toBe(true);
+      budget.recordUsage({ input: 500, output: 500 }); // 1000 tokens = $0.01
+
+      const result = budget.checkBudget();
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('Daily spend cap');
+      expect(result.reason).toContain('$0.01');
+    });
+
+    it('allows again after resetDaily() clears the counter', () => {
+      const budget = new ProviderBudget('test', {
+        dailySpendCapUsd: 0.01,
+        costPerMillionTokens: 10,
+      });
+
+      budget.recordUsage({ input: 500, output: 500 }); // 1000 tokens = $0.01
+      expect(budget.checkBudget().allowed).toBe(false);
+
+      budget.resetDaily();
+
+      expect(budget.checkBudget().allowed).toBe(true);
+    });
+
+    it('getSnapshot().estimatedDailySpendUsd returns correct value', () => {
+      const budget = new ProviderBudget('test', {
+        dailySpendCapUsd: 0.01,
+        costPerMillionTokens: 10,
+      });
+
+      budget.recordUsage({ input: 500, output: 500 }); // 1000 tokens = $0.01
+      expect(budget.getSnapshot().estimatedDailySpendUsd).toBeCloseTo(0.01);
+
+      budget.resetDaily();
+      expect(budget.getSnapshot().estimatedDailySpendUsd).toBe(0);
+    });
   });
 
   describe('chatBurstLimit', () => {
@@ -104,6 +147,46 @@ describe('ProviderBudget', () => {
       // chat-a is blocked, chat-b should still be allowed
       expect(budget.checkBudget('chat-a').allowed).toBe(false);
       expect(budget.checkBudget('chat-b').allowed).toBe(true);
+    });
+
+    it('denies the 3rd request when chatBurstLimit is 2', () => {
+      const budget = new ProviderBudget('test', { chatBurstLimit: 2 });
+
+      expect(budget.checkBudget('chat-A').allowed).toBe(true);
+      budget.recordUsage({ input: 10 }, 'chat-A');
+
+      expect(budget.checkBudget('chat-A').allowed).toBe(true);
+      budget.recordUsage({ input: 10 }, 'chat-A');
+
+      const result = budget.checkBudget('chat-A');
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('Chat burst limit');
+      expect(result.reason).toContain('2 req/min');
+    });
+
+    it('allows chat-B when chat-A is burst-limited (limit 2)', () => {
+      const budget = new ProviderBudget('test', { chatBurstLimit: 2 });
+
+      budget.recordUsage({ input: 10 }, 'chat-A');
+      budget.recordUsage({ input: 10 }, 'chat-A');
+
+      expect(budget.checkBudget('chat-A').allowed).toBe(false);
+      expect(budget.checkBudget('chat-B').allowed).toBe(true);
+    });
+
+    it('allows chat-A again after the 60s window expires', () => {
+      vi.useFakeTimers();
+      const budget = new ProviderBudget('test', { chatBurstLimit: 2 });
+
+      budget.recordUsage({ input: 10 }, 'chat-A');
+      budget.recordUsage({ input: 10 }, 'chat-A');
+      expect(budget.checkBudget('chat-A').allowed).toBe(false);
+
+      // Advance past the 60s sliding window
+      vi.advanceTimersByTime(61_000);
+
+      expect(budget.checkBudget('chat-A').allowed).toBe(true);
+      vi.useRealTimers();
     });
   });
 
