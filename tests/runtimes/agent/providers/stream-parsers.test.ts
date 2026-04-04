@@ -1,9 +1,10 @@
 // tests/runtimes/agent/providers/stream-parsers.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
 import { parseGeminiEvent } from '../../../../src/runtimes/agent/providers/gemini-parser.ts';
+import { parseOpenCodeEvent, resetParserState } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
 
 const FIXTURES_DIR = resolve(
   import.meta.dirname,
@@ -498,6 +499,170 @@ describe('Gemini stream parser', () => {
     it('parses unknown event type → unknown', () => {
       const line = JSON.stringify({ type: 'heartbeat', ts: 1234 });
       const event = parseGeminiEvent(line);
+      expect(event).toMatchObject({ type: 'unknown' });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenCode stream parser
+// ---------------------------------------------------------------------------
+
+describe('OpenCode stream parser', () => {
+  beforeEach(() => {
+    resetParserState();
+  });
+
+  describe('opencode-output.jsonl (simple text response)', () => {
+    const lines = readFixtureLines('opencode-output.jsonl');
+
+    it('parses first step_start → init with sessionId', () => {
+      const event = parseOpenCodeEvent(lines[0]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: 'ses_2a87cf8f6ffe7hp2X3Pp2257Ni',
+      });
+    });
+
+    it('parses text event → assistant_text with text content', () => {
+      parseOpenCodeEvent(lines[0]!); // consume step_start
+      const event = parseOpenCodeEvent(lines[1]!);
+      expect(event).toMatchObject({ type: 'assistant_text' });
+      const textEvent = event as { type: 'assistant_text'; text: string };
+      expect(textEvent.text).toContain('Hello!');
+    });
+
+    it('parses step_finish with reason=stop → result with token counts', () => {
+      parseOpenCodeEvent(lines[0]!);
+      parseOpenCodeEvent(lines[1]!);
+      const event = parseOpenCodeEvent(lines[2]!);
+      expect(event).toEqual({
+        type: 'result',
+        text: null,
+        inputTokens: 17853,
+        outputTokens: 39,
+      });
+    });
+
+    it('returns null for empty/whitespace-only lines', () => {
+      const lastLine = lines[lines.length - 1]!;
+      expect(lastLine.trim()).toBe('');
+      expect(parseOpenCodeEvent(lastLine)).toBeNull();
+    });
+  });
+
+  describe('opencode-tools-output.jsonl (with tool use)', () => {
+    const lines = readFixtureLines('opencode-tools-output.jsonl').filter((l) => l.trim() !== '');
+
+    it('parses first step_start → init with sessionId', () => {
+      const event = parseOpenCodeEvent(lines[0]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: 'ses_2a7f70c38ffemX8TGwQSl6tjaH',
+      });
+    });
+
+    it('parses tool_use event → tool_result with isError=false and output content', () => {
+      parseOpenCodeEvent(lines[0]!); // step_start → init
+      const event = parseOpenCodeEvent(lines[1]!); // tool_use
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'call_nB8ilojwx5u6AutWTkcmMwUc',
+        isError: false,
+      });
+      const result = event as { type: 'tool_result'; content: string };
+      expect(result.content).toContain('CLAUDE.md');
+    });
+
+    it('parses step_finish with reason=tool-calls → ignored', () => {
+      parseOpenCodeEvent(lines[0]!);
+      parseOpenCodeEvent(lines[1]!);
+      const event = parseOpenCodeEvent(lines[2]!);
+      expect(event).toEqual({ type: 'ignored' });
+    });
+
+    it('parses second step_start → ignored (not init)', () => {
+      parseOpenCodeEvent(lines[0]!);
+      parseOpenCodeEvent(lines[1]!);
+      parseOpenCodeEvent(lines[2]!);
+      const event = parseOpenCodeEvent(lines[3]!);
+      expect(event).toEqual({ type: 'ignored' });
+    });
+
+    it('parses text event after tool round → assistant_text', () => {
+      parseOpenCodeEvent(lines[0]!);
+      parseOpenCodeEvent(lines[1]!);
+      parseOpenCodeEvent(lines[2]!);
+      parseOpenCodeEvent(lines[3]!); // second step_start
+      const event = parseOpenCodeEvent(lines[4]!); // text
+      expect(event).toMatchObject({ type: 'assistant_text' });
+      const textEvent = event as { type: 'assistant_text'; text: string };
+      expect(textEvent.text).toContain('CLAUDE.md');
+    });
+
+    it('parses final step_finish with reason=stop → result with token counts', () => {
+      for (let i = 0; i < 5; i++) parseOpenCodeEvent(lines[i]!);
+      const event = parseOpenCodeEvent(lines[5]!);
+      expect(event).toMatchObject({ type: 'result', text: null });
+      const result = event as { type: 'result'; inputTokens?: number; outputTokens?: number };
+      expect(typeof result.inputTokens).toBe('number');
+      expect(typeof result.outputTokens).toBe('number');
+    });
+  });
+
+  describe('edge cases', () => {
+    it('returns null for empty string', () => {
+      expect(parseOpenCodeEvent('')).toBeNull();
+    });
+
+    it('returns null for whitespace-only string', () => {
+      expect(parseOpenCodeEvent('   \t  ')).toBeNull();
+    });
+
+    it('returns parse_error for malformed JSON', () => {
+      const event = parseOpenCodeEvent('{not valid json');
+      expect(event).toEqual({ type: 'parse_error', line: '{not valid json' });
+    });
+
+    it('resets state: second step_start after resetParserState → init again', () => {
+      const line = JSON.stringify({
+        type: 'step_start',
+        sessionID: 'ses_test123',
+        part: { type: 'step-start', sessionID: 'ses_test123' },
+      });
+      parseOpenCodeEvent(line); // consume first → init
+      resetParserState();
+      const event = parseOpenCodeEvent(line); // after reset → init again
+      expect(event).toEqual({ type: 'init', sessionId: 'ses_test123' });
+    });
+
+    it('parses tool_use with error status → tool_result isError=true', () => {
+      const line = JSON.stringify({
+        type: 'tool_use',
+        sessionID: 'ses_test',
+        part: {
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call_err1',
+          state: {
+            status: 'error',
+            input: { command: 'bad-cmd' },
+            output: 'command not found',
+          },
+        },
+      });
+      const event = parseOpenCodeEvent(line);
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'call_err1',
+        isError: true,
+        content: 'command not found',
+      });
+    });
+
+    it('parses unknown event type → unknown', () => {
+      const line = JSON.stringify({ type: 'heartbeat', ts: 1234 });
+      const event = parseOpenCodeEvent(line);
       expect(event).toMatchObject({ type: 'unknown' });
     });
   });

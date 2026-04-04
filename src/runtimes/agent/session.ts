@@ -16,6 +16,7 @@ import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiEvent } from './providers/gemini-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
+import { parseOpenCodeEvent } from './providers/opencode-parser.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -246,11 +247,7 @@ export class SessionManager {
     switch (this.provider) {
       case 'codex-cli': return parseCodexEvent;
       case 'gemini-cli': return parseGeminiAcpEvent;
-      case 'opencode-cli':
-        // OpenCode's JSON format (step_start/text/step_finish) differs from Claude's.
-        // A dedicated parser should be implemented. For now, fall through to Claude
-        // parser which will produce 'unknown' events for unrecognized types.
-        return parseEvent;
+      case 'opencode-cli': return parseOpenCodeEvent;
       case 'claude-cli':
       default: return parseEvent;
     }
