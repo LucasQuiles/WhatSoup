@@ -1042,7 +1042,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
           {config ? (
             <div style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
               {line.mode === 'agent' && (
-                <div className="flex items-center justify-between" style={{ padding: '6px 0', ...(config.length > 0 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
+                <div className="flex items-center justify-between" style={{ padding: '6px 0', ...(config.length > 0 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) /* no border when no config rows follow */ }}>
                   <span className="c-label">provider</span>
                   <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
                     {getProvider(
