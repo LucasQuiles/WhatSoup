@@ -1145,7 +1145,8 @@ describe('Send retry with exponential backoff (B02)', () => {
     await vi.runAllTimersAsync();
     await drainQueue();
 
-    expect(messenger.sendMessage).toHaveBeenCalledTimes(3);
+    // 3 send attempts + 1 best-effort failure notification
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(4);
     // The error log must include responseText so the response is recoverable
     expect(mockLogError()).toHaveBeenCalledWith(
       expect.objectContaining({ responseText: 'hey whats up' }),
@@ -1180,7 +1181,7 @@ describe('Send retry with exponential backoff (B02)', () => {
 
     // Two warn calls: one before attempt 2, one before attempt 3
     const warnCalls = mockLogWarn().mock.calls.filter(
-      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('send failed — retrying'),
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('send_retry'),
     );
     expect(warnCalls).toHaveLength(2);
   });

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const FALLBACK_TEXT = "[Voice note — couldn't transcribe]";
+const FALLBACK_TEXT = '[🎤 Voice note received — transcription unavailable]';
 
 // Use vi.hoisted so the mock fn is available inside vi.mock factory (which is hoisted)
 const { mockTranscriptionsCreate } = vi.hoisted(() => ({

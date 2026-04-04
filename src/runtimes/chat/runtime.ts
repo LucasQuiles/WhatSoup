@@ -284,6 +284,7 @@ export class ChatRuntime implements Runtime {
 
     // Primary provider: try once, wait, retry once
     try {
+      log.info({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, elapsed_ms: 0, traceId }, 'llm_attempt');
       const result = await this.primaryProvider.generate(request);
       responseText = result.content;
       inputTokens = result.inputTokens;
@@ -294,11 +295,13 @@ export class ChatRuntime implements Runtime {
         'primary provider response',
       );
     } catch (primaryErr) {
+      log.warn({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
       log.error({ traceId, err: primaryErr }, 'primary provider failed — retrying after delay');
 
       await new Promise((resolve) => setTimeout(resolve, jitteredDelay(config.apiRetryDelayMs, 0)));
 
       try {
+        log.info({ step: 'retry', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
         const result = await this.primaryProvider.generate(request);
         responseText = result.content;
         inputTokens = result.inputTokens;
@@ -309,10 +312,12 @@ export class ChatRuntime implements Runtime {
           'primary provider response (retry)',
         );
       } catch (retryErr) {
+        log.warn({ step: 'retry', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
         log.error({ traceId, err: retryErr }, 'primary provider retry failed — trying fallback');
 
         const fallbackRequest: GenerateRequest = { ...request, model: config.models.fallback };
         try {
+          log.info({ step: 'fallback', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 3, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
           const result = await this.fallbackProvider.generate(fallbackRequest);
           responseText = result.content;
           modelUsed = config.models.fallback;
@@ -324,6 +329,7 @@ export class ChatRuntime implements Runtime {
             'fallback provider response',
           );
         } catch (fallbackErr) {
+          log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
@@ -365,7 +371,7 @@ export class ChatRuntime implements Runtime {
     for (let attempt = 0; attempt < MAX_SEND_ATTEMPTS; attempt++) {
       if (attempt > 0) {
         const delay = jitteredDelay(2000, attempt - 1);
-        log.warn({ traceId, err: lastSendErr, chatJid: msg.chatJid, attempt }, `send failed — retrying (attempt ${attempt + 1}/${MAX_SEND_ATTEMPTS})`);
+        log.warn({ attempt: attempt + 1, maxAttempts: MAX_SEND_ATTEMPTS, chatJid: msg.chatJid, error: (lastSendErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - sendStart, traceId }, 'send_retry');
         await new Promise(r => setTimeout(r, delay));
       }
       try {
@@ -390,6 +396,10 @@ export class ChatRuntime implements Runtime {
       if (this.durability && msg.inboundSeq !== undefined) {
         this.durability.markInboundFailed(msg.inboundSeq);
       }
+      // After send exhaustion, try one notification (don't retry this one)
+      try {
+        await this.messenger.sendMessage(msg.chatJid, '⚠️ My last response may not have been delivered. Please ask me again.');
+      } catch { /* best-effort, don't retry the notification */ }
       return;
     }
     const sendDurationMs = Date.now() - sendStart;
