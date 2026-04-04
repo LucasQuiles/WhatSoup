@@ -9,6 +9,7 @@ import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { normalizeErrorClass, type HealCompletePayload } from './heal-protocol.ts';
 import { config } from '../config.ts';
+import { toPersonalJid } from './jid-constants.ts';
 
 const log = createChildLogger('heal');
 
@@ -104,7 +105,7 @@ export function emitHealReport(
     log.warn('no Q control peer configured — cannot send heal report');
     return reportId;
   }
-  const qJid = `${qPhone}@s.whatsapp.net`;
+  const qJid = toPersonalJid(qPhone);
 
   const payload = {
     reportId,

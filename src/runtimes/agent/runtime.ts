@@ -33,6 +33,7 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { toPersonalJid } from '../../core/jid-constants.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -841,7 +842,7 @@ export class AgentRuntime implements Runtime {
 
           // Determine target JID (Loops)
           const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
-          const loopsJid = loopsPhone ? `${loopsPhone}@s.whatsapp.net` : null;
+          const loopsJid = loopsPhone ? toPersonalJid(loopsPhone) : null;
 
           if (parsed.result === 'fixed') {
             if (loopsJid) {
@@ -865,7 +866,7 @@ export class AgentRuntime implements Runtime {
             // Also DM admin
             const adminPhone = [...config.adminPhones][0];
             if (adminPhone) {
-              const adminJid = `${adminPhone}@s.whatsapp.net`;
+              const adminJid = toPersonalJid(adminPhone);
               await sendTracked(this.messenger, adminJid,
                 `[HEAL_ESCALATE] Repair for ${parsed.errorClass} escalated.\n\n${parsed.diagnosis}`,
                 this.durability ?? undefined, { replayPolicy: 'safe' });
@@ -1494,7 +1495,7 @@ export class AgentRuntime implements Runtime {
         const controlQueue = this.getControlQueue();
         const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
         if (controlQueue && loopsPhone) {
-          const loopsJid = `${loopsPhone}@s.whatsapp.net`;
+          const loopsJid = toPersonalJid(loopsPhone);
           controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
             reportId,
             errorClass: 'timeout',
@@ -1506,7 +1507,7 @@ export class AgentRuntime implements Runtime {
         // DM admin
         const adminPhone = [...config.adminPhones][0];
         if (adminPhone) {
-          const adminJid = `${adminPhone}@s.whatsapp.net`;
+          const adminJid = toPersonalJid(adminPhone);
           sendTracked(this.messenger, adminJid,
             `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
             this.durability ?? undefined, { replayPolicy: 'safe' })
