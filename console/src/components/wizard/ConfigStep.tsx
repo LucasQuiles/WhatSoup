@@ -272,11 +272,16 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
   const handleProviderConfigOption = useCallback(
     (key: string, value: unknown) => {
-      const current = agentOptions.providerConfig ?? {}
+      const current = { ...(agentOptions.providerConfig ?? {}) }
+      if (value === undefined || value === '') {
+        delete current[key]
+      } else {
+        current[key] = value
+      }
       onChange({
         agentOptions: {
           ...agentOptions,
-          providerConfig: { ...current, [key]: value },
+          providerConfig: current,
         },
       })
     },
@@ -505,7 +510,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               background: 'var(--s-warn-wash)',
               borderRadius: 'var(--radius-sm)',
             }}>
-              Changing the provider requires a service restart to take effect.
+              Non-default provider selected. Running instances require a restart after changing providers.
             </div>
           )}
 
