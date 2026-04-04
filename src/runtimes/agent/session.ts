@@ -516,14 +516,13 @@ export class SessionManager {
       this.codexRequestSeq = 0;
       this.sendCodexRequest(child, 'initialize', {
         clientInfo: { name: 'WhatSoup', title: null, version: '1.0.0' },
-        capabilities: null,
+        capabilities: { experimentalApi: true },
       });
       this.sendCodexRequest(child, 'thread/start', {
         cwd,
         approvalPolicy: 'never' as const,
         sandbox: 'danger-full-access' as const,
         persistExtendedHistory: true,
-        experimentalRawEvents: false,
         ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
       });
     }
@@ -574,6 +573,11 @@ export class SessionManager {
 
         const event = parse(line);
         if (event === null) continue;
+
+        // Temporary debug: log all parsed events for non-Claude providers
+        if (this.provider !== 'claude-cli') {
+          log.debug({ component: 'session-manager', provider: this.provider, eventType: event.type, rawLine: line.substring(0, 300) }, 'provider stdout parsed');
+        }
 
         if (event.type === 'init' && this.dbRowId !== null) {
           this.handleProviderEvent(event);

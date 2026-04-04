@@ -216,8 +216,10 @@ function handleResponse(id: unknown, result: unknown): AgentEvent {
   // the thread object. But we capture threadId from the thread/started
   // notification instead, so responses are generally ignored.
 
-  // thread/start response: result contains a Thread object
-  if (isRecord(result) && typeof result['id'] === 'string' && result['turns'] !== undefined) {
+  // thread/start response: result contains a Thread object with an 'id' field
+  // Accept any result object with a string 'id' — don't require 'turns' field
+  // since the schema may vary across Codex versions.
+  if (isRecord(result) && typeof result['id'] === 'string') {
     return { type: 'init', sessionId: result['id'] as string };
   }
 
