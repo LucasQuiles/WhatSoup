@@ -633,6 +633,11 @@ export class SessionManager {
 
       this.child = child;
 
+      // Spawn-per-turn providers receive their prompt as CLI args, not stdin.
+      // Close stdin immediately so providers that read stdin (like Codex exec's
+      // read_to_end()) don't block waiting for EOF.
+      child.stdin.end();
+
       child.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'ENOENT') {
           // Binary not installed — configuration error, not a transient crash
