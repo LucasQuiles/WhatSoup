@@ -24,20 +24,22 @@ export async function upsertFacts(
     // Dedup check
     let isDup = false;
     try {
+      const dedupStart = Date.now();
       const dupCheck = await pinecone.checkDuplicate(fact.chatJid, fact.senderJid, fact.text);
       if (dupCheck.isDuplicate) {
-        log.debug({ id, score: dupCheck.score }, 'upserter: skipping duplicate');
+        log.debug({ id, score: dupCheck.score, elapsed_ms: Date.now() - dedupStart }, 'upserter: skipping duplicate');
         deduplicated = deduplicated + 1;
         isDup = true;
       }
     } catch (err) {
-      log.warn({ err, id }, 'upserter: dedup check failed — proceeding with upsert');
+      log.warn({ err, id, operation: 'dedup_check' }, 'upserter: dedup check failed — proceeding with upsert');
     }
 
     if (isDup) continue;
 
     // Handle corrections — find and update the superseded record's text
     if (fact.supersedesText) {
+      const supersedeStart = Date.now();
       try {
         const hits = await pinecone.search(fact.supersedesText, { chat_jid: { $eq: fact.chatJid } }, 1);
         if (hits.length > 0 && hits[0].score >= 0.8) {
@@ -53,12 +55,13 @@ export async function upsertFacts(
           superseded = superseded + 1;
         }
       } catch (err) {
-        log.warn({ err, supersedesText: fact.supersedesText }, 'upserter: supersede lookup failed — continuing');
+        log.warn({ err, supersedesText: fact.supersedesText, operation: 'supersede_lookup', elapsed_ms: Date.now() - supersedeStart }, 'upserter: supersede lookup failed — continuing');
       }
     }
 
     // Upsert the new fact
     const now = new Date().toISOString();
+    const upsertStart = Date.now();
     try {
       await pinecone.upsert([{
         id,
@@ -75,7 +78,7 @@ export async function upsertFacts(
       }]);
       upserted = upserted + 1;
     } catch (err) {
-      log.warn({ err, id }, 'upserter: upsert failed for fact');
+      log.warn({ err, id, operation: 'upsert', elapsed_ms: Date.now() - upsertStart }, 'upserter: upsert failed for fact');
     }
   }
 

@@ -1,9 +1,14 @@
 import OpenAI from 'openai';
 import { createChildLogger } from '../../../logger.ts';
+import { config } from '../../../config.ts';
+import { emitAlert } from '../../../lib/emit-alert.ts';
 
 const log = createChildLogger('whisper');
 const WHISPER_TIMEOUT_MS = 60_000;
 const FALLBACK_TEXT = "[Voice note — couldn't transcribe]";
+const FAILURE_ALERT_THRESHOLD = 5;
+
+let consecutiveFailures = 0;
 
 // Lazy-init client (same env var as the chat provider)
 let client: OpenAI | null = null;
@@ -27,13 +32,24 @@ export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise
     );
     const durationMs = Date.now() - startMs;
     log.info({ durationMs, textLength: result.text.length }, 'Whisper transcription complete');
+    consecutiveFailures = 0;
     return result.text;
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      log.warn({ durationMs: Date.now() - startMs }, 'Whisper transcription timed out');
-      return FALLBACK_TEXT;
+    const elapsed_ms = Date.now() - startMs;
+    consecutiveFailures++;
+    const message = err instanceof Error ? err.message : String(err);
+
+    log.warn({ error: message, elapsed_ms, audioSize: buffer?.length, consecutiveFailures }, 'whisper_transcription_failed');
+
+    if (consecutiveFailures >= FAILURE_ALERT_THRESHOLD) {
+      emitAlert(
+        config.botName,
+        'whisper_degraded',
+        `Whisper has ${consecutiveFailures} consecutive transcription failures`,
+        `Last error: ${message}`,
+      );
     }
-    log.error({ err }, 'Whisper transcription failed');
+
     return FALLBACK_TEXT;
   } finally {
     clearTimeout(timeout);

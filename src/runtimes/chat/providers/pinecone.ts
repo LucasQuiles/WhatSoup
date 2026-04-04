@@ -3,8 +3,38 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
+import { emitAlert } from '../../../lib/emit-alert.ts';
 
 const logger = createChildLogger('pinecone-provider');
+
+/** Consecutive failure tracking per operation for degradation alerts */
+const consecutiveFailures: Record<string, number> = {};
+const FAILURE_ALERT_THRESHOLD = 3;
+
+function trackFailure(operation: string, err: unknown): void {
+  const key = operation;
+  consecutiveFailures[key] = (consecutiveFailures[key] ?? 0) + 1;
+  const count = consecutiveFailures[key];
+  const message = err instanceof Error ? err.message : String(err);
+
+  logger.warn(
+    { operation, error: message, consecutiveFailures: count },
+    'pinecone_api_error',
+  );
+
+  if (count >= FAILURE_ALERT_THRESHOLD) {
+    emitAlert(
+      config.botName,
+      'pinecone_degraded',
+      `Pinecone ${operation} has ${count} consecutive failures`,
+      `Last error: ${message}`,
+    );
+  }
+}
+
+function trackSuccess(operation: string): void {
+  consecutiveFailures[operation] = 0;
+}
 
 export interface MemoryRecord {
   id: string;
@@ -163,9 +193,11 @@ export class PineconeMemory {
         { topScores: results.slice(0, 3).map((r) => r.score), durationMs },
         'Pinecone search complete',
       );
+      trackSuccess('search');
       return results;
     } catch (err) {
       const durationMs = Date.now() - startMs;
+      trackFailure('search', err);
       logger.error(
         { err, query: query.slice(0, 100), topK, filter: filters, durationMs },
         'Pinecone search failed — returning empty results',
@@ -233,6 +265,7 @@ export class PineconeMemory {
           }
           mapped = reranked;
         } catch (rerankErr) {
+          trackFailure('rerank', rerankErr);
           logger.warn({ err: rerankErr }, 'Client-side rerank failed — using vector scores');
         }
       }
@@ -266,9 +299,11 @@ export class PineconeMemory {
         { topScores: capped.slice(0, 3).map((r) => r.score), total: capped.length, durationMs },
         'Pinecone entity search complete',
       );
+      trackSuccess('searchEntities');
       return capped;
     } catch (err) {
       const durationMs = Date.now() - startMs;
+      trackFailure('searchEntities', err);
       logger.error(
         { err, query: query.slice(0, 100), durationMs },
         'Pinecone entity search failed — returning empty results',
@@ -290,7 +325,9 @@ export class PineconeMemory {
         { count: records.length, ids: records.map((r) => r.id), durationMs },
         'Pinecone upsert complete',
       );
+      trackSuccess('upsert');
     } catch (err) {
+      trackFailure('upsert', err);
       logger.error({ err, count: records.length }, 'Pinecone upsert failed');
       throw new AppError('Pinecone upsert failed', 'PINECONE_UNAVAILABLE', err);
     }
