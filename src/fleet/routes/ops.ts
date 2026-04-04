@@ -11,6 +11,9 @@ import { mcpCall } from '../mcp-client.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import { configRoot, dataRoot, stateRoot } from '../paths.ts';
+import { writePermissionsSettings } from '../../core/workspace.ts';
+import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
+import type { PermissionsSettings } from '../../core/settings-template.ts';
 
 export interface OpsDeps {
   discovery: FleetDiscovery;
@@ -245,10 +248,55 @@ export async function handleConfigUpdate(
     }
   }
 
+  // Write settings.json when settingsJson is in the patch (agent instances only)
+  if (patch.settingsJson && merged.type === 'agent') {
+    const ao = merged.agentOptions as Record<string, unknown> | undefined;
+    if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+      try {
+        const claudeDir = path.join(ao.cwd, '.claude');
+        const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
+        if (settings) writePermissionsSettings(claudeDir, settings);
+      } catch (err) {
+        jsonResponse(res, 500, { error: `failed to write settings.json: ${(err as Error).message}` });
+        return;
+      }
+    }
+  }
+
+  // Write enabledPlugins to .claude/settings.json when agentOptions.enabledPlugins changes
+  if (patch.agentOptions && merged.type === 'agent') {
+    const patchAo = patch.agentOptions as Record<string, unknown>;
+    if (patchAo.enabledPlugins !== undefined && (patchAo.enabledPlugins === null || typeof patchAo.enabledPlugins === 'object')) {
+      const ao = merged.agentOptions as Record<string, unknown> | undefined;
+      if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
+        try {
+          const claudeDir = path.join(ao.cwd, '.claude');
+          // Build a full PermissionsSettings so writePermissionsSettings handles the merge
+          const settingsPath = path.join(claudeDir, 'settings.json');
+          let existingPerms = defaultSettingsJson('agent')!.permissions;
+          try {
+            const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+            if (existing.permissions) existingPerms = existing.permissions;
+          } catch { /* use defaults */ }
+          writePermissionsSettings(claudeDir, {
+            permissions: existingPerms,
+            // null or {} = reset to global inheritance
+            enabledPlugins: (patchAo.enabledPlugins ?? {}) as Record<string, boolean>,
+          });
+        } catch (err) {
+          jsonResponse(res, 500, { error: `failed to write enabledPlugins: ${(err as Error).message}` });
+          return;
+        }
+      }
+    }
+  }
+
   // Atomic write: write to .tmp then rename
+  // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
+  const { settingsJson: _stripped, ...mergedClean } = merged;
   const tmpPath = instance.configPath + '.tmp';
   try {
-    fs.writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + '\n', 'utf-8');
+    fs.writeFileSync(tmpPath, JSON.stringify(mergedClean, null, 2) + '\n', 'utf-8');
     fs.renameSync(tmpPath, instance.configPath);
   } catch (err) {
     // Clean up tmp on failure
@@ -257,7 +305,7 @@ export async function handleConfigUpdate(
     return;
   }
 
-  jsonResponse(res, 200, merged);
+  jsonResponse(res, 200, mergedClean);
 }
 
 /** DELETE /api/lines/:name — tear down and remove an instance completely.
@@ -515,6 +563,23 @@ export async function handleCreateLine(
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
       fs.writeFileSync(claudeMdPath, body.claudeMd as string, 'utf-8');
       createdExtras.push(claudeMdPath);
+    }
+
+    // --- Write settings.json for agent instances ---
+    if (type === 'agent' && body.agentOptions &&
+        typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
+      const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
+      const claudeDir = path.join(cwd, '.claude');
+      const settings = mergeSettingsJson('agent', body.settingsJson as PermissionsSettings | undefined);
+      if (settings) {
+        // Include enabledPlugins from agentOptions if provided
+        const ao = body.agentOptions as Record<string, unknown>;
+        if (ao.enabledPlugins && typeof ao.enabledPlugins === 'object') {
+          settings.enabledPlugins = ao.enabledPlugins as Record<string, boolean>;
+        }
+        writePermissionsSettings(claudeDir, settings);
+        createdExtras.push(path.join(claudeDir, 'settings.json'));
+      }
     }
 
     // --- Enable systemd unit ---
