@@ -115,7 +115,7 @@ const EditConfigModal: FC<EditConfigModalProps> = ({ lineName, open, onClose, on
               <Loader2 size={24} className="animate-spin text-t4" />
             </div>
           ) : activeTab === 'config' ? (
-            <ConfigStep data={formData} onChange={patchForm} errors={{}} />
+            <ConfigStep data={formData} onChange={patchForm} errors={{}} isEditing />
           ) : (
             <ModelAuthStep data={formData} onChange={patchForm} errors={{}} />
           )}

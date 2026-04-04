@@ -1,6 +1,7 @@
 import { type FC } from 'react'
 import { Shield, ShieldAlert, ShieldOff, Lock, Cpu, Layers } from 'lucide-react'
 import type { LineInstance } from '../types'
+import { getProvider } from '../lib/providers'
 
 interface LineTagsProps {
   line: LineInstance
@@ -39,7 +40,8 @@ function getProviderTag(line: LineInstance): TagDef | null {
   if (line.mode !== 'agent') return null
   const provider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
   if (!provider || provider === 'claude-cli') return null
-  return { label: provider, icon: Layers, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
+  const displayName = getProvider(provider)?.displayName ?? provider
+  return { label: displayName, icon: Layers, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
 }
 
 const Tag: FC<{ tag: TagDef }> = ({ tag }) => {

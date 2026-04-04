@@ -50,12 +50,12 @@ function simulateConfigFieldChange(
   };
 }
 
-/** Simulates getProviderTag from LineTags.tsx */
+/** Simulates getProviderTag from LineTags.tsx (returns display name, not raw ID) */
 function simulateProviderBadge(mode: string, config?: Record<string, unknown>): string | null {
   if (mode !== 'agent') return null;
   const provider = (config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined;
   if (!provider || provider === 'claude-cli') return null;
-  return provider;
+  return getProvider(provider)?.displayName ?? provider;
 }
 
 /** Simulates ReviewStep provider display */
@@ -80,12 +80,6 @@ describe('claude-cli (default)', () => {
   it('returns no config fields (handled by existing UI)', () => {
     const fields = getProviderConfigFields(id);
     expect(fields).toHaveLength(0);
-  });
-
-  it('wizard default formData uses claude-cli', () => {
-    // Matches AddLineWizard.tsx line 144
-    const defaultAgentOptions = { provider: 'claude-cli', providerConfig: {} };
-    expect(defaultAgentOptions.provider).toBe('claude-cli');
   });
 
   it('does NOT show provider badge (default provider hidden)', () => {
@@ -138,7 +132,7 @@ describe('codex-cli', () => {
 
   it('shows provider badge', () => {
     const badge = simulateProviderBadge('agent', { agentOptions: { provider: id } });
-    expect(badge).toBe('codex-cli');
+    expect(badge).toBe('Codex CLI');
   });
 
   it('does NOT show badge for non-agent mode', () => {
@@ -201,7 +195,7 @@ describe('gemini-cli', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('gemini-cli');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('Gemini CLI');
   });
 
   it('full E2E: select → configure → verify payload', () => {
@@ -234,7 +228,7 @@ describe('opencode-cli', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('opencode-cli');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('OpenCode');
   });
 
   it('full E2E: select → configure → verify payload', () => {
@@ -285,7 +279,7 @@ describe('openai-api', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('openai-api');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('OpenAI API');
   });
 
   it('full E2E: select → configure all fields → verify payload', () => {
@@ -376,7 +370,7 @@ describe('anthropic-api', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('anthropic-api');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('Anthropic API');
   });
 
   it('full E2E: select → configure all 4 fields → verify payload', () => {
@@ -491,7 +485,7 @@ describe('cross-provider integration', () => {
 
     // Non-default providers — all show badges
     for (const p of PROVIDERS.filter(p => p.id !== 'claude-cli')) {
-      expect(simulateProviderBadge('agent', { agentOptions: { provider: p.id } })).toBe(p.id);
+      expect(simulateProviderBadge('agent', { agentOptions: { provider: p.id } })).toBe(p.displayName);
     }
   });
 
@@ -549,12 +543,10 @@ describe('edge cases: input sanitization', () => {
     expect((opts.providerConfig as Record<string, unknown>).maxTokens).toBeUndefined();
   });
 
-  it('whitespace-only text input is treated as empty (trimmed)', () => {
-    // Simulates the fixed TextInput handler: "   ".trim() = "" → undefined → deleted
-    let opts: Record<string, unknown> = { provider: 'openai-api', providerConfig: {} };
-    const raw = '   ';
-    const trimmed = raw.trim() || undefined;
-    opts = simulateConfigFieldChange(opts, 'baseUrl', trimmed);
+  it('empty string text input is treated as unset (deleted from config)', () => {
+    // TextInput handler passes empty string → handleProviderConfigOption deletes key
+    let opts: Record<string, unknown> = { provider: 'openai-api', providerConfig: { baseUrl: 'https://old.api.com' } };
+    opts = simulateConfigFieldChange(opts, 'baseUrl', '');
     expect(opts.providerConfig).toEqual({});
     expect((opts.providerConfig as Record<string, unknown>).baseUrl).toBeUndefined();
   });

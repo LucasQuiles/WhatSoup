@@ -12,6 +12,7 @@ interface ConfigStepProps {
   onChange: (patch: Record<string, unknown>) => void
   errors: Record<string, string>
   onSkip?: () => void
+  isEditing?: boolean
 }
 
 interface AgentOptions {
@@ -171,7 +172,7 @@ You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
 `
 }
 
-const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => {
+const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip, isEditing }) => {
   const type = (data.type as string) ?? 'chat'
   const accessMode = (data.accessMode as string) ?? 'self_only'
   const allowedContacts = (data.allowedContacts as string[]) ?? []
@@ -501,7 +502,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 ) : (
                   <TextInput
                     value={(fieldValue as string) ?? ''}
-                    onChange={(e) => handleProviderConfigOption(field.key, e.target.value.trim() || undefined)}
+                    onChange={(e) => handleProviderConfigOption(field.key, e.target.value || undefined)}
                     placeholder={field.placeholder}
                     confirmed={hasValue}
                   />
@@ -510,8 +511,8 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             )
           })}
 
-          {/* Restart notice when provider != default */}
-          {(agentOptions.provider ?? 'claude-cli') !== 'claude-cli' && (
+          {/* Restart notice — only relevant when editing a running instance */}
+          {isEditing && (agentOptions.provider ?? 'claude-cli') !== 'claude-cli' && (
             <div style={{
               fontSize: 'var(--font-size-xs)',
               color: 'var(--color-s-warn)',
