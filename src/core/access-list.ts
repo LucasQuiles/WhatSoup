@@ -47,20 +47,6 @@ export function insertAllowed(db: Database, subjectType: SubjectType, subjectId:
   ).run(subjectType, subjectId);
 }
 
-/**
- * Insert-or-update a subject as 'allowed'.
- * If the row already exists (any status), updates to 'allowed' with a fresh decided_at.
- * If it does not exist, inserts a new row.
- */
-export function upsertAllowed(db: Database, subjectType: SubjectType, subjectId: string): void {
-  const existing = lookupAccess(db, subjectType, subjectId);
-  if (existing) {
-    updateAccess(db, subjectType, subjectId, 'allowed');
-  } else {
-    insertAllowed(db, subjectType, subjectId);
-  }
-}
-
 export function updateAccess(db: Database, subjectType: SubjectType, subjectId: string, status: 'allowed' | 'blocked'): void {
   db.raw.prepare(
     `UPDATE access_list SET status = ?, decided_at = datetime('now') WHERE subject_type = ? AND subject_id = ?`

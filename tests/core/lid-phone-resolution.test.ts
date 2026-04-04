@@ -69,7 +69,7 @@ import {
   insertPending,
   insertAllowed,
   updateAccess,
-  upsertAllowed,
+  upsertAccess,
 } from '../../src/core/access-list.ts';
 import { resolveLid, hydrateLidMappings, upsertLidMapping, getAllLidMappings } from '../../src/core/lid-resolver.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
@@ -838,7 +838,7 @@ describe('access list with LID-resolved phones', () => {
     upsertLidMapping(db, blockLid, `${blockPhone}@s.whatsapp.net`);
 
     // Block the phone
-    upsertAllowed(db, 'phone', blockPhone);
+    upsertAccess(db, 'phone', blockPhone, 'allowed');
     updateAccess(db, 'phone', blockPhone, 'blocked');
 
     // Both JID and LID should resolve to the same blocked phone

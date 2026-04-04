@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Database } from '../../src/core/database.ts';
-import { upsertAllowed, lookupAccess, insertPending } from '../../src/core/access-list.ts';
+import { upsertAccess, lookupAccess, insertPending } from '../../src/core/access-list.ts';
 
 function makeDb(): Database {
   const db = new Database(':memory:');
@@ -8,7 +8,7 @@ function makeDb(): Database {
   return db;
 }
 
-describe('upsertAllowed', () => {
+describe('upsertAccess (allowed)', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -20,7 +20,8 @@ describe('upsertAllowed', () => {
   });
 
   it('inserts a new allowed row when subject does not exist', () => {
-    upsertAllowed(db, 'phone', '15551234567');
+    const result = upsertAccess(db, 'phone', '15551234567', 'allowed');
+    expect(result).toEqual({ action: 'inserted' });
     const entry = lookupAccess(db, 'phone', '15551234567');
     expect(entry).not.toBeNull();
     expect(entry!.status).toBe('allowed');
@@ -32,22 +33,25 @@ describe('upsertAllowed', () => {
     const before = lookupAccess(db, 'phone', '15551234567');
     expect(before!.status).toBe('pending');
 
-    upsertAllowed(db, 'phone', '15551234567');
+    const result = upsertAccess(db, 'phone', '15551234567', 'allowed');
+    expect(result).toEqual({ action: 'updated' });
     const after = lookupAccess(db, 'phone', '15551234567');
     expect(after!.status).toBe('allowed');
     expect(after!.decidedAt).not.toBeNull();
   });
 
   it('works for group subject type', () => {
-    upsertAllowed(db, 'group', '120363123456789_at_g.us');
+    const result = upsertAccess(db, 'group', '120363123456789_at_g.us', 'allowed');
+    expect(result).toEqual({ action: 'inserted' });
     const entry = lookupAccess(db, 'group', '120363123456789_at_g.us');
     expect(entry).not.toBeNull();
     expect(entry!.status).toBe('allowed');
   });
 
   it('is idempotent for already-allowed rows', () => {
-    upsertAllowed(db, 'phone', '15551234567');
-    upsertAllowed(db, 'phone', '15551234567');
+    upsertAccess(db, 'phone', '15551234567', 'allowed');
+    const result = upsertAccess(db, 'phone', '15551234567', 'allowed');
+    expect(result).toEqual({ action: 'updated' });
     const entry = lookupAccess(db, 'phone', '15551234567');
     expect(entry!.status).toBe('allowed');
   });
