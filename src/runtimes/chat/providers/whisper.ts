@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { createChildLogger } from '../../../logger.ts';
 import { config } from '../../../config.ts';
-import { emitAlert } from '../../../lib/emit-alert.ts';
+import { emitAlert, clearAlertSource } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 
 const log = createChildLogger('whisper');
@@ -10,6 +10,7 @@ const FALLBACK_TEXT = '[🎤 Voice note received — transcription unavailable]'
 const RETRY_DELAY_MS = 500;
 
 const breaker = new CircuitBreaker('whisper', 5, 60_000, log);
+let whisperAlerted = false;
 
 // Lazy-init client (same env var as the chat provider)
 let client: OpenAI | null = null;
@@ -48,6 +49,10 @@ export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise
     const durationMs = Date.now() - startMs;
     log.info({ durationMs, textLength: result.text.length }, 'Whisper transcription complete');
     breaker.recordSuccess();
+    if (whisperAlerted) {
+      whisperAlerted = false;
+      clearAlertSource(config.botName, 'whisper_degraded');
+    }
     return result.text;
   } catch (err) {
     // One retry after short delay to catch transient blips
@@ -57,6 +62,10 @@ export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise
       const durationMs = Date.now() - startMs;
       log.info({ durationMs, textLength: result.text.length, retried: true }, 'Whisper transcription complete (after retry)');
       breaker.recordSuccess();
+      if (whisperAlerted) {
+        whisperAlerted = false;
+        clearAlertSource(config.botName, 'whisper_degraded');
+      }
       return result.text;
     } catch (retryErr) {
       const elapsed_ms = Date.now() - startMs;
@@ -66,6 +75,7 @@ export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise
       log.warn({ error: message, elapsed_ms, audioSize: buffer?.length }, 'whisper_transcription_failed');
 
       if (breaker.isOpen()) {
+        whisperAlerted = true;
         emitAlert(
           config.botName,
           'whisper_degraded',

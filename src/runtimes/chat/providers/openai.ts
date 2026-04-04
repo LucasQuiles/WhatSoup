@@ -68,6 +68,12 @@ export function createOpenAIProvider(): LLMProvider {
         if (errorType === 'timeout') {
           throw new AppError('OpenAI request timed out', 'LLM_TIMEOUT', err);
         }
+        if (errorType === 'auth') {
+          throw new AppError('OpenAI auth failed', 'LLM_AUTH_ERROR', err);
+        }
+        if (errorType === 'rate_limit') {
+          throw new AppError('OpenAI rate limited', 'LLM_RATE_LIMITED', err);
+        }
         throw new AppError('OpenAI request failed', 'LLM_UNAVAILABLE', err);
       } finally {
         clearTimeout(timeout);

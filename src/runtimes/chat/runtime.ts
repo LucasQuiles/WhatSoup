@@ -22,6 +22,7 @@ import { EnrichmentPoller } from './enrichment/poller.ts';
 import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay } from '../../core/retry.ts';
+import { WhatSoupError } from '../../errors.ts';
 import { emitAlert } from '../../lib/emit-alert.ts';
 
 const log = createChildLogger('conversation');
@@ -296,6 +297,19 @@ export class ChatRuntime implements Runtime {
       );
     } catch (primaryErr) {
       log.warn({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
+
+      // Auth and rate-limit errors won't be fixed by retrying — fast-fail
+      if (primaryErr instanceof WhatSoupError && (primaryErr.code === 'LLM_AUTH_ERROR' || primaryErr.code === 'LLM_RATE_LIMITED')) {
+        log.error({ traceId, err: primaryErr, code: primaryErr.code }, 'non-retryable LLM error — skipping retry and fallback');
+        llmDurationMs = Date.now() - llmStart;
+        responseText = null;
+        emitAlert(
+          this.botName,
+          'llm_total_failure',
+          `LLM ${primaryErr.code} for ${this.botName} (${this.primaryProvider.name})`,
+          `model=${config.models.conversation} traceId=${traceId} error=${primaryErr.message}`,
+        );
+      } else {
       log.error({ traceId, err: primaryErr }, 'primary provider failed — retrying after delay');
 
       await new Promise((resolve) => setTimeout(resolve, jitteredDelay(config.apiRetryDelayMs, 0)));
@@ -341,6 +355,7 @@ export class ChatRuntime implements Runtime {
           );
         }
       }
+      } // end else (retryable errors)
     }
 
     // 8. On total failure: send fallback message (not stored, not rate-limited)

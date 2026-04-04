@@ -64,6 +64,12 @@ export function createAnthropicProvider(): LLMProvider {
         if (errorType === 'timeout') {
           throw new AppError('Anthropic request timed out', 'LLM_TIMEOUT', err);
         }
+        if (errorType === 'auth') {
+          throw new AppError('Anthropic auth failed', 'LLM_AUTH_ERROR', err);
+        }
+        if (errorType === 'rate_limit') {
+          throw new AppError('Anthropic rate limited', 'LLM_RATE_LIMITED', err);
+        }
         throw new AppError('Anthropic request failed', 'LLM_UNAVAILABLE', err);
       } finally {
         clearTimeout(timeout);

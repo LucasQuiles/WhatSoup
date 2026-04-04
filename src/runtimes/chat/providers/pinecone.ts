@@ -3,7 +3,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
-import { emitAlert } from '../../../lib/emit-alert.ts';
+import { emitAlert, clearAlertSource } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 
 const logger = createChildLogger('pinecone-provider');
@@ -32,6 +32,7 @@ function trackFailure(operation: string, err: unknown): void {
   );
 
   if (breaker.isOpen()) {
+    alertedOperations.add(operation);
     emitAlert(
       config.botName,
       'pinecone_degraded',
@@ -41,8 +42,15 @@ function trackFailure(operation: string, err: unknown): void {
   }
 }
 
+/** Track operations that have had alerts emitted, so we can clear on recovery. */
+const alertedOperations = new Set<string>();
+
 function trackSuccess(operation: string): void {
   getBreaker(operation).recordSuccess();
+  if (alertedOperations.has(operation)) {
+    alertedOperations.delete(operation);
+    clearAlertSource(config.botName, 'pinecone_degraded');
+  }
 }
 
 function isBreakerOpen(operation: string): boolean {
@@ -288,6 +296,7 @@ export class PineconeMemory {
       try {
         response = await doSearch();
       } catch (firstErr) {
+        logger.debug({ err: (firstErr as Error).message, operation: 'searchEntities' }, 'pinecone_first_attempt_failed');
         // One retry after short delay
         await sleep(RETRY_DELAY_MS);
         response = await doSearch();

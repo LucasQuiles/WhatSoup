@@ -13,6 +13,7 @@ export class CircuitBreaker {
   private state: CircuitState = 'closed';
   private failures = 0;
   private lastFailureAt = 0;
+  private probing = false;
 
   readonly name: string;
   readonly threshold: number;
@@ -31,7 +32,10 @@ export class CircuitBreaker {
     if (this.state === 'closed') return false;
 
     if (this.state === 'open' && Date.now() - this.lastFailureAt >= this.resetMs) {
-      this.transition('half-open');
+      if (!this.probing) {
+        this.probing = true;
+        this.transition('half-open');
+      }
       return false; // allow one probe
     }
 
@@ -40,6 +44,7 @@ export class CircuitBreaker {
 
   /** Record a successful call — resets the breaker to closed. */
   recordSuccess(): void {
+    this.probing = false;
     if (this.state !== 'closed') {
       this.transition('closed');
     }
@@ -48,6 +53,7 @@ export class CircuitBreaker {
 
   /** Record a failed call — increments the counter and trips to open at threshold. */
   recordFailure(): void {
+    this.probing = false;
     this.failures += 1;
     this.lastFailureAt = Date.now();
 
