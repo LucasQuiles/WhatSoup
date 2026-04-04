@@ -624,7 +624,7 @@ export class SessionManager {
       for (const line of lines) {
         // Codex app-server: intercept server-initiated requests (approval callbacks)
         // before they reach the parser. These have both 'id' and 'method'.
-        if (this.provider === 'codex-cli' && line.startsWith('{"jsonrpc"')) {
+        if (this.provider === 'codex-cli' && line[0] === '{' && line.includes('"jsonrpc"')) {
           try {
             const msg = JSON.parse(line) as Record<string, unknown>;
             if (msg['jsonrpc'] === '2.0' && msg['id'] !== undefined && typeof msg['method'] === 'string') {

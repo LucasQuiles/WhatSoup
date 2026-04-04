@@ -976,6 +976,37 @@ describe('Codex approval pre-filter', () => {
     );
   });
 
+  it('intercepts JSON-RPC approval even when jsonrpc is not the first key', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Clear writes from spawnSession's initialize + thread/start handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    // JSON-RPC message where jsonrpc is NOT the first key
+    const approvalLine = JSON.stringify({
+      id: 1,
+      jsonrpc: '2.0',
+      method: 'item/commandExecution/requestApproval',
+      params: {},
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(approvalLine));
+
+    // handleCodexServerRequest auto-approves by writing to stdin
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"decision":"approved"'),
+    );
+  });
+
   it('does NOT intercept tool output containing "method" and "id" substrings', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
