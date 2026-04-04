@@ -5,6 +5,7 @@ import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { emitAlert, clearAlertSource } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
+import { sleep } from '../../../core/retry.ts';
 
 const logger = createChildLogger('pinecone-provider');
 
@@ -57,9 +58,6 @@ function isBreakerOpen(operation: string): boolean {
   return getBreaker(operation).isOpen();
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export interface MemoryRecord {
   id: string;

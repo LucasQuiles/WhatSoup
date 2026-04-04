@@ -51,12 +51,6 @@ const MAX_TEXT_PER_RESULT = 600;
 /** Max total results to return (after rerank/dedup). */
 const MAX_RESULTS = 8;
 
-/** Truncate result text for output. */
-function truncateResult(text: string): string {
-  if (text.length <= MAX_TEXT_PER_RESULT) return text;
-  return text.slice(0, MAX_TEXT_PER_RESULT) + '…';
-}
-
 interface ParsedHit {
   id: string;
   score: number;
@@ -99,7 +93,7 @@ function formatEntityResults(hits: ParsedHit[]): string {
   for (const [entityType, items] of groups) {
     const label = entityType.charAt(0).toUpperCase() + entityType.slice(1) +
       (entityType.endsWith('s') ? '' : 's');
-    const lines = items.map((r) => `• ${truncateResult(r.text)}`).join('\n');
+    const lines = items.map((r) => `• ${truncateForRerank(r.text, MAX_TEXT_PER_RESULT)}`).join('\n');
     parts.push(`${label}:\n${lines}`);
   }
 
@@ -116,7 +110,7 @@ function formatTextResults(hits: ParsedHit[]): string {
     const filepath = (hit.fields['filepath'] as string) ?? '';
     const summary = (hit.fields['summary'] as string) ?? '';
     const source = filepath || hit.id;
-    const display = truncateResult(summary || hit.text);
+    const display = truncateForRerank(summary || hit.text, MAX_TEXT_PER_RESULT);
     return `[${source}]\n${display}`;
   }).join('\n\n');
 }

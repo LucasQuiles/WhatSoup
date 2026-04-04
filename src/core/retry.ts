@@ -1,3 +1,8 @@
+/** Simple promise-based sleep. */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Full jitter: delay = base * 2^attempt * random(0.75, 1.25), capped at maxMs */
 export function jitteredDelay(baseMs: number, attempt: number, maxMs = 30_000): number {
   const exp = baseMs * Math.pow(2, attempt);

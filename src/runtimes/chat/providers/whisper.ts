@@ -3,6 +3,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { config } from '../../../config.ts';
 import { emitAlert, clearAlertSource } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
+import { sleep } from '../../../core/retry.ts';
 
 const log = createChildLogger('whisper');
 const WHISPER_TIMEOUT_MS = 60_000;
@@ -19,9 +20,6 @@ function getClient(): OpenAI {
   return client;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
   if (breaker.isOpen()) {
