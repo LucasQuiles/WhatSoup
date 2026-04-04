@@ -34,6 +34,7 @@ export interface LineInstance {
       mode: Mode;
       accessMode: string;
       socketPath: string | null;
+      provider?: string;
     };
   } | null;
   heartbeat: ('up' | 'down' | 'slow')[];

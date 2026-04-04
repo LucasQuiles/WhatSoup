@@ -4,6 +4,7 @@ import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
 import { formatTimeWithSeconds } from '../lib/format-time'
 import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
+import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import FilterPill from '../components/FilterPill'
 import LinePicker from '../components/LinePicker'
@@ -145,6 +146,7 @@ export default function Ops() {
                       {displayInstanceName(line.name)}
                     </span>
                     <ModeBadge mode={line.mode} />
+                    <LineTags line={line} />
                   </div>
                   <span className="c-label">{line.phone}</span>
                 </div>

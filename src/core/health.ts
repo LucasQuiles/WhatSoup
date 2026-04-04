@@ -346,6 +346,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           name: deps.instanceName,
           mode: deps.instanceType,
           accessMode: deps.accessMode,
+          provider: config.agentProvider,
         },
         whatsapp: {
           connected: isConnected,

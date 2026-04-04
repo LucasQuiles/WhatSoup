@@ -6,11 +6,13 @@ import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '../hooks/use-fleet'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
+import { getProvider, DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { formatRelative, formatTime } from '../lib/format-time'
 import { levelColor, levelBg, levelLineBg } from '../lib/log-theme'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
+import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
@@ -177,6 +179,7 @@ export default function LineDetail() {
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
+            <LineTags line={line} />
           </div>
           <div className="font-mono text-t3" style={{ fontSize: 'var(--font-size-data)' }}>
             {line.phone}
@@ -904,11 +907,16 @@ function SummaryTab({ line }: { line: LineInstance }) {
   const [showConfigEditor, setShowConfigEditor] = useState(false)
   const [showModeSwitch, setShowModeSwitch] = useState(false)
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
+  const provider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
+  const providerDisplay = line.mode === 'agent' && provider
+    ? (getProvider(provider)?.displayName ?? provider)
+    : line.mode
+
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
     { label: 'UPTIME', value: line.uptime ?? '—', color: 'text-t1' },
     { label: 'MESSAGES', value: (line.messagesToday ?? 0).toLocaleString(), color: 'text-t1' },
-    { label: 'MODE', value: line.mode, color: line.mode === 'passive' ? 'text-m-pas' : line.mode === 'chat' ? 'text-m-cht' : 'text-m-agt' },
+    { label: line.mode === 'agent' ? 'PROVIDER' : 'MODE', value: providerDisplay, color: line.mode === 'passive' ? 'text-m-pas' : line.mode === 'chat' ? 'text-m-cht' : 'text-m-agt' },
     { label: 'ACCESS', value: line.accessMode ?? '—', color: 'text-t2' },
     { label: 'ACTIVE', value: line.lastActive ? formatRelative(line.lastActive) : '—', color: 'text-t3' },
   ]
@@ -1033,6 +1041,16 @@ function SummaryTab({ line }: { line: LineInstance }) {
           </div>
           {config ? (
             <div style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
+              {line.mode === 'agent' && (
+                <div className="flex items-center justify-between" style={{ padding: '6px 0', ...(config.length > 0 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
+                  <span className="c-label">provider</span>
+                  <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
+                    {getProvider(
+                      ((rawConfig.agentOptions as Record<string, unknown> | undefined)?.provider as string) ?? DEFAULT_PROVIDER_ID
+                    )?.displayName ?? DEFAULT_PROVIDER_ID}
+                  </span>
+                </div>
+              )}
               {config.map((entry, i) => (
                 <div key={entry.key} className="flex items-center justify-between" style={{ padding: '6px 0', ...(i < config.length - 1 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
                   <span className="c-label">{entry.key}</span>

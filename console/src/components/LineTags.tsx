@@ -1,5 +1,5 @@
 import { type FC } from 'react'
-import { Shield, ShieldAlert, ShieldOff, Lock, Cpu, Layers } from 'lucide-react'
+import { Shield, ShieldAlert, ShieldOff, Lock, Cpu, Layers, AlertTriangle } from 'lucide-react'
 import type { LineInstance } from '../types'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../lib/providers'
 
@@ -44,6 +44,16 @@ function getProviderTag(line: LineInstance): TagDef | null {
   return { label: displayName, icon: Layers, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
 }
 
+function getProviderMismatchTag(line: LineInstance): TagDef | null {
+  if (line.mode !== 'agent') return null
+  const configProvider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
+  const runningProvider = line.health?.instance?.provider
+  // Skip if either is missing (health fetch failed, or legacy instance without provider)
+  if (!configProvider || !runningProvider) return null
+  if (configProvider === runningProvider) return null
+  return { label: 'restart needed', icon: AlertTriangle, color: 'var(--color-s-warn)', bg: 'var(--s-warn-wash)' }
+}
+
 const Tag: FC<{ tag: TagDef }> = ({ tag }) => {
   const Icon = tag.icon
   return (
@@ -84,6 +94,9 @@ const LineTags: FC<LineTagsProps> = ({ line }) => {
 
   const providerTag = getProviderTag(line)
   if (providerTag) tags.push(providerTag)
+
+  const mismatchTag = getProviderMismatchTag(line)
+  if (mismatchTag) tags.push(mismatchTag)
 
   if (tags.length === 0) return null
 
