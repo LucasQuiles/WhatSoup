@@ -1,4 +1,5 @@
 import { createChildLogger } from '../logger.ts';
+import { emitAlert } from '../lib/emit-alert.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -122,15 +123,26 @@ export class HealthPoller {
 
   private updateFailure(name: string, error: string): void {
     const existing = this.statuses.get(name);
+    const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
+    const newStatus = failures >= 3 ? 'unreachable' : 'degraded';
+
     log.warn({ name, failures, error }, 'instance health poll failed');
     this.statuses.set(name, {
       name,
       health: existing?.health ?? null,
       lastPollAt: new Date().toISOString(),
       consecutiveFailures: failures,
-      status: failures >= 3 ? 'unreachable' : 'degraded',
+      status: newStatus,
       error,
     });
+
+    // Emit alert on transition into unreachable (exactly when failures crosses 2→3)
+    if (newStatus === 'unreachable' && prevStatus !== 'unreachable') {
+      emitAlert(name, 'instance_unreachable',
+        `whatsoup@${name} unreachable (${failures} consecutive poll failures)`,
+        `Last error: ${error}`,
+      );
+    }
   }
 }
