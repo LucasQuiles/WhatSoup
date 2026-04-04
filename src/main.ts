@@ -140,9 +140,11 @@ if (config.accessMode !== 'self_only') {
 const durability = new DurabilityEngine(db);
 durability.preConnectRecovery();
 
+// Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
+const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
+
 // 2a. Warm-start import: if DB is empty, import from legacy instance DB
 {
-  const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
   const instanceName = instanceConfig?.name as string | undefined;
   if (instanceName) {
     const msgCount = (db.raw.prepare('SELECT COUNT(*) AS cnt FROM messages').get() as { cnt: number }).cnt;
@@ -178,7 +180,6 @@ durability.preConnectRecovery();
 }
 
 // 3. Instance type selection
-const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) : null;
 const instanceType: string = instanceConfig?.type ?? 'chat';
 
 // 4. Connection
