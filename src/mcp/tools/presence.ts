@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import type { PresenceCache } from '../../transport/presence-cache.ts';
 
 // ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@ const SubscribePresenceSchema = z.object({
   jid: z.string(),
 });
 
-function makeSubscribePresence(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeSubscribePresence(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'subscribe_presence',
     description:
@@ -77,7 +77,7 @@ function makeGetPresence(presenceCache: PresenceCache): ToolDeclaration {
 // ---------------------------------------------------------------------------
 
 export function registerPresenceTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   presenceCache: PresenceCache,
   register: (tool: ToolDeclaration) => void,
 ): void {

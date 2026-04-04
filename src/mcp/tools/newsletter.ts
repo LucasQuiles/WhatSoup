@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import { validateBase64Image } from '../../core/base64.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
@@ -29,7 +29,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ name, description }, sock) => {
-      return (sock as any).newsletterCreate(name, description);
+      return sock.newsletterCreate(name, description);
     },
   },
   {
@@ -41,7 +41,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid, updates }, sock) => {
-      return (sock as any).newsletterUpdate(jid, updates);
+      return sock.newsletterUpdate(jid, updates);
     },
   },
   {
@@ -54,7 +54,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ type, key }, sock) => {
-      return (sock as any).newsletterMetadata(type, key);
+      return sock.newsletterMetadata(type, key);
     },
   },
   {
@@ -63,7 +63,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'read_only',
     call: async ({ jid }, sock) => {
-      return (sock as any).newsletterSubscribers(jid);
+      return sock.newsletterSubscribers(jid);
     },
   },
   {
@@ -72,7 +72,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).newsletterFollow(jid);
+      await sock.newsletterFollow(jid);
       return { success: true, jid };
     },
   },
@@ -82,7 +82,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).newsletterUnfollow(jid);
+      await sock.newsletterUnfollow(jid);
       return { success: true, jid };
     },
   },
@@ -92,7 +92,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).newsletterMute(jid);
+      await sock.newsletterMute(jid);
       return { success: true, jid };
     },
   },
@@ -102,7 +102,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).newsletterUnmute(jid);
+      await sock.newsletterUnmute(jid);
       return { success: true, jid };
     },
   },
@@ -115,7 +115,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid, name }, sock) => {
-      await (sock as any).newsletterUpdateName(jid, name);
+      await sock.newsletterUpdateName(jid, name);
       return { success: true, jid, name };
     },
   },
@@ -128,7 +128,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid, description }, sock) => {
-      await (sock as any).newsletterUpdateDescription(jid, description);
+      await sock.newsletterUpdateDescription(jid, description);
       return { success: true, jid, description };
     },
   },
@@ -144,7 +144,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     call: async ({ jid, content }, sock) => {
       const cleanContent = validateBase64Image(content);
       const buffer = Buffer.from(cleanContent, 'base64');
-      await (sock as any).newsletterUpdatePicture(jid, buffer);
+      await sock.newsletterUpdatePicture(jid, buffer);
       return { success: true, jid };
     },
   },
@@ -154,7 +154,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).newsletterRemovePicture(jid);
+      await sock.newsletterRemovePicture(jid);
       return { success: true, jid };
     },
   },
@@ -169,7 +169,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ jid, serverId, reaction }, sock) => {
-      await (sock as any).newsletterReactMessage(jid, serverId, reaction);
+      await sock.newsletterReactMessage(jid, serverId, reaction);
       return { success: true, jid, serverId };
     },
   },
@@ -185,7 +185,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ jid, count, since, after }, sock) => {
-      return (sock as any).newsletterFetchMessages(jid, count, since, after);
+      return sock.newsletterFetchMessages(jid, count, since, after);
     },
   },
   {
@@ -194,7 +194,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).subscribeNewsletterUpdates(jid);
+      await sock.subscribeNewsletterUpdates(jid);
       return { success: true, jid };
     },
   },
@@ -204,7 +204,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'read_only',
     call: async ({ jid }, sock) => {
-      const count = await (sock as any).newsletterAdminCount(jid);
+      const count = await sock.newsletterAdminCount(jid);
       return { jid, adminCount: count };
     },
   },
@@ -217,7 +217,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ jid, newOwnerJid }, sock) => {
-      await (sock as any).newsletterChangeOwner(jid, newOwnerJid);
+      await sock.newsletterChangeOwner(jid, newOwnerJid);
       return { success: true, jid, newOwnerJid };
     },
   },
@@ -230,7 +230,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ jid, userJid }, sock) => {
-      await (sock as any).newsletterDemote(jid, userJid);
+      await sock.newsletterDemote(jid, userJid);
       return { success: true, jid, userJid };
     },
   },
@@ -240,7 +240,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
     schema: z.object({ jid: z.string() }),
     replayPolicy: 'unsafe',
     call: async ({ jid }, sock) => {
-      await (sock as any).newsletterDelete(jid);
+      await sock.newsletterDelete(jid);
       return { success: true, jid };
     },
   },
@@ -251,7 +251,7 @@ const newsletterConfigs: SockToolConfig<any>[] = [
 // ---------------------------------------------------------------------------
 
 export function registerNewsletterTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
 ): void {
   registerSockTools(getSock, newsletterConfigs, register);

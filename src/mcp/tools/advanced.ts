@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { resetEnrichmentErrors } from '../../core/messages.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
@@ -58,7 +58,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ type, event, timeoutMs }, sock) => {
-      return (sock as any).createCallLink(type, event, timeoutMs);
+      return sock.createCallLink(type, event, timeoutMs);
     },
   },
   {
@@ -107,7 +107,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ phoneNumber, customCode }, sock) => {
-      const code = await (sock as any).requestPairingCode(phoneNumber, customCode);
+      const code = await sock.requestPairingCode(phoneNumber, customCode);
       return { pairingCode: code };
     },
   },
@@ -117,7 +117,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     schema: z.object({}),
     replayPolicy: 'read_only',
     call: async (_parsed, sock) => {
-      const bots = await (sock as any).getBotListV2();
+      const bots = await sock.getBotListV2();
       return { bots };
     },
   },
@@ -190,7 +190,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ msg }, sock) => {
-      await (sock as any).logout(msg);
+      await sock.logout(msg);
       return { loggedOut: true };
     },
   },
@@ -207,7 +207,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ collections, isInitialSync }, sock) => {
-      await (sock as any).resyncAppState(collections, isInitialSync);
+      await sock.resyncAppState(collections, isInitialSync);
       return { synced: true, collections };
     },
   },
@@ -222,7 +222,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ jid, proto, opts }, sock) => {
-      const result = await (sock as any).relayMessage(jid, proto, opts ?? {});
+      const result = await sock.relayMessage(jid, proto, opts ?? {});
       return { relayed: true, jid, result: result ?? null };
     },
   },
@@ -263,7 +263,7 @@ function makeResetEnrichmentErrors(db: Database): ToolDeclaration {
 // ---------------------------------------------------------------------------
 
 export function registerAdvancedTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
   db?: Database,
 ): void {

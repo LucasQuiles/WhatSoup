@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { ToolDeclaration, SessionContext } from '../types.ts';
 import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -293,7 +293,7 @@ const ForwardMessageSchema = z.object({
   to_jid: z.string(),
 });
 
-function makeForwardMessage(db: Database, getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'forward_message',
     description:
@@ -358,7 +358,7 @@ const ArchiveChatSchema = z.object({
   archive: z.boolean(),
 });
 
-function makeArchiveChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeArchiveChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'archive_chat',
     description: 'Archive or unarchive a WhatsApp chat (global).',
@@ -389,7 +389,7 @@ const PinChatSchema = z.object({
   pin: z.boolean(),
 });
 
-function makePinChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makePinChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'pin_chat',
     description: 'Pin or unpin a WhatsApp chat (global).',
@@ -422,7 +422,7 @@ const MuteChatSchema = z.object({
   until: z.number().optional(),
 });
 
-function makeMuteChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeMuteChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'mute_chat',
     description: 'Mute or unmute a WhatsApp chat (global). Provide until (unix seconds) for timed mute.',
@@ -460,7 +460,7 @@ const MarkMessagesReadSchema = z.object({
   from_me: z.boolean().optional(),
 });
 
-function makeMarkMessagesRead(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeMarkMessagesRead(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'mark_messages_read',
     description:
@@ -500,7 +500,7 @@ const StarMessageSchema = z.object({
   from_me: z.boolean().optional(),
 });
 
-function makeStarMessage(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeStarMessage(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'star_message',
     description: 'Star or unstar WhatsApp messages (global).',
@@ -529,7 +529,7 @@ function makeStarMessage(getSock: () => WhatsAppSocket | null): ToolDeclaration 
 
 export function registerChatManagementTools(
   db: Database,
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
 ): void {
   register(makeListMessages(db));

@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 import { validateBase64Image } from '../../core/base64.ts';
@@ -88,7 +88,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     call: async ({ jid, content }, sock) => {
       const cleanContent = validateBase64Image(content);
       const buffer = Buffer.from(cleanContent, 'base64');
-      await (sock as any).updateProfilePicture(jid, buffer);
+      await sock.updateProfilePicture(jid, buffer);
       return { success: true, jid };
     },
   },
@@ -100,7 +100,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).removeProfilePicture(jid);
+      await sock.removeProfilePicture(jid);
       return { success: true, jid };
     },
   },
@@ -112,7 +112,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ status }, sock) => {
-      await (sock as any).updateProfileStatus(status);
+      await sock.updateProfileStatus(status);
       return { success: true, status };
     },
   },
@@ -124,7 +124,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ name }, sock) => {
-      await (sock as any).updateProfileName(name);
+      await sock.updateProfileName(name);
       return { success: true, name };
     },
   },
@@ -193,18 +193,17 @@ const profileConfigs: SockToolConfig<any>[] = [
       }
 
       // Baileys exposes individual privacy methods, not a unified updatePrivacySettings
-      const s = sock as any;
       switch (setting) {
-        case 'last_seen': await s.updateLastSeenPrivacy(value); break;
-        case 'online': await s.updateOnlinePrivacy(value); break;
-        case 'profile_picture': await s.updateProfilePicturePrivacy(value); break;
-        case 'status': await s.updateStatusPrivacy(value); break;
-        case 'read_receipts': await s.updateReadReceiptsPrivacy(value); break;
-        case 'groups_add': await s.updateGroupsAddPrivacy(value); break;
-        case 'call': await s.updateCallPrivacy(value); break;
-        case 'messages': await s.updateMessagesPrivacy(value); break;
-        case 'link_previews': await s.updateDisableLinkPreviewsPrivacy(value === 'true' || value === '1'); break;
-        case 'default_disappearing': await s.updateDefaultDisappearingMode(parseInt(value, 10) || 0); break;
+        case 'last_seen': await sock.updateLastSeenPrivacy(value); break;
+        case 'online': await sock.updateOnlinePrivacy(value); break;
+        case 'profile_picture': await sock.updateProfilePicturePrivacy(value); break;
+        case 'status': await sock.updateStatusPrivacy(value); break;
+        case 'read_receipts': await sock.updateReadReceiptsPrivacy(value); break;
+        case 'groups_add': await sock.updateGroupsAddPrivacy(value); break;
+        case 'call': await sock.updateCallPrivacy(value); break;
+        case 'messages': await sock.updateMessagesPrivacy(value); break;
+        case 'link_previews': await sock.updateDisableLinkPreviewsPrivacy(value === 'true' || value === '1'); break;
+        case 'default_disappearing': await sock.updateDefaultDisappearingMode(parseInt(value, 10) || 0); break;
         default: throw new Error(`Unknown privacy setting: ${setting}`);
       }
       return { success: true, setting, value };
@@ -216,7 +215,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     schema: z.object({}),
     replayPolicy: 'read_only',
     call: async (_parsed, sock) => {
-      const settings = await (sock as any).fetchPrivacySettings();
+      const settings = await sock.fetchPrivacySettings();
       return { settings: settings ?? null };
     },
   },
@@ -238,7 +237,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       if (company !== undefined) contactAction.company = company;
       if (phone !== undefined) contactAction.phone = phone;
 
-      await (sock as any).addOrEditContact(jid, contactAction);
+      await sock.addOrEditContact(jid, contactAction);
       return { success: true, jid };
     },
   },
@@ -250,7 +249,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid }, sock) => {
-      await (sock as any).removeContact(jid);
+      await sock.removeContact(jid);
       return { success: true, jid };
     },
   },
@@ -262,7 +261,7 @@ const profileConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ jids }, sock) => {
-      const result = await (sock as any).fetchDisappearingDuration(...jids);
+      const result = await sock.fetchDisappearingDuration(...jids);
       return { result: result ?? null };
     },
   },
@@ -272,7 +271,7 @@ const profileConfigs: SockToolConfig<any>[] = [
 // get_blocklist — custom handler (live fetch with DB fallback)
 // ---------------------------------------------------------------------------
 
-function makeGetBlocklist(getSock: () => WhatsAppSocket | null, db: Database): ToolDeclaration {
+function makeGetBlocklist(getSock: () => ExtendedBaileysSocket | null, db: Database): ToolDeclaration {
   return {
     name: 'get_blocklist',
     description: 'Fetch the list of blocked contacts (global). Returns live data when connected, cached DB data otherwise.',
@@ -286,7 +285,7 @@ function makeGetBlocklist(getSock: () => WhatsAppSocket | null, db: Database): T
       if (sock) {
         // Live fetch — also sync to DB
         try {
-          const live = await (sock as any).fetchBlocklist();
+          const live = await sock.fetchBlocklist();
           const jids = Array.isArray(live) ? live : [];
           return { blocklist: jids, source: 'live' };
         } catch (err) {
@@ -308,7 +307,7 @@ function makeGetBlocklist(getSock: () => WhatsAppSocket | null, db: Database): T
 // ---------------------------------------------------------------------------
 
 export function registerProfileTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   db: Database,
   register: (tool: ToolDeclaration) => void,
 ): void {

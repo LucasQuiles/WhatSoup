@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
@@ -281,7 +281,7 @@ const groupConfigs: SockToolConfig<any>[] = [
 // ---------------------------------------------------------------------------
 
 export function registerGroupTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
 ): void {
   registerSockTools(getSock, groupConfigs, register);

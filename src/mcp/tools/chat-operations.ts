@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { Database } from '../../core/database.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('chat-operations');
@@ -26,7 +26,7 @@ const ClearChatSchema = z.object({
   ),
 });
 
-function makeClearChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeClearChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'clear_chat',
     description: 'Clear messages from a WhatsApp chat. Provide the message IDs, fromMe flag, and timestamps of the messages to clear.',
@@ -59,7 +59,7 @@ const DeleteChatSchema = z.object({
   last_message_timestamp: z.number(),
 });
 
-function makeDeleteChat(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeDeleteChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'delete_chat',
     description: 'Delete an entire WhatsApp chat. Requires the last message key and timestamp.',
@@ -96,7 +96,7 @@ const DeleteMessageForMeSchema = z.object({
   timestamp: z.number(),
 });
 
-function makeDeleteMessageForMe(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeDeleteMessageForMe(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'delete_message_for_me',
     description: 'Delete a message for yourself only (not for everyone). The message remains visible to others.',
@@ -134,7 +134,7 @@ const SetDisappearingSchema = z.object({
   duration: z.number().describe('Seconds: 0=off, 86400=24h, 604800=7d, 7776000=90d'),
 });
 
-function makeSetDisappearingMessages(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeSetDisappearingMessages(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'set_disappearing_messages',
     description: 'Enable or disable disappearing messages for a chat. Duration in seconds: 0=off, 86400=24h, 604800=7d, 7776000=90d.',
@@ -169,7 +169,7 @@ const SendEventSchema = z.object({
   call_link: z.string().optional(),
 });
 
-function makeSendEventMessage(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeSendEventMessage(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'send_event_message',
     description: 'Send a calendar event message to a WhatsApp chat.',
@@ -213,7 +213,7 @@ const MarkChatReadSchema = z.object({
   last_message_timestamp: z.number(),
 });
 
-function makeMarkChatRead(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeMarkChatRead(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'mark_chat_read',
     description: 'Mark a chat as read or unread. Uses chatModify for whole-chat read state.',
@@ -247,7 +247,7 @@ const UpdatePushNameSchema = z.object({
   name: z.string(),
 });
 
-function makeUpdatePushName(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeUpdatePushName(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'update_push_name',
     description: 'Update your WhatsApp push notification name (the name others see).',
@@ -261,7 +261,7 @@ function makeUpdatePushName(getSock: () => WhatsAppSocket | null): ToolDeclarati
       if (!sock) throw new Error('WhatsApp is not connected');
 
       // Use the bot's own JID as the target; pushNameSetting is a self-setting
-      const botJid = (sock as any).user?.id ?? '';
+      const botJid = sock.user?.id ?? '';
       await sock.chatModify({ pushNameSetting: name } as any, botJid);
       log.info({ name }, 'push name updated');
       return { success: true, name };
@@ -285,7 +285,7 @@ const FetchHistorySchema = z.object({
   oldest_message_timestamp: z.number().optional(),
 });
 
-function makeFetchMessageHistory(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeFetchMessageHistory(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'fetch_message_history',
     description: 'Request WhatsApp to send additional message history. Results arrive via messaging-history.set event.',
@@ -298,7 +298,8 @@ function makeFetchMessageHistory(getSock: () => WhatsAppSocket | null): ToolDecl
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
-      await (sock as any).fetchMessageHistory(count, oldest_message_key, oldest_message_timestamp);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- optional zod fields vs required Baileys params; expires 2026-12-31
+      await sock.fetchMessageHistory(count, oldest_message_key as any, oldest_message_timestamp as any);
       log.info({ count }, 'message history fetch requested');
       return { requested: true, count };
     },
@@ -317,7 +318,7 @@ const PlaceholderResendSchema = z.object({
   }),
 });
 
-function makeRequestPlaceholderResend(getSock: () => WhatsAppSocket | null): ToolDeclaration {
+function makeRequestPlaceholderResend(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
   return {
     name: 'request_placeholder_resend',
     description: 'Request resend of a placeholder message (message that failed to decrypt).',
@@ -330,7 +331,7 @@ function makeRequestPlaceholderResend(getSock: () => WhatsAppSocket | null): Too
       const sock = getSock();
       if (!sock) throw new Error('WhatsApp is not connected');
 
-      await (sock as any).requestPlaceholderResend(message_key);
+      await sock.requestPlaceholderResend(message_key);
       log.info({ messageKey: message_key }, 'placeholder resend requested');
       return { requested: true, messageKey: message_key };
     },
@@ -399,7 +400,7 @@ function makeGetMessageReceipts(db: Database): ToolDeclaration {
 
 export function registerChatOperationTools(
   db: Database,
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
 ): void {
   register(makeClearChat(getSock));

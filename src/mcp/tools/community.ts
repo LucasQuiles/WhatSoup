@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
@@ -16,7 +16,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ jid }, sock) => {
-      return (sock as any).communityMetadata(jid);
+      return sock.communityMetadata(jid);
     },
   },
   {
@@ -28,7 +28,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ subject, body }, sock) => {
-      return (sock as any).communityCreate(subject, body);
+      return sock.communityCreate(subject, body);
     },
   },
   {
@@ -41,7 +41,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ subject, participants, parentJid }, sock) => {
-      return (sock as any).communityCreateGroup(subject, participants, parentJid);
+      return sock.communityCreateGroup(subject, participants, parentJid);
     },
   },
   {
@@ -52,7 +52,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ id }, sock) => {
-      await (sock as any).communityLeave(id);
+      await sock.communityLeave(id);
       return { success: true, id };
     },
   },
@@ -65,7 +65,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ groupJid, communityJid }, sock) => {
-      return (sock as any).communityLinkGroup(groupJid, communityJid);
+      return sock.communityLinkGroup(groupJid, communityJid);
     },
   },
   {
@@ -77,7 +77,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ groupJid, communityJid }, sock) => {
-      return (sock as any).communityUnlinkGroup(groupJid, communityJid);
+      return sock.communityUnlinkGroup(groupJid, communityJid);
     },
   },
   {
@@ -88,7 +88,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ jid }, sock) => {
-      return (sock as any).communityFetchLinkedGroups(jid);
+      return sock.communityFetchLinkedGroups(jid);
     },
   },
   {
@@ -101,7 +101,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ jid, participants, action }, sock) => {
-      const result = await (sock as any).communityParticipantsUpdate(jid, participants, action);
+      const result = await sock.communityParticipantsUpdate(jid, participants, action);
       return { success: true, jid, action, participants, result };
     },
   },
@@ -121,20 +121,20 @@ const communityConfigs: SockToolConfig<any>[] = [
     replayPolicy: 'unsafe',
     call: async ({ jid, action = 'get', code }, sock) => {
       if (action === 'get') {
-        const inviteCode = await (sock as any).communityInviteCode(jid);
+        const inviteCode = await sock.communityInviteCode(jid);
         const inviteLink = inviteCode ? `https://chat.whatsapp.com/${inviteCode}` : null;
         return { jid, inviteCode: inviteCode ?? null, inviteLink };
       }
 
       if (action === 'revoke') {
-        const newCode = await (sock as any).communityRevokeInvite(jid);
+        const newCode = await sock.communityRevokeInvite(jid);
         const inviteLink = newCode ? `https://chat.whatsapp.com/${newCode}` : null;
         return { jid, inviteCode: newCode ?? null, inviteLink, revoked: true };
       }
 
       // action === 'accept'
       if (!code) throw new Error('code is required for action=accept');
-      const communityJid = await (sock as any).communityAcceptInvite(code);
+      const communityJid = await sock.communityAcceptInvite(code);
       return { communityJid: communityJid ?? null, code, accepted: true };
     },
   },
@@ -148,7 +148,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ jid, setting }, sock) => {
-      await (sock as any).communitySettingUpdate(jid, setting);
+      await sock.communitySettingUpdate(jid, setting);
       return { success: true, jid, setting };
     },
   },
@@ -158,7 +158,7 @@ const communityConfigs: SockToolConfig<any>[] = [
     schema: z.object({}),
     replayPolicy: 'read_only',
     call: async (_parsed, sock) => {
-      const communityMap = await (sock as any).communityFetchAllParticipating();
+      const communityMap = await sock.communityFetchAllParticipating();
       const communities = Object.values(communityMap as Record<string, unknown>);
       return { communities };
     },
@@ -175,10 +175,10 @@ const communityConfigs: SockToolConfig<any>[] = [
     replayPolicy: 'safe',
     call: async ({ jid, subject, description }, sock) => {
       if (subject !== undefined) {
-        await (sock as any).communityUpdateSubject(jid, subject);
+        await sock.communityUpdateSubject(jid, subject);
       }
       if (description !== undefined) {
-        await (sock as any).communityUpdateDescription(jid, description);
+        await sock.communityUpdateDescription(jid, description);
       }
       return { success: true, jid, subject, description };
     },
@@ -190,7 +190,7 @@ const communityConfigs: SockToolConfig<any>[] = [
 // ---------------------------------------------------------------------------
 
 export function registerCommunityTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
 ): void {
   registerSockTools(getSock, communityConfigs, register);

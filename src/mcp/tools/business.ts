@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ExtendedBaileysSocket } from '../types.ts';
 import { validateBase64Image } from '../../core/base64.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
@@ -17,7 +17,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ jid }, sock) => {
-      return (sock as any).getBusinessProfile(jid);
+      return sock.getBusinessProfile(jid);
     },
   },
   {
@@ -33,7 +33,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async (args, sock) => {
-      await (sock as any).updateBussinesProfile(args);
+      await sock.updateBussinesProfile(args);
       return { success: true };
     },
   },
@@ -48,7 +48,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     call: async ({ photo }, sock) => {
       const cleanPhoto = validateBase64Image(photo);
       const buffer = Buffer.from(cleanPhoto, 'base64');
-      await (sock as any).updateCoverPhoto(buffer);
+      await sock.updateCoverPhoto(buffer);
       return { success: true };
     },
   },
@@ -60,7 +60,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ id }, sock) => {
-      await (sock as any).removeCoverPhoto(id);
+      await sock.removeCoverPhoto(id);
       return { success: true, id };
     },
   },
@@ -74,7 +74,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async (args, sock) => {
-      return (sock as any).getCatalog({
+      return sock.getCatalog({
         jid: args.jid,
         limit: args.limit,
         cursor: args.cursor,
@@ -90,7 +90,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ jid, limit }, sock) => {
-      return (sock as any).getCollections(jid, limit);
+      return sock.getCollections(jid, limit);
     },
   },
   {
@@ -108,7 +108,8 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async (args, sock) => {
-      return (sock as any).productCreate(args);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zod-parsed args are a superset of ProductCreate; expires 2026-12-31
+      return sock.productCreate(args as any);
     },
   },
   {
@@ -128,7 +129,8 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ productId, ...update }, sock) => {
-      return (sock as any).productUpdate(productId, update);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zod-parsed update is a superset of ProductUpdate; expires 2026-12-31
+      return sock.productUpdate(productId, update as any);
     },
   },
   {
@@ -139,7 +141,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ productIds }, sock) => {
-      const result = await (sock as any).productDelete(productIds);
+      const result = await sock.productDelete(productIds);
       return result ?? { success: true, deleted: productIds.length };
     },
   },
@@ -152,7 +154,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'read_only',
     call: async ({ orderId, tokenBase64 }, sock) => {
-      return (sock as any).getOrderDetails(orderId, tokenBase64);
+      return sock.getOrderDetails(orderId, tokenBase64);
     },
   },
   {
@@ -167,7 +169,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async (quickReply, sock) => {
-      await (sock as any).addOrEditQuickReply(quickReply);
+      await sock.addOrEditQuickReply(quickReply);
       return { success: true, shortcut: quickReply.shortcut };
     },
   },
@@ -179,7 +181,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ timestamp }, sock) => {
-      await (sock as any).removeQuickReply(timestamp);
+      await sock.removeQuickReply(timestamp);
       return { success: true, timestamp };
     },
   },
@@ -225,7 +227,7 @@ const businessConfigs: SockToolConfig<any>[] = [
           }
           if (!args.chat_jid) throw new Error('add_label requires chat_jid');
           for (const label of args.labels) {
-            await (sock as any).addLabel(args.chat_jid, label);
+            await sock.addLabel(args.chat_jid, label);
           }
           return { success: true, action: args.action, count: args.labels.length };
         }
@@ -233,14 +235,14 @@ const businessConfigs: SockToolConfig<any>[] = [
         case 'add_chat_label': {
           if (!args.label_id) throw new Error('add_chat_label requires label_id');
           if (!args.chat_jid) throw new Error('add_chat_label requires chat_jid');
-          await (sock as any).addChatLabel(args.chat_jid, args.label_id);
+          await sock.addChatLabel(args.chat_jid, args.label_id);
           return { success: true, action: args.action, label_id: args.label_id, chat_jid: args.chat_jid };
         }
 
         case 'remove_chat_label': {
           if (!args.label_id) throw new Error('remove_chat_label requires label_id');
           if (!args.chat_jid) throw new Error('remove_chat_label requires chat_jid');
-          await (sock as any).removeChatLabel(args.chat_jid, args.label_id);
+          await sock.removeChatLabel(args.chat_jid, args.label_id);
           return { success: true, action: args.action, label_id: args.label_id, chat_jid: args.chat_jid };
         }
 
@@ -248,7 +250,7 @@ const businessConfigs: SockToolConfig<any>[] = [
           if (!args.label_id) throw new Error('add_message_label requires label_id');
           if (!args.chat_jid) throw new Error('add_message_label requires chat_jid');
           if (!args.message_id) throw new Error('add_message_label requires message_id');
-          await (sock as any).addMessageLabel(args.chat_jid, args.message_id, args.label_id);
+          await sock.addMessageLabel(args.chat_jid, args.message_id, args.label_id);
           return {
             success: true,
             action: args.action,
@@ -262,7 +264,7 @@ const businessConfigs: SockToolConfig<any>[] = [
           if (!args.label_id) throw new Error('remove_message_label requires label_id');
           if (!args.chat_jid) throw new Error('remove_message_label requires chat_jid');
           if (!args.message_id) throw new Error('remove_message_label requires message_id');
-          await (sock as any).removeMessageLabel(args.chat_jid, args.message_id, args.label_id);
+          await sock.removeMessageLabel(args.chat_jid, args.message_id, args.label_id);
           return {
             success: true,
             action: args.action,
@@ -281,7 +283,7 @@ const businessConfigs: SockToolConfig<any>[] = [
 // ---------------------------------------------------------------------------
 
 export function registerBusinessTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
 ): void {
   registerSockTools(getSock, businessConfigs, register);
