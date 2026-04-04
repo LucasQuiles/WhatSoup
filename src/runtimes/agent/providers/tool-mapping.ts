@@ -7,14 +7,17 @@
 
 export type ToolCategory =
   | 'reading'
+  | 'searching'
   | 'modifying'
   | 'running'
-  | 'searching'
-  | 'fetching'
   | 'agent'
-  | 'skill'
+  | 'fetching'
   | 'planning'
-  | 'other';
+  | 'skill'
+  | 'other'
+  | 'error'
+  | 'blocked'
+  | 'cancelled';
 
 export interface ToolNameMapper {
   /** Map a provider-specific tool name to a display category */

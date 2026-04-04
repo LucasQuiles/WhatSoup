@@ -7,22 +7,10 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
+import type { ToolCategory } from './providers/tool-mapping.ts';
+export type { ToolCategory } from './providers/tool-mapping.ts';
 
 const log = createChildLogger('outbound-queue');
-
-export type ToolCategory =
-  | 'reading'
-  | 'searching'
-  | 'modifying'
-  | 'running'
-  | 'agent'
-  | 'fetching'
-  | 'planning'
-  | 'skill'
-  | 'other'
-  | 'error'
-  | 'blocked'
-  | 'cancelled';
 
 export interface ToolUpdate {
   category: ToolCategory;
@@ -373,7 +361,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.minimalLastSentAt = Date.now();
     this.turnHasVisibleText = false;
     this.clearMinimalHeartbeat();
-    this.abortTyping();
+    this.stopTyping(false);
   }
 
   get targetChatJid(): string { return this.chatJid; }
@@ -398,15 +386,21 @@ export class OutboundQueue implements IOutboundQueue {
     }, TYPING_REFRESH_MS);
   }
 
-  /** Graceful stop — send 'paused' and clear the refresh interval. */
-  private stopTyping(): void {
+  /**
+   * Stop the composing indicator and clear the refresh interval.
+   * When `notify` is true (default), sends a 'paused' presence update.
+   * When `notify` is false, clears silently (used on session crash).
+   */
+  private stopTyping(notify = true): void {
     if (!this.isTyping) return;
     this.isTyping = false;
     if (this.typingRefreshInterval !== null) {
       clearInterval(this.typingRefreshInterval);
       this.typingRefreshInterval = null;
     }
-    this.messenger.setTyping?.(this.chatJid, false).catch(() => {});
+    if (notify) {
+      this.messenger.setTyping?.(this.chatJid, false).catch(() => {});
+    }
   }
 
   /**
@@ -444,15 +438,6 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.minimalHeartbeatTimer !== null) {
       clearTimeout(this.minimalHeartbeatTimer);
       this.minimalHeartbeatTimer = null;
-    }
-  }
-
-  /** Abort — clear the refresh interval without sending 'paused'. */
-  private abortTyping(): void {
-    this.isTyping = false;
-    if (this.typingRefreshInterval !== null) {
-      clearInterval(this.typingRefreshInterval);
-      this.typingRefreshInterval = null;
     }
   }
 
