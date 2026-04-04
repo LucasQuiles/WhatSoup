@@ -13,6 +13,8 @@ import { createChildLogger } from '../../logger.ts';
 import { createSession, incrementMessageCount, updateSessionId, updateSessionStatus, updateTranscriptPath } from './session-db.ts';
 import { parseEvent } from './stream-parser.ts';
 import type { AgentEvent } from './stream-parser.ts';
+import { parseCodexEvent } from './providers/codex-parser.ts';
+import { parseGeminiEvent } from './providers/gemini-parser.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -49,6 +51,8 @@ export interface SessionManagerOptions {
   instructionsPath?: string;
   model?: string;
   pluginDirs?: string[];
+  provider?: string;
+  providerConfig?: Record<string, unknown>;
 }
 
 /**
@@ -62,7 +66,7 @@ export interface SessionManagerOptions {
  * Extend this function when adding new providers: each provider should only receive
  * its own credentials plus the system essentials below.
  */
-function buildChildEnv(): NodeJS.ProcessEnv {
+function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     // System essentials
     PATH: process.env.PATH,
@@ -81,13 +85,29 @@ function buildChildEnv(): NodeJS.ProcessEnv {
     SUDO_ASKPASS: process.env.SUDO_ASKPASS,
   };
 
-  // OPENAI_API_KEY: passed because Claude Code may use it for its own features.
-  // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
-  if (process.env.OPENAI_API_KEY) {
-    env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  // Provider-specific credentials — each provider only receives the keys it needs.
+  switch (provider) {
+    case 'codex-cli':
+      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      break;
+    case 'gemini-cli':
+      if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+      if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+      break;
+    case 'opencode-cli':
+      // OpenCode reads from its own config or standard API keys
+      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+      break;
+    case 'claude-cli':
+    default:
+      // OPENAI_API_KEY: passed because Claude Code may use it for its own features.
+      // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
+      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      break;
   }
 
-  // Excluded: ANTHROPIC_API_KEY (subscription auth), PINECONE_API_KEY (parent MCP only),
+  // Excluded (all providers): PINECONE_API_KEY (parent MCP only),
   // WHATSOUP_HEALTH_TOKEN (parent-only auth token)
 
   // Strip undefined values (env vars not set in the parent process)
@@ -106,6 +126,8 @@ export class SessionManager {
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
   private readonly pluginDirs: string[];
+  private readonly provider: string;
+  private readonly providerConfig: Record<string, unknown> | undefined;
 
   private child: ReturnType<typeof spawn> | null = null;
   private dbRowId: number | null = null;
@@ -151,6 +173,78 @@ export class SessionManager {
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
     this.pluginDirs = opts.pluginDirs ?? [];
+    this.provider = opts.provider ?? 'claude-cli';
+    this.providerConfig = opts.providerConfig;
+  }
+
+  // ─── Provider helpers ─────────────────────────────────────────────────────
+
+  /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */
+  private get isSpawnPerTurn(): boolean {
+    return this.provider !== 'claude-cli';
+  }
+
+  private getProviderBinary(): string {
+    switch (this.provider) {
+      case 'codex-cli': return 'codex';
+      case 'gemini-cli': return 'gemini';
+      case 'opencode-cli': return 'opencode';
+      case 'claude-cli':
+      default: return 'claude';
+    }
+  }
+
+  private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
+    const model = this.model;
+    switch (this.provider) {
+      case 'codex-cli':
+        return [
+          'exec', '--json',
+          '--dangerously-bypass-approvals-and-sandbox',
+          ...(model ? ['-m', model] : []),
+          '-C', cwd,
+        ];
+      case 'gemini-cli':
+        return [
+          '-p',
+          '--output-format', 'stream-json',
+          '--yolo',
+          ...(model ? ['-m', model] : []),
+        ];
+      case 'opencode-cli':
+        return [
+          'run',
+          '--format', 'json',
+          '--pure',
+          ...(model ? ['-m', model] : []),
+        ];
+      case 'claude-cli':
+      default:
+        return [
+          '-p', '--verbose',
+          '--input-format', 'stream-json',
+          '--output-format', 'stream-json',
+          '--permission-mode', 'bypassPermissions',
+          '--system-prompt', systemPrompt,
+          ...(model ? ['--model', model] : []),
+          ...this.pluginDirs.flatMap(dir => ['--plugin-dir', dir]),
+          ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
+        ];
+    }
+  }
+
+  private getParser(): (line: string) => AgentEvent | null {
+    switch (this.provider) {
+      case 'codex-cli': return parseCodexEvent;
+      case 'gemini-cli': return parseGeminiEvent;
+      case 'opencode-cli':
+        // OpenCode's JSON format (step_start/text/step_finish) differs from Claude's.
+        // A dedicated parser should be implemented. For now, fall through to Claude
+        // parser which will produce 'unknown' events for unrecognized types.
+        return parseEvent;
+      case 'claude-cli':
+      default: return parseEvent;
+    }
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -203,30 +297,18 @@ export class SessionManager {
       ].join(' ');
     }
 
-    const child = spawn(
-      'claude',
-      [
-        '-p',
-        '--verbose',
-        '--input-format', 'stream-json',
-        '--output-format', 'stream-json',
-        '--permission-mode', 'bypassPermissions',
-        '--system-prompt', systemPrompt,
-        ...(this.model ? ['--model', this.model] : []),
-        ...this.pluginDirs.flatMap(dir => ['--plugin-dir', dir]),
-        ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
-      ],
-      {
-        cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        // Security: explicit env allowlist prevents credential leakage to child processes.
-        // Without this, Node.js inherits process.env in full — meaning ALL secrets
-        // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
-        // For multi-provider support this becomes critical: each provider should only
-        // receive the credentials it actually needs.
-        env: buildChildEnv(),
-      },
-    );
+    const binary = this.getProviderBinary();
+    const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
+
+    const child = spawn(binary, args, {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // Security: explicit env allowlist prevents credential leakage to child processes.
+      // Without this, Node.js inherits process.env in full — meaning ALL secrets
+      // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
+      // Each provider only receives the credentials it actually needs.
+      env: buildChildEnv(this.provider),
+    });
 
     this.child = child;
     this.active = true;
@@ -257,7 +339,17 @@ export class SessionManager {
     }
 
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
-    child.on('error', (err) => {
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') {
+        // Binary not installed — configuration error, not a crash
+        this.active = false;
+        this.child = null;
+        this.sessionId = null;
+        log.error({ err, chatJid: this.chatJid, binary }, 'claude binary not found (ENOENT)');
+        this.notifyUser?.(`_${this.getProviderBinary()} is not installed. Check your provider configuration._`);
+        // Do NOT call onCrash — this is not a transient failure
+        return;
+      }
       log.error({ err, chatJid: this.chatJid }, 'claude process spawn error');
       this.clearTurnWatchdog();
       this.active = false;
@@ -268,14 +360,15 @@ export class SessionManager {
       this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
     });
 
-    // Pipe stdout through line parser
+    // Pipe stdout through line parser — use provider-specific parser
+    const parse = this.getParser();
     child.stdout.on('data', (chunk: Buffer) => {
       this.stdoutBuffer += chunk.toString('utf8');
       const lines = this.stdoutBuffer.split('\n');
       // Keep the last (possibly incomplete) line in the buffer
       this.stdoutBuffer = lines.pop() ?? '';
       for (const line of lines) {
-        const event = parseEvent(line);
+        const event = parse(line);
         if (event === null) continue;
 
         if (event.type === 'init' && this.dbRowId !== null) {
@@ -329,7 +422,7 @@ export class SessionManager {
         for (const line of this.stdoutBuffer.split('\n')) {
           const trimmed = line.trim();
           if (trimmed) {
-            const event = parseEvent(trimmed);
+            const event = parse(trimmed);
             if (event) this.onEvent(event);
           }
         }
@@ -484,39 +577,133 @@ export class SessionManager {
     this.child?.kill('SIGKILL');
   }
 
-  /** Write a user message turn as JSONL to the child stdin. */
+  /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
   async sendTurn(text: string): Promise<void> {
-    if (this.child === null || !this.active) {
+    if (!this.active) {
       throw new Error('No active session. Call spawnSession() first.');
     }
 
-    const payload = JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
-    });
+    if (this.isSpawnPerTurn) {
+      // Clear any partial JSON from the previous turn before spawning a new process.
+      // Without this, leftover bytes in the buffer can corrupt the next turn's output.
+      this.stdoutBuffer = '';
 
-    const stdin = this.child.stdin;
-    if (!stdin) throw new Error('Child process stdin is not available');
+      // Spawn-per-turn providers: kill any existing process and spawn a new one
+      // with the user prompt appended as a CLI argument.
+      if (this.child) {
+        this.child.kill('SIGTERM');
+        this.child = null;
+      }
 
-    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-    try {
-      await Promise.race([
-        new Promise<void>((resolve, reject) => {
-          stdin.write(payload + '\n', 'utf8', (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        }),
-        new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(
-            () => reject(new Error('STDIN_WRITE_TIMEOUT: agent not reading input')),
-            STDIN_WRITE_TIMEOUT_MS,
-          );
-        }),
-      ]);
-    } finally {
-      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+      const cwd = this.configuredCwd ?? homedir();
+      const systemPrompt = ''; // system prompt not used as CLI arg for non-Claude providers
+      const baseArgs = this.getProviderArgs(systemPrompt, cwd);
+
+      // Append the user message as the final argument (the prompt)
+      const args = [...baseArgs, text];
+      const binary = this.getProviderBinary();
+      const parse = this.getParser();
+
+      const child = spawn(binary, args, {
+        cwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: buildChildEnv(this.provider),
+      });
+
+      this.child = child;
+
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') {
+          // Binary not installed — configuration error, not a transient crash
+          this.active = false;
+          this.child = null;
+          log.error({ err, chatJid: this.chatJid, provider: this.provider, binary }, 'provider binary not found (ENOENT)');
+          this.notifyUser?.(`_${this.getProviderBinary()} is not installed. Check your provider configuration._`);
+          // Do NOT call onCrash — this is not a transient failure
+          return;
+        }
+        log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'provider process spawn error');
+        this.clearTurnWatchdog();
+        this.active = false;
+        this.child = null;
+        this.notifyUser?.('_Agent failed to start — will retry on your next message._');
+        this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
+      });
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        this.stdoutBuffer += chunk.toString('utf8');
+        const lines = this.stdoutBuffer.split('\n');
+        this.stdoutBuffer = lines.pop() ?? '';
+        for (const line of lines) {
+          const event = parse(line);
+          if (event === null) continue;
+          this.onEvent(event);
+        }
+      });
+
+      child.stderr.on('data', (chunk: Buffer) => {
+        log.debug({ stderr: chunk.toString('utf8').trim(), provider: this.provider }, 'provider stderr');
+      });
+
+      // For spawn-per-turn, process exit is normal (one turn = one process).
+      // Emit any remaining buffered output, then mark the turn as complete.
+      child.on('exit', (code, signal) => {
+        if (this.child !== child) return; // superseded
+
+        // Drain buffered output
+        if (this.stdoutBuffer.trim() !== '') {
+          for (const line of this.stdoutBuffer.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed) {
+              const event = parse(trimmed);
+              if (event) this.onEvent(event);
+            }
+          }
+          this.stdoutBuffer = '';
+        }
+
+        this.clearTurnWatchdog();
+
+        // Non-zero exit on spawn-per-turn = error for this turn, but session stays active
+        if (code !== 0 && code !== null) {
+          log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
+        }
+      });
+    } else {
+      // Claude-cli: long-running process, pipe turns via stdin JSONL
+      if (this.child === null) {
+        throw new Error('No active session. Call spawnSession() first.');
+      }
+
+      const payload = JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text }] },
+      });
+
+      const stdin = this.child.stdin;
+      if (!stdin) throw new Error('Child process stdin is not available');
+
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          new Promise<void>((resolve, reject) => {
+            stdin.write(payload + '\n', 'utf8', (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          }),
+          new Promise<never>((_, reject) => {
+            timeoutHandle = setTimeout(
+              () => reject(new Error('STDIN_WRITE_TIMEOUT: agent not reading input')),
+              STDIN_WRITE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+      }
     }
+
     if (this.dbRowId !== null) {
       incrementMessageCount(this.db, this.dbRowId);
     }
@@ -558,40 +745,44 @@ export class SessionManager {
    */
   async shutdown(suspend = true): Promise<void> {
     this.clearTurnWatchdog();
+    this.active = false; // Suppress crash notification for clean shutdown
 
+    const currentPid = this.child?.pid ?? null;
+
+    // DB update and durability checkpoint run unconditionally when dbRowId exists.
+    // For spawn-per-turn providers, there may be no child in-flight at shutdown time,
+    // but the session row still needs to be closed out.
+    if (this.dbRowId !== null) {
+      if (suspend) {
+        log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: suspended');
+        updateSessionStatus(this.db, this.dbRowId, 'suspended');
+      } else {
+        log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: ended');
+        updateSessionStatus(this.db, this.dbRowId, 'ended');
+      }
+    }
+
+    // Checkpoint: record suspend/end status (runs regardless of child presence)
+    if (this.durability) {
+      const conversationKey = toConversationKey(this.chatJid);
+      this.durability.upsertSessionCheckpoint(conversationKey, {
+        sessionStatus: suspend ? 'suspended' : 'ended',
+      });
+    }
+
+    // Kill the child only if one is running
     if (this.child !== null) {
-      this.active = false; // Suppress crash notification for clean shutdown
-
-      const currentPid = this.child.pid ?? null;
-      if (this.dbRowId !== null) {
-        if (suspend) {
-          log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: suspended');
-          updateSessionStatus(this.db, this.dbRowId, 'suspended');
-        } else {
-          log.info({ rowId: this.dbRowId, chatJid: this.chatJid, sessionId: this.sessionId, pid: currentPid }, 'session: ended');
-          updateSessionStatus(this.db, this.dbRowId, 'ended');
-        }
-      }
-
-      // Checkpoint: record suspend/end status
-      if (this.durability) {
-        const conversationKey = toConversationKey(this.chatJid);
-        this.durability.upsertSessionCheckpoint(conversationKey, {
-          sessionStatus: suspend ? 'suspended' : 'ended',
-        });
-      }
-
       const terminatedSessionId = this.sessionId;
       this.child.kill('SIGTERM');
       this.child = null;
-      this.sessionId = null;
-      this.dbRowId = null;
-      this.startedAt = null;
-      this.messageCount = 0;
-      this.lastMessageAt = null;
-
       log.info({ chatJid: this.chatJid, sessionId: terminatedSessionId, pid: currentPid }, 'claude process terminated');
     }
+
+    this.sessionId = null;
+    this.dbRowId = null;
+    this.startedAt = null;
+    this.messageCount = 0;
+    this.lastMessageAt = null;
   }
 }
 

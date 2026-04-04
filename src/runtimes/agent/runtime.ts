@@ -445,6 +445,8 @@ export class AgentRuntime implements Runtime {
   private readonly sandboxPerChat: boolean;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
+  private readonly agentProvider: string;
+  private readonly agentProviderConfig: Record<string, unknown> | undefined;
   private readonly registry: ToolRegistry;
 
   // single mode: one session, one queue
@@ -463,6 +465,9 @@ export class AgentRuntime implements Runtime {
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
 
+  // NOTE: turnHadVisibleOutput is only tracked in the non-per-chat handleEvent path.
+  // Spawn-per-turn providers route through handleEventWithContext which does not
+  // use this flag. The "(no response)" fallback only exists in handleEvent.
   private turnHadVisibleOutput = false;
   private turnChain: Promise<void> = Promise.resolve();
 
@@ -521,6 +526,8 @@ export class AgentRuntime implements Runtime {
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
+    this.agentProvider = config.agentProvider;
+    this.agentProviderConfig = config.agentProviderConfig;
 
     this.registry = new ToolRegistry();
     this.registerAllTools();
@@ -1679,6 +1686,8 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: this.model,
       pluginDirs: this.pluginDirs,
+      provider: this.agentProvider,
+      providerConfig: this.agentProviderConfig,
     });
     if (this.durability) {
       session.setDurability(this.durability);
