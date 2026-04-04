@@ -177,9 +177,13 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
     case 'thread/compacted':
       return { type: 'compact_boundary' };
 
+    case 'thread/tokenUsage/updated': {
+      const { inputTokens, outputTokens } = extractTokenCounts(params);
+      return { type: 'result', text: null, inputTokens, outputTokens };
+    }
+
     case 'thread/status/changed':
     case 'thread/name/updated':
-    case 'thread/tokenUsage/updated':
     case 'thread/closed':
     case 'error':
       return { type: 'ignored' };
