@@ -17,12 +17,11 @@
 // Those must be silently filtered — never throw on a non-JSON line.
 
 import type { AgentEvent } from '../stream-parser.ts';
+import { type JsonObject, isRecord, stringifyValue, getNestedNumber } from './parser-utils.ts';
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
-
-type JsonObject = Record<string, unknown>;
 
 /** A parsed JSON-RPC frame (notification, response, or error response). */
 export type AcpFrame =
@@ -34,24 +33,6 @@ export type AcpFrame =
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function isRecord(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function stringifyValue(value: unknown): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return '';
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
 
 function extractMessage(value: unknown): string | null {
   if (typeof value === 'string') {
@@ -73,17 +54,6 @@ function extractMessage(value: unknown): string | null {
     }
   }
   return null;
-}
-
-function getNestedNumber(value: unknown, path: readonly string[]): number | undefined {
-  let current: unknown = value;
-  for (const segment of path) {
-    if (!isRecord(current)) {
-      return undefined;
-    }
-    current = current[segment];
-  }
-  return typeof current === 'number' ? current : undefined;
 }
 
 function extractTokenCounts(

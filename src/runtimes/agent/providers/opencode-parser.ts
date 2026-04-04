@@ -12,26 +12,7 @@
 // compatible with (line: string) => AgentEvent | null.
 
 import type { AgentEvent } from '../stream-parser.ts';
-
-type JsonObject = Record<string, unknown>;
-
-function isRecord(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function stringifyValue(value: unknown): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return '';
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
+import { type JsonObject, isRecord, stringifyValue } from './parser-utils.ts';
 
 // Module-level flag: tracks whether the first step_start has been seen.
 let _firstStepSeen = false;
