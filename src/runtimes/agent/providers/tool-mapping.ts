@@ -30,51 +30,35 @@ export interface ToolNameMapper {
 // Claude CLI mapper — extracted from runtime.ts buildToolUpdate()
 // ---------------------------------------------------------------------------
 
+const claudeToolCategories: Record<string, ToolCategory> = {
+  Read: 'reading',
+  LS: 'reading',
+  Edit: 'modifying',
+  Write: 'modifying',
+  NotebookEdit: 'modifying',
+  NotebookRead: 'modifying',
+  Bash: 'running',
+  Glob: 'searching',
+  Grep: 'searching',
+  LSP: 'searching',
+  WebFetch: 'fetching',
+  WebSearch: 'fetching',
+  Agent: 'agent',
+  SendMessage: 'agent',
+  Skill: 'skill',
+  ToolSearch: 'skill',
+  TodoWrite: 'planning',
+  TaskCreate: 'planning',
+  TaskUpdate: 'planning',
+  TaskList: 'planning',
+  TaskGet: 'planning',
+  EnterPlanMode: 'planning',
+  ExitPlanMode: 'planning',
+};
+
 export const claudeToolMapper: ToolNameMapper = {
   mapToolName(toolName: string): ToolCategory {
-    switch (toolName) {
-      case 'Read':
-      case 'LS':
-        return 'reading';
-
-      case 'Edit':
-      case 'Write':
-      case 'NotebookEdit':
-      case 'NotebookRead':
-        return 'modifying';
-
-      case 'Bash':
-        return 'running';
-
-      case 'Glob':
-      case 'Grep':
-      case 'LSP':
-        return 'searching';
-
-      case 'WebFetch':
-      case 'WebSearch':
-        return 'fetching';
-
-      case 'Agent':
-      case 'SendMessage':
-        return 'agent';
-
-      case 'Skill':
-      case 'ToolSearch':
-        return 'skill';
-
-      case 'TodoWrite':
-      case 'TaskCreate':
-      case 'TaskUpdate':
-      case 'TaskList':
-      case 'TaskGet':
-      case 'EnterPlanMode':
-      case 'ExitPlanMode':
-        return 'planning';
-
-      default:
-        return 'other';
-    }
+    return claudeToolCategories[toolName] ?? 'other';
   },
 
   getToolLabel(toolName: string, toolInput: Record<string, unknown>): string {
@@ -92,22 +76,17 @@ export const claudeToolMapper: ToolNameMapper = {
 // Codex CLI mapper
 // ---------------------------------------------------------------------------
 
+const codexToolCategories: Record<string, ToolCategory> = {
+  command_execution: 'running',
+  file_change: 'modifying',
+  file_read: 'reading',
+  mcp_tool_call: 'other',
+  web_search: 'fetching',
+};
+
 export const codexToolMapper: ToolNameMapper = {
   mapToolName(toolName: string): ToolCategory {
-    switch (toolName) {
-      case 'command_execution':
-        return 'running';
-      case 'file_change':
-        return 'modifying';
-      case 'file_read':
-        return 'reading';
-      case 'mcp_tool_call':
-        return 'other';
-      case 'web_search':
-        return 'fetching';
-      default:
-        return 'other';
-    }
+    return codexToolCategories[toolName] ?? 'other';
   },
 
   getToolLabel(toolName: string, toolInput: Record<string, unknown>): string {
@@ -121,25 +100,20 @@ export const codexToolMapper: ToolNameMapper = {
 // Gemini CLI mapper
 // ---------------------------------------------------------------------------
 
+const geminiToolCategories: Record<string, ToolCategory> = {
+  read_file: 'reading',
+  edit_file: 'modifying',
+  write_new_file: 'modifying',
+  run_shell_command: 'running',
+  grep: 'searching',
+  glob: 'searching',
+  list_directory: 'searching',
+  google_web_search: 'fetching',
+};
+
 export const geminiToolMapper: ToolNameMapper = {
   mapToolName(toolName: string): ToolCategory {
-    switch (toolName) {
-      case 'read_file':
-        return 'reading';
-      case 'edit_file':
-      case 'write_new_file':
-        return 'modifying';
-      case 'run_shell_command':
-        return 'running';
-      case 'grep':
-      case 'glob':
-      case 'list_directory':
-        return 'searching';
-      case 'google_web_search':
-        return 'fetching';
-      default:
-        return 'other';
-    }
+    return geminiToolCategories[toolName] ?? 'other';
   },
 
   getToolLabel(toolName: string, _toolInput: Record<string, unknown>): string {
