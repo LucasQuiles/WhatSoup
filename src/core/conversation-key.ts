@@ -1,5 +1,13 @@
 import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from './jid-constants.ts';
 
+export function isGroupConversationKey(key: string): boolean {
+  return key.includes('_at_g.us') || key.includes('@g.us')
+}
+
+export function conversationKeyToJid(key: string): string {
+  return key.replace('_at_g.us', '@g.us')
+}
+
 export function toConversationKey(jid: string): string {
   if (!jid || !jid.includes('@')) {
     throw new Error(`Invalid JID: "${jid}" -- must contain @`);

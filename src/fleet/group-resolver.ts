@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { mcpCall } from './mcp-client.ts';
 import { proxyToInstance } from './http-proxy.ts';
+import { conversationKeyToJid } from '../core/conversation-key.ts';
 import type { DiscoveredInstance } from './discovery.ts';
 import { createChildLogger } from '../logger.ts';
 
@@ -102,7 +103,7 @@ async function backfill(
   let resolved = 0;
 
   for (const key of keys) {
-    const jid = key.replace('_at_g.us', '@g.us');
+    const jid = conversationKeyToJid(key);
     const metadata = await fetchGroupMetadata(instance, jid);
     if (!metadata?.subject) continue;
 

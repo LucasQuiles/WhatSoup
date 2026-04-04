@@ -16,6 +16,8 @@ import { writePermissionsSettings } from '../../core/workspace.ts';
 import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
 import type { PermissionsSettings } from '../../core/settings-template.ts';
 import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
+import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
+import { toPersonalJid } from '../../core/jid-constants.ts';
 
 export interface OpsDeps {
   discovery: FleetDiscovery;
@@ -38,9 +40,9 @@ export async function handleSend(
   try {
     const parsed = JSON.parse(body);
     if (typeof parsed.chatJid === 'string' && !parsed.chatJid.includes('@')) {
-      parsed.chatJid = parsed.chatJid.includes('_at_g.us')
-        ? parsed.chatJid.replace('_at_g.us', '@g.us')
-        : `${parsed.chatJid}@s.whatsapp.net`;
+      parsed.chatJid = isGroupConversationKey(parsed.chatJid)
+        ? conversationKeyToJid(parsed.chatJid)
+        : toPersonalJid(parsed.chatJid);
       fixedBody = JSON.stringify(parsed);
     }
   } catch { /* use original body */ }

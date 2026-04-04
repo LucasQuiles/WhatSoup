@@ -10,6 +10,7 @@ import { configRoot } from '../paths.ts';
 
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
+import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toIsoFromUnix } from '../time-utils.ts';
 
 export interface DataDeps {
@@ -79,14 +80,14 @@ export function handleGetChats(
       const unread = (unreadStmt.get(chat.conversationKey) as any)?.unread_count ?? 0;
 
       // Detect group: conversation_key contains _at_g.us or @g.us
-      const isGroup = chat.conversationKey.includes('_at_g.us') || chat.conversationKey.includes('@g.us');
+      const isGroup = isGroupConversationKey(chat.conversationKey);
 
       // Resolve display name
       let displayName: string;
       let needsBackfill = false;
       if (isGroup) {
         // Convert _at_g.us back to @g.us for the groups table lookup
-        const groupJid = chat.conversationKey.replace('_at_g.us', '@g.us');
+        const groupJid = conversationKeyToJid(chat.conversationKey);
         const groupSubject = (groupNameStmt.get(groupJid) as any)?.subject;
         const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
         if (groupSubject) {
