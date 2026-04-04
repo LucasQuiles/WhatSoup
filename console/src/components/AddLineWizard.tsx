@@ -141,6 +141,8 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       },
       mcp: { send_media: true },
       perUserDirs: { enabled: false, basePath: 'users' },
+      provider: 'claude-cli',
+      providerConfig: {},
     },
     models: {
       conversation: 'claude-sonnet-4-6',
