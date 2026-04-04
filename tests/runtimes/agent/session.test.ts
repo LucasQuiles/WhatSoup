@@ -1001,6 +1001,180 @@ describe('Codex approval pre-filter', () => {
   });
 });
 
+// ─── Provider ready signal tests ─────────────────────────────────────────────
+
+describe('Event-driven provider ready signal', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('Codex sendTurn resolves after init event fires (not after polling)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Clear writes from spawnSession's initialize + thread/start handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    // Start sendTurn — it should await the ready promise
+    const sendPromise = sm.sendTurn('hello');
+
+    // Simulate codex thread/start response arriving (produces init event with threadId)
+    const threadResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'ws-2',
+      result: { id: 'thread_abc123' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(threadResponse));
+
+    // The send should resolve without needing to advance timers by 15s
+    await sendPromise;
+
+    // Verify turn/start was written with the captured threadId
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"thread_abc123"'),
+      'utf8',
+      expect.any(Function),
+    );
+  });
+
+  it('Codex sendTurn times out with clear error if init never fires', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Start sendTurn and attach rejection handler before advancing timers
+    const sendPromise = sm.sendTurn('hello').catch((e: Error) => e);
+
+    // Advance past the 15s timeout without firing init
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    const error = await sendPromise;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch('Codex threadId not captured after 15s');
+  });
+
+  it('Gemini sendTurn resolves after init event fires (not after polling)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'gemini-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Clear writes from spawnSession's initialize + session/new handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    // Start sendTurn
+    const sendPromise = sm.sendTurn('hello');
+
+    // Simulate gemini session/new response (produces init event with sessionId)
+    const sessionResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      result: { sessionId: 'sess_xyz789' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(sessionResponse));
+
+    // The send should resolve without needing to advance timers by 15s
+    await sendPromise;
+
+    // Verify session/prompt was written with the captured sessionId
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('sess_xyz789'),
+    );
+  });
+
+  it('Gemini sendTurn times out with clear error if init never fires', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'gemini-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Start sendTurn and attach rejection handler before advancing timers
+    const sendPromise = sm.sendTurn('hello').catch((e: Error) => e);
+
+    // Advance past the 15s timeout without firing init
+    await vi.advanceTimersByTimeAsync(16_000);
+
+    const error = await sendPromise;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch('Gemini sessionId not captured after 15s');
+  });
+
+  it('Codex sendTurn skips wait if threadId already captured', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Simulate init event arriving before sendTurn
+    const threadResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'ws-2',
+      result: { id: 'thread_pre' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(threadResponse));
+
+    // Clear writes from spawnSession's handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    // sendTurn should resolve immediately (no waiting)
+    await sm.sendTurn('hello');
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"thread_pre"'),
+      'utf8',
+      expect.any(Function),
+    );
+  });
+});
+
 // ─── formatAge tests ──────────────────────────────────────────────────────────
 
 describe('formatAge', () => {

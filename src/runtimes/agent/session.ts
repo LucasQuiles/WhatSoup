@@ -17,6 +17,7 @@ import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
 import { buildBaseChildEnv } from './providers/child-env.ts';
+import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -173,6 +174,9 @@ export class SessionManager {
   /** Per-session OpenCode parser — avoids shared module-level state across chats. */
   private readonly openCodeParser: OpenCodeParser = createOpenCodeParser();
 
+  /** Per-provider budget enforcement — null means unlimited (no budget config). */
+  private budget: ProviderBudget | null = null;
+
   constructor(opts: SessionManagerOptions) {
     this.db = opts.db;
     this.messenger = opts.messenger;
@@ -188,6 +192,12 @@ export class SessionManager {
     this.pluginDirs = opts.pluginDirs ?? [];
     this.provider = opts.provider ?? 'claude-cli';
     this.providerConfig = opts.providerConfig;
+
+    // Initialize budget enforcement if configured
+    const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
+    if (budgetConfig) {
+      this.budget = new ProviderBudget(opts.provider ?? 'claude-cli', budgetConfig);
+    }
   }
 
   // ─── Provider helpers ─────────────────────────────────────────────────────
@@ -298,6 +308,17 @@ export class SessionManager {
         this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), {
           sessionId: this.sessionId,
         });
+      }
+    }
+
+    // Record token usage for budget tracking on result events
+    if (event.type === 'result' && this.budget) {
+      const { inputTokens, outputTokens } = event;
+      if (inputTokens !== undefined || outputTokens !== undefined) {
+        this.budget.recordUsage(
+          { input: inputTokens, output: outputTokens },
+          this.chatJid,
+        );
       }
     }
 
@@ -536,13 +557,20 @@ export class SessionManager {
         clientInfo: { name: 'WhatSoup', title: null, version: '1.0.0' },
         capabilities: { experimentalApi: true },
       });
-      this.sendCodexRequest(child, 'thread/start', {
+      const threadStartParams: Record<string, unknown> = {
         cwd,
         approvalPolicy: 'never' as const,
         sandbox: 'danger-full-access' as const,
         persistExtendedHistory: true,
         ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
-      });
+      };
+      // Resume: if a stored thread ID was provided, include it in thread/start
+      // so the app-server resumes the existing conversation history.
+      if (resumeSessionId) {
+        threadStartParams.threadId = resumeSessionId;
+        log.info({ chatJid: this.chatJid, resumeThreadId: resumeSessionId }, 'codex: attempting thread resume');
+      }
+      this.sendCodexRequest(child, 'thread/start', threadStartParams);
     }
 
     // Gemini ACP: send initialize + session/new after spawn
@@ -803,6 +831,16 @@ export class SessionManager {
       throw new Error('No active session. Call spawnSession() first.');
     }
 
+    // Budget enforcement: check rate/spend limits before dispatching the turn
+    if (this.budget) {
+      const check = this.budget.checkBudget(this.chatJid);
+      if (!check.allowed) {
+        log.warn({ chatJid: this.chatJid, reason: check.reason }, 'sendTurn throttled by budget');
+        this.onEvent({ type: 'result', text: `_Throttled: ${check.reason}_` });
+        return;
+      }
+    }
+
     if (this.isSpawnPerTurn) {
       // Clear any partial JSON from the previous turn before spawning a new process.
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
@@ -917,9 +955,17 @@ export class SessionManager {
       // Gemini ACP: wait for sessionId from session/new response, then write session/prompt
       if (this.provider === 'gemini-cli') {
         if (!this.geminiSessionId) {
-          const waitStart = Date.now();
-          while (!this.geminiSessionId && Date.now() - waitStart < 15_000) {
-            await new Promise(resolve => setTimeout(resolve, 100));
+          if (!this.providerReadyPromise) {
+            throw new Error('Gemini provider ready promise not initialized. Call spawnSession() first.');
+          }
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Gemini sessionId not captured after 15s.')), 15_000);
+          });
+          try {
+            await Promise.race([this.providerReadyPromise, timeout]);
+          } finally {
+            if (timer !== null) clearTimeout(timer);
           }
           if (!this.geminiSessionId) {
             throw new Error('Gemini sessionId not captured after 15s.');
@@ -942,10 +988,17 @@ export class SessionManager {
         // Codex app-server: wait for threadId from thread/started response
         // (spawnSession sends initialize + thread/start, response arrives async on stdout)
         if (!this.codexThreadId) {
-          const waitStart = Date.now();
-          const THREAD_WAIT_MS = 15_000;
-          while (!this.codexThreadId && Date.now() - waitStart < THREAD_WAIT_MS) {
-            await new Promise(resolve => setTimeout(resolve, 100));
+          if (!this.providerReadyPromise) {
+            throw new Error('Codex provider ready promise not initialized. Call spawnSession() first.');
+          }
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Codex threadId not captured after 15s. app-server may have failed to initialize.')), 15_000);
+          });
+          try {
+            await Promise.race([this.providerReadyPromise, timeout]);
+          } finally {
+            if (timer !== null) clearTimeout(timer);
           }
           if (!this.codexThreadId) {
             throw new Error('Codex threadId not captured after 15s. app-server may have failed to initialize.');
@@ -1073,6 +1126,8 @@ export class SessionManager {
     this.messageCount = 0;
     this.lastMessageAt = null;
     this.codexThreadId = null;
+    this.providerReadyPromise = null;
+    this.providerReadyResolve = null;
   }
 }
 
