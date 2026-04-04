@@ -9,6 +9,7 @@ import type { AgentEvent } from './stream-parser.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
+import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -19,7 +20,7 @@ import {
   getResumableSessionForChat,
   accumulateSessionTokens,
 } from './session-db.ts';
-import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts } from '../../core/workspace.ts';
+import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
 import {
@@ -201,6 +202,8 @@ export interface AgentRuntimeOptions {
   sandboxPerChat?: boolean;
   /** Plugin directories to pass via --plugin-dir to the claude subprocess. */
   pluginDirs?: string[];
+  /** Per-instance plugin enablement. Written to project settings.json to override global. */
+  enabledPlugins?: Record<string, boolean>;
 }
 
 /**
@@ -438,6 +441,7 @@ export class AgentRuntime implements Runtime {
   private readonly model: string | undefined;
   private readonly sandboxPerChat: boolean;
   private readonly pluginDirs: string[];
+  private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly registry: ToolRegistry;
 
   // single mode: one session, one queue
@@ -513,6 +517,7 @@ export class AgentRuntime implements Runtime {
     this.model = options?.model;
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
     this.pluginDirs = options?.pluginDirs ?? [];
+    this.enabledPlugins = options?.enabledPlugins;
 
     this.registry = new ToolRegistry();
     this.registerAllTools();
@@ -601,6 +606,14 @@ export class AgentRuntime implements Runtime {
       );
       writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath);
       log.info({ cwd, hookPath }, 'wrote sandbox-policy.json and settings.json');
+    }
+
+    // Ensure settings.json has a permissions block — safety net for instances
+    // without sandbox config. Prevents Claude Code's "sensitive file" blocks.
+    {
+      const cwd = this.cwd ?? homedir();
+      const claudeDir = join(cwd, '.claude');
+      ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins);
     }
 
     // Start global WhatSoup socket server (non-sandboxPerChat mode only)
@@ -1909,6 +1922,7 @@ export class AgentRuntime implements Runtime {
           session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
             await new Promise(r => setTimeout(r, 1_000));
             if (!session.getStatus().active) return;
+            clearAlertSource(this.instanceName, 'agent_respawn_failed');
             try {
               await session.sendTurn('[System: session resumed after crash — continue where you left off]');
               log.info({ mapKey }, 'sent continuation turn after auto-respawn');
@@ -1920,6 +1934,14 @@ export class AgentRuntime implements Runtime {
           });
         }, AUTO_RESPAWN_DELAY_MS);
       }
+    } else if (this.recentCrashCount > AUTO_RESPAWN_MAX_CRASHES) {
+      log.error({ mapKey, crashes: this.recentCrashCount }, 'auto-respawn exhausted — emitting alert');
+      emitAlert(
+        this.instanceName,
+        'agent_respawn_failed',
+        `whatsoup@${this.instanceName} agent respawn exhausted (${this.recentCrashCount} crashes)`,
+        `Chat: ${mapKey}, Last exit: code=${info?.exitCode ?? '?'} signal=${info?.signal ?? 'none'}`,
+      );
     }
   }
 
