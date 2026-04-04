@@ -3,8 +3,7 @@
 // Eliminates per-tool boilerplate: schema parsing, getSock(), null check, call, return.
 
 import { z } from 'zod';
-import type { ToolDeclaration, ToolScope, TargetMode } from '../types.ts';
-import type { WhatsAppSocket } from '../../transport/connection.ts';
+import type { ToolDeclaration, ToolScope, TargetMode, ExtendedBaileysSocket } from '../types.ts';
 
 export interface SockToolConfig<T extends z.ZodRawShape> {
   name: string;
@@ -14,7 +13,7 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
   targetMode?: TargetMode;
   replayPolicy?: 'safe' | 'unsafe' | 'read_only';
   /** Given parsed params and a live socket, call the sock method and return the result. */
-  call: (parsed: z.infer<z.ZodObject<T>>, sock: WhatsAppSocket) => Promise<unknown>;
+  call: (parsed: z.infer<z.ZodObject<T>>, sock: ExtendedBaileysSocket) => Promise<unknown>;
 }
 
 /**
@@ -22,7 +21,7 @@ export interface SockToolConfig<T extends z.ZodRawShape> {
  * The returned handler parses the schema, obtains the socket, and delegates to `config.call`.
  */
 export function makeSockTool<T extends z.ZodRawShape>(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   config: SockToolConfig<T>,
 ): ToolDeclaration {
   return {
@@ -48,7 +47,7 @@ export function makeSockTool<T extends z.ZodRawShape>(
  * configs with different schema shapes without needing a union type.
  */
 export function registerSockTools(
-  getSock: () => WhatsAppSocket | null,
+  getSock: () => ExtendedBaileysSocket | null,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- heterogeneous config array requires any for ZodRawShape variance; expires 2026-12-31
   configs: SockToolConfig<any>[],
   register: (tool: ToolDeclaration) => void,

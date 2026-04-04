@@ -5,7 +5,7 @@
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
-import type { ToolDeclaration } from './types.ts';
+import type { ToolDeclaration, ExtendedBaileysSocket } from './types.ts';
 import type { Database } from '../core/database.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import { registerMessagingTools } from './tools/messaging.ts';
@@ -38,7 +38,7 @@ export function registerAllTools(
   connection: ConnectionManager,
   db: Database,
 ): void {
-  const getSock = () => connection.getSocket();
+  const getSock = () => connection.getSocket() as ExtendedBaileysSocket | null;
   const register = (tool: ToolDeclaration) => {
     try {
       registry.register(tool);

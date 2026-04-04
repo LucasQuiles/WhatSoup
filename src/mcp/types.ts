@@ -1,8 +1,24 @@
 import type { ZodType } from 'zod';
+import type { WhatsAppSocket } from '../transport/connection.ts';
 
 export type ToolScope = 'chat' | 'global';
 export type TargetMode = 'injected' | 'caller-supplied';
 export type SessionTier = 'global' | 'chat-scoped';
+
+/**
+ * MCP tool socket type — re-exports WhatsAppSocket for use by tool files.
+ *
+ * The upstream Baileys type definitions now include all methods used by
+ * MCP tools (community, newsletter, business, profile, privacy, calls,
+ * advanced/protocol). This alias provides a single import point for tool
+ * files and serves as an extension seam if future Baileys versions drop
+ * method declarations.
+ *
+ * Previously, tool files used 70+ `(sock as any)` casts because these
+ * methods weren't in the type definitions. They are now fully typed
+ * upstream, so the casts have been removed.
+ */
+export type ExtendedBaileysSocket = WhatsAppSocket;
 
 export interface SessionContext {
   tier: SessionTier;
