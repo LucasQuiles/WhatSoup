@@ -1175,6 +1175,136 @@ describe('Event-driven provider ready signal', () => {
   });
 });
 
+// ─── Codex session resume on crash tests ─────────────────────────────────────
+
+describe('Codex session resume via thread ID', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    // Override stdin.write to tolerate calls without a callback (codex JSON-RPC uses 1-arg write)
+    (mockChild.stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
+      (_data: unknown, _enc?: unknown, cb?: (err?: Error | null) => void) => { if (cb) cb(); },
+    );
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('includes threadId in thread/start when resuming with a stored thread ID', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    // Spawn with a resume thread ID (simulating crash recovery)
+    await sm.spawnSession('thread_resume_abc', 42);
+
+    // Find the thread/start call — it should contain the threadId
+    const writes = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls;
+    const threadStartCall = writes.find((call: unknown[]) => {
+      const data = String(call[0]);
+      return data.includes('"thread/start"');
+    });
+    expect(threadStartCall).toBeDefined();
+    const payload = JSON.parse(String(threadStartCall![0]));
+    expect(payload.params.threadId).toBe('thread_resume_abc');
+  });
+
+  it('falls back to fresh thread when resume thread/start returns an error', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession('thread_stale_xyz', 42);
+
+    // Clear writes from initial handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    // Simulate error response from the app-server rejecting the threadId.
+    // The thread/start request was the second request (ws-2).
+    const errorResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'ws-2',
+      error: { code: -32600, message: 'Thread not found' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(errorResponse));
+
+    // A fresh thread/start should have been sent (without threadId)
+    const writes = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls;
+    const freshThreadStart = writes.find((call: unknown[]) => {
+      const data = String(call[0]);
+      return data.includes('"thread/start"');
+    });
+    expect(freshThreadStart).toBeDefined();
+    const payload = JSON.parse(String(freshThreadStart![0]));
+    expect(payload.params.threadId).toBeUndefined();
+  });
+
+  it('clears stale thread ID from DB after resume failure', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession('thread_expired_999', 42);
+
+    // Simulate error response rejecting the threadId
+    const errorResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'ws-2',
+      error: { code: -32600, message: 'Thread expired' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(errorResponse));
+
+    // updateSessionId should have been called with empty string to clear the stale ID
+    expect(updateSessionId).toHaveBeenCalledWith(db, 42, '');
+  });
+
+  it('does not include threadId in thread/start for fresh spawn (no resume)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    // Fresh spawn — no resume ID
+    await sm.spawnSession();
+
+    const writes = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls;
+    const threadStartCall = writes.find((call: unknown[]) => {
+      const data = String(call[0]);
+      return data.includes('"thread/start"');
+    });
+    expect(threadStartCall).toBeDefined();
+    const payload = JSON.parse(String(threadStartCall![0]));
+    expect(payload.params.threadId).toBeUndefined();
+  });
+});
+
 // ─── formatAge tests ──────────────────────────────────────────────────────────
 
 describe('formatAge', () => {
