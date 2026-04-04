@@ -160,10 +160,6 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
     return resolved ?? normalizeLid(local);
   }
 
-  // Personal JID or other — return local part
-  try {
-    return toConversationKey(jid);
-  } catch {
-    return local;
-  }
+  // Personal JID or other — delegate to extractLocal
+  return extractLocal(jid);
 }
