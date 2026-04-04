@@ -177,30 +177,11 @@ export async function handleConfigUpdate(
 
   // Validate cwd path traversal (same guard as handleCreateLine)
   if (merged.agentOptions && typeof (merged.agentOptions as Record<string, unknown>).cwd === 'string') {
-    const cwd = (merged.agentOptions as Record<string, unknown>).cwd as string;
-    if (cwd.trim()) {
-      const safeCwd = path.resolve(cwd);
-      if (!safeCwd.startsWith(os.homedir() + path.sep)) {
-        jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
-        return;
-      }
-      (merged.agentOptions as Record<string, unknown>).cwd = safeCwd;
-    }
+    if (resolveAndValidateCwd(merged.agentOptions as Record<string, unknown>, res) === null) return;
   }
 
   // Validate numeric bounds if present in patch
-  if (typeof patch.rateLimitPerHour === 'number' && (patch.rateLimitPerHour < 1 || patch.rateLimitPerHour > 10000)) {
-    jsonResponse(res, 400, { error: 'rateLimitPerHour must be between 1 and 10,000' });
-    return;
-  }
-  if (typeof patch.maxTokens === 'number' && (patch.maxTokens < 256 || patch.maxTokens > 200000)) {
-    jsonResponse(res, 400, { error: 'maxTokens must be between 256 and 200,000' });
-    return;
-  }
-  if (typeof patch.tokenBudget === 'number' && (patch.tokenBudget < 1000 || patch.tokenBudget > 10000000)) {
-    jsonResponse(res, 400, { error: 'tokenBudget must be between 1,000 and 10,000,000' });
-    return;
-  }
+  if (!validateNumericBounds(patch, res)) return;
 
   // Validate accessMode if patched
   if (patch.accessMode !== undefined) {
@@ -216,7 +197,7 @@ export async function handleConfigUpdate(
       jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
       return;
     }
-    merged.adminPhones = [...new Set((patch.adminPhones as string[]).map((p: string) => normalizePhoneE164(p)))];
+    merged.adminPhones = normalizeAdminPhones(patch.adminPhones as string[]);
   }
 
   // Cross-field constraint: sessionScope "single" requires accessMode "self_only"
@@ -228,12 +209,7 @@ export async function handleConfigUpdate(
 
   // Validate pluginDirs paths are within home directory
   if (Array.isArray(mergedAo?.pluginDirs)) {
-    for (const dir of mergedAo!.pluginDirs as unknown[]) {
-      if (typeof dir !== 'string' || !path.resolve(dir).startsWith(os.homedir() + path.sep)) {
-        jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
-        return;
-      }
-    }
+    if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) return;
   }
 
   // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
@@ -341,6 +317,68 @@ export async function handleDeleteLine(
 }
 
 // ---------------------------------------------------------------------------
+// Shared validation helpers (used by handleConfigUpdate and handleCreateLine)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate numeric bounds for rateLimitPerHour, maxTokens, and tokenBudget.
+ * Writes a 400 response and returns false on the first violation; returns true when valid.
+ */
+function validateNumericBounds(body: Record<string, unknown>, res: ServerResponse): boolean {
+  if (typeof body.rateLimitPerHour === 'number' && (body.rateLimitPerHour < 1 || body.rateLimitPerHour > 10000)) {
+    jsonResponse(res, 400, { error: 'rateLimitPerHour must be between 1 and 10,000' });
+    return false;
+  }
+  if (typeof body.maxTokens === 'number' && (body.maxTokens < 256 || body.maxTokens > 200000)) {
+    jsonResponse(res, 400, { error: 'maxTokens must be between 256 and 200,000' });
+    return false;
+  }
+  if (typeof body.tokenBudget === 'number' && (body.tokenBudget < 1000 || body.tokenBudget > 10000000)) {
+    jsonResponse(res, 400, { error: 'tokenBudget must be between 1,000 and 10,000,000' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve agentOptions.cwd and verify it is within the home directory.
+ * Mutates agentOptions.cwd in-place to the resolved absolute path.
+ * Returns the resolved path on success, null and writes a 400 on failure.
+ */
+function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: ServerResponse): string | null {
+  const cwd = agentOptions.cwd as string;
+  if (!cwd.trim()) return cwd; // empty — caller decides whether it's valid
+  const safeCwd = path.resolve(cwd);
+  if (!safeCwd.startsWith(os.homedir() + path.sep)) {
+    jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
+    return null;
+  }
+  agentOptions.cwd = safeCwd;
+  return safeCwd;
+}
+
+/**
+ * Validate that every entry in pluginDirs is a string within the home directory.
+ * Writes a 400 response and returns false on the first violation; returns true when valid.
+ */
+function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
+  for (const dir of dirs) {
+    if (typeof dir !== 'string' || !path.resolve(dir).startsWith(os.homedir() + path.sep)) {
+      jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Deduplicate and normalize an array of phone strings using E.164 format.
+ */
+function normalizeAdminPhones(phones: string[]): string[] {
+  return [...new Set(phones.map((p) => normalizePhoneE164(p)))];
+}
+
+// ---------------------------------------------------------------------------
 // Helpers for handleCreateLine
 // ---------------------------------------------------------------------------
 
@@ -437,7 +475,7 @@ export async function handleCreateLine(
     jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of non-empty strings' });
     return;
   }
-  adminPhones = [...new Set((adminPhones as string[]).map((p: string) => normalizePhoneE164(p)))];
+  adminPhones = normalizeAdminPhones(adminPhones as string[]);
 
   // --- Type-specific validation ---
   // systemPrompt and agentOptions are deferred — validated at instance start by instance-loader.
@@ -479,21 +517,11 @@ export async function handleCreateLine(
     }
     // Confine cwd to user home directory if provided
     if (typeof ao.cwd === 'string' && ao.cwd.trim()) {
-      const safeCwd = path.resolve(ao.cwd as string);
-      if (!safeCwd.startsWith(os.homedir() + path.sep)) {
-        jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
-        return;
-      }
-      (body.agentOptions as Record<string, unknown>).cwd = safeCwd;
+      if (resolveAndValidateCwd(ao, res) === null) return;
     }
     // Confine pluginDirs to user home directory
     if (Array.isArray(ao.pluginDirs)) {
-      for (const dir of ao.pluginDirs as unknown[]) {
-        if (typeof dir !== 'string' || !path.resolve(dir).startsWith(os.homedir() + path.sep)) {
-          jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
-          return;
-        }
-      }
+      if (!validatePluginDirs(ao.pluginDirs as unknown[], res)) return;
     }
   }
 
@@ -508,18 +536,7 @@ export async function handleCreateLine(
   };
 
   // --- Validate numeric bounds ---
-  if (typeof body.rateLimitPerHour === 'number' && (body.rateLimitPerHour < 1 || body.rateLimitPerHour > 10000)) {
-    jsonResponse(res, 400, { error: 'rateLimitPerHour must be between 1 and 10,000' });
-    return;
-  }
-  if (typeof body.maxTokens === 'number' && (body.maxTokens < 256 || body.maxTokens > 200000)) {
-    jsonResponse(res, 400, { error: 'maxTokens must be between 256 and 200,000' });
-    return;
-  }
-  if (typeof body.tokenBudget === 'number' && (body.tokenBudget < 1000 || body.tokenBudget > 10000000)) {
-    jsonResponse(res, 400, { error: 'tokenBudget must be between 1,000 and 10,000,000' });
-    return;
-  }
+  if (!validateNumericBounds(body, res)) return;
 
   // Pass through all optional config fields (exclude internal/UI-only fields)
   const PASSTHROUGH_FIELDS = [
