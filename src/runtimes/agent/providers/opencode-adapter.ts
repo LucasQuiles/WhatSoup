@@ -20,6 +20,7 @@ import type {
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
+import { buildBaseChildEnv } from './child-env.ts';
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -90,28 +91,14 @@ interface OpenCodeMessageResponse {
  * Only the vars opencode actually needs are forwarded.
  */
 function buildOpenCodeEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
-    SHELL: process.env.SHELL,
-    LANG: process.env.LANG,
-    TERM: process.env.TERM,
-    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-    SUDO_ASKPASS: process.env.SUDO_ASKPASS,
-  };
+  const env = buildBaseChildEnv();
 
   // Pass through any OPENCODE_SERVER_PASSWORD the host has set.
   if (process.env.OPENCODE_SERVER_PASSWORD) {
     env.OPENCODE_SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD;
   }
 
-  // Strip undefined values
-  return Object.fromEntries(
-    Object.entries(env).filter(([, v]) => v !== undefined),
-  ) as NodeJS.ProcessEnv;
+  return env;
 }
 
 // ---------------------------------------------------------------------------

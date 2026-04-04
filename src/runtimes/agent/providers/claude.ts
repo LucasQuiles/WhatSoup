@@ -13,6 +13,7 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { parseEvent } from '../stream-parser.ts';
+import { buildBaseChildEnv } from './child-env.ts';
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -47,27 +48,8 @@ const STDIN_WRITE_TIMEOUT_MS = 30_000;
  * Anthropic's key, Gemini would receive OpenAI's key, etc. By constructing an
  * explicit allowlist we ensure each subprocess only gets the credentials it needs.
  */
-// NOTE: This is intentionally duplicated from session.ts until SessionManager
-// is wired through ClaudeProvider. Once session.ts delegates to ClaudeProvider,
-// remove the copy in session.ts and keep only this one.
 function buildChildEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    // System essentials
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
-    SHELL: process.env.SHELL,
-    LANG: process.env.LANG,
-    TERM: process.env.TERM,
-    // Node.js
-    NODE_PATH: process.env.NODE_PATH,
-    // XDG dirs (Linux)
-    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-    // Sudo support
-    SUDO_ASKPASS: process.env.SUDO_ASKPASS,
-  };
+  const env = buildBaseChildEnv();
 
   // OPENAI_API_KEY: passed because Claude Code may use it for its own features.
   // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
@@ -78,10 +60,7 @@ function buildChildEnv(): NodeJS.ProcessEnv {
   // Excluded: ANTHROPIC_API_KEY (subscription auth), PINECONE_API_KEY (parent MCP only),
   // WHATSOUP_HEALTH_TOKEN (parent-only auth token)
 
-  // Strip undefined values (env vars not set in the parent process)
-  return Object.fromEntries(
-    Object.entries(env).filter(([, v]) => v !== undefined),
-  ) as NodeJS.ProcessEnv;
+  return env;
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 import { parseOpenCodeEvent, resetParserState as resetOpenCodeParserState } from './providers/opencode-parser.ts';
+import { buildBaseChildEnv } from './providers/child-env.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -68,23 +69,7 @@ export interface SessionManagerOptions {
  * its own credentials plus the system essentials below.
  */
 function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    // System essentials
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    USER: process.env.USER,
-    SHELL: process.env.SHELL,
-    LANG: process.env.LANG,
-    TERM: process.env.TERM,
-    // Node.js
-    NODE_PATH: process.env.NODE_PATH,
-    // XDG dirs (Linux)
-    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-    // Sudo support
-    SUDO_ASKPASS: process.env.SUDO_ASKPASS,
-  };
+  const env = buildBaseChildEnv();
 
   // Provider-specific credentials — each provider only receives the keys it needs.
   switch (provider) {
@@ -111,10 +96,7 @@ function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
   // Excluded (all providers): PINECONE_API_KEY (parent MCP only),
   // WHATSOUP_HEALTH_TOKEN (parent-only auth token)
 
-  // Strip undefined values (env vars not set in the parent process)
-  return Object.fromEntries(
-    Object.entries(env).filter(([, v]) => v !== undefined),
-  ) as NodeJS.ProcessEnv;
+  return env;
 }
 
 export class SessionManager {
