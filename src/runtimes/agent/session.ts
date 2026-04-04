@@ -281,6 +281,7 @@ export class SessionManager {
       // Codex app-server: capture threadId from thread/started notification
       if (this.provider === 'codex-cli' && event.sessionId) {
         this.codexThreadId = event.sessionId;
+        this.codexResumeThreadStartReqId = null; // resume succeeded, clear tracking
         log.info({ chatJid: this.chatJid, codexThreadId: this.codexThreadId }, 'codex: captured threadId');
       }
 
@@ -1163,6 +1164,7 @@ export class SessionManager {
     this.messageCount = 0;
     this.lastMessageAt = null;
     this.codexThreadId = null;
+    this.codexResumeThreadStartReqId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
   }

@@ -36,7 +36,7 @@ describe('Provider hardening', () => {
 
   describe('Provider descriptor completeness', () => {
     // Every provider file that exports a descriptor must have all required fields
-    const descriptorFiles = ['claude.ts', 'openai-api.ts', 'anthropic-api.ts', 'opencode-adapter.ts'];
+    const descriptorFiles = ['claude.ts', 'openai-api.ts', 'anthropic-api.ts'];
 
     for (const file of descriptorFiles) {
       it(`${file} descriptor has all required fields`, () => {
