@@ -617,11 +617,38 @@ export class SessionManager {
       }
 
       const cwd = this.configuredCwd ?? homedir();
-      const systemPrompt = ''; // system prompt not used as CLI arg for non-Claude providers
-      const baseArgs = this.getProviderArgs(systemPrompt, cwd);
 
-      // Append the user message as the final argument (the prompt)
-      const args = [...baseArgs, text];
+      // Build args with session continuity: use resume/continue for subsequent turns
+      let args: string[];
+      if (this.provider === 'codex-cli' && this.sessionId && !this.sessionId.startsWith('codex-cli-')) {
+        // Codex: resume previous thread to maintain conversation history
+        // codex exec resume <thread_id> "new prompt"
+        args = [
+          'exec', '--json',
+          '--dangerously-bypass-approvals-and-sandbox',
+          ...(this.model ? ['-m', this.model] : []),
+          '-C', cwd,
+          'resume', this.sessionId,
+          text,
+        ];
+        log.info({ chatJid: this.chatJid, provider: this.provider, threadId: this.sessionId }, 'codex: resuming thread');
+      } else if (this.provider === 'gemini-cli' && this.sessionId && !this.sessionId.startsWith('gemini-cli-')) {
+        // Gemini: resume previous session
+        args = [
+          '-p', text,
+          '--output-format', 'stream-json',
+          '--yolo',
+          ...(this.model ? ['-m', this.model] : []),
+          '--resume', this.sessionId,
+        ];
+        log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'gemini: resuming session');
+      } else {
+        // First turn or providers without resume: use base args + prompt
+        const systemPrompt = '';
+        const baseArgs = this.getProviderArgs(systemPrompt, cwd);
+        args = [...baseArgs, text];
+        log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
+      }
       const binary = this.getProviderBinary();
       const parse = this.getParser();
 
