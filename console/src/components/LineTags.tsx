@@ -1,5 +1,5 @@
 import { type FC } from 'react'
-import { Shield, ShieldAlert, ShieldOff, Lock, Cpu } from 'lucide-react'
+import { Shield, ShieldAlert, ShieldOff, Lock, Cpu, Layers } from 'lucide-react'
 import type { LineInstance } from '../types'
 
 interface LineTagsProps {
@@ -33,6 +33,13 @@ function getModelTag(line: LineInstance): TagDef | null {
   const isOpenAi = fallback.toLowerCase().includes('gpt') || fallback.toLowerCase().includes('openai')
   if (!isOpenAi) return null
   return { label: 'openai fb', icon: Cpu, color: 'var(--color-s-warn)', bg: 'var(--s-warn-wash)' }
+}
+
+function getProviderTag(line: LineInstance): TagDef | null {
+  if (line.mode !== 'agent') return null
+  const provider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
+  if (!provider || provider === 'claude-cli') return null
+  return { label: provider, icon: Layers, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
 }
 
 const Tag: FC<{ tag: TagDef }> = ({ tag }) => {
@@ -72,6 +79,10 @@ const LineTags: FC<LineTagsProps> = ({ line }) => {
   // OpenAI fallback
   const modelTag = getModelTag(line)
   if (modelTag) tags.push(modelTag)
+
+  // Provider badge (agent lines with non-default provider)
+  const providerTag = getProviderTag(line)
+  if (providerTag) tags.push(providerTag)
 
   if (tags.length === 0) return null
 

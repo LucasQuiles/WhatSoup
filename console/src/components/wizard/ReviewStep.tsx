@@ -115,7 +115,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const systemPrompt = (data.systemPrompt as string) ?? ''
   const rateLimitPerHour = (data.rateLimitPerHour as number) ?? 60
   const tokenBudget = (data.tokenBudget as number) ?? 50000
-  const agentOptions = (data.agentOptions as { cwd?: string; sessionScope?: string }) ?? {}
+  const agentOptions = (data.agentOptions as { cwd?: string; sessionScope?: string; provider?: string; providerConfig?: Record<string, unknown> }) ?? {}
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
 
   const accessLabels: Record<string, string> = {
@@ -184,6 +184,10 @@ const ReviewStep: FC<ReviewStepProps> = ({
           <>
             <KV label="CWD" value={agentOptions.cwd || 'Not set'} />
             <KV label="Session scope" value={agentOptions.sessionScope ?? 'single'} />
+            <KV label="Provider" value={agentOptions.provider ?? 'claude-cli'} />
+            {agentOptions.providerConfig?.model && (
+              <KV label="Provider model" value={agentOptions.providerConfig.model as string} />
+            )}
           </>
         )}
         <KV
