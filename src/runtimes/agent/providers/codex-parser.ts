@@ -7,7 +7,7 @@
 // - Server requests:      { jsonrpc: "2.0", id: "...", method: "...", params: {...} }
 
 import type { AgentEvent } from '../stream-parser.ts';
-import { type JsonObject, isRecord, stringifyValue, getNestedNumber } from './parser-utils.ts';
+import { type JsonObject, isRecord, stringifyValue, getNestedNumber, extractMessage, extractTokenCounts } from './parser-utils.ts';
 
 // ─── Item helpers ─────────────────────────────────────────────────────────────
 
@@ -279,65 +279,6 @@ export function parseCodexEvent(line: string): AgentEvent | null {
 // ─── Legacy exec --json parser ──────────────────────────────────────────────
 // Kept for backward compatibility with existing test fixtures that use the
 // old `codex exec --json` JSONL format.
-
-function extractMessage(value: unknown): string | null {
-  if (typeof value === 'string') return value || null;
-
-  if (Array.isArray(value)) {
-    const parts = value.map((item) => extractMessage(item)).filter((item): item is string => Boolean(item));
-    return parts.length > 0 ? parts.join('\n') : null;
-  }
-
-  if (!isRecord(value)) return null;
-
-  for (const key of ['text', 'message', 'error', 'details', 'content', 'aggregated_output', 'output']) {
-    const nested = extractMessage(value[key]);
-    if (nested) return nested;
-  }
-
-  return null;
-}
-
-function extractTokenCounts(usage: unknown): Pick<
-  Extract<AgentEvent, { type: 'result' }>,
-  'inputTokens' | 'outputTokens'
-> {
-  const inputPaths = [
-    ['input_tokens'],
-    ['inputTokens'],
-    ['usage', 'input_tokens'],
-    ['usage', 'inputTokens'],
-  ] as const;
-
-  const outputPaths = [
-    ['output_tokens'],
-    ['outputTokens'],
-    ['usage', 'output_tokens'],
-    ['usage', 'outputTokens'],
-  ] as const;
-
-  for (const path of inputPaths) {
-    const inputTokens = getNestedNumber(usage, path);
-    if (inputTokens !== undefined) {
-      for (const outputPath of outputPaths) {
-        const outputTokens = getNestedNumber(usage, outputPath);
-        if (outputTokens !== undefined) {
-          return { inputTokens, outputTokens };
-        }
-      }
-      return { inputTokens };
-    }
-  }
-
-  for (const path of outputPaths) {
-    const outputTokens = getNestedNumber(usage, path);
-    if (outputTokens !== undefined) {
-      return { outputTokens };
-    }
-  }
-
-  return {};
-}
 
 function extractLegacyToolInput(item: JsonObject): Record<string, unknown> {
   const itemType = String(item['type'] ?? '');
