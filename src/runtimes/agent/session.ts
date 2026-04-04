@@ -31,6 +31,16 @@ export const WATCHDOG_SOFT_MS  = 600_000;   // 10 min — first soft probe
 export const WATCHDOG_WARN_MS  = 1_200_000; // 20 min — second soft probe
 export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 
+/** Human-readable display name for each supported provider. */
+export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  'claude-cli': 'Claude Code',
+  'codex-cli': 'Codex CLI',
+  'gemini-cli': 'Gemini CLI',
+  'opencode-cli': 'OpenCode',
+  'anthropic-api': 'Anthropic API',
+  'openai-api': 'OpenAI API',
+};
+
 export interface SessionCrashInfo {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -413,6 +423,8 @@ export class SessionManager {
 
     const cwd = this.configuredCwd ?? homedir();
 
+    const displayName = PROVIDER_DISPLAY_NAMES[this.provider] ?? this.provider;
+
     let systemPrompt: string;
     if (this.instructionsPath) {
       const fullInstructionsPath = join(cwd, this.instructionsPath);
@@ -423,10 +435,10 @@ export class SessionManager {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(`Failed to read instructionsPath "${fullInstructionsPath}": ${message}`);
       }
-      systemPrompt = `You are "${this.instanceName}", a personal Claude Code agent running over WhatsApp. ${instructionsContent}`;
+      systemPrompt = `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp. ${instructionsContent}`;
     } else {
       systemPrompt = [
-        `You are "${this.instanceName}", a personal Claude Code agent running over WhatsApp.`,
+        `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp.`,
         `Your responses are sent as WhatsApp messages — keep them concise.`,
         `You have full access to the local machine via bypassPermissions mode.`,
         `Working directory: ${cwd}`,
@@ -553,7 +565,7 @@ export class SessionManager {
       for (const line of lines) {
         // Codex app-server: intercept server-initiated requests (approval callbacks)
         // before they reach the parser. These have both 'id' and 'method'.
-        if (this.provider === 'codex-cli' && line.includes('"method"') && line.includes('"id"')) {
+        if (this.provider === 'codex-cli' && line.startsWith('{"jsonrpc"')) {
           try {
             const msg = JSON.parse(line) as Record<string, unknown>;
             if (msg['jsonrpc'] === '2.0' && msg['id'] !== undefined && typeof msg['method'] === 'string') {

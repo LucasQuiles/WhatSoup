@@ -27,7 +27,7 @@ function makeMockChild(pid = 12345) {
     write: ReturnType<typeof vi.fn>;
   };
   (stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
-    (_data: unknown, _enc: unknown, cb: (err?: Error | null) => void) => cb(),
+    (_data: unknown, _enc?: unknown, cb?: (err?: Error | null) => void) => { if (typeof _enc === 'function') (_enc as (err?: Error | null) => void)(); else if (typeof cb === 'function') cb(); },
   );
 
   const stdout = new EventEmitter();
@@ -67,7 +67,7 @@ vi.mock('node:fs', () => ({
 // Import after mocks are registered
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS } from '../../../src/runtimes/agent/session.ts';
+import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -658,6 +658,93 @@ describe('SessionManager', () => {
     expect(readFileSync).toHaveBeenCalledWith('/agent/dir/CLAUDE.md', 'utf8');
   });
 
+  // ─── Provider-aware system prompt identity ────────────────────────────────
+
+  it('system prompt uses "Claude Code" for claude-cli provider (default)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const args: string[] = callArgs[1];
+    const systemPromptIdx = args.indexOf('--system-prompt');
+    const systemPrompt = args[systemPromptIdx + 1];
+    expect(systemPrompt).toContain('a personal Claude Code agent');
+    expect(systemPrompt).not.toContain('a personal claude-cli agent');
+  });
+
+  it('system prompt uses "Codex CLI" for codex-cli provider', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    await sm.spawnSession();
+
+    // Codex sends systemPrompt via JSON-RPC thread/start baseInstructions on stdin
+    const stdinCalls = (mockChild.stdin.write as ReturnType<typeof vi.fn>).mock.calls;
+    const threadStartCall = stdinCalls.find((call: unknown[]) => {
+      const data = String(call[0]);
+      return data.includes('"thread/start"');
+    });
+    expect(threadStartCall).toBeDefined();
+    const payload = JSON.parse(String(threadStartCall![0]).trim());
+    expect(payload.params.baseInstructions).toContain('a personal Codex CLI agent');
+    expect(payload.params.baseInstructions).not.toContain('Claude Code');
+  });
+
+  it('system prompt uses "OpenCode" for opencode-cli provider (spawn-per-turn)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+    await sm.spawnSession();
+
+    // opencode-cli is spawn-per-turn, so systemPrompt is stored on the instance
+    expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('a personal OpenCode agent');
+    expect((sm as unknown as { systemPrompt: string }).systemPrompt).not.toContain('Claude Code');
+  });
+
+  it('system prompt uses provider string as fallback for unknown providers', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'custom-provider',
+    });
+    await sm.spawnSession();
+
+    // Unknown providers are spawn-per-turn, so systemPrompt is stored on the instance
+    expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('a personal custom-provider agent');
+  });
+
+  it('system prompt with instructionsPath uses provider display name', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('Custom instructions.');
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      cwd: '/agent/dir', instructionsPath: 'CLAUDE.md',
+    });
+    await sm.spawnSession();
+
+    expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('a personal OpenCode agent');
+    expect((sm as unknown as { systemPrompt: string }).systemPrompt).not.toContain('Claude Code');
+    expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('Custom instructions.');
+  });
+
   // ─── P3-C: Pending tool tracking ─────────────────────────────────────────
 
   it('trackToolStart/trackToolEnd tracks pending tools correctly', async () => {
@@ -837,6 +924,80 @@ describe('SessionManager', () => {
 
     expect(sentMessages).toHaveLength(2);
     expect(sentMessages[1].text).toContain('session ended');
+  });
+});
+
+// ─── Codex approval pre-filter tests ─────────────────────────────────────────
+
+describe('Codex approval pre-filter', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    // Override stdin.write to tolerate calls without a callback (codex JSON-RPC uses 1-arg write)
+    (mockChild.stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
+      (_data: unknown, _enc?: unknown, cb?: (err?: Error | null) => void) => { if (cb) cb(); },
+    );
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('intercepts a valid JSON-RPC approval request', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Clear writes from spawnSession's initialize + thread/start handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    const approvalLine = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'item/commandExecution/requestApproval',
+      params: {},
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(approvalLine));
+
+    // handleCodexServerRequest auto-approves by writing to stdin
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"decision":"approved"'),
+    );
+  });
+
+  it('does NOT intercept tool output containing "method" and "id" substrings', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'codex-cli',
+      onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Clear writes from spawnSession's initialize + thread/start handshake
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    // A tool output line that contains "method" and "id" but is not a JSON-RPC message
+    const toolOutput = 'The method getId was called with "id" parameter and "method" field\n';
+    mockChild.stdout.emit('data', Buffer.from(toolOutput));
+
+    // stdin.write should NOT have been called (no interception)
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
   });
 });
 
