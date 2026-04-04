@@ -15,6 +15,7 @@ import { configRoot, dataRoot, stateRoot } from '../paths.ts';
 import { writePermissionsSettings } from '../../core/workspace.ts';
 import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
 import type { PermissionsSettings } from '../../core/settings-template.ts';
+import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
 
 export interface OpsDeps {
   discovery: FleetDiscovery;
@@ -201,9 +202,8 @@ export async function handleConfigUpdate(
 
   // Validate accessMode if patched
   if (patch.accessMode !== undefined) {
-    const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'];
-    if (!VALID_ACCESS_MODES.includes(patch.accessMode as string)) {
-      jsonResponse(res, 400, { error: `accessMode must be one of: ${VALID_ACCESS_MODES.join(', ')}` });
+    if (!VALID_ACCESS_MODES.has(patch.accessMode as string)) {
+      jsonResponse(res, 400, { error: `accessMode must be one of: ${[...VALID_ACCESS_MODES].join(', ')}` });
       return;
     }
   }
@@ -388,7 +388,6 @@ function cleanupPartial(name: string, extraPaths?: string[]): void {
 // ---------------------------------------------------------------------------
 
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
-const VALID_TYPES = new Set(['passive', 'chat', 'agent']);
 
 /** POST /api/lines — create a new WhatSoup instance. */
 export async function handleCreateLine(
@@ -455,7 +454,6 @@ export async function handleCreateLine(
   }
 
   // --- Validate accessMode ---
-  const VALID_ACCESS_MODES = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
   const accessMode = type === 'passive' ? 'self_only' : (body.accessMode ?? 'self_only') as string;
   if (!VALID_ACCESS_MODES.has(accessMode)) {
     jsonResponse(res, 400, { error: 'accessMode must be one of: self_only, allowlist, open_dm, groups_only' });
@@ -469,8 +467,7 @@ export async function handleCreateLine(
       jsonResponse(res, 400, { error: 'agentOptions must be an object' });
       return;
     }
-    const VALID_SCOPES = new Set(['single', 'shared', 'per_chat']);
-    if (ao.sessionScope && !VALID_SCOPES.has(ao.sessionScope as string)) {
+    if (ao.sessionScope && !VALID_SESSION_SCOPES.has(ao.sessionScope as string)) {
       jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
       return;
     }

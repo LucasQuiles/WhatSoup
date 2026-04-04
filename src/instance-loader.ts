@@ -13,9 +13,9 @@ type InstanceType = 'chat' | 'agent' | 'passive';
 type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 type SessionScope = 'single' | 'shared' | 'per_chat';
 
-const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
-const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
-const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set(['single', 'shared', 'per_chat']);
+export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
+export const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
+export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set(['single', 'shared', 'per_chat']);
 
 interface AgentOptionsSandbox {
   allowedPaths?: unknown;
