@@ -93,6 +93,16 @@ export function parseEvent(line: string): AgentEvent | null {
       typeof content === 'object' && content !== null
         ? (content as Record<string, unknown>)
         : event;
+    const directContent = messageObj['content'];
+    if (typeof directContent === 'string') {
+      const trimmed = directContent.trim();
+      // Claude emits unknown slash-skill failures as synthetic user messages
+      // before any assistant/result event. Surface them as a terminal result so
+      // the WhatsApp runtime does not silently drop the turn.
+      if (/^Unknown skill:\s+/i.test(trimmed)) {
+        return { type: 'result', text: trimmed };
+      }
+    }
     const contentArr = messageObj['content'];
     if (Array.isArray(contentArr)) {
       for (const block of contentArr) {

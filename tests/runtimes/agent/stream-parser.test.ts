@@ -165,6 +165,18 @@ describe('parseEvent', () => {
   });
 
   describe('user tool_result events', () => {
+    it('maps unknown skill local-command failure to a terminal result', () => {
+      const result = parseEvent(
+        line({
+          type: 'user',
+          message: {
+            content: 'Unknown skill: sdlc',
+          },
+        }),
+      );
+      expect(result).toEqual({ type: 'result', text: 'Unknown skill: sdlc' });
+    });
+
     it('maps tool_result block (is_error=false) to tool_result', () => {
       const result = parseEvent(
         line({
