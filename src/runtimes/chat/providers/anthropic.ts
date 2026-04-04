@@ -3,7 +3,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import type { LLMProvider, GenerateRequest, GenerateResponse, ChatMessage } from './types.ts';
-import { classifyApiError, extractStatusCode } from './api-error-classifier.ts';
+import { handleApiError } from './api-error-classifier.ts';
 
 const logger = createChildLogger('anthropic-provider');
 
@@ -54,23 +54,7 @@ export function createAnthropicProvider(): LLMProvider {
           { signal: controller.signal },
         );
       } catch (err) {
-        const elapsed_ms = Date.now() - startMs;
-        const errorType = classifyApiError(err);
-        const statusCode = extractStatusCode(err);
-        logger.error(
-          { errorType, statusCode, provider: 'anthropic', model, elapsed_ms, err },
-          'llm_api_error',
-        );
-        if (errorType === 'timeout') {
-          throw new AppError('Anthropic request timed out', 'LLM_TIMEOUT', err);
-        }
-        if (errorType === 'auth') {
-          throw new AppError('Anthropic auth failed', 'LLM_AUTH_ERROR', err);
-        }
-        if (errorType === 'rate_limit') {
-          throw new AppError('Anthropic rate limited', 'LLM_RATE_LIMITED', err);
-        }
-        throw new AppError('Anthropic request failed', 'LLM_UNAVAILABLE', err);
+        handleApiError(err, 'Anthropic', model, startMs, logger);
       } finally {
         clearTimeout(timeout);
       }

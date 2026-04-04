@@ -1,6 +1,9 @@
 /**
  * Classifies LLM API errors into structured categories for logging and alerting.
+ * Also provides a shared handler for provider catch blocks.
  */
+import type { Logger } from 'pino';
+import { WhatSoupError as AppError } from '../../../errors.ts';
 export type ApiErrorType = 'auth' | 'rate_limit' | 'timeout' | 'server' | 'network' | 'unknown';
 
 /**
@@ -45,4 +48,36 @@ export function classifyApiError(error: unknown): ApiErrorType {
   }
 
   return 'unknown';
+}
+
+/**
+ * Shared catch-block handler for LLM provider errors.
+ *
+ * Logs the error with provider context and throws the appropriate AppError.
+ * Never returns — always throws.
+ */
+export function handleApiError(
+  err: unknown,
+  providerName: string,
+  model: string,
+  startMs: number,
+  logger: Logger,
+): never {
+  const elapsed_ms = Date.now() - startMs;
+  const errorType = classifyApiError(err);
+  const statusCode = extractStatusCode(err);
+  logger.error(
+    { errorType, statusCode, provider: providerName, model, elapsed_ms, err },
+    'llm_api_error',
+  );
+  if (errorType === 'timeout') {
+    throw new AppError(`${providerName} request timed out`, 'LLM_TIMEOUT', err);
+  }
+  if (errorType === 'auth') {
+    throw new AppError(`${providerName} auth failed`, 'LLM_AUTH_ERROR', err);
+  }
+  if (errorType === 'rate_limit') {
+    throw new AppError(`${providerName} rate limited`, 'LLM_RATE_LIMITED', err);
+  }
+  throw new AppError(`${providerName} request failed`, 'LLM_UNAVAILABLE', err);
 }
