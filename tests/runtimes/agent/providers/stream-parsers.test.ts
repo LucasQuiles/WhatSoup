@@ -205,6 +205,156 @@ describe('Codex stream parser', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Codex app-server (JSON-RPC) parser
+// ---------------------------------------------------------------------------
+
+describe('Codex app-server parser (JSON-RPC)', () => {
+  describe('codex-appserver-output.jsonl (simple 2+2 response)', () => {
+    const lines = readFixtureLines('codex-appserver-output.jsonl').filter((l) => l.trim() !== '');
+
+    it('parses initialize response → ignored', () => {
+      const event = parseCodexEvent(lines[0]!);
+      expect(event).toEqual({ type: 'ignored' });
+    });
+
+    it('parses thread/started notification → init with threadId', () => {
+      const event = parseCodexEvent(lines[1]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: '019d572a-d8da-7fa3-8c55-6bad7ff0f8b9',
+      });
+    });
+
+    it('parses thread/start response → init (duplicate, has Thread shape)', () => {
+      const event = parseCodexEvent(lines[2]!);
+      expect(event).toEqual({
+        type: 'init',
+        sessionId: '019d572a-d8da-7fa3-8c55-6bad7ff0f8b9',
+      });
+    });
+
+    it('parses turn/started → ignored', () => {
+      const event = parseCodexEvent(lines[3]!);
+      expect(event).toEqual({ type: 'ignored' });
+    });
+
+    it('parses item/agentMessage/delta → assistant_text with delta text', () => {
+      const event = parseCodexEvent(lines[4]!);
+      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+    });
+
+    it('parses item/completed agentMessage → assistant_text with full text', () => {
+      const event = parseCodexEvent(lines[5]!);
+      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+    });
+
+    it('parses turn/completed → result with null text', () => {
+      const event = parseCodexEvent(lines[6]!);
+      expect(event).toEqual({ type: 'result', text: null });
+    });
+  });
+
+  describe('codex-appserver-tools.jsonl (tool use: commands + file changes)', () => {
+    const lines = readFixtureLines('codex-appserver-tools.jsonl').filter((l) => l.trim() !== '');
+
+    it('parses item/started commandExecution → tool_use', () => {
+      const event = parseCodexEvent(lines[2]!);
+      expect(event).toMatchObject({
+        type: 'tool_use',
+        toolName: 'commandExecution',
+        toolId: 'cmd-1',
+      });
+      const toolUse = event as { type: 'tool_use'; toolInput: Record<string, unknown> };
+      expect(toolUse.toolInput['command']).toBe('ls -la');
+    });
+
+    it('parses item/completed commandExecution → tool_result with output', () => {
+      const event = parseCodexEvent(lines[3]!);
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'cmd-1',
+        isError: false,
+      });
+      const result = event as { type: 'tool_result'; content: string };
+      expect(result.content).toBe('file1.txt\nfile2.txt');
+    });
+
+    it('parses item/started fileChange → tool_use', () => {
+      const event = parseCodexEvent(lines[4]!);
+      expect(event).toMatchObject({
+        type: 'tool_use',
+        toolName: 'fileChange',
+        toolId: 'fc-1',
+      });
+    });
+
+    it('parses item/completed fileChange → tool_result', () => {
+      const event = parseCodexEvent(lines[5]!);
+      expect(event).toMatchObject({
+        type: 'tool_result',
+        toolId: 'fc-1',
+        isError: false,
+      });
+    });
+
+    it('parses final turn/completed → result', () => {
+      const event = parseCodexEvent(lines[7]!);
+      expect(event).toEqual({ type: 'result', text: null });
+    });
+  });
+
+  describe('JSON-RPC edge cases', () => {
+    it('parses turn/completed with failed status → result with error text', () => {
+      const line = JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId: 'test-thread',
+          turn: { id: 'turn-1', items: [], status: 'failed', error: { message: 'context window exceeded' } },
+        },
+      });
+      const event = parseCodexEvent(line);
+      expect(event).toMatchObject({ type: 'result' });
+      const result = event as { type: 'result'; text: string | null };
+      expect(result.text).toContain('context window exceeded');
+    });
+
+    it('parses error response → result with error text', () => {
+      const line = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'ws-5',
+        error: { code: -32600, message: 'Invalid Request' },
+      });
+      const event = parseCodexEvent(line);
+      expect(event).toMatchObject({ type: 'result' });
+      const result = event as { type: 'result'; text: string | null };
+      expect(result.text).toContain('Invalid Request');
+    });
+
+    it('parses server request (approval) → unknown (handled by session manager)', () => {
+      const line = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'srv-1',
+        method: 'item/commandExecution/requestApproval',
+        params: { threadId: 'test', turnId: 't1', itemId: 'i1' },
+      });
+      const event = parseCodexEvent(line);
+      expect(event).toMatchObject({ type: 'unknown' });
+    });
+
+    it('parses thread/compacted → compact_boundary', () => {
+      const line = JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'thread/compacted',
+        params: { threadId: 'test' },
+      });
+      const event = parseCodexEvent(line);
+      expect(event).toEqual({ type: 'compact_boundary' });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Gemini stream parser
 // ---------------------------------------------------------------------------
 

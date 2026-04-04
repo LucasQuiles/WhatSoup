@@ -143,6 +143,10 @@ export class SessionManager {
   private watchdogWarn: ReturnType<typeof setTimeout> | null = null;
   private watchdogHard: ReturnType<typeof setTimeout> | null = null;
   private pendingToolIds: Set<string> = new Set();
+  /** Codex app-server thread ID for persistent sessions. */
+  private codexThreadId: string | null = null;
+  /** Monotonic counter for Codex JSON-RPC request IDs. */
+  private codexRequestSeq = 0;
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */
@@ -183,7 +187,10 @@ export class SessionManager {
 
   /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */
   private get isSpawnPerTurn(): boolean {
-    return this.provider !== 'claude-cli';
+    // Claude CLI and Codex app-server are persistent subprocesses.
+    // Others (gemini, opencode) still spawn per turn.
+    return this.provider !== 'claude-cli'
+      && this.provider !== 'codex-cli';
   }
 
   private getProviderBinary(): string {
@@ -201,10 +208,9 @@ export class SessionManager {
     switch (this.provider) {
       case 'codex-cli':
         return [
-          'exec', '--json',
-          '--dangerously-bypass-approvals-and-sandbox',
-          ...(model ? ['-m', model] : []),
-          '-C', cwd,
+          'app-server',
+          '--listen', 'stdio://',
+          ...(model ? ['--model', model] : []),
         ];
       case 'gemini-cli':
         return [
@@ -246,6 +252,151 @@ export class SessionManager {
         return parseEvent;
       case 'claude-cli':
       default: return parseEvent;
+    }
+  }
+
+  private handleProviderEvent(event: AgentEvent): void {
+    if (event.type === 'init' && this.dbRowId !== null) {
+      this.sessionId = event.sessionId;
+      updateSessionId(this.db, this.dbRowId, event.sessionId);
+
+      // Codex app-server: capture threadId from thread/started notification
+      if (this.provider === 'codex-cli' && event.sessionId) {
+        this.codexThreadId = event.sessionId;
+        log.info({ chatJid: this.chatJid, codexThreadId: this.codexThreadId }, 'codex: captured threadId');
+      }
+
+      if (this.provider === 'claude-cli') {
+        const transcriptPath = join(
+          homedir(),
+          '.claude',
+          'projects',
+          `-home-${userInfo().username}`,
+          `${event.sessionId}.jsonl`,
+        );
+        updateTranscriptPath(this.db, this.dbRowId, transcriptPath);
+      }
+
+      if (this.durability) {
+        this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), {
+          sessionId: this.sessionId,
+        });
+      }
+    }
+
+    this.onEvent(event);
+  }
+
+  /**
+   * Write a JSON-RPC request to a Codex app-server child process.
+   * Uses newline-delimited JSON (nd-JSON) framing.
+   */
+  private sendCodexRequest(
+    child: ReturnType<typeof spawn>,
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    const id = `ws-${++this.codexRequestSeq}`;
+    const msg = JSON.stringify({ jsonrpc: '2.0', method, params, id });
+    child.stdin!.write(msg + '\n');
+    log.debug({ method, id, chatJid: this.chatJid }, 'codex: sent JSON-RPC request');
+  }
+
+  /**
+   * Write a JSON-RPC response to a Codex app-server server-initiated request
+   * (e.g. auto-approving tool execution).
+   */
+  private sendCodexResponse(
+    child: ReturnType<typeof spawn>,
+    id: unknown,
+    result: unknown,
+  ): void {
+    const msg = JSON.stringify({ jsonrpc: '2.0', id, result });
+    child.stdin!.write(msg + '\n');
+    log.debug({ id, chatJid: this.chatJid }, 'codex: sent JSON-RPC response');
+  }
+
+  /**
+   * Handle Codex app-server server-initiated requests (approval callbacks).
+   * Auto-approves all requests since we run in full-access mode.
+   */
+  private handleCodexServerRequest(parsed: Record<string, unknown>): void {
+    if (!this.child) return;
+    const id = parsed['id'];
+    const method = String(parsed['method'] ?? '');
+
+    if (
+      method === 'item/commandExecution/requestApproval' ||
+      method === 'item/fileChange/requestApproval' ||
+      method === 'item/permissions/requestApproval' ||
+      method === 'applyPatchApproval' ||
+      method === 'execCommandApproval'
+    ) {
+      log.info({ method, id, chatJid: this.chatJid }, 'codex: auto-approving server request');
+      this.sendCodexResponse(this.child, id, { decision: 'approved' });
+      return;
+    }
+
+    if (method === 'item/tool/requestUserInput') {
+      // Cannot provide interactive input; deny gracefully
+      log.warn({ method, id, chatJid: this.chatJid }, 'codex: denying user input request (non-interactive)');
+      this.sendCodexResponse(this.child, id, { input: '' });
+      return;
+    }
+
+    log.warn({ method, id, chatJid: this.chatJid }, 'codex: unhandled server request');
+  }
+
+  private buildSpawnPerTurnPrompt(text: string): string {
+    if (!this.systemPrompt) return text;
+
+    return [
+      'System instructions:',
+      this.systemPrompt,
+      '',
+      'User message:',
+      text,
+    ].join('\n');
+  }
+
+  private buildSpawnPerTurnArgs(cwd: string, text: string): string[] {
+    const prompt = this.buildSpawnPerTurnPrompt(text);
+
+    switch (this.provider) {
+      // codex-cli is now persistent (app-server), not spawn-per-turn.
+
+      case 'gemini-cli':
+        if (this.sessionId && !this.sessionId.startsWith('gemini-cli-')) {
+          log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'gemini: resuming session');
+          return [
+            '-p', prompt,
+            '--output-format', 'stream-json',
+            '--yolo',
+            ...(this.model ? ['-m', this.model] : []),
+            '--resume', this.sessionId,
+          ];
+        }
+
+        log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
+        return [
+          '-p', prompt,
+          '--output-format', 'stream-json',
+          '--yolo',
+          ...(this.model ? ['-m', this.model] : []),
+        ];
+
+      case 'opencode-cli':
+        log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
+        return [
+          'run',
+          '--format', 'json',
+          '--pure',
+          ...(this.model ? ['-m', this.model] : []),
+          prompt,
+        ];
+
+      default:
+        return this.getProviderArgs('', cwd);
     }
   }
 
@@ -359,6 +510,24 @@ export class SessionManager {
       });
     }
 
+    // Codex app-server: send initialize + thread/start after spawn
+    if (this.provider === 'codex-cli') {
+      this.codexThreadId = null;
+      this.codexRequestSeq = 0;
+      this.sendCodexRequest(child, 'initialize', {
+        clientInfo: { name: 'WhatSoup', title: null, version: '1.0.0' },
+        capabilities: null,
+      });
+      this.sendCodexRequest(child, 'thread/start', {
+        cwd,
+        approvalPolicy: 'never' as const,
+        sandbox: 'danger-full-access' as const,
+        persistExtendedHistory: true,
+        experimentalRawEvents: false,
+        ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
+      });
+    }
+
     // Handle spawn errors (e.g. claude binary not in PATH, out of resources)
     child.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'ENOENT') {
@@ -389,32 +558,29 @@ export class SessionManager {
       // Keep the last (possibly incomplete) line in the buffer
       this.stdoutBuffer = lines.pop() ?? '';
       for (const line of lines) {
+        // Codex app-server: intercept server-initiated requests (approval callbacks)
+        // before they reach the parser. These have both 'id' and 'method'.
+        if (this.provider === 'codex-cli' && line.includes('"method"') && line.includes('"id"')) {
+          try {
+            const msg = JSON.parse(line) as Record<string, unknown>;
+            if (msg['jsonrpc'] === '2.0' && msg['id'] !== undefined && typeof msg['method'] === 'string') {
+              this.handleCodexServerRequest(msg);
+              continue;
+            }
+          } catch {
+            // Fall through to normal parsing
+          }
+        }
+
         const event = parse(line);
         if (event === null) continue;
 
         if (event.type === 'init' && this.dbRowId !== null) {
-          this.sessionId = event.sessionId;
-          updateSessionId(this.db, this.dbRowId, event.sessionId);
-          // Derive and persist transcript path
-          const transcriptPath = join(
-            homedir(),
-            '.claude',
-            'projects',
-            `-home-${userInfo().username}`,
-            `${event.sessionId}.jsonl`,
-          );
-          if (this.dbRowId !== null) {
-            updateTranscriptPath(this.db, this.dbRowId, transcriptPath);
-          }
-          // Durability checkpoint: record sessionId once Claude confirms it
-          if (this.durability) {
-            this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), {
-              sessionId: this.sessionId,
-            });
-          }
+          this.handleProviderEvent(event);
+          continue;
         }
 
-        this.onEvent(event);
+        this.handleProviderEvent(event);
       }
     });
 
@@ -618,37 +784,7 @@ export class SessionManager {
 
       const cwd = this.configuredCwd ?? homedir();
 
-      // Build args with session continuity: use resume/continue for subsequent turns
-      let args: string[];
-      if (this.provider === 'codex-cli' && this.sessionId && !this.sessionId.startsWith('codex-cli-')) {
-        // Codex: resume previous thread to maintain conversation history
-        // codex exec resume <thread_id> "new prompt"
-        args = [
-          'exec', '--json',
-          '--dangerously-bypass-approvals-and-sandbox',
-          ...(this.model ? ['-m', this.model] : []),
-          '-C', cwd,
-          'resume', this.sessionId,
-          text,
-        ];
-        log.info({ chatJid: this.chatJid, provider: this.provider, threadId: this.sessionId }, 'codex: resuming thread');
-      } else if (this.provider === 'gemini-cli' && this.sessionId && !this.sessionId.startsWith('gemini-cli-')) {
-        // Gemini: resume previous session
-        args = [
-          '-p', text,
-          '--output-format', 'stream-json',
-          '--yolo',
-          ...(this.model ? ['-m', this.model] : []),
-          '--resume', this.sessionId,
-        ];
-        log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'gemini: resuming session');
-      } else {
-        // First turn or providers without resume: use base args + prompt
-        const systemPrompt = '';
-        const baseArgs = this.getProviderArgs(systemPrompt, cwd);
-        args = [...baseArgs, text];
-        log.info({ chatJid: this.chatJid, provider: this.provider }, 'spawn-per-turn: fresh session');
-      }
+      const args = this.buildSpawnPerTurnArgs(cwd, text);
       const binary = this.getProviderBinary();
       const parse = this.getParser();
 
@@ -690,7 +826,7 @@ export class SessionManager {
         for (const line of lines) {
           const event = parse(line);
           if (event === null) continue;
-          this.onEvent(event);
+          this.handleProviderEvent(event);
         }
       });
 
@@ -709,7 +845,7 @@ export class SessionManager {
             const trimmed = line.trim();
             if (trimmed) {
               const event = parse(trimmed);
-              if (event) this.onEvent(event);
+              if (event) this.handleProviderEvent(event);
             }
           }
           this.stdoutBuffer = '';
@@ -723,15 +859,34 @@ export class SessionManager {
         }
       });
     } else {
-      // Claude-cli: long-running process, pipe turns via stdin JSONL
+      // Persistent process: pipe turns via stdin (JSONL for Claude, JSON-RPC for Codex)
       if (this.child === null) {
         throw new Error('No active session. Call spawnSession() first.');
       }
 
-      const payload = JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text }] },
-      });
+      let payload: string;
+      if (this.provider === 'codex-cli') {
+        // Codex app-server: JSON-RPC turn/start request
+        if (!this.codexThreadId) {
+          throw new Error('Codex threadId not captured. Wait for thread/started before sending turns.');
+        }
+        const id = `ws-${++this.codexRequestSeq}`;
+        payload = JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'turn/start',
+          params: {
+            threadId: this.codexThreadId,
+            input: [{ type: 'text', text, text_elements: [] }],
+          },
+          id,
+        });
+      } else {
+        // Claude-cli: stream-json user message
+        payload = JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: [{ type: 'text', text }] },
+        });
+      }
 
       const stdin = this.child.stdin;
       if (!stdin) throw new Error('Child process stdin is not available');
@@ -836,6 +991,7 @@ export class SessionManager {
     this.startedAt = null;
     this.messageCount = 0;
     this.lastMessageAt = null;
+    this.codexThreadId = null;
   }
 }
 

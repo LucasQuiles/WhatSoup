@@ -1,5 +1,10 @@
 // src/runtimes/agent/providers/codex-parser.ts
-// Parses Codex CLI --json JSONL lines into typed AgentEvents.
+// Parses Codex app-server JSON-RPC nd-JSON lines into typed AgentEvents.
+//
+// The app-server protocol uses JSON-RPC 2.0 over newline-delimited JSON:
+// - Server notifications: { jsonrpc: "2.0", method: "...", params: {...} }
+// - Server responses:     { jsonrpc: "2.0", id: "...", result: {...} }
+// - Server requests:      { jsonrpc: "2.0", id: "...", method: "...", params: {...} }
 
 import type { AgentEvent } from '../stream-parser.ts';
 
@@ -23,25 +28,288 @@ function stringifyValue(value: unknown): string {
   }
 }
 
-function extractMessage(value: unknown): string | null {
-  if (typeof value === 'string') {
-    return value || null;
+// ─── Item helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Extract tool input from a ThreadItem (commandExecution, fileChange, mcpToolCall).
+ */
+function extractToolInput(item: JsonObject): Record<string, unknown> {
+  const itemType = String(item['type'] ?? '');
+
+  if (itemType === 'commandExecution') {
+    return {
+      command: item['command'],
+      ...(item['cwd'] ? { cwd: item['cwd'] } : {}),
+    };
   }
+
+  if (itemType === 'fileChange') {
+    return {
+      changes: item['changes'],
+    };
+  }
+
+  if (itemType === 'mcpToolCall') {
+    const args = item['arguments'];
+    return {
+      server: item['server'],
+      tool: item['tool'],
+      ...(isRecord(args) ? args : { arguments: args }),
+    };
+  }
+
+  // Generic fallback
+  const toolInput: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (key === 'id' || key === 'type' || key === 'status') continue;
+    toolInput[key] = value;
+  }
+  return toolInput;
+}
+
+/**
+ * Extract content from a completed ThreadItem for tool_result.
+ */
+function extractToolResultContent(item: JsonObject): string {
+  const itemType = String(item['type'] ?? '');
+
+  if (itemType === 'commandExecution') {
+    const output = item['aggregatedOutput'];
+    if (typeof output === 'string' && output) return output;
+    const exitCode = item['exitCode'];
+    if (typeof exitCode === 'number') return `Exit code ${exitCode}`;
+  }
+
+  if (itemType === 'fileChange') {
+    const status = item['status'];
+    return typeof status === 'string' ? status : 'completed';
+  }
+
+  if (itemType === 'mcpToolCall') {
+    const result = item['result'];
+    if (isRecord(result)) {
+      const text = result['text'] ?? result['content'] ?? result['output'];
+      if (typeof text === 'string') return text;
+      return stringifyValue(result);
+    }
+    const error = item['error'];
+    if (isRecord(error)) {
+      return String(error['message'] ?? error['text'] ?? stringifyValue(error));
+    }
+  }
+
+  // Fallback
+  return stringifyValue(item);
+}
+
+function isToolItemType(itemType: string): boolean {
+  return (
+    itemType === 'commandExecution' ||
+    itemType === 'fileChange' ||
+    itemType === 'mcpToolCall' ||
+    itemType === 'dynamicToolCall'
+  );
+}
+
+function isErrorStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized !== '' && normalized !== 'completed' && normalized !== 'success' && normalized !== 'ok';
+}
+
+// ─── JSON-RPC notification handlers ──────────────────────────────────────────
+
+function handleNotification(method: string, params: JsonObject): AgentEvent {
+  switch (method) {
+    case 'thread/started': {
+      const thread = params['thread'];
+      if (isRecord(thread)) {
+        return { type: 'init', sessionId: String(thread['id'] ?? '') };
+      }
+      return { type: 'init', sessionId: '' };
+    }
+
+    case 'turn/started':
+      return { type: 'ignored' };
+
+    case 'item/agentMessage/delta': {
+      const delta = params['delta'];
+      if (typeof delta === 'string') {
+        return { type: 'assistant_text', text: delta };
+      }
+      return { type: 'ignored' };
+    }
+
+    case 'item/started': {
+      const item = params['item'];
+      if (!isRecord(item)) return { type: 'unknown', raw: params };
+
+      const itemType = String(item['type'] ?? '');
+      if (!isToolItemType(itemType)) return { type: 'ignored' };
+
+      return {
+        type: 'tool_use',
+        toolName: itemType,
+        toolId: String(item['id'] ?? ''),
+        toolInput: extractToolInput(item),
+      };
+    }
+
+    case 'item/completed': {
+      const item = params['item'];
+      if (!isRecord(item)) return { type: 'unknown', raw: params };
+
+      const itemType = String(item['type'] ?? '');
+
+      // agentMessage completed: full text (not a delta)
+      if (itemType === 'agentMessage') {
+        return {
+          type: 'assistant_text',
+          text: String(item['text'] ?? ''),
+        };
+      }
+
+      if (!isToolItemType(itemType)) return { type: 'ignored' };
+
+      return {
+        type: 'tool_result',
+        isError: isErrorStatus(String(item['status'] ?? '')),
+        toolId: String(item['id'] ?? ''),
+        content: extractToolResultContent(item),
+      };
+    }
+
+    case 'turn/completed': {
+      // turn field contains a Turn object with status
+      const turn = params['turn'];
+      const status = isRecord(turn) ? String(turn['status'] ?? '') : '';
+
+      if (status === 'failed') {
+        const error = isRecord(turn) && isRecord(turn['error'])
+          ? String((turn['error'] as JsonObject)['message'] ?? 'Codex turn failed')
+          : 'Codex turn failed';
+        return { type: 'result', text: error };
+      }
+
+      return { type: 'result', text: null };
+    }
+
+    case 'thread/compacted':
+      return { type: 'compact_boundary' };
+
+    case 'thread/status/changed':
+    case 'thread/name/updated':
+    case 'thread/tokenUsage/updated':
+    case 'thread/closed':
+    case 'error':
+      return { type: 'ignored' };
+
+    default:
+      return { type: 'unknown', raw: { method, params } };
+  }
+}
+
+// ─── JSON-RPC response handlers ─────────────────────────────────────────────
+
+function handleResponse(id: unknown, result: unknown): AgentEvent {
+  // Responses to our requests (initialize, thread/start, turn/start, etc.)
+  // Most are informational; the key one is thread/start which returns
+  // the thread object. But we capture threadId from the thread/started
+  // notification instead, so responses are generally ignored.
+
+  // thread/start response: result contains a Thread object
+  if (isRecord(result) && typeof result['id'] === 'string' && result['turns'] !== undefined) {
+    return { type: 'init', sessionId: result['id'] as string };
+  }
+
+  return { type: 'ignored' };
+}
+
+// ─── Public parser ──────────────────────────────────────────────────────────
+
+/**
+ * Parse a single nd-JSON line from the Codex app-server into an AgentEvent.
+ *
+ * Handles three JSON-RPC message types:
+ * - Notifications (method + params, no id)
+ * - Responses (id + result)
+ * - Server requests (id + method + params) — returned as 'approval_request'
+ *   for upstream handling
+ *
+ * Returns null for empty/whitespace-only lines.
+ * Returns { type: 'parse_error', line } for malformed JSON.
+ * Never throws.
+ */
+export function parseCodexEvent(line: string): AgentEvent | null {
+  if (line.trim() === '') {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return { type: 'parse_error', line };
+  }
+
+  if (!isRecord(parsed)) {
+    return { type: 'unknown', raw: parsed };
+  }
+
+  // ── Legacy exec --json format (type-based events) ─────────────────────
+  // Support the old exec format for backward compatibility with fixtures/tests.
+  if (parsed['type'] !== undefined && parsed['jsonrpc'] === undefined) {
+    return parseLegacyExecEvent(parsed);
+  }
+
+  // ── JSON-RPC 2.0 (app-server format) ──────────────────────────────────
+  const method = parsed['method'];
+  const id = parsed['id'];
+  const params = parsed['params'];
+  const result = parsed['result'];
+
+  // Notification: has method but no id
+  if (typeof method === 'string' && id === undefined) {
+    return handleNotification(method, isRecord(params) ? params : {});
+  }
+
+  // Response: has id and result (no method)
+  if (id !== undefined && result !== undefined && method === undefined) {
+    return handleResponse(id, result);
+  }
+
+  // Server request: has both id and method (approval requests etc.)
+  // These need to be responded to by the session manager.
+  if (id !== undefined && typeof method === 'string') {
+    return { type: 'unknown', raw: parsed };
+  }
+
+  // Error response
+  if (id !== undefined && parsed['error'] !== undefined) {
+    const error = parsed['error'];
+    const errorMsg = isRecord(error) ? String(error['message'] ?? 'Unknown error') : String(error);
+    return { type: 'result', text: `Codex error: ${errorMsg}` };
+  }
+
+  return { type: 'unknown', raw: parsed };
+}
+
+// ─── Legacy exec --json parser ──────────────────────────────────────────────
+// Kept for backward compatibility with existing test fixtures that use the
+// old `codex exec --json` JSONL format.
+
+function extractMessage(value: unknown): string | null {
+  if (typeof value === 'string') return value || null;
 
   if (Array.isArray(value)) {
     const parts = value.map((item) => extractMessage(item)).filter((item): item is string => Boolean(item));
     return parts.length > 0 ? parts.join('\n') : null;
   }
 
-  if (!isRecord(value)) {
-    return null;
-  }
+  if (!isRecord(value)) return null;
 
   for (const key of ['text', 'message', 'error', 'details', 'content', 'aggregated_output', 'output']) {
     const nested = extractMessage(value[key]);
-    if (nested) {
-      return nested;
-    }
+    if (nested) return nested;
   }
 
   return null;
@@ -49,14 +317,10 @@ function extractMessage(value: unknown): string | null {
 
 function getNestedNumber(value: unknown, path: readonly string[]): number | undefined {
   let current: unknown = value;
-
   for (const segment of path) {
-    if (!isRecord(current)) {
-      return undefined;
-    }
+    if (!isRecord(current)) return undefined;
     current = current[segment];
   }
-
   return typeof current === 'number' ? current : undefined;
 }
 
@@ -101,39 +365,31 @@ function extractTokenCounts(usage: unknown): Pick<
   return {};
 }
 
-function extractToolInput(item: JsonObject): Record<string, unknown> {
+function extractLegacyToolInput(item: JsonObject): Record<string, unknown> {
   const itemType = String(item['type'] ?? '');
 
   if (itemType === 'command_execution') {
-    return {
-      command: item['command'],
-    };
+    return { command: item['command'] };
   }
 
   if (itemType === 'file_change') {
-    return {
-      changes: item['changes'],
-    };
+    return { changes: item['changes'] };
   }
 
   if (itemType === 'mcp_tool_call') {
     const rawInput = item['input'];
-    if (isRecord(rawInput)) {
-      return rawInput;
-    }
+    if (isRecord(rawInput)) return rawInput;
   }
 
   const toolInput: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(item)) {
-    if (key === 'id' || key === 'type' || key === 'status') {
-      continue;
-    }
+    if (key === 'id' || key === 'type' || key === 'status') continue;
     toolInput[key] = value;
   }
   return toolInput;
 }
 
-function extractToolResultContent(item: JsonObject): string {
+function extractLegacyToolResultContent(item: JsonObject): string {
   const direct =
     extractMessage(item['aggregated_output']) ??
     extractMessage(item['output']) ??
@@ -141,65 +397,22 @@ function extractToolResultContent(item: JsonObject): string {
     extractMessage(item['error']) ??
     extractMessage(item['message']);
 
-  if (direct) {
-    return direct;
-  }
+  if (direct) return direct;
 
   const exitCode = item['exit_code'];
-  if (typeof exitCode === 'number') {
-    return `Exit code ${exitCode}`;
-  }
+  if (typeof exitCode === 'number') return `Exit code ${exitCode}`;
 
   const status = item['status'];
-  if (typeof status === 'string' && status) {
-    return status;
-  }
+  if (typeof status === 'string' && status) return status;
 
   return stringifyValue(item);
 }
 
-function isToolItemType(itemType: string): boolean {
+function isLegacyToolItemType(itemType: string): boolean {
   return itemType === 'command_execution' || itemType === 'file_change' || itemType === 'mcp_tool_call';
 }
 
-function isErrorStatus(status: string): boolean {
-  const normalized = status.trim().toLowerCase();
-  return normalized !== '' && normalized !== 'completed' && normalized !== 'success' && normalized !== 'ok';
-}
-
-function extractTurnFailureText(event: JsonObject): string | null {
-  return (
-    extractMessage(event['error']) ??
-    extractMessage(event['message']) ??
-    extractMessage(event['details']) ??
-    extractMessage(event['reason']) ??
-    'Codex CLI turn failed'
-  );
-}
-
-/**
- * Parse a single JSONL line from Codex CLI --json output into an AgentEvent.
- *
- * Returns null for empty/whitespace-only lines.
- * Returns { type: 'parse_error', line } for malformed JSON.
- * Never throws.
- */
-export function parseCodexEvent(line: string): AgentEvent | null {
-  if (line.trim() === '') {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return { type: 'parse_error', line };
-  }
-
-  if (!isRecord(parsed)) {
-    return { type: 'unknown', raw: parsed };
-  }
-
+function parseLegacyExecEvent(parsed: JsonObject): AgentEvent {
   const eventType = parsed['type'];
 
   if (eventType === 'thread.started') {
@@ -212,9 +425,7 @@ export function parseCodexEvent(line: string): AgentEvent | null {
 
   if (eventType === 'item.started' || eventType === 'item.completed') {
     const item = parsed['item'];
-    if (!isRecord(item)) {
-      return { type: 'unknown', raw: parsed };
-    }
+    if (!isRecord(item)) return { type: 'unknown', raw: parsed };
 
     const itemType = String(item['type'] ?? '');
 
@@ -225,16 +436,14 @@ export function parseCodexEvent(line: string): AgentEvent | null {
       };
     }
 
-    if (!isToolItemType(itemType)) {
-      return { type: 'ignored' };
-    }
+    if (!isLegacyToolItemType(itemType)) return { type: 'ignored' };
 
     if (eventType === 'item.started') {
       return {
         type: 'tool_use',
         toolName: itemType,
         toolId: String(item['id'] ?? ''),
-        toolInput: extractToolInput(item),
+        toolInput: extractLegacyToolInput(item),
       };
     }
 
@@ -242,7 +451,7 @@ export function parseCodexEvent(line: string): AgentEvent | null {
       type: 'tool_result',
       isError: isErrorStatus(String(item['status'] ?? '')),
       toolId: String(item['id'] ?? ''),
-      content: extractToolResultContent(item),
+      content: extractLegacyToolResultContent(item),
     };
   }
 
@@ -255,7 +464,12 @@ export function parseCodexEvent(line: string): AgentEvent | null {
     const { inputTokens, outputTokens } = extractTokenCounts(parsed['usage']);
     return {
       type: 'result',
-      text: extractTurnFailureText(parsed),
+      text:
+        extractMessage(parsed['error']) ??
+        extractMessage(parsed['message']) ??
+        extractMessage(parsed['details']) ??
+        extractMessage(parsed['reason']) ??
+        'Codex CLI turn failed',
       inputTokens,
       outputTokens,
     };
