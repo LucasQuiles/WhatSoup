@@ -304,6 +304,30 @@ describe('agent session-db', () => {
     expect(result).toBeNull();
   });
 
+  // B04a: Verify Codex thread ID (stored as session_id) survives persistence
+  // and is recoverable via getResumableSessionForChat for crash resume.
+  it('Codex thread ID persisted as session_id is retrievable for crash resume', () => {
+    const wk = 'codex-thread-persist-test';
+    const jid = '5550000099@s.whatsapp.net';
+    const codexThreadId = 'thread_abc123def456';
+
+    // Simulate: session created, Codex thread ID stored via updateSessionId
+    // (mirrors session.ts handleProviderEvent where codexThreadId = event.sessionId
+    //  and updateSessionId(db, dbRowId, event.sessionId) is called)
+    const id = createSession(db, 70001, '/tmp/codex-thread', jid, wk);
+    updateSessionId(db, id, codexThreadId);
+
+    // Simulate crash: session marked as orphaned
+    markOrphaned(db, id);
+
+    // Verify: getResumableSessionForChat returns the thread ID
+    const resumable = getResumableSessionForChat(db, wk);
+    expect(resumable).not.toBeNull();
+    expect(resumable?.session_id).toBe(codexThreadId);
+    expect(resumable?.chat_jid).toBe(jid);
+    expect(resumable?.id).toBe(id);
+  });
+
   it('getResumableSessionForChat does not return active sessions', () => {
     const wk = 'active-only-key';
     const jid = '5550000002@s.whatsapp.net';
