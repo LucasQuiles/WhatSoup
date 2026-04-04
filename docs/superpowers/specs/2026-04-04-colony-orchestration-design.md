@@ -499,7 +499,306 @@ tmup remains the execution engine: SQLite WAL task DAG, tmux grid management, wo
 
 ---
 
-## 9. Open Questions
+## 9. Operational Model
+
+### 9.1 The Runtime Loop
+
+At runtime, the system behaves less like a queue runner and more like a layered operating loop.
+
+A worker starts with an authorized mission and a bounded scope. It pulls the current task state, relevant artifacts, prior decisions, open findings, and enriched context from the shared operational record. It does not begin from a blank prompt. It begins from a live state bundle.
+
+The worker executes within scope. While doing so, it continuously emits structured traces: what it observed, what it inferred, what it changed, what evidence it used, what failed, what remained uncertain, and what adjacent findings it noticed. Those traces are not just logs — they become reusable system objects.
+
+If the worker finds follow-on work inside the same mission, it may enqueue or propose it directly according to policy. If it finds something outside scope, it creates an exploratory finding with evidence and sends it upward for machine adjudication.
+
+A reviewer, peer agent, or higher-tier layer evaluates the output. This may be Claude reviewing Codex, Codex expanding Claude, BRIC enriching both, or a higher control layer reconciling conflicts. Every pass adds evidence, reduces ambiguity, or tightens action.
+
+Meanwhile, daemon and enrichment layers run in the background: watching for stuck tasks, repeated retries, resurfacing issues, failed validations, noisy findings, and queue starvation. They also preprocess large inputs so workers reason over distilled evidence instead of raw bulk.
+
+The loop:
+1. **Act** — execute within scope
+2. **Observe** — capture structured traces
+3. **Capture evidence** — emit reusable system objects
+4. **Cluster and enrich** — BRIC and background services process signals
+5. **Promote, suppress, defer, or escalate** — orchestration decides
+6. **Feed back into active state** — next pass starts richer
+
+### 9.2 The Six Agent Needs
+
+**1. Stable operating substrate.** Access to a shared operational record: active missions, scoped tasks, findings, prior decisions, evidence references, escalation history, enriched artifacts. Without this, every session resets and the design collapses into prompt theater.
+
+**2. Explicit authority boundaries.** Every agent must know:
+- What mission it is serving
+- What scope it is allowed to modify
+- What kinds of follow-on work it may promote automatically
+- What must be raised as a finding instead
+- What evidence threshold is required for action
+- When to defer, suppress, duplicate-link, or escalate
+
+This matters more than model selection. Most autonomous drift comes from unclear authority, not weak intelligence.
+
+**3. Structured handoff formats.** Every meaningful transition preserves:
+- Observation
+- Inference
+- Action taken
+- Evidence
+- Uncertainty
+- Rejected alternatives
+- Scope assumptions
+- Next recommended step
+
+Both machine-readable structure (for routing and clustering) and compact narrative (for nuance).
+
+**4. Layered validation.** Agents do not trust their own outputs by default:
+- Peer review by another model
+- Evidence validation against file/line anchors
+- Policy checks against mission/scope
+- Regression or test checks
+- Anomaly comparison against prior similar cases
+- Confidence and ambiguity scoring
+
+This reduces hallucinated autonomy without turning everything into human review.
+
+**5. Memory that compounds.** Not generic chat memory — operational memory:
+- Recurring failure modes
+- Repeated successful remediations
+- Common dead ends
+- Common escalation triggers
+- Codebase hotspots
+- Issue clusters
+- Tool selection patterns
+- Evidence patterns that correlate with good or bad outcomes
+
+New agents inherit this as working context, not rediscover it from scratch.
+
+**6. Access to support services.** Agents offload to BRIC and similar systems:
+- Large file-set preprocessing
+- Corpus chunking
+- Metadata enrichment
+- Embeddings
+- Entity extraction
+- Line/file anchoring
+- Anomaly surfacing
+- Similarity matching to prior incidents
+- Evidence bundling for handoff
+
+Native to the workflow, not bolted on.
+
+### 9.3 The Three Contracts
+
+#### Agent Contract
+
+Every agent receives at dispatch:
+- Mission
+- Scope (files, modules, packages authorized for modification)
+- Allowed actions (implement, review, audit, discover)
+- Required evidence threshold for action
+- Handoff schema
+- Escalation rules
+- Available support services
+- Current operational context bundle (state packet)
+
+#### System Contract
+
+The system provides:
+- Shared operational record
+- Finding/task/decision schemas
+- Provenance and evidence anchors
+- Review and validation paths
+- Clustering and prioritization
+- Suppression/deferral mechanisms
+- Escalation hierarchy
+- Enrichment hooks
+- Backpressure capture
+
+#### Control Contract
+
+The system monitors:
+- Drift (scope creep, unauthorized domain crossing)
+- Retries (repeated retries without new evidence)
+- Stuckness (repeated rewrites of same artifact)
+- Unresolved ambiguity (low-confidence findings accumulating)
+- Boundary suspicion (findings that look out-of-scope or novel)
+- Escalation frequency (rising escalation rate)
+- Issue resurfacing (same defects returning)
+- Queue health (starvation, churn without resolution)
+- Evidence quality (findings without anchors)
+- Human intervention rate (repeated human involvement in same issue class)
+
+These are not mere metrics. They are control inputs that feed back into routing, prioritization, and policy adjustment.
+
+### 9.4 Boundary and Promotion Rules
+
+#### Boundary Classification
+
+Agents classify discoveries at two levels:
+- **Mission boundary:** no longer part of the currently authorized campaign
+- **Domain boundary:** materially different problem class, system area, or operational mode
+
+Agents do not need perfect semantic classification. They need a way to say: *this looks adjacent, this looks novel, this looks out-of-scope, this looks risky.*
+
+#### Promotion Criteria
+
+Not every observation becomes work. Findings become executable tasks when they meet:
+- Evidence quality threshold
+- Relevance to active mission
+- Similarity to known patterns
+- Severity assessment
+- Confidence level
+- Available validation path
+- Whether machine layers have already enriched or adjudicated it
+
+Discovery is broad. Execution is narrow.
+
+#### Suppression and Deferral
+
+A healthy system also says:
+- Keep visible, do not act yet
+- Merge into existing issue
+- Insufficient evidence — gather more
+- Likely duplicate — link and consolidate
+- Outside current campaign — defer
+- Wait for stronger signal
+- Human review eventually, not now
+
+Without this, the queue becomes noise.
+
+### 9.5 Learning Boundaries
+
+The system continuously learns, but with a hard distinction:
+
+**Allowed to change continuously:**
+- More context
+- Better retrieval patterns
+- Better enrichment and clustering
+- Stronger confidence on known patterns
+- Improved evidence packaging
+- More efficient routing heuristics
+
+**Gated behind adjudication:**
+- Policy changes
+- Authority expansion
+- Evidence threshold reduction
+- Scope boundary redefinition
+- Promotion rule changes
+- Autonomy boundary modifications
+
+The first category happens every pass. The second requires machine-hierarchy review and, for consequential changes, human approval.
+
+### 9.6 Practical Operating Example
+
+A Codex worker finishes a lint-fix mission in a package. During the work it notices repeated import-pattern anomalies in neighboring modules. It is allowed to create in-scope follow-on tasks for the same package because the mission allows local hygiene remediation.
+
+It also notices a deeper database migration inconsistency outside the current package. It cannot act on that. It creates an exploratory finding with evidence. BRIC enriches the finding with file references, related migrations, and prior similar incidents. A higher-tier layer sees that this resembles an already known but unresolved issue cluster, links it, raises salience, and keeps it visible. No human is bothered yet.
+
+Meanwhile, the daemon sees this is the fourth mission this week that surfaced similar migration anomalies. That is backpressure. It clusters those signals into a recurring pattern. A scheduled discovery bead is created for a higher-tier audit. That audit may later justify a new authorized campaign. That is self-learning without reckless self-expansion.
+
+---
+
+## 10. BRIC Integration Patterns
+
+### 10.1 Scoped Workstream Identity
+
+Every operational unit in the system has a durable identity — not a random session ID, but a composite key derived from:
+- Repository
+- Branch or worktree
+- Mission/campaign ID
+- Bead chain or task lineage
+- Code area/package/module scope
+- Issue cluster ID (if applicable)
+
+This **scoped workstream identity** narrows retrieval and joins together: SQLite rows, artifact sets, transcript chunks, log events, vector entries, and enrichment outputs.
+
+BRIC does not index raw sessions as monolithic blobs. It indexes state packets bound to durable scoped identities.
+
+### 10.2 The State Packet
+
+A state packet is the operational context bundle that agents read at session start. It contains:
+
+| Field | Source | Authority |
+|-------|--------|-----------|
+| Mission ID | Orchestrator | Authoritative |
+| Workstream identity | Composite key | Authoritative |
+| Current authorized scope | Mission definition | Authoritative |
+| Active beads and status | Bead files (Git) | Authoritative |
+| Commit hash / branch / diff summary | Git | Authoritative |
+| Changed files and hotspots | BRIC preprocessing | Enrichment |
+| Linked findings/issues | Findings store | Authoritative |
+| Evidence anchors: file paths, line ranges, artifact IDs | BRIC + Git | Mixed |
+| Relevant transcript extracts | BRIC post-hook | Enrichment |
+| Tool log summary | BRIC post-hook | Enrichment |
+| Unresolved questions | Conductor journal | Authoritative |
+| Rejected paths | Conductor journal | Authoritative |
+| Confidence/ambiguity markers | Prior evaluations | Enrichment |
+| Next recommended actions | Conductor journal | Advisory |
+| Promotion/escalation state | Orchestrator | Authoritative |
+
+The packet is assembled by combining authoritative state (beads, SQLite, Git) with enriched context (BRIC outputs, vector recalls). Authoritative fields are ground truth. Enrichment fields support reasoning but are not definitive.
+
+### 10.3 Four-Layer Storage Model
+
+Each layer serves a distinct purpose:
+
+| Layer | What it stores | Authority level | Retrieval mode |
+|-------|---------------|-----------------|----------------|
+| **Beads** (Git) | Execution and workflow units: objectives, status, corrections, decisions | Authoritative ground truth | Deterministic file read |
+| **Artifacts** (Git + filesystem) | Human-readable and machine-consumable work products | Authoritative work product | Deterministic file read |
+| **SQLite** (tmup DB + operational state) | Local structured state: session continuity, provenance, linkages, task lifecycle | Authoritative operational state | Deterministic query |
+| **Vector storage** (Pinecone + embeddings) | Fuzzy retrieval: semantic recall, clustering, related-context surfacing | Approximate recall | Constrained semantic search |
+
+Retrieval combines deterministic anchors with semantic recall. The scoped workstream identity and rich metadata constrain vector search so retrieval happens inside the correct operational neighborhood. Final packets are assembled by combining deterministic state with bounded semantic recall, not by trusting vector search alone.
+
+### 10.4 BRIC Lifecycle Roles
+
+#### Pre-Hook Context Assembler
+
+Before an agent begins work on a bead:
+- Receives: current diff, HEAD commit, branch, active mission, active bead list, open findings, recent tool logs, prior state packet
+- Resolves related artifacts, extracts relevant code regions, attaches related prior issues
+- Computes embeddings, clusters nearby signals
+- Returns a distilled context packet
+- The agent starts from the packet, not from raw scattered state
+
+#### Post-Hook State Condenser
+
+After a bead completes:
+- Receives: updated diff, new logs, transcript excerpt, test results, changed files, produced artifacts
+- Extracts decisions, unresolved uncertainties, evidence anchors, follow-on findings, candidate duplicates
+- Updates the persistent state packet, retrieval index, SQLite state, and linked vector entries
+- The next worker inherits a structured continuation, not a lossy prose handoff
+
+#### BRIC Preprocessing Contract
+
+BRIC does not ingest raw material blindly. For every input source it must:
+1. **Extract structured events** from noisy streams
+2. **Identify decision points and unresolved ambiguity**
+3. **Attach provenance** (file, line, commit, timestamp)
+4. **Discard low-value repetition**
+
+Raw transcripts are noisy. Tool logs are noisy. JSONL must be normalized. Without filtering, the system builds an expensive memory swamp.
+
+#### Background Utility Worker
+
+Continuously running:
+- Monitor for stuck work, repeated retries, unresolved findings, and resurfacing patterns
+- Cluster similar failures
+- Refresh salience on active issue families
+- Reindex changed artifacts and transcripts
+- Maintain the retrieval graph
+
+#### Evidence Service for Adjudication
+
+When a higher-tier agent decides whether to promote, suppress, merge, or escalate:
+- BRIC provides a scoped evidence bundle instead of raw history
+- Includes: file references, related cases, prior similar incidents, anomaly summaries, confidence assessment
+
+### 10.5 BRIC Safety Boundary
+
+BRIC enriches and stages, but does not become the policy engine. It can help write decision-tree entries, classify patterns, and propose linkages. But promotion rules, authority expansion, and policy mutation live in the orchestration/guardrail layer. Moving control into an enrichment service undermines the layered mediation model.
+
+---
+
+## 11. Open Questions
 
 1. **Local model triage:** What model is appropriate for the daemon triage layer? What's the decision boundary between "triage can handle this" and "spawn Opus"?
 
