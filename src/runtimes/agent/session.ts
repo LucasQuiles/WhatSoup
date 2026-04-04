@@ -122,12 +122,14 @@ export class SessionManager {
   private readonly chatJid: string;
   private readonly onEvent: (event: AgentEvent) => void;
   private readonly instanceName: string;
-  private readonly configuredCwd: string | undefined;
+  private configuredCwd: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
   private readonly pluginDirs: string[];
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
+
+  private systemPrompt: string = '';
 
   private child: ReturnType<typeof spawn> | null = null;
   private dbRowId: number | null = null;
@@ -297,6 +299,25 @@ export class SessionManager {
       ].join(' ');
     }
 
+    // Spawn-per-turn providers (codex, gemini, opencode) should NOT eagerly spawn
+    // at session init — they spawn a fresh process per sendTurn() with the prompt as CLI arg.
+    // Mark active and return; the first sendTurn() will spawn the actual process.
+    if (this.isSpawnPerTurn) {
+      this.active = true;
+      this.startedAt = new Date().toISOString();
+      this.systemPrompt = systemPrompt;
+      this.configuredCwd = cwd;
+      // Record in DB with pid=0 (no process yet)
+      if (existingRowId !== undefined) {
+        this.dbRowId = existingRowId;
+      } else {
+        this.dbRowId = createSession(this.db, 0, this.instanceName);
+      }
+      // Emit a synthetic init event so the runtime knows the session is ready
+      this.onEvent({ type: 'init', sessionId: `${this.provider}-${Date.now()}` });
+      return;
+    }
+
     const binary = this.getProviderBinary();
     const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
 
@@ -327,7 +348,7 @@ export class SessionManager {
       this.dbRowId = createSession(this.db, pid, cwd, this.chatJid);
     }
 
-    log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null }, 'spawned claude process');
+    log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null, provider: this.provider, binary }, `spawned ${binary} process`);
 
     // Checkpoint: record spawn in durability engine
     if (this.durability) {
