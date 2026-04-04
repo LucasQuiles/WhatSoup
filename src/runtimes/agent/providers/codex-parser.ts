@@ -179,7 +179,7 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
 
     case 'thread/tokenUsage/updated': {
       const { inputTokens, outputTokens } = extractTokenCounts(params);
-      return { type: 'result', text: null, inputTokens, outputTokens };
+      return { type: 'token_usage', inputTokens, outputTokens };
     }
 
     case 'thread/status/changed':

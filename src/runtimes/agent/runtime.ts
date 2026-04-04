@@ -1346,6 +1346,18 @@ export class AgentRuntime implements Runtime {
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
         break;
 
+      case 'token_usage':
+        // Record token usage without triggering turn completion.
+        // Codex emits thread/tokenUsage/updated mid-turn; the actual turn
+        // completion comes from turn/completed → type:'result'.
+        if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
+          const rowId = session?.getDbRowId() ?? null;
+          if (rowId !== null) {
+            accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+          }
+        }
+        break;
+
       case 'ignored':
       case 'unknown':
       case 'parse_error':
@@ -2177,6 +2189,16 @@ export class AgentRuntime implements Runtime {
         // the process crashes after send but before completeInbound runs.
         queue.markLastTerminal();
         queue.flush().catch((err) => log.error({ err }, 'flush failed'));
+        break;
+
+      case 'token_usage':
+        // Record token usage without triggering turn completion (non-per-chat path).
+        if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
+          const rowId = this.session?.getDbRowId() ?? null;
+          if (rowId !== null) {
+            accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+          }
+        }
         break;
 
       case 'ignored':

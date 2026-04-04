@@ -3,7 +3,7 @@ import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-
 
 describe('parseCodexEvent', () => {
   describe('thread/tokenUsage/updated notification', () => {
-    it('produces a result event with token counts from nested tokenUsage', () => {
+    it('produces a token_usage event with token counts from nested tokenUsage', () => {
       const line = JSON.stringify({
         jsonrpc: '2.0',
         method: 'thread/tokenUsage/updated',
@@ -17,14 +17,13 @@ describe('parseCodexEvent', () => {
 
       const event = parseCodexEvent(line);
       expect(event).toEqual({
-        type: 'result',
-        text: null,
+        type: 'token_usage',
         inputTokens: 1234,
         outputTokens: 567,
       });
     });
 
-    it('produces a result event with token counts at top level of params', () => {
+    it('produces a token_usage event with token counts at top level of params', () => {
       const line = JSON.stringify({
         jsonrpc: '2.0',
         method: 'thread/tokenUsage/updated',
@@ -36,14 +35,13 @@ describe('parseCodexEvent', () => {
 
       const event = parseCodexEvent(line);
       expect(event).toEqual({
-        type: 'result',
-        text: null,
+        type: 'token_usage',
         inputTokens: 800,
         outputTokens: 200,
       });
     });
 
-    it('produces a result event with no tokens when params has no token data', () => {
+    it('produces a token_usage event with no tokens when params has no token data', () => {
       const line = JSON.stringify({
         jsonrpc: '2.0',
         method: 'thread/tokenUsage/updated',
@@ -52,8 +50,7 @@ describe('parseCodexEvent', () => {
 
       const event = parseCodexEvent(line);
       expect(event).toEqual({
-        type: 'result',
-        text: null,
+        type: 'token_usage',
       });
     });
   });

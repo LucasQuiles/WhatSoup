@@ -8,6 +8,7 @@ export type AgentEvent =
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
   | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
   | { type: 'result'; text: string | null; inputTokens?: number; outputTokens?: number }
+  | { type: 'token_usage'; inputTokens?: number; outputTokens?: number }
   | { type: 'ignored' }
   | { type: 'unknown'; raw: unknown }
   | { type: 'parse_error'; line: string };
