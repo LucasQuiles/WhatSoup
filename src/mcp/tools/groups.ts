@@ -4,6 +4,9 @@
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { WhatsAppSocket } from '../../transport/connection.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('group-tools');
 
 // ---------------------------------------------------------------------------
 // list_groups
@@ -20,15 +23,20 @@ function makeListGroups(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async () => {
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
+      try {
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
 
-      // groupFetchAllParticipating returns Record<string, GroupMetadata>
-      const groupMap = await sock.groupFetchAllParticipating();
-      const groups = Object.values(groupMap);
-      return { groups };
+        // groupFetchAllParticipating returns Record<string, GroupMetadata>
+        const groupMap = await sock.groupFetchAllParticipating();
+        const groups = Object.values(groupMap);
+        return { groups };
+      } catch (err) {
+        log.error({ tool: 'list_groups', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
+      }
     },
   };
 }
@@ -50,15 +58,20 @@ function makeGetGroupMetadata(getSock: () => WhatsAppSocket | null): ToolDeclara
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { jid } = GetGroupMetadataSchema.parse(params);
+      try {
+        const { jid } = GetGroupMetadataSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const metadata = await sock.groupMetadata(jid);
+        return metadata;
+      } catch (err) {
+        log.error({ tool: 'get_group_metadata', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const metadata = await sock.groupMetadata(jid);
-      return metadata;
     },
   };
 }
@@ -81,15 +94,20 @@ function makeGroupUpdateSubject(getSock: () => WhatsAppSocket | null): ToolDecla
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, subject } = GroupUpdateSubjectSchema.parse(params);
+      try {
+        const { jid, subject } = GroupUpdateSubjectSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupUpdateSubject(jid, subject);
+        return { success: true, jid, subject };
+      } catch (err) {
+        log.error({ tool: 'group_update_subject', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupUpdateSubject(jid, subject);
-      return { success: true, jid, subject };
     },
   };
 }
@@ -112,15 +130,20 @@ function makeGroupUpdateDescription(getSock: () => WhatsAppSocket | null): ToolD
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, description } = GroupUpdateDescriptionSchema.parse(params);
+      try {
+        const { jid, description } = GroupUpdateDescriptionSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupUpdateDescription(jid, description);
+        return { success: true, jid };
+      } catch (err) {
+        log.error({ tool: 'group_update_description', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupUpdateDescription(jid, description);
-      return { success: true, jid };
     },
   };
 }
@@ -145,15 +168,20 @@ function makeGroupParticipantsUpdate(getSock: () => WhatsAppSocket | null): Tool
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { jid, participants, action } = GroupParticipantsUpdateSchema.parse(params);
+      try {
+        const { jid, participants, action } = GroupParticipantsUpdateSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const result = await sock.groupParticipantsUpdate(jid, participants, action);
+        return { success: true, jid, action, participants, result };
+      } catch (err) {
+        log.error({ tool: 'group_participants_update', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const result = await sock.groupParticipantsUpdate(jid, participants, action);
-      return { success: true, jid, action, participants, result };
     },
   };
 }
@@ -177,15 +205,20 @@ function makeGroupSettingsUpdate(getSock: () => WhatsAppSocket | null): ToolDecl
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, setting } = GroupSettingsUpdateSchema.parse(params);
+      try {
+        const { jid, setting } = GroupSettingsUpdateSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupSettingUpdate(jid, setting);
+        return { success: true, jid, setting };
+      } catch (err) {
+        log.error({ tool: 'group_settings_update', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupSettingUpdate(jid, setting);
-      return { success: true, jid, setting };
     },
   };
 }
@@ -207,16 +240,21 @@ function makeGetGroupInviteLink(getSock: () => WhatsAppSocket | null): ToolDecla
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { jid } = GetGroupInviteLinkSchema.parse(params);
+      try {
+        const { jid } = GetGroupInviteLinkSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const code = await sock.groupInviteCode(jid);
+        const link = code ? `https://chat.whatsapp.com/${code}` : null;
+        return { jid, inviteCode: code ?? null, inviteLink: link };
+      } catch (err) {
+        log.error({ tool: 'get_group_invite_link', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const code = await sock.groupInviteCode(jid);
-      const link = code ? `https://chat.whatsapp.com/${code}` : null;
-      return { jid, inviteCode: code ?? null, inviteLink: link };
     },
   };
 }
@@ -239,15 +277,20 @@ function makeGroupCreate(getSock: () => WhatsAppSocket | null): ToolDeclaration 
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { subject, participants } = GroupCreateSchema.parse(params);
+      try {
+        const { subject, participants } = GroupCreateSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const result = await sock.groupCreate(subject, participants);
+        return result;
+      } catch (err) {
+        log.error({ tool: 'group_create', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const result = await sock.groupCreate(subject, participants);
-      return result;
     },
   };
 }
@@ -269,15 +312,20 @@ function makeGroupLeave(getSock: () => WhatsAppSocket | null): ToolDeclaration {
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { id } = GroupLeaveSchema.parse(params);
+      try {
+        const { id } = GroupLeaveSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupLeave(id);
+        return { success: true, id };
+      } catch (err) {
+        log.error({ tool: 'group_leave', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupLeave(id);
-      return { success: true, id };
     },
   };
 }
@@ -299,15 +347,20 @@ function makeGroupRevokeInvite(getSock: () => WhatsAppSocket | null): ToolDeclar
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { jid } = GroupRevokeInviteSchema.parse(params);
+      try {
+        const { jid } = GroupRevokeInviteSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const newCode = await sock.groupRevokeInvite(jid);
+        return { jid, inviteCode: newCode ?? null };
+      } catch (err) {
+        log.error({ tool: 'group_revoke_invite', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const newCode = await sock.groupRevokeInvite(jid);
-      return { jid, inviteCode: newCode ?? null };
     },
   };
 }
@@ -329,15 +382,20 @@ function makeGroupAcceptInvite(getSock: () => WhatsAppSocket | null): ToolDeclar
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { code } = GroupAcceptInviteSchema.parse(params);
+      try {
+        const { code } = GroupAcceptInviteSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const groupJid = await sock.groupAcceptInvite(code);
+        return { code, groupJid: groupJid ?? null };
+      } catch (err) {
+        log.error({ tool: 'group_accept_invite', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const groupJid = await sock.groupAcceptInvite(code);
-      return { code, groupJid: groupJid ?? null };
     },
   };
 }
@@ -359,15 +417,20 @@ function makeGroupGetInviteInfo(getSock: () => WhatsAppSocket | null): ToolDecla
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { code } = GroupGetInviteInfoSchema.parse(params);
+      try {
+        const { code } = GroupGetInviteInfoSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const metadata = await sock.groupGetInviteInfo(code);
+        return metadata;
+      } catch (err) {
+        log.error({ tool: 'group_get_invite_info', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const metadata = await sock.groupGetInviteInfo(code);
-      return metadata;
     },
   };
 }
@@ -391,15 +454,20 @@ function makeGroupToggleEphemeral(getSock: () => WhatsAppSocket | null): ToolDec
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, expiration } = GroupToggleEphemeralSchema.parse(params);
+      try {
+        const { jid, expiration } = GroupToggleEphemeralSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupToggleEphemeral(jid, expiration);
+        return { success: true, jid, expiration };
+      } catch (err) {
+        log.error({ tool: 'group_toggle_ephemeral', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupToggleEphemeral(jid, expiration);
-      return { success: true, jid, expiration };
     },
   };
 }
@@ -423,15 +491,20 @@ function makeGroupMemberAddMode(getSock: () => WhatsAppSocket | null): ToolDecla
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, mode } = GroupMemberAddModeSchema.parse(params);
+      try {
+        const { jid, mode } = GroupMemberAddModeSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupMemberAddMode(jid, mode);
+        return { success: true, jid, mode };
+      } catch (err) {
+        log.error({ tool: 'group_member_add_mode', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupMemberAddMode(jid, mode);
-      return { success: true, jid, mode };
     },
   };
 }
@@ -455,15 +528,20 @@ function makeGroupJoinApprovalMode(getSock: () => WhatsAppSocket | null): ToolDe
     targetMode: 'caller-supplied',
     replayPolicy: 'safe',
     handler: async (params) => {
-      const { jid, mode } = GroupJoinApprovalModeSchema.parse(params);
+      try {
+        const { jid, mode } = GroupJoinApprovalModeSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupJoinApprovalMode(jid, mode);
+        return { success: true, jid, mode };
+      } catch (err) {
+        log.error({ tool: 'group_join_approval_mode', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupJoinApprovalMode(jid, mode);
-      return { success: true, jid, mode };
     },
   };
 }
@@ -485,15 +563,20 @@ function makeGroupRequestParticipantsList(getSock: () => WhatsAppSocket | null):
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { jid } = GroupRequestParticipantsListSchema.parse(params);
+      try {
+        const { jid } = GroupRequestParticipantsListSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const participants = await sock.groupRequestParticipantsList(jid);
+        return { jid, participants };
+      } catch (err) {
+        log.error({ tool: 'group_request_participants_list', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const participants = await sock.groupRequestParticipantsList(jid);
-      return { jid, participants };
     },
   };
 }
@@ -518,15 +601,20 @@ function makeGroupRequestParticipantsUpdate(getSock: () => WhatsAppSocket | null
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { jid, participants, action } = GroupRequestParticipantsUpdateSchema.parse(params);
+      try {
+        const { jid, participants, action } = GroupRequestParticipantsUpdateSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        const result = await sock.groupRequestParticipantsUpdate(jid, participants, action);
+        return { success: true, jid, action, participants, result };
+      } catch (err) {
+        log.error({ tool: 'group_request_participants_update', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      const result = await sock.groupRequestParticipantsUpdate(jid, participants, action);
-      return { success: true, jid, action, participants, result };
     },
   };
 }
@@ -555,30 +643,35 @@ function makeSendGroupInvite(getSock: () => WhatsAppSocket | null): ToolDeclarat
     targetMode: 'injected',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { chatJid, groupJid, inviteCode, inviteExpiration, groupName, jpegThumbnail, caption } =
-        SendGroupInviteSchema.parse(params);
+      try {
+        const { chatJid, groupJid, inviteCode, inviteExpiration, groupName, jpegThumbnail, caption } =
+          SendGroupInviteSchema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
 
-      const jid = chatJid!;
-      const groupInvite: Record<string, unknown> = {
-        groupJid,
-        inviteCode,
-        inviteExpiration,
-        groupName,
-      };
-      if (jpegThumbnail !== undefined) {
-        groupInvite.jpegThumbnail = jpegThumbnail;
-      }
-      if (caption !== undefined) {
-        groupInvite.caption = caption;
-      }
+        const jid = chatJid!;
+        const groupInvite: Record<string, unknown> = {
+          groupJid,
+          inviteCode,
+          inviteExpiration,
+          groupName,
+        };
+        if (jpegThumbnail !== undefined) {
+          groupInvite.jpegThumbnail = jpegThumbnail;
+        }
+        if (caption !== undefined) {
+          groupInvite.caption = caption;
+        }
 
-      const result = await sock.sendMessage(jid, { groupInvite } as any);
-      return result;
+        const result = await sock.sendMessage(jid, { groupInvite } as any);
+        return result;
+      } catch (err) {
+        log.error({ tool: 'send_group_invite', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
+      }
     },
   };
 }
@@ -602,15 +695,20 @@ function makeGroupRevokeInviteV4(getSock: () => WhatsAppSocket | null): ToolDecl
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
     handler: async (params) => {
-      const { groupJid, invitedJid } = GroupRevokeInviteV4Schema.parse(params);
+      try {
+        const { groupJid, invitedJid } = GroupRevokeInviteV4Schema.parse(params);
 
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
+        const sock = getSock();
+        if (!sock) {
+          throw new Error('WhatsApp is not connected');
+        }
+
+        await sock.groupRevokeInviteV4(groupJid, invitedJid);
+        return { success: true, groupJid, invitedJid };
+      } catch (err) {
+        log.error({ tool: 'group_revoke_invite_v4', error: (err as Error).message }, 'mcp_tool_error');
+        throw err;
       }
-
-      await sock.groupRevokeInviteV4(groupJid, invitedJid);
-      return { success: true, groupJid, invitedJid };
     },
   };
 }

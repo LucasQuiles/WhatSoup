@@ -265,8 +265,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!this.sock) return;
     try {
       await this.sock.sendPresenceUpdate(typing ? 'composing' : 'paused', chatJid);
-    } catch {
+    } catch (err) {
       // best-effort — presence failures must never surface to callers
+      this.log.debug({ op: 'sendPresenceUpdate', error: (err as Error).message }, 'transport_op_swallowed');
     }
   }
 
@@ -946,8 +947,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (this.autoRejectCalls && callId) {
         try {
           void (sock as any).rejectCall(callId, callFrom);
-        } catch {
+        } catch (err) {
           // best-effort
+          this.log.debug({ op: 'rejectCall', error: (err as Error).message }, 'transport_op_swallowed');
         }
       }
 
