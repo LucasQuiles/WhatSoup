@@ -5,6 +5,7 @@ import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
 import { helperStyle, labelStyle } from './form-styles'
 import { validatePhone } from '../../lib/validation'
+import { PROVIDERS, getProviderConfigFields } from '../../lib/providers'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -24,6 +25,8 @@ interface AgentOptions {
   mcp?: { send_media?: boolean }
   perUserDirs?: { enabled?: boolean; basePath?: string }
   enabledPlugins?: Record<string, boolean>
+  provider?: string
+  providerConfig?: Record<string, unknown>
 }
 
 /** All known plugins. Order determines display order in the UI. */
@@ -267,6 +270,33 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
     [agentOptions, onChange],
   )
 
+  const handleProviderConfigOption = useCallback(
+    (key: string, value: unknown) => {
+      const current = agentOptions.providerConfig ?? {}
+      onChange({
+        agentOptions: {
+          ...agentOptions,
+          providerConfig: { ...current, [key]: value },
+        },
+      })
+    },
+    [agentOptions, onChange],
+  )
+
+  const handleProviderChange = useCallback(
+    (newProvider: string) => {
+      // Reset providerConfig when switching providers (fields differ)
+      onChange({
+        agentOptions: {
+          ...agentOptions,
+          provider: newProvider,
+          providerConfig: {},
+        },
+      })
+    },
+    [agentOptions, onChange],
+  )
+
   const [activeTab, setActiveTab] = useState<string>('access')
 
 
@@ -427,6 +457,57 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               <option value="per_chat">per_chat</option>
             </SelectInput>
           </Field>
+
+          {/* Provider selection */}
+          <Field label="Provider" helper="AI backend for this agent instance" confirmed>
+            <SelectInput
+              value={agentOptions.provider ?? 'claude-cli'}
+              onChange={(e) => handleProviderChange(e.target.value)}
+              confirmed
+            >
+              {PROVIDERS.map(p => (
+                <option key={p.id} value={p.id}>{p.displayName}</option>
+              ))}
+            </SelectInput>
+          </Field>
+
+          {/* Provider-specific config fields */}
+          {getProviderConfigFields(agentOptions.provider ?? 'claude-cli').map(field => (
+            <Field
+              key={field.key}
+              label={field.label}
+              confirmed={!!(agentOptions.providerConfig?.[field.key])}
+            >
+              {field.inputType === 'number' ? (
+                <NumberInput
+                  value={(agentOptions.providerConfig?.[field.key] as number) ?? ''}
+                  onChange={(e) => handleProviderConfigOption(field.key, e.target.value ? Number(e.target.value) : undefined)}
+                  placeholder={field.placeholder}
+                  confirmed={!!(agentOptions.providerConfig?.[field.key])}
+                />
+              ) : (
+                <TextInput
+                  value={(agentOptions.providerConfig?.[field.key] as string) ?? ''}
+                  onChange={(e) => handleProviderConfigOption(field.key, e.target.value || undefined)}
+                  placeholder={field.placeholder}
+                  confirmed={!!(agentOptions.providerConfig?.[field.key])}
+                />
+              )}
+            </Field>
+          ))}
+
+          {/* Restart notice when provider != default */}
+          {(agentOptions.provider ?? 'claude-cli') !== 'claude-cli' && (
+            <div style={{
+              fontSize: 'var(--font-size-xs)',
+              color: 'var(--color-s-warn)',
+              padding: 'var(--sp-2) var(--sp-3)',
+              background: 'var(--s-warn-wash)',
+              borderRadius: 'var(--radius-sm)',
+            }}>
+              Changing the provider requires a service restart to take effect.
+            </div>
+          )}
 
           {/* Sandbox per chat */}
           <CheckboxField
