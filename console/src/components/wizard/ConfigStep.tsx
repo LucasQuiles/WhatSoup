@@ -23,6 +23,44 @@ interface AgentOptions {
   }
   mcp?: { send_media?: boolean }
   perUserDirs?: { enabled?: boolean; basePath?: string }
+  enabledPlugins?: Record<string, boolean>
+}
+
+/** All known plugins. Order determines display order in the UI. */
+const ALL_PLUGINS: { key: string; label: string; description: string; category: 'core' | 'dev' | 'integration' | 'lsp' }[] = [
+  // Core
+  { key: 'superpowers@superpowers-marketplace', label: 'Superpowers', description: 'Brainstorming, TDD, debugging, plans, verification', category: 'core' },
+  { key: 'episodic-memory@superpowers-marketplace', label: 'Episodic Memory', description: 'Cross-session conversation memory', category: 'core' },
+  { key: 'commit-commands@claude-plugins-official', label: 'Commit Commands', description: 'Git commit, push, PR workflows', category: 'core' },
+  { key: 'elements-of-style@superpowers-marketplace', label: 'Elements of Style', description: 'Writing quality for docs and messages', category: 'core' },
+  { key: 'claude-md-management@claude-plugins-official', label: 'CLAUDE.md Management', description: 'Audit and improve instruction files', category: 'core' },
+  { key: 'hookify@claude-plugins-official', label: 'Hookify', description: 'Create hooks from conversation analysis', category: 'core' },
+  // Dev
+  { key: 'sdlc-os@sdlc-os-dev', label: 'SDLC-OS', description: 'Multi-agent SDLC workflow (45 agents, heavy context)', category: 'dev' },
+  { key: 'tmup@tmup-dev', label: 'tmup', description: 'Multi-agent task coordination via tmux', category: 'dev' },
+  { key: 'ralph-loop-v2@ralph-loop-v2-dev', label: 'Ralph Loop v2', description: 'Hardened iteration loops with telemetry', category: 'dev' },
+  { key: 'plugin-dev@claude-plugins-official', label: 'Plugin Dev', description: 'Plugin creation and validation tools', category: 'dev' },
+  { key: 'superpowers-developing-for-claude-code@superpowers-marketplace', label: 'CC Dev Docs', description: 'Claude Code official documentation', category: 'dev' },
+  { key: 'feature-dev@claude-plugins-official', label: 'Feature Dev', description: 'Guided feature development workflow', category: 'dev' },
+  { key: 'code-review@claude-plugins-official', label: 'Code Review', description: 'Confidence-based code review', category: 'dev' },
+  { key: 'frontend-design@claude-plugins-official', label: 'Frontend Design', description: 'Production-grade UI generation', category: 'dev' },
+  { key: 'security-guidance@claude-plugins-official', label: 'Security Guidance', description: 'Security best practices', category: 'dev' },
+  // Integrations
+  { key: 'microsoft_365@microsoft-365-dev', label: 'Microsoft 365', description: 'Email, calendar, Teams, SharePoint', category: 'integration' },
+  { key: 'microsoft-docs@claude-plugins-official', label: 'Microsoft Docs', description: 'Official Microsoft documentation search', category: 'integration' },
+  { key: 'superpowers-chrome@superpowers-marketplace', label: 'Chrome DevTools', description: 'Browser inspection and automation', category: 'integration' },
+  { key: 'superpowers-lab@superpowers-marketplace', label: 'Superpowers Lab', description: 'Slack, Windows VM, tmux, duplicate detection', category: 'integration' },
+  { key: 'playwright@claude-plugins-official', label: 'Playwright', description: 'Browser automation and testing', category: 'integration' },
+  // LSP
+  { key: 'pyright-lsp@claude-plugins-official', label: 'Pyright LSP', description: 'Python language server', category: 'lsp' },
+  { key: 'typescript-lsp@claude-plugins-official', label: 'TypeScript LSP', description: 'TypeScript language server', category: 'lsp' },
+]
+
+const CATEGORY_LABELS: Record<string, string> = {
+  core: 'Core',
+  dev: 'Development',
+  integration: 'Integrations',
+  lsp: 'Language Servers',
 }
 
 const ACCESS_OPTIONS = [
@@ -438,6 +476,189 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             onChange={(v) => handleMcpOption('send_media', v)}
             helper="Enable the send_media MCP tool"
           />
+
+          {/* Plugin selection */}
+          <div style={{ ...detailPanelStyle, marginTop: 'var(--sp-2)' }}>
+            <label className="c-label" style={labelStyle}>
+              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+                Enabled Plugins
+                {agentOptions.enabledPlugins && (
+                  <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                )}
+              </span>
+            </label>
+            <div style={helperStyle}>
+              Select which plugins this instance loads. Disabled plugins save context tokens. Heavy plugins like SDLC-OS add ~66K tokens to every session.
+            </div>
+            <div className="flex items-center" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)', marginBottom: 'var(--sp-1)' }}>
+              {agentOptions.enabledPlugins && Object.keys(agentOptions.enabledPlugins).length > 0 && (
+                <button
+                  type="button"
+                  className="c-btn c-btn-ghost"
+                  style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)' }}
+                  onClick={() => handleAgentOption('enabledPlugins', {})}
+                >
+                  Reset to global defaults
+                </button>
+              )}
+              <button
+                type="button"
+                className="c-btn c-btn-ghost"
+                style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)' }}
+                onClick={() => {
+                  const all: Record<string, boolean> = {}
+                  ALL_PLUGINS.forEach(p => { all[p.key] = true })
+                  handleAgentOption('enabledPlugins', all)
+                }}
+              >
+                Enable all
+              </button>
+              <button
+                type="button"
+                className="c-btn c-btn-ghost"
+                style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)' }}
+                onClick={() => {
+                  const core: Record<string, boolean> = {}
+                  ALL_PLUGINS.forEach(p => { core[p.key] = p.category === 'core' })
+                  handleAgentOption('enabledPlugins', core)
+                }}
+              >
+                Core only
+              </button>
+            </div>
+            {(Object.entries(CATEGORY_LABELS) as [string, string][]).map(([cat, catLabel]) => {
+              const plugins = ALL_PLUGINS.filter(p => p.category === cat)
+              if (plugins.length === 0) return null
+              return (
+                <div key={cat} style={{ marginTop: 'var(--sp-3)' }}>
+                  <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t4)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-wide)', marginBottom: 'var(--sp-1)' }}>
+                    {catLabel}
+                  </div>
+                  {plugins.map(plugin => {
+                    const current = agentOptions.enabledPlugins ?? {}
+                    const isEnabled = current[plugin.key] ?? true // default: inherit (enabled)
+                    return (
+                      <label
+                        key={plugin.key}
+                        className="flex items-start cursor-pointer"
+                        style={{ gap: 'var(--sp-2)', padding: 'var(--sp-1) 0' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isEnabled}
+                          onChange={(e) => {
+                            const updated = { ...current, [plugin.key]: e.target.checked }
+                            handleAgentOption('enabledPlugins', updated)
+                          }}
+                          style={{ marginTop: '3px' }}
+                        />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 'var(--font-size-data)', color: isEnabled ? 'var(--color-t1)' : 'var(--color-t4)' }}>
+                            {plugin.label}
+                          </div>
+                          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t5)' }}>
+                            {plugin.description}
+                          </div>
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Settings JSON — permissions for Claude Code */}
+          <div style={{ ...detailPanelStyle, marginTop: 'var(--sp-2)' }}>
+            <label className="c-label" style={labelStyle}>
+              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+                Claude Code Permissions (settings.json)
+                {(data.settingsJson as Record<string, unknown> | undefined) && (
+                  <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                )}
+              </span>
+            </label>
+            <div style={helperStyle}>
+              Controls which tools Claude Code is allowed to use. Default grants full bypass with standard MCP wildcards.
+            </div>
+            <Field label="Template" confirmed>
+              <SelectInput
+                value={(data.settingsJsonMode as string) ?? 'default'}
+                onChange={(e) => {
+                  const mode = e.target.value
+                  onChange({ settingsJsonMode: mode })
+                  if (mode === 'default') {
+                    onChange({ settingsJson: undefined, settingsJsonMode: mode })
+                  }
+                }}
+                confirmed
+              >
+                <option value="default">Default (bypassPermissions + standard tools)</option>
+                <option value="custom">Custom</option>
+              </SelectInput>
+            </Field>
+            {(data.settingsJsonMode as string) === 'custom' && (
+              <>
+                <div style={{ marginTop: 'var(--sp-2)' }}>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (!file) return
+                      const reader = new FileReader()
+                      reader.onload = () => {
+                        try {
+                          const parsed = JSON.parse(reader.result as string)
+                          onChange({ settingsJson: parsed })
+                        } catch {
+                          /* invalid JSON — ignore */
+                        }
+                      }
+                      reader.readAsText(file)
+                    }}
+                    style={{
+                      width: '100%',
+                      cursor: 'pointer',
+                      fontSize: 'var(--font-size-data)',
+                      color: 'var(--color-t3)',
+                      marginBottom: 'var(--sp-2)',
+                    }}
+                  />
+                </div>
+                <TextArea
+                  value={
+                    (data.settingsJson as Record<string, unknown> | undefined)
+                      ? JSON.stringify(data.settingsJson, null, 2)
+                      : JSON.stringify({
+                          permissions: {
+                            allow: [
+                              'Bash', 'Read', 'Glob', 'Grep', 'Edit', 'Write', 'Task',
+                              'WebFetch', 'WebSearch', 'NotebookEdit',
+                              'mcp__whatsoup__*', 'mcp__pinecone__*', 'mcp__playwright__*',
+                              'mcp__render__*', 'mcp__plugin_*', 'mcp__claude_ai_*',
+                              'mcp__google-workspace__*',
+                            ],
+                            deny: [],
+                            defaultMode: 'bypassPermissions',
+                          },
+                        }, null, 2)
+                  }
+                  onChange={(e) => {
+                    try {
+                      const parsed = JSON.parse(e.target.value)
+                      onChange({ settingsJson: parsed })
+                    } catch {
+                      /* let user keep typing — only save valid JSON */
+                    }
+                  }}
+                  placeholder='{"permissions": {"allow": [...], "deny": [], "defaultMode": "bypassPermissions"}}'
+                  confirmed={!!(data.settingsJson as Record<string, unknown> | undefined)}
+                  minHeight={200}
+                />
+              </>
+            )}
+          </div>
         </div>
       )}
 
