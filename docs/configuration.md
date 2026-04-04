@@ -155,6 +155,8 @@ Required when `type` is `agent`. All sub-fields are validated by `instance-loade
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
 | `sandbox` | object | no | — | Sandbox constraints applied via Claude Code hooks. See [sandbox](#agentoptions-sandbox). |
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
+| `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the Claude Code subprocess. |
+| `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
 
 #### Session Scopes
 
@@ -174,6 +176,28 @@ Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.
 | `allowedTools` | string[] | Claude Code tools the agent may use. Empty array blocks all non-essential tools. |
 | `allowedMcpTools` | string[] | MCP tools permitted within the sandbox. |
 | `bash` | object | Bash execution policy: `{ "enabled": boolean, "pathRestricted": boolean }`. |
+
+#### `agentOptions.enabledPlugins`
+
+Controls which Claude Code plugins are loaded for this instance's sessions. Each key is a plugin identifier in `plugin@marketplace` format. Set to `false` to disable a plugin that would otherwise be inherited from the global `~/.claude/settings.json`.
+
+```json
+"enabledPlugins": {
+  "sdlc-os@sdlc-os-dev": false,
+  "tmup@tmup-dev": false,
+  "superpowers@superpowers-marketplace": true,
+  "episodic-memory@superpowers-marketplace": true
+}
+```
+
+**Behavior:**
+- Keys set to `false` override the global setting and disable the plugin for this instance.
+- Keys set to `true` explicitly enable the plugin (redundant if already globally enabled, but documents intent).
+- Keys omitted entirely inherit from the global `enabledPlugins` in `~/.claude/settings.json`.
+- An empty object `{}` or `null` resets to full global inheritance.
+- This value is written to `<cwd>/.claude/settings.json` during instance startup and via the PATCH API.
+
+**Context impact:** Plugin agents are eagerly loaded into the system prompt. Disabling heavy plugins like `sdlc-os` (45 agents, ~66K tokens) significantly reduces per-session context overhead.
 
 ### Validation Rules Summary
 

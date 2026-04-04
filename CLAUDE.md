@@ -33,6 +33,15 @@ Four independent processes via systemd template unit (`whatsoup@<name>.service`)
 - `sandbox-agent` — sandboxed per-chat agent (tier: chat-scoped per workspace)
 - `chat-bot` — chat API bot, no MCP, no agent
 
+### Per-Instance Plugin Scoping
+
+Each agent instance controls which Claude Code plugins it loads via `enabledPlugins` in `agentOptions` (config.json) and `.claude/settings.json` (project-level). Plugins disabled at the instance level are not loaded into the session, saving context.
+
+Key files:
+- `src/core/settings-template.ts` — default permissions and plugin templates
+- `src/core/workspace.ts` — `writePermissionsSettings()`, `ensurePermissionsSettings()`
+- `src/fleet/routes/ops.ts` — PATCH handler writes enabledPlugins to both config.json and .claude/settings.json
+
 ## Conventions
 
 - ESM throughout, no CommonJS
@@ -44,7 +53,7 @@ Four independent processes via systemd template unit (`whatsoup@<name>.service`)
 
 ## Documentation
 
-- `docs/configuration.md` — environment variables, instance.json schema, XDG paths
+- `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
 - `docs/tools.md` — complete MCP tool API reference (127 tools, 13 modules)
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms
