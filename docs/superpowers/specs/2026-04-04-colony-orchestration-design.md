@@ -699,21 +699,54 @@ Meanwhile, the daemon sees this is the fourth mission this week that surfaced si
 
 ### 10.1 Scoped Workstream Identity
 
-Every operational unit in the system has a durable identity — not a random session ID, but a composite key derived from:
+Every operational unit has a durable identity — not a random session ID, but a scoped workstream identity that serves as a correlation ID with operational semantics. The identity is a composite derived from:
+
 - Repository
 - Branch or worktree
 - Mission/campaign ID
 - Bead chain or task lineage
 - Code area/package/module scope
 - Issue cluster ID (if applicable)
+- Time window / session epoch
 
-This **scoped workstream identity** narrows retrieval and joins together: SQLite rows, artifact sets, transcript chunks, log events, vector entries, and enrichment outputs.
+Not necessarily encoded as one string, but conceptually this composite identity. It narrows retrieval and joins together: SQLite rows, artifact sets, transcript chunks, log events, vector entries, and enrichment outputs.
 
 BRIC does not index raw sessions as monolithic blobs. It indexes state packets bound to durable scoped identities.
 
-### 10.2 The State Packet
+### 10.2 The State Ledger
 
-A state packet is the operational context bundle that agents read at session start. It contains:
+The scoped workstream identity is paired with a **structured state ledger** in SQLite — a denormalized snapshot with pointers, not a full copy of all state and not just a pointer list.
+
+The SQLite ledger stores:
+
+| Field | What it contains |
+|-------|-----------------|
+| Slug ID | Scoped workstream identity (composite key) |
+| Mission ID | Active mission reference |
+| Current authorized scope | Files, modules, packages agent may modify |
+| Active beads and statuses | Bead IDs with current lifecycle state |
+| Latest commit hash / branch / diff summary | Git state snapshot |
+| Changed files / hotspots | Files modified in this workstream |
+| Linked artifacts | Pointers to work product files |
+| Linked findings / issues | Pointers to exploratory issues and open findings |
+| Decision anchors | Structured + narrative records of key decisions |
+| Unresolved questions | Explicit uncertainty tracking |
+| Provenance pointers | References into Git objects, artifact files, vector entries |
+| Last enrichment timestamps | When BRIC last processed this workstream |
+| Vector store references | Entry IDs for associated semantic records |
+
+This is the compact structured snapshot that enables a **coordinated rehydration flow** — not a single database call, but an orchestrated sequence:
+
+1. SQLite query for structured state and pointers
+2. Artifact resolution via provenance pointers
+3. Bead state read from Git-backed files
+4. Optional vector expansion for semantic context widening
+
+The important part is orchestration, not one lookup.
+
+### 10.3 The State Packet
+
+A state packet is the operational context bundle assembled for an agent at session start. It is constructed from the state ledger plus enriched context:
 
 | Field | Source | Authority |
 |-------|--------|-----------|
@@ -733,22 +766,92 @@ A state packet is the operational context bundle that agents read at session sta
 | Next recommended actions | Conductor journal | Advisory |
 | Promotion/escalation state | Orchestrator | Authoritative |
 
-The packet is assembled by combining authoritative state (beads, SQLite, Git) with enriched context (BRIC outputs, vector recalls). Authoritative fields are ground truth. Enrichment fields support reasoning but are not definitive.
+Authoritative fields are ground truth. Enrichment fields support reasoning but are not definitive.
 
-### 10.3 Four-Layer Storage Model
+### 10.4 Four-Layer Storage Model
 
-Each layer serves a distinct purpose:
+Each layer serves a distinct purpose, ordered by authority and confidence — not recency:
 
-| Layer | What it stores | Authority level | Retrieval mode |
-|-------|---------------|-----------------|----------------|
-| **Beads** (Git) | Execution and workflow units: objectives, status, corrections, decisions | Authoritative ground truth | Deterministic file read |
-| **Artifacts** (Git + filesystem) | Human-readable and machine-consumable work products | Authoritative work product | Deterministic file read |
-| **SQLite** (tmup DB + operational state) | Local structured state: session continuity, provenance, linkages, task lifecycle | Authoritative operational state | Deterministic query |
-| **Vector storage** (Pinecone + embeddings) | Fuzzy retrieval: semantic recall, clustering, related-context surfacing | Approximate recall | Constrained semantic search |
+| Layer | What it stores | Authority | Retrieval mode |
+|-------|---------------|-----------|----------------|
+| **Beads** (Git) | Workflow-authoritative execution state: objectives, status, corrections, decisions | Ground truth | Deterministic file read |
+| **Artifacts** (Git + filesystem) | Authoritative work products and human-readable outputs | Ground truth | Deterministic file read |
+| **SQLite** (tmup DB + state ledger) | Authoritative structured operational continuity: provenance, linkages, task lifecycle | Structured truth | Deterministic query |
+| **Vector storage** (Pinecone + embeddings) | Non-authoritative semantic recall and related-context surfacing | Approximate recall | Constrained semantic search |
 
-Retrieval combines deterministic anchors with semantic recall. The scoped workstream identity and rich metadata constrain vector search so retrieval happens inside the correct operational neighborhood. Final packets are assembled by combining deterministic state with bounded semantic recall, not by trusting vector search alone.
+Vector storage is not fourth because it is old. It is fourth because it is probabilistic. The retrieval rule:
 
-### 10.4 BRIC Lifecycle Roles
+1. Use deterministic scoped state first (beads, ledger)
+2. Use linked artifacts and provenance second
+3. Use SQLite for structured joins and continuity
+4. Use vector recall to widen or recover context when deterministic state is insufficient
+
+The system resists compression loss by preserving state across multiple complementary layers. BRIC plus SQLite plus scoped identity improves handoff fidelity, retrieval precision, and context reconstruction efficiency. It does not eliminate loss — it reduces it through layered redundancy.
+
+### 10.5 Typed Event Model
+
+BRIC operates on typed events, not raw "session stuff." Without a typed event model, BRIC becomes a garbage sink.
+
+#### Event Types
+
+| Event | Trigger | BRIC Processing Level |
+|-------|---------|----------------------|
+| `bead_started` | Worker begins bead execution | Full enrichment |
+| `bead_completed` | Worker reports completion | Full enrichment |
+| `bead_failed` | Worker reports failure | Full enrichment |
+| `commit_created` | Git commit lands | Full enrichment |
+| `test_run_completed` | Test suite finishes | Full enrichment |
+| `patch_applied` | Diff applied to working tree | Full enrichment |
+| `escalation_requested` | Agent requests escalation | Full enrichment |
+| `finding_opened` | Agent creates exploratory finding | Full enrichment |
+| `finding_promoted` | Finding becomes executable task | Full enrichment |
+| `finding_deferred` | Finding deferred for later | Batched condensation |
+| `session_checkpointed` | Conductor saves state | Full enrichment |
+| `large_file_batch_read` | Agent reads many files | Batched condensation |
+| `notable_tool_failure` | Tool error with signal value | Batched condensation |
+| `retry_pattern_detected` | Same action retried 3+ times | Batched condensation |
+| `shell_command_executed` | Individual CLI invocation | Append-only logging |
+| `trivial_file_read` | Single small file read | Append-only logging |
+| `intermediate_tool_chatter` | Low-signal tool output | Append-only logging |
+
+#### Three Processing Modes
+
+- **Full enrichment:** Extract events, compute embeddings, update SQLite ledger, update vector store, produce distilled artifacts. Triggered by high-value events.
+- **Batched condensation:** Append to raw event log. Periodically (or on next full-enrichment trigger), batch-process accumulated medium-value events. Extract patterns without per-event overhead.
+- **Append-only logging:** Write to JSONL stream. No immediate processing. Available for retrospective analysis and backpressure detection. Keeps hook overhead near zero for low-value events.
+
+### 10.6 BRIC Output Types
+
+BRIC produces multiple typed outputs, not a single summary blob:
+
+**A. Structured state updates** (written to SQLite ledger):
+- Decision records
+- Finding records
+- Linkage updates
+- Bead/session status deltas
+- Provenance pointers
+- Ambiguity/confidence markers
+
+**B. Distilled retrieval artifacts** (stored as JSON files):
+- Context packets for agent consumption
+- Evidence bundles for escalation/adjudication
+- Diff summaries and hotspot maps
+- Unresolved-question sets
+- Clustering outputs (related failures, similar patterns)
+
+**C. Vectorizable summaries** (written to vector store):
+- Scoped semantic summaries
+- Decision summaries
+- Failure pattern summaries
+- Artifact abstracts
+- Transcript extracts with metadata
+
+**D. Optional human-readable summaries** (written as markdown):
+- Checkpoint reports
+- Review packets
+- Escalation briefs
+
+### 10.7 BRIC Lifecycle Roles
 
 #### Pre-Hook Context Assembler
 
@@ -764,7 +867,7 @@ Before an agent begins work on a bead:
 After a bead completes:
 - Receives: updated diff, new logs, transcript excerpt, test results, changed files, produced artifacts
 - Extracts decisions, unresolved uncertainties, evidence anchors, follow-on findings, candidate duplicates
-- Updates the persistent state packet, retrieval index, SQLite state, and linked vector entries
+- Updates the persistent state ledger, retrieval index, SQLite state, and linked vector entries
 - The next worker inherits a structured continuation, not a lossy prose handoff
 
 #### BRIC Preprocessing Contract
@@ -792,9 +895,13 @@ When a higher-tier agent decides whether to promote, suppress, merge, or escalat
 - BRIC provides a scoped evidence bundle instead of raw history
 - Includes: file references, related cases, prior similar incidents, anomaly summaries, confidence assessment
 
-### 10.5 BRIC Safety Boundary
+### 10.8 BRIC Safety Boundary
 
 BRIC enriches and stages, but does not become the policy engine. It can help write decision-tree entries, classify patterns, and propose linkages. But promotion rules, authority expansion, and policy mutation live in the orchestration/guardrail layer. Moving control into an enrichment service undermines the layered mediation model.
+
+### 10.9 What This Design Actually Is
+
+BRIC is not a magic memory layer. It is a hook-integrated enrichment and condensation service. It passively captures high-value operational signals, converts them into structured state updates and distilled retrieval artifacts, and binds them to a durable scoped workstream identity. SQLite provides deterministic continuity and joins. Artifacts preserve human/machine-readable work products. Vector storage provides semantic recall inside the correct operational neighborhood. Together these layers improve handoff fidelity and reduce the need to reconstruct context from scratch. They do not eliminate loss — they reduce it through layered redundancy, structured capture, and orchestrated rehydration.
 
 ---
 
