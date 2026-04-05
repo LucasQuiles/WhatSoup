@@ -2,7 +2,7 @@
 
 ## Summary
 
-Phase 2 delivers 7 new features across 3 sprints, building on Phase 1's media access, content completeness, search, and voice synthesis. Combined with Phase 1, WhatSoup now has 140+ MCP tools covering the full WhatsApp feature surface.
+Phase 2 delivers 6 new features across 3 sprints (1 cut after proof test). Building on Phase 1's media access, content completeness, search, and voice synthesis, WhatSoup now has 139 MCP tools covering the full WhatsApp feature surface.
 
 ## New Features
 
@@ -17,7 +17,7 @@ Phase 2 delivers 7 new features across 3 sprints, building on Phase 1's media ac
 - **SP9: Broadcast Lists** — CUT. Proof test confirmed `broadcast: true` is vestigial in Baileys v7.0.0-rc.9. See `docs/sdlc/active/whatsapp-mcp-features/sp9-broadcast-proof.md`.
 
 ### Sprint C — Infrastructure
-- **SP11: Message Scheduling** — `schedule_message`, `list_scheduled`, `cancel_scheduled` tools. New `scheduled_messages` table (MIGRATION_14). Scheduler loop with idempotency guard, retry (3 max), dead-letter state.
+- **SP11: Message Scheduling** — `schedule_message`, `list_scheduled`, `cancel_scheduled` tools. New `scheduled_messages` table (MIGRATION_14). Scheduler loop with idempotency guard (`processing` status), retry (3 max), terminal `failed` status for exhausted retries.
 
 ## Database Migrations
 
@@ -48,17 +48,16 @@ API key is now provisioned in GNOME Keyring (`service: elevenlabs`). Voice synth
 - **Sub-projects cut:** 1 (SP9 — Baileys limitation)
 - **Total commits:** 40+
 - **New tests added:** ~150+
-- **Test suite:** 3366 passed | 1 pre-existing failure
-- **TypeScript:** Clean (0 errors from our work)
+- **Test suite:** 3369 passed | 0 failures
+- **TypeScript:** 5 pre-existing errors in `fleet/index.ts`, `fleet/routes/data.ts`, `control-queue.ts`, `agent/runtime.ts` — none from Phase 1/2 work
 - **Canary smoke test:** 6/6 PASS on BES Bot instance
 
 ## Team
 
 - **Q:** Orchestrator, foundation layers, SP1-SP4 foundation, SP6, SP7, SP9 proof test, SP11 infrastructure
-- **BES Bot:** Implementation partner, SP1 download tool, SP2 parsing rewrite, SP3 search, SP5 typing, SP8 status tools, SP11 scheduling tools, independent code review
+- **BES Bot:** Implementation partner, SP1 download tool, SP2 parsing rewrite, SP3 search, SP5 typing, SP8 status tools, SP11 scheduling tools, independent code review + release note audit
 
 ## Known Issues
 
-- 1 pre-existing test failure: `stream-parsers.test.ts` (Codex parser — unrelated)
-- Pre-existing TypeScript errors in `fleet/routes/data.ts`, `control-queue.ts`, `agent/runtime.ts` (unrelated to Phase 1/2)
+- 5 pre-existing TypeScript errors in `fleet/index.ts`, `fleet/routes/data.ts`, `control-queue.ts`, `agent/runtime.ts` (none from Phase 1/2)
 - SP4 voice reply requires ElevenLabs API quota — monitor usage
