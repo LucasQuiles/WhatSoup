@@ -20,6 +20,7 @@ import { registerPresenceTools } from '../../src/mcp/tools/presence.ts';
 import { registerProfileTools } from '../../src/mcp/tools/profile.ts';
 import { registerRetentionTools } from '../../src/mcp/tools/retention.ts';
 import { registerStatusTools } from '../../src/mcp/tools/status.ts';
+import { registerSchedulingTools } from '../../src/mcp/tools/scheduling.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 
@@ -66,6 +67,7 @@ describe('tool registration', () => {
     registerProfileTools(getSock, db, register);
     registerRetentionTools(registry, { db });
     registerStatusTools(registry, { db, getSock });
+    registerSchedulingTools(registry, { db });
 
     // Presence
     registerPresenceTools(getSock, connection.presenceCache, register);
@@ -82,6 +84,9 @@ describe('tool registration', () => {
     expect(names).toContain('cleanup_media');
     expect(names).toContain('post_status');
     expect(names).toContain('list_statuses');
+    expect(names).toContain('schedule_message');
+    expect(names).toContain('list_scheduled');
+    expect(names).toContain('cancel_scheduled');
 
     db.raw.close();
   });
