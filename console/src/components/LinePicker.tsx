@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import StatusDot from './StatusDot'
 import ModeBadge from './ModeBadge'

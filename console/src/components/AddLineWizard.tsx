@@ -1,4 +1,4 @@
-import { type FC, useState, useCallback, useEffect, useRef } from 'react'
+import { type CSSProperties, type FC, useState, useCallback, useEffect, useRef } from 'react'
 import { X, Check, ChevronRight, ChevronLeft, Loader2 } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import IdentityStep from './wizard/IdentityStep'
@@ -280,7 +280,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
-        }}
+        } as CSSProperties & Record<'--wizard-accent', string>}
       >
         {/* Header */}
         <div
