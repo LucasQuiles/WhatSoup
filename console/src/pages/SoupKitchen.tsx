@@ -252,16 +252,7 @@ const SoupKitchen: FC = () => {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search lines..."
-                className="w-full bg-d1 text-t2 font-mono outline-none
-                           placeholder:text-t5 focus:border-m-cht/40"
-                style={{
-                  fontSize: "var(--font-size-data)",
-                  padding: "var(--sp-1h) var(--sp-3) var(--sp-1h) var(--sp-7)",
-                  height: "var(--input-h)",
-                  borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b2)",
-                  borderRadius: "var(--radius-sm)",
-                  transition: "border-color var(--dur-norm) var(--ease)",
-                }}
+                className="c-input c-input-search"
               />
             </div>
 

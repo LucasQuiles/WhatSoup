@@ -752,6 +752,75 @@ body::before {
 .c-toolbar { padding: var(--sp-2h) var(--sp-4); }    /* 10px 16px — toolbar areas per spec */
 .c-kpi-pad { padding: var(--sp-4) var(--sp-5); }    /* 16px 20px — KPI cards per spec */
 
+/* ═══ Input, dialog, and card primitives ═══ */
+.c-input {
+  width: 100%;
+  height: var(--input-h);
+  padding: var(--sp-1h) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-data);
+  color: var(--color-t2);
+  background: var(--color-d1);
+  border: var(--bw) solid var(--b2);
+  border-radius: var(--radius-sm);
+  transition:
+    border-color var(--dur-norm) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    background var(--dur-norm) var(--ease);
+}
+.c-input::placeholder { color: var(--color-t5); }
+.c-input:hover { border-color: var(--b3); }
+.c-input:focus-visible {
+  border-color: var(--color-m-cht);
+  box-shadow:
+    0 0 0 var(--bw-focus) var(--color-d1),
+    0 0 0 calc(var(--bw-focus) + var(--bw-focus-outer)) var(--m-cht-wash);
+}
+.c-input-search {
+  padding-left: var(--sp-7);
+  padding-right: var(--sp-8);
+}
+
+.c-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background: var(--overlay);
+  z-index: 50;
+}
+.c-dialog {
+  width: min(100%, var(--panel-confirm));
+  max-height: var(--modal-max-h);
+  overflow: hidden;
+  background: var(--color-d1);
+  border: var(--bw) solid var(--b2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.c-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+}
+
+.c-card {
+  background: var(--color-d2);
+  border: var(--bw) solid var(--b2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+}
+.c-card--detail {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--color-d5);
+  border-color: var(--b3);
+  box-shadow: var(--shadow-lg);
+  min-width: var(--tooltip-min-w);
+}
+
 /* ═══ Button variants — c-btn from design system ═══ */
 .c-btn {
   display: inline-flex;
