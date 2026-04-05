@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { Routes, Route } from 'react-router-dom'
+import ErrorBoundary from './components/ErrorBoundary'
 import Nav from './components/Nav'
 import { useLines } from './hooks/use-fleet'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
@@ -42,10 +43,10 @@ export default function App() {
       <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <Suspense fallback={<PageLoader />}>
           <Routes>
-            <Route path="/" element={<SoupKitchen />} />
-            <Route path="/lines/:name" element={<LineDetail />} />
-            <Route path="/inbox" element={<Inbox />} />
-            <Route path="/ops" element={<Ops />} />
+            <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
+            <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
+            <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
+            <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
           </Routes>
         </Suspense>
       </main>
