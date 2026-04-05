@@ -49,7 +49,7 @@ export function registerAllTools(
 
   // Pattern 1 — options-object: take ToolRegistry + deps directly
   try { registerMessagingTools(registry, { connection, db: db.raw }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
-  try { registerMediaTools(registry, { connection, db: db.raw }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
+  try { registerMediaTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
 
   // Pattern 2 — DB-dependent
   try { registerChatManagementTools(db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }

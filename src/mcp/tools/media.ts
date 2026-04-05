@@ -9,7 +9,7 @@ import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/me
 import { extractRawMime } from '../../core/media-mime.ts';
 import { updateMediaPath } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
-import type { DatabaseSync } from 'node:sqlite';
+import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
@@ -23,7 +23,7 @@ const log = createChildLogger('mcp:media');
 
 export interface MediaDeps {
   connection: ConnectionManager;
-  db: DatabaseSync;
+  db: Database;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ export function registerMediaTools(
       const messageId = params['message_id'] as string;
 
       // Look up the message
-      const row = db.prepare(
+      const row = db.raw.prepare(
         'SELECT message_id, content_type, media_path, raw_message FROM messages WHERE message_id = ?',
       ).get(messageId) as Pick<MessageRow, 'message_id' | 'content_type' | 'media_path'> & { raw_message: string | null } | undefined;
 
@@ -295,8 +295,26 @@ export function registerMediaTools(
         return { error: 'download_failed', message: 'Media download failed. The URL may have expired or the file exceeds the 25MB limit.' };
       }
 
-      // Determine file extension — for documents, try original filename
-      let ext = typeInfo.ext;
+      // MIME-to-extension map for deriving the correct file extension from actual MIME type
+      const MIME_TO_EXT: Record<string, string> = {
+        'image/jpeg':  'jpg',
+        'image/png':   'png',
+        'image/gif':   'gif',
+        'image/webp':  'webp',
+        'image/heic':  'heic',
+        'image/heif':  'heif',
+        'audio/ogg':   'ogg',
+        'audio/mpeg':  'mp3',
+        'audio/mp4':   'm4a',
+        'audio/wav':   'wav',
+        'video/mp4':   'mp4',
+        'video/webm':  'webm',
+        'application/pdf': 'pdf',
+      };
+
+      // Determine file extension — derive from actual MIME type when possible,
+      // fall back to the content-type default; for documents, prefer original filename.
+      let ext = MIME_TO_EXT[result.mimeType] ?? typeInfo.ext;
       if (row.content_type === 'document') {
         const docMsg = (rawMsg as any)?.message?.documentMessage
           ?? (rawMsg as any)?.message?.documentWithCaptionMessage?.message?.documentMessage;
@@ -311,8 +329,7 @@ export function registerMediaTools(
       const filePath = writeTempFile(result.buffer, ext);
 
       // Persist path to database
-      const dbWrapper = { raw: db } as import('../../core/database.ts').Database;
-      updateMediaPath(dbWrapper, messageId, filePath);
+      updateMediaPath(db, messageId, filePath);
 
       return {
         file_path: filePath,

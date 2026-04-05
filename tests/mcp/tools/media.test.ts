@@ -69,7 +69,7 @@ describe('registerMediaTools', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db: testDb.raw };
+    deps = { connection, db: testDb };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);
@@ -439,7 +439,7 @@ describe('download_media', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db: db.raw };
+    deps = { connection, db };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);
