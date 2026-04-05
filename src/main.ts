@@ -180,7 +180,7 @@ const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INST
 }
 
 // 3. Instance type selection
-const instanceType: string = instanceConfig?.type ?? 'chat';
+const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
 const connectionManager = new ConnectionManager();
@@ -209,7 +209,7 @@ if (instanceType === 'agent') {
     cwd: cwdResolved,
     instructionsPath: agentOpts?.instructionsPath,
     sandbox: agentOpts?.sandbox,
-    model: instanceConfig?.model,
+    model: instanceConfig?.model as string | undefined,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
     pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
     enabledPlugins: agentOpts?.enabledPlugins,
