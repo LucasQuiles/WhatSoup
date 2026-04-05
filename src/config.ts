@@ -263,6 +263,29 @@ export const config = {
     intervalHours: (instance?.mediaRetention?.intervalHours as number | undefined) ?? 6,
   },
 
+  // Ingest backpressure (SP1)
+  ingest: {
+    maxConcurrent: (instance?.ingest?.maxConcurrent as number | undefined) ?? 20,
+    maxQueueDepth: (instance?.ingest?.maxQueueDepth as number | undefined) ?? 500,
+  },
+
+  // Connection exhaustion (SP2) — exit after N exhaustion cycles so systemd can restart
+  maxExhaustionCycles: (instance?.maxExhaustionCycles as number | undefined) ?? 2,
+
+  // Turn queue depth cap (SP3)
+  agentMaxQueueDepth: (instance?.agentMaxQueueDepth as number | undefined) ?? 25,
+
+  // Admin allow replay throttle (SP4)
+  adminReplayMax: (instance?.adminReplayMax as number | undefined) ?? 5,
+  adminReplayDelayMs: (instance?.adminReplayDelayMs as number | undefined) ?? 2000,
+
+  // Advanced tool gates (SP5)
+  advanced: {
+    enableRelayMessage: (instance?.advanced?.enableRelayMessage as boolean | undefined) ?? false,
+    enableResync: (instance?.advanced?.enableResync as boolean | undefined) ?? false,
+    relayMaxPayloadBytes: (instance?.advanced?.relayMaxPayloadBytes as number | undefined) ?? 1_048_576, // 1MB
+  },
+
   // Access mode (from instance config, defaults to allowlist for backward compat)
   accessMode: (() => {
     const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;

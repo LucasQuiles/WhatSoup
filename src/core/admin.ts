@@ -5,13 +5,16 @@ import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
 import { toPersonalJid, toLidJid, bareNumber } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
-import { getMessagesBySender } from './messages.ts';
+import { getMessagesBySender, type StoredMessage } from './messages.ts';
 import { isAdminPhone } from '../lib/phone.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 
 const log = createChildLogger('admin');
+
+/** Track replayed message IDs to prevent duplicate replays within this process lifetime. */
+const replayedIds = new Set<string>();
 
 export async function handleAdminCommand(
   db: Database,
@@ -28,8 +31,6 @@ export async function handleAdminCommand(
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
     if (subjectType === 'phone') {
-      await sendTracked(messenger, adminChatJid, `Got it, allowed +${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
-
       // Replay queued messages: try the personal JID, plus any LIDs that map
       // to this phone. toLidJid(phone) is wrong — LIDs are opaque numbers
       // unrelated to phone numbers. We must reverse-lookup from lid_mappings.
@@ -40,25 +41,43 @@ export async function handleAdminCommand(
           jidFormats.push(toLidJid(lid));
         }
       }
+
+      // Collect all stored messages across JID formats, deduplicate, take most recent N
+      const allStored: StoredMessage[] = [];
       for (const senderJid of jidFormats) {
-        const stored = getMessagesBySender(db, senderJid);
-        for (const msg of stored) {
-          const incomingMsg: IncomingMessage = {
-            messageId: msg.messageId,
-            chatJid: msg.chatJid,
-            senderJid: msg.senderJid,
-            senderName: msg.senderName,
-            content: msg.content,
-            contentText: msg.contentText ?? null,
-            contentType: msg.contentType,
-            isFromMe: false,
-            isGroup: false,
-            mentionedJids: [],
-            timestamp: msg.timestamp,
-            quotedMessageId: msg.quotedMessageId,
-            isResponseWorthy: true,
-          };
-          await handleMessageFn(incomingMsg);
+        allStored.push(...getMessagesBySender(db, senderJid));
+      }
+      const totalQueued = allStored.length;
+
+      // Filter already-replayed, sort by timestamp ascending, take most recent N
+      const toReplay = allStored
+        .filter(m => !replayedIds.has(m.messageId))
+        .slice(-config.adminReplayMax);
+
+      const replayCount = toReplay.length;
+      await sendTracked(messenger, adminChatJid, `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`, durability, { replayPolicy: 'safe', isTerminal: true });
+
+      for (const msg of toReplay) {
+        replayedIds.add(msg.messageId);
+        const incomingMsg: IncomingMessage = {
+          messageId: msg.messageId,
+          chatJid: msg.chatJid,
+          senderJid: msg.senderJid,
+          senderName: msg.senderName,
+          content: msg.content,
+          contentText: msg.contentText ?? null,
+          contentType: msg.contentType,
+          isFromMe: false,
+          isGroup: false,
+          mentionedJids: [],
+          timestamp: msg.timestamp,
+          quotedMessageId: msg.quotedMessageId,
+          isResponseWorthy: true,
+        };
+        await handleMessageFn(incomingMsg);
+        // Throttle between replayed messages to avoid flooding
+        if (config.adminReplayDelayMs > 0) {
+          await new Promise(r => setTimeout(r, config.adminReplayDelayMs));
         }
       }
     } else {

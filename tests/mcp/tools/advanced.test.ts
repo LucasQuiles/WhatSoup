@@ -7,6 +7,16 @@ import { Database } from '../../../src/core/database.ts';
 import { storeMessage, type StoreMessageInput } from '../../../src/core/messages.ts';
 import { randomBytes } from 'node:crypto';
 
+vi.mock('../../../src/config.ts', () => ({
+  config: {
+    advanced: {
+      enableRelayMessage: true,
+      enableResync: true,
+      relayMaxPayloadBytes: 1_048_576,
+    },
+  },
+}));
+
 function globalSession(): SessionContext {
   return { tier: 'global' };
 }

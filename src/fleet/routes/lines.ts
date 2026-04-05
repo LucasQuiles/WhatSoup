@@ -7,6 +7,7 @@ import { bareNumber } from '../../core/jid-constants.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
+import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 
 export interface LinesDeps {
   discovery: FleetDiscovery;
@@ -34,19 +35,6 @@ function phoneFromJid(jid: string | undefined | null): string {
   return extractLocal(jid);
 }
 
-/**
- * Normalize a timestamp to ISO 8601 format.
- * SQLite datetime('now') produces "YYYY-MM-DD HH:MM:SS" (UTC but no timezone marker).
- * Agent runtimes produce ISO strings. This ensures a consistent format for the frontend.
- */
-function normalizeTimestamp(ts: unknown): string | null {
-  if (!ts || typeof ts !== 'string') return null;
-  // Already ISO 8601 (has T and Z or timezone offset)
-  if (ts.includes('T')) return ts;
-  // SQLite datetime format "YYYY-MM-DD HH:MM:SS" — treat as UTC
-  const d = new Date(ts.replace(' ', 'T') + 'Z');
-  return isNaN(d.getTime()) ? null : d.toISOString();
-}
 
 /** Safely traverse nested health snapshot using dot-separated keys. */
 function dig(obj: Record<string, unknown> | null | undefined, ...keys: string[]): unknown {
@@ -226,7 +214,7 @@ function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): 
         'SELECT MAX(timestamp) as ts FROM messages WHERE deleted_at IS NULL'
       ).get() as { ts: number | null } | undefined;
       if (!row?.ts) return null;
-      return new Date(row.ts * 1000).toISOString();
+      return toIsoFromUnix(row.ts);
     });
     return result.ok ? result.data : null;
   });

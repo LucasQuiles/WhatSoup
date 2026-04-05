@@ -130,6 +130,38 @@ describe('handleGetLines', () => {
     expect(body[0]).toHaveProperty('lastActive');
   });
 
+  it('normalizes sqlite-style runtime timestamps for lastActive', () => {
+    const inst = fakeInstance({ name: 'alpha' });
+    const status = fakeStatus({
+      name: 'alpha',
+      health: {
+        uptime: 1234,
+        runtime: {
+          passive: {
+            lastActivityAt: '2026-04-05 12:34:56',
+          },
+        },
+      },
+    });
+
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['alpha', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['alpha', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+
+    const body = JSON.parse(res._body);
+    expect(body[0].lastActive).toBe('2026-04-05T12:34:56.000Z');
+  });
+
   it('returns "unknown" status when poller has no data for an instance', () => {
     const inst = fakeInstance({ name: 'beta' });
 

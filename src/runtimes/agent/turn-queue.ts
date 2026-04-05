@@ -16,10 +16,22 @@ export interface QueuedTurn {
   inboundSeq?: number;
 }
 
+export interface TurnQueueOpts {
+  maxDepth?: number;
+  onReject?: (turn: QueuedTurn) => void;
+}
+
 export class TurnQueue {
   private queue: QueuedTurn[] = [];
   private processing = false;
   private processor: ((turn: QueuedTurn) => Promise<void>) | null = null;
+  private readonly maxDepth: number;
+  private readonly onReject?: (turn: QueuedTurn) => void;
+
+  constructor(opts?: TurnQueueOpts) {
+    this.maxDepth = opts?.maxDepth ?? Infinity;
+    this.onReject = opts?.onReject;
+  }
 
   setProcessor(fn: (turn: QueuedTurn) => Promise<void>): void {
     this.processor = fn;
@@ -27,13 +39,25 @@ export class TurnQueue {
     void this.drain();
   }
 
-  enqueue(turn: QueuedTurn): void {
+  enqueue(turn: QueuedTurn): boolean {
+    if (this.queue.length >= this.maxDepth) {
+      log.warn({ chatJid: turn.chatJid, maxDepth: this.maxDepth, pending: this.queue.length },
+        'turn rejected — queue depth cap reached');
+      this.onReject?.(turn);
+      return false;
+    }
     this.queue.push(turn);
     void this.drain();
+    return true;
   }
 
   get pending(): number {
     return this.queue.length;
+  }
+
+  /** Count queued turns for a specific chat. */
+  pendingForChat(chatJid: string): number {
+    return this.queue.filter((t) => t.chatJid === chatJid).length;
   }
 
   get isProcessing(): boolean {

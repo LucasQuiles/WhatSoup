@@ -2,6 +2,8 @@
 // ConnectionManager — Baileys-backed WhatsApp connection with typed event emission.
 
 import { EventEmitter } from 'node:events';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   makeWASocket,
@@ -155,6 +157,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private keepaliveInFlight = false;
   private gracefulReconnectInFlight = false;
+  private exhaustionCycles = 0;
+  private restartRequiredTimestamps: number[] = [];
   private lastPingAt: number | null = null;
   private lastPongAt: number | null = null;
   private connectionState: ConnectionLifecycleState = 'disconnected';
@@ -210,6 +214,28 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   async connect(): Promise<void> {
     if (this.shuttingDown) return;
+
+    // Check for recent exhaustion marker from a previous crash-loop
+    if (config.dataRoot) {
+      const markerPath = join(config.dataRoot, 'exhausted.marker');
+      try {
+        if (existsSync(markerPath)) {
+          const raw = readFileSync(markerPath, 'utf-8');
+          const marker = JSON.parse(raw) as { timestamp: string; cycles: number; instanceName: string };
+          const ageMs = Date.now() - new Date(marker.timestamp).getTime();
+          if (ageMs < 5 * 60 * 1000) {
+            this.log.warn(
+              { marker, ageMs },
+              '*** RECENT EXHAUSTION MARKER DETECTED — previous process exited after %d exhaustion cycles %dms ago ***',
+              marker.cycles,
+              ageMs,
+            );
+          }
+        }
+      } catch {
+        // Marker file missing or corrupt — ignore
+      }
+    }
 
     this.setConnectionState('connecting');
     this.log.info('Connecting to WhatsApp');
@@ -825,7 +851,26 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       if (statusCode === DisconnectReason.restartRequired) {
-        // Baileys signals a clean internal restart — reconnect immediately
+        // Rate-limit restartRequired: if 10+ in under 60s, treat as flapping and use backoff
+        const now = Date.now();
+        this.restartRequiredTimestamps.push(now);
+        // Keep only timestamps from the last 60 seconds
+        this.restartRequiredTimestamps = this.restartRequiredTimestamps.filter(t => now - t < 60_000);
+
+        if (this.restartRequiredTimestamps.length >= 10) {
+          this.log.warn(
+            { count: this.restartRequiredTimestamps.length },
+            'restartRequired flapping detected (%d in <60s) — using backoff reconnect',
+            this.restartRequiredTimestamps.length,
+          );
+          this.restartRequiredTimestamps = [];
+          if (!this.shuttingDown) {
+            this.scheduleReconnect();
+          }
+          return;
+        }
+
+        // Normal case: Baileys signals a clean internal restart — reconnect immediately
         if (!this.shuttingDown) {
           this.setConnectionState('reconnecting');
           void this.connect();
@@ -1124,8 +1169,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private async handleExhausted(): Promise<void> {
     if (this.shuttingDown || this.gracefulReconnectInFlight) return;
 
+    this.exhaustionCycles++;
+    this.log.warn({ exhaustionCycles: this.exhaustionCycles, max: config.maxExhaustionCycles },
+      'reconnect window exhausted — cycle %d of %d', this.exhaustionCycles, config.maxExhaustionCycles);
+
+    if (this.exhaustionCycles >= (config.maxExhaustionCycles ?? 2)) {
+      const marker = {
+        timestamp: new Date().toISOString(),
+        cycles: this.exhaustionCycles,
+        instanceName: config.botName,
+      };
+      if (config.dataRoot) {
+        const markerPath = join(config.dataRoot, 'exhausted.marker');
+        try {
+          writeFileSync(markerPath, JSON.stringify(marker, null, 2) + '\n', 'utf-8');
+        } catch (err) {
+          this.log.error({ err }, 'failed to write exhaustion marker');
+        }
+      }
+      this.log.fatal(marker, 'connection exhaustion limit reached — exiting for systemd restart');
+      process.exit(1);
+    }
+
     this.gracefulReconnectInFlight = true;
-    this.log.warn('reconnect window exhausted — forcing fresh connect');
+    this.log.warn('forcing fresh connect after exhaustion cycle');
     this.stopKeepalive();
     this.clearReconnectTimers();
     this.sock = null;

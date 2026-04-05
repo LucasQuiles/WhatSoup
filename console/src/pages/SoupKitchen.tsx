@@ -4,7 +4,9 @@ import { Search, Plus } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
+import { useFleetMetrics } from "../hooks/use-metrics";
 import { computeKpis } from "../lib/compute-kpis";
+import { deriveFleetMessageSparklines } from "../lib/metrics-sparklines";
 import type { Mode } from "../types";
 import KpiCard from "../components/KpiCard";
 import AlertBanner from "../components/AlertBanner";
@@ -40,15 +42,11 @@ const SoupKitchen: FC = () => {
   const [showAddWizard, setShowAddWizard] = useState(false);
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
-
-  // Derive sparkline data from per-line heartbeat arrays
-  const sparkConnected = useMemo(() => {
-    if (!lines.length) return undefined;
-    // Normalize message counts across lines as a sparkline
-    const vals = lines.map(l => l.messagesToday ?? 0);
-    const max = Math.max(...vals, 1);
-    return vals.map(v => v / max);
-  }, [lines]);
+  const { data: fleetMetrics } = useFleetMetrics('24h');
+  const messageSparklines = useMemo(
+    () => deriveFleetMessageSparklines(fleetMetrics?.messageVolume),
+    [fleetMetrics?.messageVolume],
+  );
 
   // Derive alerts from lines
   const alerts = useMemo(
@@ -140,7 +138,6 @@ const SoupKitchen: FC = () => {
           color="text-s-ok"
           onClick={() => toggleKpi("connected")}
           active={activeKpi === "connected"}
-          sparkData={sparkConnected}
         />
         <KpiCard
           value={kpis.needAttention}
@@ -155,6 +152,7 @@ const SoupKitchen: FC = () => {
           color="text-m-cht"
           onClick={() => toggleKpi("messages")}
           active={activeKpi === "messages"}
+          sparkData={messageSparklines?.outbound}
         />
         <KpiCard
           value={kpis.totalReceived.toLocaleString()}
@@ -162,6 +160,7 @@ const SoupKitchen: FC = () => {
           color="text-t2"
           onClick={() => toggleKpi("messages")}
           active={activeKpi === "messages"}
+          sparkData={messageSparklines?.inbound}
         />
         <KpiCard
           value={kpis.agentSessions}

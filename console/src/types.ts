@@ -103,6 +103,11 @@ export interface LineMetrics {
   activeHours: number[][];
 }
 
+export interface FleetMetrics {
+  range: MetricsRange;
+  messageVolume: MessageVolumeBucket[];
+}
+
 export interface AccessEntry {
   subjectType: 'phone' | 'group';
   subjectId: string;

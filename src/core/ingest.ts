@@ -20,6 +20,96 @@ import { config } from '../config.ts';
 
 const log = createChildLogger('ingest');
 
+// ---------------------------------------------------------------------------
+// Backpressure: counting semaphore + bounded overflow queue (SP1)
+// ---------------------------------------------------------------------------
+
+// -- Backpressure counters --
+let ingestActive = 0;
+let ingestQueued = 0;
+let ingestDropped = 0;
+
+/** Returns a snapshot of ingest backpressure counters. */
+export function getIngestStats(): { active: number; queued: number; dropped: number } {
+  return { active: ingestActive, queued: ingestQueued, dropped: ingestDropped };
+}
+
+/**
+ * Simple counting semaphore with an external bounded FIFO overflow queue.
+ *
+ * When all slots are busy, callers are placed in the overflow queue instead of
+ * an unbounded internal waiter list. If the overflow queue is full, the oldest
+ * group (non-DM) message is dropped; if none, the oldest entry is dropped.
+ */
+let _activeSlots = 0;
+
+interface QueuedItem {
+  msg: IncomingMessage;
+  resolve: () => void;
+  dropped: boolean;
+}
+
+const waitQueue: QueuedItem[] = [];
+
+/**
+ * Try to acquire a concurrency slot. Returns a promise that resolves to `true`
+ * when the slot is acquired and the caller should proceed, or `false` if the
+ * message was dropped from the overflow queue while waiting.
+ */
+function acquireSlot(msg: IncomingMessage): Promise<boolean> {
+  const maxConcurrent = config.ingest?.maxConcurrent ?? 20;
+  const maxQueueDepth = config.ingest?.maxQueueDepth ?? 500;
+
+  // Fast path: slot available
+  if (_activeSlots < maxConcurrent) {
+    _activeSlots++;
+    ingestActive++;
+    return Promise.resolve(true);
+  }
+
+  // Slow path: queue is full — need to drop something
+  if (waitQueue.length >= maxQueueDepth) {
+    // Prefer dropping group messages (lower priority) over DMs
+    const groupIdx = waitQueue.findIndex((q) => q.msg.isGroup === true);
+    const dropIdx = groupIdx !== -1 ? groupIdx : 0;
+    const dropped = waitQueue.splice(dropIdx, 1)[0];
+
+    dropped.dropped = true;
+    dropped.resolve(); // unblock the dropped task so it can exit
+    ingestDropped++;
+    ingestQueued--;
+
+    log.warn(
+      { droppedMessageId: dropped.msg.messageId, isGroup: dropped.msg.isGroup, queueDepth: waitQueue.length },
+      'ingest queue full, dropped message',
+    );
+  }
+
+  // Enqueue this message
+  return new Promise<boolean>((resolve) => {
+    const item: QueuedItem = {
+      msg,
+      resolve: () => resolve(item.dropped ? false : true),
+      dropped: false,
+    };
+    waitQueue.push(item);
+    ingestQueued++;
+  });
+}
+
+/** Release a concurrency slot, waking the next queued item if any. */
+function releaseSlot(): void {
+  const next = waitQueue.shift();
+  if (next) {
+    ingestQueued--;
+    ingestActive++;
+    // Slot transfers directly — _activeSlots stays the same
+    next.resolve();
+  } else {
+    _activeSlots--;
+  }
+}
+
 /**
  * Create a fire-and-forget ingest handler that routes incoming messages
  * through the shared pipeline before dispatching eligible messages to the
@@ -48,6 +138,11 @@ export function createIngestHandler(
 ): (msg: IncomingMessage) => void {
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
+      // --- Backpressure gate (SP1) ---
+      const proceed = await acquireSlot(msg);
+      if (!proceed) return;
+
+      try {
       // 0. Control plane intercept — before any normal storage
       if (msg.content && extractProtocol(msg.content) !== null) {
         const phone = resolvePhoneFromJid(msg.senderJid, db);
@@ -222,6 +317,10 @@ export function createIngestHandler(
         if (durability && seq !== undefined) {
           durability.markInboundFailed(seq);
         }
+      }
+      } finally {
+        ingestActive--;
+        releaseSlot();
       }
     })();
   };

@@ -54,6 +54,39 @@ describe('metrics query options', () => {
       }),
     )
   })
+
+  it('fetches fleet metrics for the requested range', async () => {
+    vi.stubGlobal('document', {
+      querySelector: () => null,
+    })
+
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        range: '7d',
+        messageVolume: [{ bucket: '2026-04-05T18:00:00.000Z', inbound: 9, outbound: 7 }],
+      }),
+      text: async () => '',
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const { getFleetMetricsQueryOptions } = await import('../../console/src/hooks/use-metrics.ts')
+
+    const options = getFleetMetricsQueryOptions('7d')
+    expect(options.queryKey).toEqual(['fleet-metrics', '7d'])
+
+    await expect(options.queryFn()).resolves.toEqual({
+      range: '7d',
+      messageVolume: [{ bucket: '2026-04-05T18:00:00.000Z', inbound: 9, outbound: 7 }],
+    })
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/metrics?range=7d',
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
+      }),
+    )
+  })
 })
 
 describe('MetricsChart', () => {

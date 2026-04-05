@@ -1,16 +1,15 @@
 /**
- * Fleet API client with mock data fallback.
+ * Fleet API client.
  *
  * - In production: fleet server serves both the SPA and /api/* routes
  * - In dev mode: Vite proxies /api/* to the fleet server
- * - Fallback: if fleet server is unreachable, returns mock data so the
- *   console always renders (useful for design iteration and demos)
  */
 
 import type {
   AccessEntry,
   ChatItem,
   FeedEvent,
+  FleetMetrics,
   LineInstance,
   LineMetrics,
   LogEntry,
@@ -32,42 +31,6 @@ function authHeaders(): Record<string, string> {
   return token ? { 'Authorization': `Bearer ${token}` } : {};
 }
 
-let fleetAvailable: boolean | null = null;
-let checkInFlight: Promise<boolean> | null = null;
-let mockDataPromise: Promise<typeof import('../mock-data.ts')> | null = null;
-
-async function loadMockData(): Promise<typeof import('../mock-data.ts')> {
-  if (!mockDataPromise) {
-    mockDataPromise = import('../mock-data.ts');
-  }
-  return mockDataPromise;
-}
-
-async function checkFleetAvailable(): Promise<boolean> {
-  if (fleetAvailable !== null) return fleetAvailable;
-  // Deduplicate concurrent checks
-  if (checkInFlight) return checkInFlight;
-  checkInFlight = (async () => {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1500);
-      const res = await fetch(`${API_BASE}/api/lines`, {
-        signal: controller.signal,
-        headers: authHeaders(),
-      });
-      clearTimeout(timer);
-      fleetAvailable = res.ok;
-    } catch {
-      fleetAvailable = false;
-    }
-    checkInFlight = null;
-    // Re-check periodically in case fleet server starts later
-    setTimeout(() => { fleetAvailable = null; }, 60_000);
-    return fleetAvailable;
-  })();
-  return checkInFlight;
-}
-
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -84,40 +47,21 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Try fleet API first, fall back to mock data if unavailable. */
-async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
-  const available = await checkFleetAvailable();
-  if (!available) return mockFn();
-  try {
-    return await apiFn();
-  } catch {
-    // Fleet server went away mid-session — fall back
-    fleetAvailable = null;
-    return mockFn();
-  }
-}
-
 export const api = {
-  getLines: () => withFallback(
-    () => apiFetch<LineInstance[]>('/api/lines'),
-    async () => (await loadMockData()).getLines(),
-  ),
-  getLine: (name: string) => withFallback(
-    () => apiFetch<LineInstance>(`/api/lines/${encodeURIComponent(name)}`),
-    async () => (await loadMockData()).getLine(name)!,
-  ),
-  getChats: (name: string) => withFallback(
-    () => apiFetch<ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
-    async () => (await loadMockData()).getChats(name),
-  ),
-  getMessages: (name: string, conversationKey: string, beforePk?: number) => withFallback(
-    () => apiFetch<Message[]>(
+  getLines: () =>
+    apiFetch<LineInstance[]>('/api/lines'),
+  getLine: (name: string) =>
+    apiFetch<LineInstance>(`/api/lines/${encodeURIComponent(name)}`),
+  getChats: (name: string) =>
+    apiFetch<ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
+  getMessages: (name: string, conversationKey: string, beforePk?: number) =>
+    apiFetch<Message[]>(
       `/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`
     ),
-    async () => (await loadMockData()).getMessages(name, conversationKey),
-  ),
   getMetrics: (name: string, range: MetricsRange) =>
     apiFetch<LineMetrics>(`/api/lines/${encodeURIComponent(name)}/metrics?range=${encodeURIComponent(range)}`),
+  getFleetMetrics: (range: MetricsRange) =>
+    apiFetch<FleetMetrics>(`/api/metrics?range=${encodeURIComponent(range)}`),
   searchMessages: (name: string, query: string, conversationKey?: string) =>
     apiFetch<{ results: Message[]; total: number; query: string }>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
@@ -128,23 +72,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(contact),
     }),
-  getAccess: (name: string) => withFallback(
-    () => apiFetch<AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
-    async () => (await loadMockData()).getAccess(name),
-  ),
-  getLogs: (name: string) => withFallback(
-    () => apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
-    async () => (await loadMockData()).getLogs(name),
-  ),
-  getFeed: () => withFallback(
-    () => apiFetch<FeedEvent[]>('/api/feed'),
-    async () => (await loadMockData()).getFeed(),
-  ),
+  getAccess: (name: string) =>
+    apiFetch<AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
+  getLogs: (name: string) =>
+    apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
+  getFeed: () =>
+    apiFetch<FeedEvent[]>('/api/feed'),
 
   getTyping: () =>
     apiFetch<{ instance: string; jid: string; since: number }[]>('/api/typing').catch(() => []),
 
-  // ── Write operations (no mock fallback — these require a live fleet server) ──
+  // ── Write operations ──
 
   restart: (name: string) =>
     apiFetch<{ status: string; instance: string }>(`/api/lines/${encodeURIComponent(name)}/restart`, { method: 'POST' }),

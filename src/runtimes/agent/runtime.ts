@@ -619,7 +619,13 @@ export class AgentRuntime implements Runtime {
     this.registry = new ToolRegistry();
     this.registerAllTools();
 
-    this.turnQueue = new TurnQueue();
+    this.turnQueue = new TurnQueue({
+      maxDepth: config.agentMaxQueueDepth,
+      onReject: (turn) => {
+        log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid },
+          'turn rejected — agent queue full');
+      },
+    });
     this.turnQueue.setProcessor((turn) => this.processTurn(turn));
   }
 

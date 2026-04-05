@@ -8,6 +8,10 @@ import type { ExtendedBaileysSocket } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { resetEnrichmentErrors } from '../../core/messages.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { config } from '../../config.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('advanced-tools');
 
 // ---------------------------------------------------------------------------
 // Nested schemas (reused by configs below)
@@ -207,6 +211,10 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'safe',
     call: async ({ collections, isInitialSync }, sock) => {
+      if (!config.advanced.enableResync) {
+        throw new Error('resync_app_state is disabled. Set advanced.enableResync: true in instance config to enable.');
+      }
+      log.warn({ collections, isInitialSync }, 'resync_app_state invoked');
       await sock.resyncAppState(collections, isInitialSync);
       return { synced: true, collections };
     },
@@ -222,6 +230,20 @@ const advancedConfigs: SockToolConfig<any>[] = [
     }),
     replayPolicy: 'unsafe',
     call: async ({ jid, proto, opts }, sock) => {
+      if (!config.advanced.enableRelayMessage) {
+        throw new Error('relay_message is disabled. Set advanced.enableRelayMessage: true in instance config to enable.');
+      }
+      // Validate JID format
+      if (!jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@g.us') && !jid.endsWith('@lid')) {
+        throw new Error(`Invalid JID format: ${jid}`);
+      }
+      // Size check
+      const payloadSize = JSON.stringify(proto).length;
+      if (payloadSize > config.advanced.relayMaxPayloadBytes) {
+        throw new Error(`Payload too large: ${payloadSize} bytes (max ${config.advanced.relayMaxPayloadBytes})`);
+      }
+      // Audit log
+      log.warn({ jid, protoKeys: Object.keys(proto), payloadSize }, 'relay_message invoked');
       const result = await sock.relayMessage(jid, proto, opts ?? {});
       return { relayed: true, jid, result: result ?? null };
     },
