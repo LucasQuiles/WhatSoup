@@ -313,7 +313,7 @@ function rowToMessage(row: MessageRow): Message {
 
 **Files to modify:**
 - `src/transport/connection.ts:986-1028` — rewrite content extraction, add `content_text` generation
-- `src/core/messages.ts` — add `content_text` and `media_path` to `MessageRow` (line 9-22), update `rowToMessage()` (line 24-39), update `StoreMessageInput` (line 58-71), fix ON CONFLICT in `storeMessage()` (line 125-131)
+- `src/core/messages.ts` — add `content_text` and `media_path` to `MessageRow` (line 9-22), update `rowToMessage()` (line 24-39), update `StoreMessageInput` (line 58-71). Note: ON CONFLICT fix not needed per guppy swarm G9 — only `storeMessageIfNew` (INSERT OR IGNORE) is called in production.
 - `src/core/database.ts` — add migration for `content_text` column, update FTS triggers
 - `src/runtimes/agent/runtime.ts:139-143` — persist transcription after Whisper call
 - `src/mcp/tools/media.ts` — add `transcribe_audio` tool
@@ -440,13 +440,13 @@ Scope: chat
 Parameters:
   text: string (required) — text to synthesize and send as voice note
   voice_id: string (optional) — ElevenLabs voice ID, defaults to config
-  reply_to: string (optional) — message ID to reply to
 Returns:
-  message_id: string — sent message ID
-  duration: number — audio duration in seconds
+  sent: boolean
+  duration: number — estimated audio duration in seconds
+  file_path: string — path to saved audio file
 ```
 
-**Registration pattern:** Pattern 1 (options-object) — tool needs both `connection` (to send media) and `db` (to look up reply-to message JID). Register via `registerVoiceTools(registry, { connection, db })`.
+**Registration pattern:** Pattern 1 (options-object) — tool needs `connection` (to send media) and `db`. Register via `registerVoiceTools(registry, { connection, db })`.
 
 Implementation:
 1. Call `synthesizeSpeech(text)`
@@ -494,7 +494,7 @@ All sub-projects can be deployed independently. Recommended order:
 3. **SP3 (Search Enhancement)** — new tool only, no schema changes. FTS already updated by SP2.
 4. **SP4 (Two-Way Voice)** — new capability, opt-in via config.
 
-Database migrations are additive. The ON CONFLICT fix (SP2) is the only change to existing write behavior — it preserves enriched content on re-delivery rather than overwriting.
+Database migrations are additive. No changes to existing write behavior — guppy swarm confirmed only `storeMessageIfNew` (INSERT OR IGNORE) is called, so re-delivery already safe.
 
 ## 8. Tech Stack
 
@@ -515,7 +515,7 @@ Database migrations are additive. The ON CONFLICT fix (SP2) is the only change t
 7. Voice notes received trigger transcription → agent response → optional voice reply (configurable)
 8. All new tools follow existing WhatSoup patterns (Zod schema, scope, replay policy, Pattern 1 registration)
 9. No breaking changes to existing tools or message format — `contentText` falls back to `content` for text messages
-10. ON CONFLICT upsert preserves enriched content on message re-delivery
+10. `storeMessageIfNew` (INSERT OR IGNORE) is the only write path — re-delivery is inherently safe
 
 ## Appendix: Council Review Log
 
