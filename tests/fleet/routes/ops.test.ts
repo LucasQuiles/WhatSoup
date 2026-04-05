@@ -197,8 +197,9 @@ describe('handleAccessUpdate', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"updated":true}' });
 
     const res = mockRes();
-    await handleAccessUpdate(mockReq('{"action":"approve"}'), res, deps, { name: 'test-line' });
-    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/access', 'POST', '{"action":"approve"}', 'tok123');
+    const body = '{"subjectType":"phone","subjectId":"15551234567","action":"allow"}';
+    await handleAccessUpdate(mockReq(body), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/access', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
   });
 });

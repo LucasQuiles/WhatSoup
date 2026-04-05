@@ -19,6 +19,18 @@ import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../ins
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
 
+/** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
+const NAME_RE = /^[a-z][a-z0-9-]*$/;
+
+/** Guard: validate instance name from URL params before using in shell commands or path construction. */
+function validateInstanceName(name: string, res: ServerResponse): boolean {
+  if (!NAME_RE.test(name) || name.length < 2 || name.length > 30) {
+    jsonResponse(res, 400, { error: 'invalid instance name' });
+    return false;
+  }
+  return true;
+}
+
 export interface OpsDeps {
   discovery: FleetDiscovery;
 }
@@ -83,10 +95,28 @@ export async function handleAccessUpdate(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
   const body = await readBody(req);
+
+  // Validate body shape before proxying to instance
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    jsonResponse(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+  const { subjectType, subjectId, action } = parsed;
+  if ((subjectType !== 'phone' && subjectType !== 'group') ||
+      typeof subjectId !== 'string' || !subjectId ||
+      (action !== 'allow' && action !== 'block')) {
+    jsonResponse(res, 400, { error: 'body must include subjectType (phone|group), subjectId (string), action (allow|block)' });
+    return;
+  }
+
   const result = await proxyToInstance(
     instance.healthPort, '/access', 'POST', body, instance.healthToken,
   );
@@ -101,6 +131,7 @@ async function handleSystemctlAction(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
@@ -142,6 +173,7 @@ export async function handleConfigUpdate(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
@@ -427,8 +459,6 @@ function cleanupPartial(name: string, extraPaths?: string[]): void {
 // POST /api/lines — create a new instance
 // ---------------------------------------------------------------------------
 
-const NAME_RE = /^[a-z][a-z0-9-]*$/;
-
 /** POST /api/lines — create a new WhatSoup instance. */
 export async function handleCreateLine(
   req: IncomingMessage,
@@ -488,6 +518,10 @@ export async function handleCreateLine(
 
   // --- Auto-assign healthPort ---
   let healthPort = typeof body.healthPort === 'number' ? body.healthPort as number : null;
+  if (healthPort != null && (healthPort < 1024 || healthPort > 65535)) {
+    jsonResponse(res, 400, { error: 'healthPort must be between 1024 and 65535' });
+    return;
+  }
   if (healthPort == null) {
     const used = usedHealthPorts();
     healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
@@ -614,6 +648,8 @@ export async function handleCreateLine(
 
 // Active auth processes per instance — prevents duplicate concurrent auth sessions
 const activeAuthProcesses = new Map<string, ReturnType<typeof spawn>>();
+// In-flight auth operations — prevents concurrent auth requests from racing
+const authInFlight = new Set<string>();
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
@@ -626,8 +662,16 @@ export async function handleAuth(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
+
+  // Prevent concurrent auth requests for the same instance from racing
+  if (authInFlight.has(params.name)) {
+    jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
+    return;
+  }
+  authInFlight.add(params.name);
 
   // Kill any existing auth process for this instance before starting a new one
   const existing = activeAuthProcesses.get(params.name);
@@ -658,10 +702,11 @@ export async function handleAuth(
   activeAuthProcesses.set(params.name, child);
 
   // Guard against double res.end() — declared before any event handlers
-  let authTimer: ReturnType<typeof setTimeout>;
+  let authTimer: ReturnType<typeof setTimeout> | null = null;
   const { writeSSE, endOnce } = createSSEWriter(res, () => {
     activeAuthProcesses.delete(params.name);
-    clearTimeout(authTimer);
+    authInFlight.delete(params.name);
+    if (authTimer) clearTimeout(authTimer);
   });
 
   // Wall-clock timeout — prevents auth process from hanging forever
@@ -689,9 +734,13 @@ export async function handleAuth(
             const cfgPath = instance.configPath;
             const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
             raw.introSent = false;
-            fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+            const tmpPath = cfgPath + '.tmp';
+            fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+            fs.renameSync(tmpPath, cfgPath);
           } catch { /* config write failed — intro won't re-fire but not critical */ }
-          execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], () => {});
+          execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], (err) => {
+            if (err) log.error({ err, instance: params.name }, 'post-auth start failed');
+          });
           deps.discovery.scan();
           setTimeout(endOnce, 1000);
         }
