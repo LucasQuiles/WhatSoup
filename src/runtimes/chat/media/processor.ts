@@ -170,7 +170,7 @@ export async function processMedia(
 
     let docExt = 'bin';
     const dotIdx = fileName.lastIndexOf('.');
-    if (dotIdx > 0) docExt = fileName.substring(dotIdx + 1).toLowerCase();
+    if (dotIdx > 0) docExt = fileName.substring(dotIdx + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) || 'bin';
     persistMediaPath(result.buffer, docExt, db, messageId);
 
     try {

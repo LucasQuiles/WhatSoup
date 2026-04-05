@@ -19,10 +19,11 @@ export async function downloadMedia(
   mimeType: string,
 ): Promise<MediaDownload | null> {
   const startMs = Date.now();
+  let handle: ReturnType<typeof setTimeout> | null = null;
   try {
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Download timed out after 30s')), DOWNLOAD_TIMEOUT_MS),
-    );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      handle = setTimeout(() => reject(new Error('Download timed out after 30s')), DOWNLOAD_TIMEOUT_MS);
+    });
 
     const buffer = await Promise.race([downloadFn(), timeoutPromise]);
 
@@ -40,6 +41,8 @@ export async function downloadMedia(
   } catch (err) {
     log.error({ err, mimeType, durationMs: Date.now() - startMs }, 'Media download failed');
     return null;
+  } finally {
+    if (handle) clearTimeout(handle);
   }
 }
 

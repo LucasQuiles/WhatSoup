@@ -136,6 +136,29 @@ What you never do:
 - If you genuinely don't know something, say it how a person would — "honestly no clue", "that's out of my depth", "you'd know better than me on that one".
 - Don't be a people-pleaser. You can disagree. You can push back. You can say "nah that's a bad idea" if you think it is.`;
 
+// ---------------------------------------------------------------------------
+// Rate-limit window migration (SP6)
+// If rateLimitWindowMs is not explicitly set in instance config, fall back to
+// rateLimitNoticeWindowMs (the old dual-purpose field) and log a deprecation
+// note at startup.
+// ---------------------------------------------------------------------------
+const DEFAULT_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const resolvedRateLimitWindowMs: number = (() => {
+  if (instance?.rateLimitWindowMs != null) {
+    return instance.rateLimitWindowMs as number;
+  }
+  if (instance?.rateLimitNoticeWindowMs != null) {
+    // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; expires 2026-07-01
+    console.warn(
+      '[config] DEPRECATION: rateLimitWindowMs not set — falling back to rateLimitNoticeWindowMs (%dms). ' +
+        'Set rateLimitWindowMs explicitly to silence this warning.',
+      instance.rateLimitNoticeWindowMs,
+    );
+    return instance.rateLimitNoticeWindowMs as number;
+  }
+  return DEFAULT_RATE_WINDOW_MS;
+})();
+
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
@@ -166,7 +189,8 @@ export const config = {
 
   // Rate limiting
   rateLimitPerHour: (instance?.rateLimitPerHour as number | undefined) ?? intEnv('RATE_LIMIT_PER_HOUR', 45),
-  rateLimitNoticeWindowMs: 60 * 60 * 1000, // 1 hour
+  rateLimitWindowMs: resolvedRateLimitWindowMs, // measurement window for counting responses (SP6)
+  rateLimitNoticeWindowMs: (instance?.rateLimitNoticeWindowMs as number | undefined) ?? DEFAULT_RATE_WINDOW_MS, // dedup window for rate-limit notices
 
   // Enrichment
   enrichmentIntervalMs: 60 * 1000, // 1 minute

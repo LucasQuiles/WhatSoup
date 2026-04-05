@@ -169,12 +169,12 @@ export class WhatSoupSocketServer {
           };
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.error({ err, method: req.method }, 'unhandled error in request handler');
+      const errorId = `E${Date.now().toString(36).toUpperCase()}`;
+      log.error({ err, method: req.method, errorId }, 'unhandled error in request handler');
       return {
         jsonrpc: '2.0',
         id,
-        error: { code: -32603, message: `Internal error: ${message}` },
+        error: { code: -32603, message: `Internal error [${errorId}]` },
       };
     }
   }

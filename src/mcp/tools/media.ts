@@ -327,7 +327,7 @@ export function registerMediaTools(
         const fileName = docMsg?.fileName as string | undefined;
         if (fileName) {
           const dotIdx = fileName.lastIndexOf('.');
-          if (dotIdx > 0) ext = fileName.substring(dotIdx + 1).toLowerCase();
+          if (dotIdx > 0) ext = fileName.substring(dotIdx + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) || 'bin';
         }
       }
 

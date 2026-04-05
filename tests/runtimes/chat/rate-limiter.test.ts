@@ -41,7 +41,7 @@ describe('checkRateLimit', () => {
   it('counts responses inserted at the window boundary (just inside)', () => {
     // Insert a row timestamped exactly at the boundary (1 second inside window)
     const sender = 'boundary@s.whatsapp.net';
-    const windowSec = config.rateLimitNoticeWindowMs / 1000;
+    const windowSec = config.rateLimitWindowMs / 1000;
     // datetime('now', '-X seconds') is the cutoff; inserting at '-X+1 seconds' is inside
     db.raw
       .prepare(
@@ -57,7 +57,7 @@ describe('checkRateLimit', () => {
 
   it('does NOT count responses outside the window', () => {
     const sender = 'outside@s.whatsapp.net';
-    const windowSec = config.rateLimitNoticeWindowMs / 1000;
+    const windowSec = config.rateLimitWindowMs / 1000;
     // Insert a row 1 second OLDER than the window cutoff
     db.raw
       .prepare(

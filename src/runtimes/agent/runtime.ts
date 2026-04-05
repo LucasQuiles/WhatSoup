@@ -131,7 +131,7 @@ export async function prepareContentForAgent(msg: IncomingMessage, db?: Database
   let ext = typeInfo.ext;
   if (contentType === 'document' && content) {
     const dotIdx = content.lastIndexOf('.');
-    if (dotIdx > 0) ext = content.substring(dotIdx + 1).toLowerCase();
+    if (dotIdx > 0) ext = content.substring(dotIdx + 1).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) || 'bin';
   }
 
   // Save to disk — do NOT clean up immediately; agent needs time to read the file

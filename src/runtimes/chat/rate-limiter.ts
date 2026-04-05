@@ -12,7 +12,7 @@ export function checkRateLimit(
   db: Database,
   senderJid: string,
 ): { allowed: boolean; remaining: number } {
-  const count = getResponseCount(db, senderJid, config.rateLimitNoticeWindowMs);
+  const count = getResponseCount(db, senderJid, config.rateLimitWindowMs);
   const remaining = Math.max(0, config.rateLimitPerHour - count);
   return { allowed: count < config.rateLimitPerHour, remaining };
 }
