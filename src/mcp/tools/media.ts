@@ -2,8 +2,9 @@
 // Media sending tool with filesystem boundary enforcement.
 
 import { z } from 'zod';
-import { statSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname } from 'node:path';
+import type { MessageRow } from '../../core/messages.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
@@ -58,7 +59,7 @@ export function registerMediaTools(
   registry: ToolRegistry,
   deps: MediaDeps,
 ): void {
-  const { connection } = deps;
+  const { connection, db } = deps;
 
   registry.register({
     name: 'send_media',
@@ -187,6 +188,59 @@ export function registerMediaTools(
         mimetype: mime,
         sizeBytes: fileSize,
       };
+    },
+  });
+
+  // ── download_media ──────────────────��───────────────────────────────────────
+
+  const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+
+  registry.register({
+    name: 'download_media',
+    description:
+      'Download media from a received WhatsApp message. Returns the local file path. Uses cached path if media was already downloaded.',
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    schema: z.object({
+      message_id: z.string().describe('The message ID to download media from'),
+    }),
+    handler: async (params) => {
+      const messageId = params['message_id'] as string;
+
+      // Look up the message
+      const row = db.prepare(
+        'SELECT message_id, content_type, media_path, raw_message FROM messages WHERE message_id = ?',
+      ).get(messageId) as Pick<MessageRow, 'message_id' | 'content_type' | 'media_path'> & { raw_message: string | null } | undefined;
+
+      if (!row) {
+        return { error: 'not_found', message: `No message found with ID: ${messageId}` };
+      }
+
+      // Reject non-media types
+      if (!MEDIA_CONTENT_TYPES.has(row.content_type)) {
+        return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
+      }
+
+      // Return cached path if file still exists on disk
+      if (row.media_path && existsSync(row.media_path)) {
+        let fileSize = 0;
+        try { fileSize = statSync(row.media_path).size; } catch { /* ignore */ }
+        return {
+          file_path: row.media_path,
+          content_type: row.content_type,
+          file_size: fileSize,
+          cached: true,
+        };
+      }
+
+      // Need raw_message to attempt download
+      if (!row.raw_message) {
+        return { error: 'no_raw_message', message: 'Message has no raw data for media download. Media may not have been stored.' };
+      }
+
+      // On-demand download will be implemented in Task 6
+      return { error: 'not_implemented', message: 'On-demand download not yet available.' };
     },
   });
 }

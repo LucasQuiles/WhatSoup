@@ -418,3 +418,112 @@ describe('registerMediaTools', () => {
     expect(body.error).toMatch(/File not found/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// download_media
+// ---------------------------------------------------------------------------
+
+describe('download_media', () => {
+  let registry: ToolRegistry;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let connection: ReturnType<typeof makeConnection>;
+  let db: Database;
+  let deps: MediaDeps;
+  let workspace: string;
+  let filesToClean: string[] = [];
+  let dirsToClean: string[] = [];
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db: db.raw };
+    registerMediaTools(registry, deps);
+    workspace = tempDir();
+    dirsToClean.push(workspace);
+    filesToClean = [];
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+    for (const d of [...dirsToClean].reverse()) {
+      try { rmdirSync(d, { recursive: true } as any); } catch { /* ignore */ }
+    }
+    dirsToClean = [];
+  });
+
+  function insertMessage(
+    messageId: string,
+    contentType: string,
+    opts: { mediaPath?: string; rawMessage?: string } = {},
+  ): void {
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, media_path, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, ?, 0, 1700000000, ?, ?)
+    `).run(messageId, contentType, opts.mediaPath ?? null, opts.rawMessage ?? null);
+  }
+
+  it('returns cached file when media_path is set and file exists', async () => {
+    const filePath = join(workspace, 'cached.jpg');
+    writeFileSync(filePath, 'fake-image-data');
+    filesToClean.push(filePath);
+
+    insertMessage('msg-cached', 'image', { mediaPath: filePath });
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-cached' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.file_path).toBe(filePath);
+    expect(body.cached).toBe(true);
+    expect(body.content_type).toBe('image');
+  });
+
+  it('returns unsupported_type error for text messages', async () => {
+    insertMessage('msg-text', 'text');
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-text' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('unsupported_type');
+  });
+
+  it('returns error for unknown message_id', async () => {
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'nonexistent' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('not_found');
+  });
+
+  it('falls through to download when media_path file is missing from disk', async () => {
+    insertMessage('msg-stale', 'image', {
+      mediaPath: '/tmp/whatsoup-media/deleted.jpg',
+      rawMessage: null,
+    });
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-stale' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('no_raw_message');
+  });
+});
