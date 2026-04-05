@@ -246,6 +246,10 @@ export async function handleConfigUpdate(
   }
 
   // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
+  if (patch.claudeMd && typeof patch.claudeMd === 'string' && (patch.claudeMd as string).length > 32_768) {
+    jsonResponse(res, 400, { error: 'claudeMd exceeds maximum size (32KB)' });
+    return;
+  }
   if (patch.claudeMd && merged.type === 'agent') {
     const ao = merged.agentOptions as Record<string, unknown> | undefined;
     if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
@@ -522,6 +526,13 @@ export async function handleCreateLine(
   if (healthPort == null) {
     const used = usedHealthPorts();
     healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
+  } else {
+    // Validate user-supplied port isn't already in use
+    const used = usedHealthPorts();
+    if (used.includes(healthPort)) {
+      jsonResponse(res, 409, { error: `healthPort ${healthPort} is already in use` });
+      return;
+    }
   }
 
   // --- Validate accessMode ---
