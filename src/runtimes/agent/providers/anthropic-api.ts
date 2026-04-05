@@ -10,10 +10,12 @@ import type {
   ProviderCheckpoint,
   ProviderConfig,
   ProviderDescriptor,
+  ProviderMcpToolResult,
   ProviderSession,
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
+import { convertMcpToolsToAnthropic } from './mcp-bridge.ts';
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -24,7 +26,7 @@ export const anthropicApiDescriptor: ProviderDescriptor = {
   displayName: 'Anthropic API',
   transport: 'http',
   executionMode: 'managed_loop',
-  mcpMode: 'none',
+  mcpMode: 'native_bridge',
   imageSupport: 'base64',
   supportsResume: false,
   defaultWatchdog: { softMs: 120_000, warnMs: 300_000, hardMs: 600_000 },
@@ -42,7 +44,7 @@ interface AnthropicMessage {
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; tool_use_id: string; content: string };
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
 
 interface ToolUseAccum {
   id: string;
@@ -144,8 +146,7 @@ export class AnthropicApiProvider implements ProviderSession {
         break;
       }
 
-      // Emit tool_use events and record placeholder results.
-      // Real tool execution will be wired via the MCP bridge in B07.
+      // Emit tool_use events and feed executed tool results back into the loop.
       const toolResultBlocks: AnthropicContentBlock[] = [];
 
       for (const tu of result.toolUses) {
@@ -163,20 +164,20 @@ export class AnthropicApiProvider implements ProviderSession {
           toolInput,
         });
 
-        // Placeholder tool result — will be replaced by real MCP execution in B07
-        const placeholderContent = 'Tool execution not yet wired';
+        const toolResult = await this.executeTool(tu.name, toolInput);
 
         toolResultBlocks.push({
           type: 'tool_result',
           tool_use_id: tu.id,
-          content: placeholderContent,
+          content: toolResult.content,
+          ...(toolResult.isError ? { is_error: true } : {}),
         });
 
         this.opts.onEvent({
           type: 'tool_result',
-          isError: false,
+          isError: toolResult.isError,
           toolId: tu.id,
-          content: placeholderContent,
+          content: toolResult.content,
         });
       }
 
@@ -235,6 +236,7 @@ export class AnthropicApiProvider implements ProviderSession {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
+    const mcpTools = this.opts.mcpBridge?.listTools() ?? [];
 
     let response: Response;
     try {
@@ -250,6 +252,9 @@ export class AnthropicApiProvider implements ProviderSession {
           max_tokens: (this.config?.maxTokens as number | undefined) ?? 16384,
           system: this.systemPrompt,
           messages: this.messages,
+          ...(mcpTools.length > 0
+            ? { tools: convertMcpToolsToAnthropic(mcpTools) }
+            : {}),
           stream: true,
         }),
         signal: this.abortController.signal,
@@ -420,5 +425,27 @@ export class AnthropicApiProvider implements ProviderSession {
       inputTokens,
       outputTokens,
     };
+  }
+
+  private async executeTool(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<ProviderMcpToolResult> {
+    if (!this.opts?.mcpBridge) {
+      return {
+        content: `Tool "${name}" failed: MCP bridge not configured`,
+        isError: true,
+      };
+    }
+
+    try {
+      return await this.opts.mcpBridge.executeTool(name, input);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: `Tool "${name}" failed: ${message}`,
+        isError: true,
+      };
+    }
   }
 }

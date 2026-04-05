@@ -11,10 +11,12 @@ import type {
   ProviderCheckpoint,
   ProviderConfig,
   ProviderDescriptor,
+  ProviderMcpToolResult,
   ProviderSession,
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
+import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -25,7 +27,7 @@ export const openaiApiDescriptor: ProviderDescriptor = {
   displayName: 'OpenAI API',
   transport: 'http',
   executionMode: 'managed_loop',
-  mcpMode: 'none',
+  mcpMode: 'native_bridge',
   imageSupport: 'base64',
   supportsResume: false,
   defaultWatchdog: { softMs: 120_000, warnMs: 300_000, hardMs: 600_000 },
@@ -143,37 +145,37 @@ export class OpenAIApiProvider implements ProviderSession {
         break;
       }
 
-      // Emit tool_use events and record placeholder results.
-      // Real tool execution will be wired via the MCP bridge in B07.
+      // Emit tool_use events and feed executed tool results back into the loop.
       for (const tc of result.toolCalls) {
         if (!this.active) break;
+        const toolInput = (() => {
+          try {
+            return JSON.parse(tc.function.arguments || '{}') as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        })();
+
         this.opts.onEvent({
           type: 'tool_use',
           toolName: tc.function.name,
           toolId: tc.id,
-          toolInput: (() => {
-            try {
-              return JSON.parse(tc.function.arguments || '{}') as Record<string, unknown>;
-            } catch {
-              return {};
-            }
-          })(),
+          toolInput,
         });
 
-        // Placeholder tool result — will be replaced by real MCP execution in B07
-        const placeholderContent = 'Tool execution not yet wired';
+        const toolResult = await this.executeTool(tc.function.name, toolInput);
 
         this.messages.push({
           role: 'tool',
-          content: placeholderContent,
+          content: toolResult.content,
           tool_call_id: tc.id,
         });
 
         this.opts.onEvent({
           type: 'tool_result',
-          isError: false,
+          isError: toolResult.isError,
           toolId: tc.id,
-          content: placeholderContent,
+          content: toolResult.content,
         });
       }
     }
@@ -231,6 +233,7 @@ export class OpenAIApiProvider implements ProviderSession {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
+    const mcpTools = this.opts.mcpBridge?.listTools() ?? [];
 
     let response: Response;
     try {
@@ -243,6 +246,9 @@ export class OpenAIApiProvider implements ProviderSession {
         body: JSON.stringify({
           model,
           messages: this.messages,
+          ...(mcpTools.length > 0
+            ? { tools: convertMcpToolsToOpenAI(mcpTools) }
+            : {}),
           stream: true,
           stream_options: { include_usage: true },
         }),
@@ -365,5 +371,27 @@ export class OpenAIApiProvider implements ProviderSession {
       inputTokens,
       outputTokens,
     };
+  }
+
+  private async executeTool(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<ProviderMcpToolResult> {
+    if (!this.opts?.mcpBridge) {
+      return {
+        content: `Tool "${name}" failed: MCP bridge not configured`,
+        isError: true,
+      };
+    }
+
+    try {
+      return await this.opts.mcpBridge.executeTool(name, input);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: `Tool "${name}" failed: ${message}`,
+        isError: true,
+      };
+    }
   }
 }

@@ -19,6 +19,25 @@ export type McpMode = 'config_file' | 'native_bridge' | 'none';
 /** How the provider accepts images. */
 export type ImageSupport = 'native' | 'startup_only' | 'file_path' | 'base64' | 'none';
 
+/** Canonical MCP tool definition exposed to providers. */
+export interface ProviderMcpTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/** Normalized MCP tool execution result returned to providers. */
+export interface ProviderMcpToolResult {
+  content: string;
+  isError: boolean;
+}
+
+/** Bridge contract for providers that call MCP tools natively. */
+export interface ProviderMcpBridge {
+  listTools(): ProviderMcpTool[];
+  executeTool(name: string, params: Record<string, unknown>): Promise<ProviderMcpToolResult>;
+}
+
 // ---------------------------------------------------------------------------
 // Watchdog
 // ---------------------------------------------------------------------------
@@ -134,6 +153,8 @@ export interface ProviderSessionOptions {
   onEvent: (event: AgentEvent) => void;
   /** Callback invoked when the provider crashes. */
   onCrash: (info: { exitCode: number | null; signal: string | null }) => void;
+  /** Optional native MCP bridge for HTTP providers with function/tool calling. */
+  mcpBridge?: ProviderMcpBridge;
 }
 
 /**

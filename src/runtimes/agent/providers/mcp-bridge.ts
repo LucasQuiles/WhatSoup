@@ -2,7 +2,14 @@
 // Provider-aware MCP bridge: generates .mcp.json configs for CLI providers and
 // converts MCP tool definitions to API function-calling formats for API providers.
 
-import type { McpMode } from './types.ts';
+import type { ToolRegistry } from '../../../mcp/registry.ts';
+import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
+import type {
+  McpMode,
+  ProviderMcpBridge,
+  ProviderMcpTool,
+  ProviderMcpToolResult,
+} from './types.ts';
 
 // ---------------------------------------------------------------------------
 // API tool definition types
@@ -29,6 +36,16 @@ export interface AnthropicToolDefinition {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+}
+
+function normalizeToolResult(result: ToolCallResult): ProviderMcpToolResult {
+  return {
+    content: result.content
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n'),
+    isError: result.isError === true,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +93,7 @@ export function generateMcpConfigFile(
  * Used by API providers (openai-api) to include WhatSoup's tools in requests.
  */
 export function convertMcpToolsToOpenAI(
-  tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>,
+  tools: ProviderMcpTool[],
 ): ApiToolDefinition[] {
   return tools.map(tool => ({
     type: 'function' as const,
@@ -93,7 +110,7 @@ export function convertMcpToolsToOpenAI(
  * Used by API providers (anthropic-api) to include WhatSoup's tools in requests.
  */
 export function convertMcpToolsToAnthropic(
-  tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>,
+  tools: ProviderMcpTool[],
 ): AnthropicToolDefinition[] {
   return tools.map(tool => ({
     name: tool.name,
@@ -121,4 +138,22 @@ export function getMcpStrategy(providerId: string): McpMode {
     default:
       return 'none';
   }
+}
+
+/**
+ * Create a provider-native MCP bridge backed by WhatSoup's in-process registry.
+ * Used by managed-loop HTTP providers to advertise and execute tools directly.
+ */
+export function createProviderMcpBridge(
+  registry: ToolRegistry,
+  session: SessionContext,
+): ProviderMcpBridge {
+  return {
+    listTools(): ProviderMcpTool[] {
+      return registry.listTools(session);
+    },
+    async executeTool(name: string, params: Record<string, unknown>): Promise<ProviderMcpToolResult> {
+      return normalizeToolResult(await registry.call(name, params, session));
+    },
+  };
 }
