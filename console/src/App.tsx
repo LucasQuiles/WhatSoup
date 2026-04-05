@@ -1,12 +1,25 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route } from 'react-router-dom'
 import Nav from './components/Nav'
-import SoupKitchen from './pages/SoupKitchen'
-import LineDetail from './pages/LineDetail'
-import Inbox from './pages/Inbox'
-import Ops from './pages/Ops'
-import UpdateModal from './components/UpdateModal'
 import { useLines } from './hooks/use-fleet'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
+
+// Route-level code splitting — each page loads its own chunk on navigation
+const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
+const LineDetail = lazy(() => import('./pages/LineDetail'))
+const Inbox = lazy(() => import('./pages/Inbox'))
+const Ops = lazy(() => import('./pages/Ops'))
+
+// Modal code splitting — loaded only when opened
+const UpdateModal = lazy(() => import('./components/UpdateModal'))
+
+function PageLoader() {
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-t4 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>Loading...</div>
+    </div>
+  )
+}
 
 export default function App() {
   const { data: lines } = useLines()
@@ -27,19 +40,23 @@ export default function App() {
         onUpdateClick={update.openUpdateModal}
       />
       <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        <Routes>
-          <Route path="/" element={<SoupKitchen />} />
-          <Route path="/lines/:name" element={<LineDetail />} />
-          <Route path="/inbox" element={<Inbox />} />
-          <Route path="/ops" element={<Ops />} />
-        </Routes>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/" element={<SoupKitchen />} />
+            <Route path="/lines/:name" element={<LineDetail />} />
+            <Route path="/inbox" element={<Inbox />} />
+            <Route path="/ops" element={<Ops />} />
+          </Routes>
+        </Suspense>
       </main>
-      <UpdateModal
-        open={update.showUpdateModal}
-        onClose={update.closeUpdateModal}
-        currentSha={version}
-        lines={lines ?? []}
-      />
+      <Suspense fallback={null}>
+        <UpdateModal
+          open={update.showUpdateModal}
+          onClose={update.closeUpdateModal}
+          currentSha={version}
+          lines={lines ?? []}
+        />
+      </Suspense>
     </div>
   )
 }
