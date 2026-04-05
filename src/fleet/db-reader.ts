@@ -294,6 +294,27 @@ export class FleetDbReader {
     });
   }
 
+  /** Lightweight markers for realtime snapshot-diff (O(1) indexed queries). */
+  getLatestMarkers(
+    name: string,
+    dbPath: string,
+  ): DbResult<{ latestMessagePk: number | null; latestAccessMarker: string | null }> {
+    return this.query(name, dbPath, (db) => {
+      const msgRow = db.prepare(
+        'SELECT MAX(pk) AS pk FROM messages WHERE deleted_at IS NULL',
+      ).get() as { pk: number | null } | undefined;
+
+      const accessRow = db.prepare(
+        'SELECT MAX(COALESCE(decided_at, requested_at)) AS marker FROM access_list',
+      ).get() as { marker: string | null } | undefined;
+
+      return {
+        latestMessagePk: msgRow?.pk ?? null,
+        latestAccessMarker: accessRow?.marker ?? null,
+      };
+    });
+  }
+
   /** Fetch messages by a set of message_ids (for feed preview enrichment). */
   getMessagesByIds(name: string, dbPath: string, messageIds: string[]): DbResult<FeedMessageRow[]> {
     if (messageIds.length === 0) return { ok: true, data: [] };

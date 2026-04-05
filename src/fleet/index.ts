@@ -21,6 +21,7 @@ import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
+import { FleetRealtimeEventPoller } from './realtime-event-poller.ts';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
@@ -381,21 +382,27 @@ export function createFleetServer(deps: FleetDeps) {
     realtime.publish({ type: 'instance_status', instance });
   });
 
+  // Realtime event poller — snapshot-diff for messages/access/typing
+  const realtimePoller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime });
+
   return {
     server,
     discovery,
     healthPoller,
     dbReader,
     wsServer,
+    realtimePoller,
     start(port: number): void {
       discovery.startAutoRefresh();
       healthPoller.start();
       updateChecker.start();
+      realtimePoller.start();
       server.listen(port, '127.0.0.1', () => {
         log.info({ port, ws: true }, 'fleet server listening');
       });
     },
     stop(): void {
+      realtimePoller.stop();
       healthPoller.stop();
       discovery.stop();
       updateChecker.stop();
