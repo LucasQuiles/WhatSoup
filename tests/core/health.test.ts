@@ -240,18 +240,16 @@ describe('GET /health', () => {
     expect(json.instance.accessMode).toBe('allowlist');
   });
 
-  // TODO: implement socketPath in health endpoint
-  it.skip('returns instance.socketPath as null when not provided', async () => {
+  it('returns instance.socketPath as null when not provided', async () => {
     const { body } = await httpReq(port, '/health', 'GET');
     const json = JSON.parse(body);
     expect(json.instance.socketPath).toBeNull();
   });
 
-  // TODO: implement socketPath in health endpoint
-  it.skip('returns instance.socketPath when provided in deps', async () => {
+  it('returns instance.socketPath when provided in deps', async () => {
     db.close();
     const db2 = makeDb();
-    const deps = makeDeps(db2, { socketPath: '/run/whatsoup/test.sock' } as any);
+    const deps = makeDeps(db2, { socketPath: '/run/whatsoup/test.sock' });
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));
 
@@ -261,8 +259,7 @@ describe('GET /health', () => {
     db2.close();
   });
 
-  // TODO: implement sqlite.schema_version in health endpoint
-  it.skip('returns sqlite.schema_version as a number >= 0', async () => {
+  it('returns sqlite.schema_version as a number >= 0', async () => {
     const { body } = await httpReq(port, '/health', 'GET');
     const json = JSON.parse(body);
     expect(typeof json.sqlite.schema_version).toBe('number');

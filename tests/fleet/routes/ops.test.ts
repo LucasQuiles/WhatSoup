@@ -26,6 +26,15 @@ vi.mock('../../../src/fleet/http-proxy.ts', () => ({
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: vi.fn(actual.existsSync),
+  };
+});
+
+const { existsSync: actualExistsSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
 
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
@@ -95,6 +104,15 @@ function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
 // ---------------------------------------------------------------------------
 
 describe('handleSend', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  afterEach(() => {
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
   it('returns 404 for unknown instance', async () => {
     const deps = makeDeps();
     const res = mockRes();
@@ -102,40 +120,39 @@ describe('handleSend', () => {
     expect(res._status).toBe(404);
   });
 
-  // TODO: MCP routing requires socket file to exist on disk (fs.existsSync check)
-  // These tests need a real or mocked socket file to exercise the MCP path.
-  it.skip('routes passive instances through mcpCall', async () => {
+  it('routes passive instances through mcpCall', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
+    vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
 
     const res = mockRes();
     await handleSend(mockReq(JSON.stringify({ chatJid: '123', text: 'hi' })), res, deps, { name: 'test-line' });
 
-    expect(mcpCall).toHaveBeenCalledWith('/state/test-line/whatsoup.sock', 'send_message', { chatJid: '123', text: 'hi' });
+    expect(mcpCall).toHaveBeenCalledWith('/state/test-line/whatsoup.sock', 'send_message', { chatJid: '123@s.whatsapp.net', text: 'hi' });
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body).success).toBe(true);
   });
 
-  // TODO: agent instances route via HTTP proxy, not MCP
-  it.skip('routes agent instances through mcpCall', async () => {
+  it('routes agent instances through proxyToInstance', async () => {
     const inst = fakeInstance({ type: 'agent', socketPath: '/state/agent/whatsoup.sock' });
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
-    vi.mocked(mcpCall).mockResolvedValue({ success: true, result: {} });
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
     const res = mockRes();
     await handleSend(mockReq('{"text":"hello"}'), res, deps, { name: 'test-line' });
-    expect(mcpCall).toHaveBeenCalled();
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', '{"text":"hello"}', 'tok123');
     expect(res._status).toBe(200);
   });
 
-  // TODO: MCP routing requires socket file to exist on disk (fs.existsSync check)
-  it.skip('returns 502 when mcpCall fails', async () => {
+  it('returns 502 when mcpCall fails', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
+    vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(mcpCall).mockResolvedValue({ success: false, error: 'timeout' });
 
     const res = mockRes();
@@ -143,11 +160,12 @@ describe('handleSend', () => {
     expect(res._status).toBe(502);
   });
 
-  // TODO: MCP routing requires socket file to exist on disk (fs.existsSync check)
-  it.skip('returns 400 for invalid JSON body on mcp route', async () => {
+  it('returns 400 for invalid JSON body on mcp route', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(proxyToInstance).mockResolvedValue({ status: 400, body: '{"error":"invalid JSON"}' });
     const res = mockRes();
     await handleSend(mockReq('not json'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(400);
