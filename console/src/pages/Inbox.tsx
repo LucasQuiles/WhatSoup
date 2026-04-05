@@ -11,7 +11,7 @@ import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
-import { MessageSquare, Send, UserCheck, Ban, User, Users, ChevronDown, ChevronsUp, Loader2 } from 'lucide-react'
+import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2 } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -425,6 +425,30 @@ export default function Inbox() {
                   >
                     <Ban size={14} strokeWidth={1.75} /> Block Contact
                   </button>
+                  {!currentChat.isGroup && (
+                    <button
+                      className="c-btn w-full justify-center"
+                      style={{ borderColor: 'var(--color-d3)', color: 'var(--color-t2)' }}
+                      onClick={async () => {
+                        const name = prompt('Contact name (first last):')
+                        if (!name?.trim()) return
+                        const parts = name.trim().split(/\s+/)
+                        const firstName = parts[0]
+                        const lastName = parts.slice(1).join(' ') || undefined
+                        const jid = currentChat.conversationKey.includes('@')
+                          ? currentChat.conversationKey
+                          : currentChat.conversationKey + '@s.whatsapp.net'
+                        try {
+                          await api.saveContact(activeLine, { jid, firstName, lastName })
+                          toast.success(`Saved contact: ${name.trim()}`)
+                        } catch (err) {
+                          toast.error(`Failed to save: ${err instanceof Error ? err.message : String(err)}`)
+                        }
+                      }}
+                    >
+                      <UserPlus size={14} strokeWidth={1.75} /> Save as Contact
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
