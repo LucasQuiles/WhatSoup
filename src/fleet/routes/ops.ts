@@ -601,9 +601,9 @@ export async function handleCreateLine(
     // --- Write config.json ---
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
 
-    // TODO: Store per-instance API key in keyring if body.apiKey is provided.
-    // The deploy wrapper currently reads a shared key from `secret-tool lookup service anthropic`.
-    // Per-instance keys would need `secret-tool store ... service anthropic user <name>`.
+    // Decision: instance creation ignores any per-instance provider key material for now.
+    // The deploy wrapper still reads a shared provider key from the keyring, and we will only
+    // persist instance-scoped keys after a dedicated secret-storage model is designed end-to-end.
 
     // --- Copy shared health token ---
     try {

@@ -33,6 +33,7 @@ export interface HealthDeps {
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
   accessMode: string;
+  socketPath?: string | null;
   /** Callback for POST /access — allow triggers queued-message replay. */
   handleAccessDecision?: (subjectType: string, subjectId: string, action: 'allow' | 'block') => Promise<void>;
 }
@@ -351,6 +352,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count pending access-list entries',
       );
 
+      const schemaVersion = safeDbQuery(
+        () => {
+          const row = deps.db.raw.prepare('PRAGMA schema_version').get() as { schema_version: number } | undefined;
+          return row?.schema_version ?? 0;
+        },
+        0,
+        'failed to read sqlite schema_version',
+      );
+
       // Mode-specific runtime block for control-plane
       let runtimeBlock: Record<string, unknown> = {};
       if (deps.runtime) {
@@ -378,6 +388,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           name: deps.instanceName,
           mode: deps.instanceType,
           accessMode: deps.accessMode,
+          socketPath: deps.socketPath ?? null,
           provider: config.agentProvider,
         },
         whatsapp: {
@@ -394,6 +405,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           },
         },
         sqlite: {
+          schema_version: schemaVersion,
           messages_total: messagesTotal,
           unprocessed: enrichmentStats.unprocessed,
         },
