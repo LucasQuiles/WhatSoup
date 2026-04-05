@@ -31,7 +31,7 @@ The system of record may include: markdown files (beads, journals, specs), SQLit
 
 ### Principle 2: Cross-Model Adversarial-Complementary Collaboration
 
-Any capable agent may draft, expand, critique, validate, enrich, or adjudicate depending on task type and model strengths. Not a fixed author/reviewer pipeline. Claude's planning and process control strengths, Codex's broader codebase grounding, BRIC's evidence generation, local models' cost-effective triage — dynamic role assignment per task.
+Any capable agent may draft, expand, critique, validate, enrich, or adjudicate depending on task type and model strengths. Not a fixed author/reviewer pipeline. Claude's planning and process control strengths, Codex's broader codebase grounding, Brick's evidence generation, local models' cost-effective triage — dynamic role assignment per task.
 
 The handoff between models is artifact-mediated, not conversation-mediated. One model produces structured output into a shared artifact; the next model picks it up. The DAG handles sequencing for bead-to-bead handoffs. Review loops are the primary collaboration primitive, where one model critiques, expands, or validates another's work — but the reviewer role is not fixed. Either model may lead or review depending on task characteristics.
 
@@ -53,7 +53,7 @@ The system comprises five distinct tiers of participants:
 | **Workers** | Claude Code, Codex CLI, Gemini CLI | Execute tasks, produce artifacts, report completion/failure |
 | **Orchestrators** | Conductor, Orchestrator | Route, prioritize, enforce scope, mediate transitions |
 | **Daemon services** | Deacon, local model triage | Persistent watchers, health monitors, event routing |
-| **Enrichment/evidence services** | BRIC, Pinecone semantic search, static analyzers | Preprocess, enrich, extract, cluster, surface anomalies |
+| **Enrichment/evidence services** | Brick, Pinecone semantic search, static analyzers | Preprocess, enrich, extract, cluster, surface anomalies |
 | **Memory/retrieval layers** | Episodic memory, Pinecone indexes, SQLite state | Store and retrieve context, decisions, patterns, history |
 
 All tiers write back into the shared operational system of record. The orchestration protocol treats them as participants with different capabilities and lifecycle models, not as a flat peer set.
@@ -126,16 +126,16 @@ Over time, this turns the system from a stateless executor into a compounding op
 
 **Self-learning does not mean uncontrolled self-modification.** The loop continuously accumulates observations, failure modes, success cases, heuristics, evidence patterns, and enriched references. But changes to policy, thresholds, promotion rules, or autonomy boundaries require adjudication through the machine hierarchy and, for consequential changes, human approval. The system becomes better informed every pass without becoming self-rewriting in unsafe ways.
 
-### Principle 13: BRIC as Universal Enrichment Substrate
+### Principle 13: Brick as Universal Enrichment Substrate
 
-BRIC and similar services are available across the workflow as staging, preprocessing, evidence generation, metadata enrichment, embedding, anomaly surfacing, and context compression layers. BRIC is not merely adjacent to the workflow — it is part of the fabric that keeps the workflow grounded.
+Brick and similar services are available across the workflow as staging, preprocessing, evidence generation, metadata enrichment, embedding, anomaly surfacing, and context compression layers. Brick is not merely adjacent to the workflow — it is part of the fabric that keeps the workflow grounded.
 
-BRIC serves multiple roles depending on context:
+Brick serves multiple roles depending on context:
 - **Daemon service:** Always available to preprocess, categorize, extract metadata, build embeddings, surface entities, attach line references, identify buried signals
-- **Evidence service:** Higher-tier agents call BRIC when they need stronger grounding before promoting or escalating a finding
-- **Delegated subprocessor:** Agents stage files, logs, diffs, or artifacts; BRIC processes and writes back distilled artifacts for other agents to reason over
-- **Backpressure clustering:** BRIC helps cluster retries, correlate failure modes, detect resurfacing regressions, turn raw operational noise into structured signals
-- **Compression loss mitigation:** When handoffs risk summary collapse, BRIC produces denser evidence bundles for more faithful context transfer
+- **Evidence service:** Higher-tier agents call Brick when they need stronger grounding before promoting or escalating a finding
+- **Delegated subprocessor:** Agents stage files, logs, diffs, or artifacts; Brick processes and writes back distilled artifacts for other agents to reason over
+- **Backpressure clustering:** Brick helps cluster retries, correlate failure modes, detect resurfacing regressions, turn raw operational noise into structured signals
+- **Compression loss mitigation:** When handoffs risk summary collapse, Brick produces denser evidence bundles for more faithful context transfer
 
 ---
 
@@ -188,7 +188,7 @@ Only after machine layers exhaust their reasoning → surface to human
 | **Adjacency discovery** | Task completion | Neighborhood of completed work | Safest default — stays near understood code |
 | **Scheduled audit** | Orchestrator-initiated beads | Controlled scope per audit type | Explicit discovery as a work type |
 | **Passive observation** | Backpressure capture | System-wide operational signals | Failures, retries, regressions, anomalies |
-| **Enrichment-driven** | BRIC/Pinecone surfacing | Indexed data anomalies | Services identify buried patterns |
+| **Enrichment-driven** | Brick/Pinecone surfacing | Indexed data anomalies | Services identify buried patterns |
 
 **Discovery is broad. Promotion is narrow.** Agents discover and log far more than they promote and execute. When the active mission is exhausted, agents continue observing, auditing, consolidating, and enriching — but do not invent autonomous campaigns outside authorized boundaries.
 
@@ -208,7 +208,7 @@ Orchestrator Layer
 Daemon Layer
   - Deacon (persistent daemon, systemd-managed)
   - Small local model for intelligent triage (optional)
-  - BRIC daemon (enrichment, preprocessing, evidence)
+  - Brick daemon (enrichment, preprocessing, evidence)
     ↑ coordinates
 Worker Layer
   - Claude Code workers (tmux panes, claude-cli)
@@ -220,7 +220,7 @@ Shared Operational System of Record
   - tmup SQLite DB (task DAG, events, messages, agents)
   - Structured journals (decision anchors, conductor state)
   - Findings store (exploratory issues, backpressure signals)
-  - Enrichment outputs (BRIC artifacts, embeddings, metadata)
+  - Enrichment outputs (Brick artifacts, embeddings, metadata)
   - Memory layers (episodic memory, Pinecone indexes)
 ```
 
@@ -273,7 +273,7 @@ This reconstructs enough context for the Conductor to make informed decisions wi
 - Codex for implementation, codebase-grounded analysis, cross-model review
 - Either model for review loops (reviewer is not always the same model as author)
 
-### 4.5 BRIC (Universal Enrichment Substrate)
+### 4.5 Brick (Universal Enrichment Substrate)
 
 **What:** A standing enrichment and context amplification service available across all workflow layers.
 
@@ -304,7 +304,7 @@ Workers execute, producing artifacts + observations
     ↓
 Observations captured: successes, failures, friction, anomalies
     ↓
-Backpressure signals clustered, enriched (via BRIC), prioritized
+Backpressure signals clustered, enriched (via Brick), prioritized
     ↓
 Findings consolidated: deduped, categorized, ranked, salience-tracked
     ↓
@@ -439,7 +439,7 @@ The first implementation slice proves the core pattern — not a demo, but a ref
 
 7. **Machine escalation path** — worker → conductor → orchestrator chain with structured escalation records before human notification
 
-8. **BRIC integration** — at least one path where BRIC preprocesses a large file set and returns distilled artifacts for agent consumption
+8. **Brick integration** — at least one path where Brick preprocesses a large file set and returns distilled artifacts for agent consumption
 
 9. **Boundary suspicion** — agents can flag "this may be outside scope" and route it as an exploratory issue rather than autonomous action
 
@@ -449,7 +449,7 @@ The first implementation slice proves the core pattern — not a demo, but a ref
 
 ### 7.2 What Gets Deferred
 
-- Full BRIC daemon integration (proving slice uses BRIC as an on-demand service, not always-on daemon)
+- Full Brick daemon integration (proving slice uses Brick as an on-demand service, not always-on daemon)
 - Local model triage layer (start with direct Conductor spawning, add triage later)
 - Full policy adjudication system (start with manual threshold management)
 - Wasteland/federation concepts (single-machine first)
@@ -466,7 +466,7 @@ This spec supersedes the Colony Runtime design. The Deacon daemon, worker dispat
 - Structured conductor journal replaces implicit context loss
 - Cross-model collaboration is a first-class protocol, not just worker-type selection
 - Exploratory issues and backpressure capture are new first-class concepts
-- BRIC integration is architectural, not incidental
+- Brick integration is architectural, not incidental
 
 ### 8.2 SDLC-OS
 
@@ -511,7 +511,7 @@ The worker executes within scope. While doing so, it continuously emits structur
 
 If the worker finds follow-on work inside the same mission, it may enqueue or propose it directly according to policy. If it finds something outside scope, it creates an exploratory finding with evidence and sends it upward for machine adjudication.
 
-A reviewer, peer agent, or higher-tier layer evaluates the output. This may be Claude reviewing Codex, Codex expanding Claude, BRIC enriching both, or a higher control layer reconciling conflicts. Every pass adds evidence, reduces ambiguity, or tightens action.
+A reviewer, peer agent, or higher-tier layer evaluates the output. This may be Claude reviewing Codex, Codex expanding Claude, Brick enriching both, or a higher control layer reconciling conflicts. Every pass adds evidence, reduces ambiguity, or tightens action.
 
 Meanwhile, daemon and enrichment layers run in the background: watching for stuck tasks, repeated retries, resurfacing issues, failed validations, noisy findings, and queue starvation. They also preprocess large inputs so workers reason over distilled evidence instead of raw bulk.
 
@@ -519,7 +519,7 @@ The loop:
 1. **Act** — execute within scope
 2. **Observe** — capture structured traces
 3. **Capture evidence** — emit reusable system objects
-4. **Cluster and enrich** — BRIC and background services process signals
+4. **Cluster and enrich** — Brick and background services process signals
 5. **Promote, suppress, defer, or escalate** — orchestration decides
 6. **Feed back into active state** — next pass starts richer
 
@@ -571,7 +571,7 @@ This reduces hallucinated autonomy without turning everything into human review.
 
 New agents inherit this as working context, not rediscover it from scratch.
 
-**6. Access to support services.** Agents offload to BRIC and similar systems:
+**6. Access to support services.** Agents offload to Brick and similar systems:
 - Large file-set preprocessing
 - Corpus chunking
 - Metadata enrichment
@@ -689,13 +689,13 @@ The first category happens every pass. The second requires machine-hierarchy rev
 
 A Codex worker finishes a lint-fix mission in a package. During the work it notices repeated import-pattern anomalies in neighboring modules. It is allowed to create in-scope follow-on tasks for the same package because the mission allows local hygiene remediation.
 
-It also notices a deeper database migration inconsistency outside the current package. It cannot act on that. It creates an exploratory finding with evidence. BRIC enriches the finding with file references, related migrations, and prior similar incidents. A higher-tier layer sees that this resembles an already known but unresolved issue cluster, links it, raises salience, and keeps it visible. No human is bothered yet.
+It also notices a deeper database migration inconsistency outside the current package. It cannot act on that. It creates an exploratory finding with evidence. Brick enriches the finding with file references, related migrations, and prior similar incidents. A higher-tier layer sees that this resembles an already known but unresolved issue cluster, links it, raises salience, and keeps it visible. No human is bothered yet.
 
 Meanwhile, the daemon sees this is the fourth mission this week that surfaced similar migration anomalies. That is backpressure. It clusters those signals into a recurring pattern. A scheduled discovery bead is created for a higher-tier audit. That audit may later justify a new authorized campaign. That is self-learning without reckless self-expansion.
 
 ---
 
-## 10. BRIC Integration Patterns
+## 10. Brick Integration Patterns
 
 ### 10.1 Scoped Workstream Identity
 
@@ -711,7 +711,7 @@ Every operational unit has a durable identity — not a random session ID, but a
 
 Not necessarily encoded as one string, but conceptually this composite identity. It narrows retrieval and joins together: SQLite rows, artifact sets, transcript chunks, log events, vector entries, and enrichment outputs.
 
-BRIC does not index raw sessions as monolithic blobs. It indexes state packets bound to durable scoped identities.
+Brick does not index raw sessions as monolithic blobs. It indexes state packets bound to durable scoped identities.
 
 ### 10.2 The State Ledger
 
@@ -732,7 +732,7 @@ The SQLite ledger stores:
 | Decision anchors | Structured + narrative records of key decisions |
 | Unresolved questions | Explicit uncertainty tracking |
 | Provenance pointers | References into Git objects, artifact files, vector entries |
-| Last enrichment timestamps | When BRIC last processed this workstream |
+| Last enrichment timestamps | When Brick last processed this workstream |
 | Vector store references | Entry IDs for associated semantic records |
 
 This is the compact structured snapshot that enables a **coordinated rehydration flow** — not a single database call, but an orchestrated sequence:
@@ -755,11 +755,11 @@ A state packet is the operational context bundle assembled for an agent at sessi
 | Current authorized scope | Mission definition | Authoritative |
 | Active beads and status | Bead files (Git) | Authoritative |
 | Commit hash / branch / diff summary | Git | Authoritative |
-| Changed files and hotspots | BRIC preprocessing | Enrichment |
+| Changed files and hotspots | Brick preprocessing | Enrichment |
 | Linked findings/issues | Findings store | Authoritative |
-| Evidence anchors: file paths, line ranges, artifact IDs | BRIC + Git | Mixed |
-| Relevant transcript extracts | BRIC post-hook | Enrichment |
-| Tool log summary | BRIC post-hook | Enrichment |
+| Evidence anchors: file paths, line ranges, artifact IDs | Brick + Git | Mixed |
+| Relevant transcript extracts | Brick post-hook | Enrichment |
+| Tool log summary | Brick post-hook | Enrichment |
 | Unresolved questions | Conductor journal | Authoritative |
 | Rejected paths | Conductor journal | Authoritative |
 | Confidence/ambiguity markers | Prior evaluations | Enrichment |
@@ -786,15 +786,15 @@ Vector storage is not fourth because it is old. It is fourth because it is proba
 3. Use SQLite for structured joins and continuity
 4. Use vector recall to widen or recover context when deterministic state is insufficient
 
-The system resists compression loss by preserving state across multiple complementary layers. BRIC plus SQLite plus scoped identity improves handoff fidelity, retrieval precision, and context reconstruction efficiency. It does not eliminate loss — it reduces it through layered redundancy.
+The system resists compression loss by preserving state across multiple complementary layers. Brick plus SQLite plus scoped identity improves handoff fidelity, retrieval precision, and context reconstruction efficiency. It does not eliminate loss — it reduces it through layered redundancy.
 
 ### 10.5 Typed Event Model
 
-BRIC operates on typed events, not raw "session stuff." Without a typed event model, BRIC becomes a garbage sink.
+Brick operates on typed events, not raw "session stuff." Without a typed event model, Brick becomes a garbage sink.
 
 #### Event Types
 
-| Event | Trigger | BRIC Processing Level |
+| Event | Trigger | Brick Processing Level |
 |-------|---------|----------------------|
 | `bead_started` | Worker begins bead execution | Full enrichment |
 | `bead_completed` | Worker reports completion | Full enrichment |
@@ -820,9 +820,9 @@ BRIC operates on typed events, not raw "session stuff." Without a typed event mo
 - **Batched condensation:** Append to raw event log. Periodically (or on next full-enrichment trigger), batch-process accumulated medium-value events. Extract patterns without per-event overhead.
 - **Append-only logging:** Write to JSONL stream. No immediate processing. Available for retrospective analysis and backpressure detection. Keeps hook overhead near zero for low-value events.
 
-### 10.6 BRIC Output Types
+### 10.6 Brick Output Types
 
-BRIC produces multiple typed outputs, not a single summary blob:
+Brick produces multiple typed outputs, not a single summary blob:
 
 **A. Structured state updates** (written to SQLite ledger):
 - Decision records
@@ -851,7 +851,7 @@ BRIC produces multiple typed outputs, not a single summary blob:
 - Review packets
 - Escalation briefs
 
-### 10.7 BRIC Lifecycle Roles
+### 10.7 Brick Lifecycle Roles
 
 #### Pre-Hook Context Assembler
 
@@ -870,9 +870,9 @@ After a bead completes:
 - Updates the persistent state ledger, retrieval index, SQLite state, and linked vector entries
 - The next worker inherits a structured continuation, not a lossy prose handoff
 
-#### BRIC Preprocessing Contract
+#### Brick Preprocessing Contract
 
-BRIC does not ingest raw material blindly. For every input source it must:
+Brick does not ingest raw material blindly. For every input source it must:
 1. **Extract structured events** from noisy streams
 2. **Identify decision points and unresolved ambiguity**
 3. **Attach provenance** (file, line, commit, timestamp)
@@ -892,16 +892,16 @@ Continuously running:
 #### Evidence Service for Adjudication
 
 When a higher-tier agent decides whether to promote, suppress, merge, or escalate:
-- BRIC provides a scoped evidence bundle instead of raw history
+- Brick provides a scoped evidence bundle instead of raw history
 - Includes: file references, related cases, prior similar incidents, anomaly summaries, confidence assessment
 
-### 10.8 BRIC Safety Boundary
+### 10.8 Brick Safety Boundary
 
-BRIC enriches and stages, but does not become the policy engine. It can help write decision-tree entries, classify patterns, and propose linkages. But promotion rules, authority expansion, and policy mutation live in the orchestration/guardrail layer. Moving control into an enrichment service undermines the layered mediation model.
+Brick enriches and stages, but does not become the policy engine. It can help write decision-tree entries, classify patterns, and propose linkages. But promotion rules, authority expansion, and policy mutation live in the orchestration/guardrail layer. Moving control into an enrichment service undermines the layered mediation model.
 
 ### 10.9 What This Design Actually Is
 
-BRIC is not a magic memory layer. It is a hook-integrated enrichment and condensation service. It passively captures high-value operational signals, converts them into structured state updates and distilled retrieval artifacts, and binds them to a durable scoped workstream identity. SQLite provides deterministic continuity and joins. Artifacts preserve human/machine-readable work products. Vector storage provides semantic recall inside the correct operational neighborhood. Together these layers improve handoff fidelity and reduce the need to reconstruct context from scratch. They do not eliminate loss — they reduce it through layered redundancy, structured capture, and orchestrated rehydration.
+Brick is not a magic memory layer. It is a hook-integrated enrichment and condensation service. It passively captures high-value operational signals, converts them into structured state updates and distilled retrieval artifacts, and binds them to a durable scoped workstream identity. SQLite provides deterministic continuity and joins. Artifacts preserve human/machine-readable work products. Vector storage provides semantic recall inside the correct operational neighborhood. Together these layers improve handoff fidelity and reduce the need to reconstruct context from scratch. They do not eliminate loss — they reduce it through layered redundancy, structured capture, and orchestrated rehydration.
 
 ---
 
@@ -987,11 +987,11 @@ schema_version:   INTEGER NOT NULL DEFAULT 1
 
 ### 11.4 Write Serialization Strategy
 
-SQLite WAL allows one writer at a time. With Deacon, Bridge, and BRIC all writing to events.db, contention is inevitable under load. The mitigation strategy:
+SQLite WAL allows one writer at a time. With Deacon, Bridge, and Brick all writing to events.db, contention is inevitable under load. The mitigation strategy:
 
 **events.db writes are funneled through the Deacon process.** Other components do not write directly to events.db. Instead:
 - Bridge emits events to a JSONL append file (`events-inbox.jsonl`) — atomic append, no lock contention
-- BRIC writes enrichment results to a JSONL append file (`enrichment-inbox.jsonl`)
+- Brick writes enrichment results to a JSONL append file (`enrichment-inbox.jsonl`)
 - The Deacon's maintenance loop (every 60s) batch-ingests from both inbox files into events.db as a single writer
 - High-value events that need immediate visibility (bead_completed, bead_failed) are written by the Deacon directly when it detects them via inotifywait on tmup.db
 
@@ -1048,7 +1048,7 @@ purged:     SQLite rows deleted, vector entries removed, only Git artifacts rema
 | Finding records | Indefinite while open | Finding resolved/archived | 90 days after resolution |
 | Vector entries | Indefinite while workstream active | Superseded by newer entry for same scope | 90 days after supersession |
 | Fallback JSONL | Until successfully replayed | Replay succeeds | Immediate after replay |
-| BRIC distilled artifacts | Indefinite while workstream active | Workstream archives | 30 days after archive |
+| Brick distilled artifacts | Indefinite while workstream active | Workstream archives | 30 days after archive |
 
 ### 13.3 Salience Decay
 
@@ -1090,7 +1090,7 @@ A finding requires machine adjudication when ANY of:
 - Affected scope overlaps with another agent's active bead
 - The finding pattern is novel (no prior match in operational memory)
 
-Machine adjudication flow: BRIC enriches → lower-tier agent classifies → higher-tier agent decides (promote / defer / suppress / merge / escalate).
+Machine adjudication flow: Brick enriches → lower-tier agent classifies → higher-tier agent decides (promote / defer / suppress / merge / escalate).
 
 ### 14.3 Suppression Rules
 
@@ -1120,10 +1120,10 @@ Backpressure is not just a signal — it triggers concrete control actions:
 |--------|-----------|----------|
 | Task stuck (same bead, repeated retries) | 3 retries without new evidence | Pause retries. Route to higher-tier agent for diagnosis. Increase evidence threshold for next attempt. |
 | Oscillating state (bead bouncing between states) | 3 round-trips | Freeze bead. Create diagnostic finding. Escalate to Conductor. |
-| Rising escalation rate | >50% of findings escalating in one cycle | Slow promotion rate. Increase BRIC enrichment depth. Trigger scheduled discovery audit of the affected scope. |
+| Rising escalation rate | >50% of findings escalating in one cycle | Slow promotion rate. Increase Brick enrichment depth. Trigger scheduled discovery audit of the affected scope. |
 | Queue starvation | No pending work for >30 minutes while agents are idle | Trigger scheduled discovery beads. Notify human if no discoverable work exists. |
 | Repeated human intervention on same class | Same issue type escalated to human 3+ times | Create a policy review finding. Flag as recurring pattern. Machine layers should attempt automated resolution next time. |
-| Low-confidence finding accumulation | >10 open findings below confidence 0.5 | Trigger BRIC clustering pass. Merge duplicates. Suppress noise. Raise evidence bar for new findings in that scope. |
+| Low-confidence finding accumulation | >10 open findings below confidence 0.5 | Trigger Brick clustering pass. Merge duplicates. Suppress noise. Raise evidence bar for new findings in that scope. |
 | Review loop disagreement | Same bead rejected by reviewer 3+ times | Escalate to higher-tier adjudicator. If still unresolved, freeze and escalate to human. |
 
 ---
@@ -1134,11 +1134,11 @@ Backpressure is not just a signal — it triggers concrete control actions:
 
 | Component down | Impact | Degraded mode |
 |---------------|--------|---------------|
-| **BRIC unavailable** | No pre-hook enrichment, no post-hook condensation | Agents rehydrate from SQLite ledger + bead files + artifacts only. No vector updates. Append-only logging continues to fallback JSONL. Work continues with reduced context quality. |
+| **Brick unavailable** | No pre-hook enrichment, no post-hook condensation | Agents rehydrate from SQLite ledger + bead files + artifacts only. No vector updates. Append-only logging continues to fallback JSONL. Work continues with reduced context quality. |
 | **SQLite locked/corrupted** | No state ledger, no event writes | CRITICAL. Deacon detects via health check. All workers paused. Deacon attempts WAL recovery. If unrecoverable, alert human. Bead files (Git) are the recovery point. |
 | **Vector indexing lagging** | Stale semantic recall | Agents get current deterministic state but older vector context. Flag as degraded in state packet. Work continues. |
 | **Event hooks failing** | Events not captured | Fallback to JSONL append. Deacon batch-replays on recovery. No immediate data loss, but real-time enrichment paused. |
-| **BRIC produces nonsense** | Bad enrichment artifacts | Enrichment fields are advisory, not authoritative. Agents fall back to deterministic state. Bad artifacts flagged and quarantined. BRIC processing paused for review. |
+| **Brick produces nonsense** | Bad enrichment artifacts | Enrichment fields are advisory, not authoritative. Agents fall back to deterministic state. Bad artifacts flagged and quarantined. Brick processing paused for review. |
 | **Review loops disagree repeatedly** | Bead cannot advance | Freeze after 3 cycles. Escalate to higher tier, then human. Bead marked `stuck` with full disagreement history. |
 | **Task oscillating between states** | Wasted compute | Freeze after 3 round-trips. Diagnostic finding created. No further retries until root cause addressed. |
 
@@ -1147,7 +1147,7 @@ Backpressure is not just a signal — it triggers concrete control actions:
 The system degrades by shedding enrichment layers while preserving authoritative state:
 
 ```
-Full mode:    beads + artifacts + SQLite + BRIC enrichment + vector recall
+Full mode:    beads + artifacts + SQLite + Brick enrichment + vector recall
 Reduced:      beads + artifacts + SQLite + append-only logging
 Minimal:      beads + artifacts + Git history only
 Emergency:    bead files in Git (the last resort recovery point)
@@ -1163,12 +1163,12 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 |----------|--------|-------------|
 | Hook frequency (high-value events) | Max 60/hour per workstream | Event deduplication + rate limiter in hook runner |
 | Hook frequency (medium-value events) | Batched every 5 minutes | Timer-based condensation, not per-event |
-| BRIC enrichment concurrency | Max 2 concurrent enrichment runs | Semaphore in Deacon |
+| Brick enrichment concurrency | Max 2 concurrent enrichment runs | Semaphore in Deacon |
 | Vector indexing batch size | Max 50 records per batch | Batched writes to Pinecone |
 | Review loop depth | Max 3 cycles per bead per loop level | Hard limit in Conductor policy |
 | Max retries per bead | 3 at L0, 2 at L1, 2 at L2 | tmup task retry config |
 | Per-workstream cost ceiling | $50 USD (configurable) | Deacon tracks cumulative cost from Conductor session outputs |
-| Per-agent context assembly | Max 100K tokens per state packet | BRIC truncates and summarizes above limit |
+| Per-agent context assembly | Max 100K tokens per state packet | Brick truncates and summarizes above limit |
 | Conductor session timeout | 30 min (DISPATCH/EVALUATE), 60 min (SYNTHESIZE) | Deacon SIGTERM + SIGKILL |
 | Worker session timeout | Calibrated by Cynefin: CLEAR=5min, COMPLICATED=15min, COMPLEX=30min | tmup heartbeat + dead-claim recovery |
 | Discovery budget | Max 20% of total workstream compute | Deacon tracks discovery vs execution bead ratio |
@@ -1185,7 +1185,7 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 | Source code diffs | Yes (in artifacts, Git) | N/A | Strip credentials if detected |
 | Bead files | Yes | N/A | No secrets in bead fields |
 | Decision anchors | Yes (structured + narrative) | N/A | No credential references |
-| Transcripts | Extracts only (not full transcripts) | Full transcripts → BRIC summary | Strip API keys, tokens, passwords |
+| Transcripts | Extracts only (not full transcripts) | Full transcripts → Brick summary | Strip API keys, tokens, passwords |
 | Tool logs | Yes (in append-only JSONL) | N/A | Strip environment variables containing secrets |
 | Test output | Yes (in artifacts) | N/A | Strip connection strings |
 | Vector summaries | Yes (semantic summaries) | Full content → embedding + abstract | No raw credentials in vector metadata |
@@ -1197,13 +1197,13 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 | Append-only event JSONL | 30 days (then condense or purge) |
 | SQLite state ledger | 90 days after workstream archive |
 | Vector entries | 90 days after supersession |
-| BRIC distilled artifacts | 30 days after workstream archive |
+| Brick distilled artifacts | 30 days after workstream archive |
 | Git-backed artifacts (beads, specs) | Indefinite (Git history) |
 
 ### 18.3 Access Rules
 
 - Only agents dispatched within a workstream may read that workstream's state packet
-- BRIC may read any workstream for cross-workstream clustering (read-only)
+- Brick may read any workstream for cross-workstream clustering (read-only)
 - The Deacon may read all workstreams for health monitoring (read-only)
 - Human has full access to all stores
 
@@ -1214,7 +1214,7 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 | Metric | Target | Measurement |
 |--------|--------|-------------|
 | Handoff reconstruction accuracy | >80% of decision anchors recoverable by fresh Conductor | Sample 10 handoffs, measure anchor recovery rate |
-| Repeated context rebuild reduction | >50% reduction vs baseline (no ledger/BRIC) | Compare context assembly time and completeness with/without system |
+| Repeated context rebuild reduction | >50% reduction vs baseline (no ledger/Brick) | Compare context assembly time and completeness with/without system |
 | In-scope follow-on task generation precision | >70% of auto-promoted tasks are valid and useful | Sample promoted tasks, measure human agreement rate |
 | Exploratory finding false positive rate | <30% of exploratory findings are noise | Sample findings, measure suppression rate after adjudication |
 | Escalation precision | >80% of human escalations are genuinely needed | Track human action rate on escalated items |
@@ -1233,9 +1233,9 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 ```
 1. Codex worker completes implementation bead
 2. Post-hook emits bead_completed event (typed, high-value)
-3. BRIC receives: diff, commit hash, transcript extract, test results, changed files
-4. BRIC condenses: extracts decisions, evidence anchors, follow-on findings
-5. BRIC updates: SQLite state ledger, vector store, distilled artifact
+3. Brick receives: diff, commit hash, transcript extract, test results, changed files
+4. Brick condenses: extracts decisions, evidence anchors, follow-on findings
+5. Brick updates: SQLite state ledger, vector store, distilled artifact
 6. Worker reports adjacent finding: "import anomaly in neighboring module"
 7. Finding created: in_scope, confidence 0.8, evidence includes file refs
 8. Auto-promotion check: in_scope + confidence >= 0.7 + file anchor + active mission allows → PROMOTED
@@ -1246,22 +1246,22 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 13. Cycle continues
 ```
 
-### 20.2 Degraded Path (BRIC Unavailable)
+### 20.2 Degraded Path (Brick Unavailable)
 
 ```
 1. Codex worker completes implementation bead
 2. Post-hook emits bead_completed event
-3. BRIC is down — event falls back to append-only JSONL
+3. Brick is down — event falls back to append-only JSONL
 4. Minimal SQLite update: bead status change, commit hash, changed files (from Git directly)
 5. No vector update, no enrichment artifacts
 6. Worker reports adjacent finding (same as golden path)
-7. Finding created with lower enrichment: no BRIC clustering, no related-case matching
+7. Finding created with lower enrichment: no Brick clustering, no related-case matching
 8. Auto-promotion check: passes on evidence quality alone (file refs present)
 9. Orchestrator creates follow-on bead
-10. Claude receives state packet assembled from ledger + artifacts only (no BRIC enrichment)
-11. State packet flagged: "degraded — BRIC offline, reduced context quality"
+10. Claude receives state packet assembled from ledger + artifacts only (no Brick enrichment)
+11. State packet flagged: "degraded — Brick offline, reduced context quality"
 12. Claude proceeds with reduced but functional context
-13. When BRIC recovers: Deacon triggers batch replay of JSONL backlog
+13. When Brick recovers: Deacon triggers batch replay of JSONL backlog
 14. Enrichment catches up, vector store updated, ledger refreshed
 ```
 
@@ -1294,4 +1294,4 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 
 4. **Cross-workstream learning:** When should operational memory from one workstream inform another? What's the contamination risk?
 
-5. **BRIC cold start:** How does the system bootstrap when there's no prior operational memory? What's the minimum viable state packet for the first workstream?
+5. **Brick cold start:** How does the system bootstrap when there's no prior operational memory? What's the minimum viable state packet for the first workstream?
