@@ -5,6 +5,10 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '../hooks/use-fleet'
+import { useMetrics } from '../hooks/use-metrics'
+import { MetricsChart } from '../components/MetricsChart'
+import type { MetricsRange } from '../types'
+import EmptyState from '../components/EmptyState'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { formatRelative, formatTime } from '../lib/format-time'
@@ -79,10 +83,12 @@ export default function LineDetail() {
   const { name } = useParams<{ name: string }>()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<TabId>('summary')
+  const [metricsRange, setMetricsRange] = useState<MetricsRange>('24h')
   const { data: line } = useLine(name || '')
   const { data: chats } = useChats(name || '')
   const { data: access } = useAccess(name || '')
   const { data: logs } = useLogs(name || '')
+  const { data: metrics, isLoading: metricsLoading, error: metricsError } = useMetrics(name || '', metricsRange)
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
     new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
@@ -309,6 +315,43 @@ export default function LineDetail() {
               />
             )}
             {activeTab === 'logs' && <LogsTab logs={logs || []} filter={logFilter} onFilterChange={setLogFilter} />}
+            {activeTab === 'metrics' && (
+              <div className="flex-1 overflow-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
+                {/* Range selector */}
+                <div className="flex items-center" style={{ gap: 'var(--sp-2)', marginBottom: 'var(--sp-4)' }}>
+                  <span className="c-section-label">Range</span>
+                  {(['24h', '7d', '30d'] as const).map((r) => (
+                    <button
+                      key={r}
+                      className={`c-btn c-btn-sm ${metricsRange === r ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                      onClick={() => setMetricsRange(r)}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                </div>
+
+                {metricsLoading ? (
+                  <EmptyState title="Loading metrics..." description="Fetching data for this instance." />
+                ) : metricsError ? (
+                  <EmptyState
+                    variant="error"
+                    title="Failed to load metrics"
+                    description={metricsError.message}
+                    onRetry={() => setMetricsRange(metricsRange)}
+                  />
+                ) : metrics?.messageVolume && metrics.messageVolume.length > 0 ? (
+                  <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+                    <div>
+                      <div className="c-heading" style={{ marginBottom: 'var(--sp-2)' }}>Message Volume</div>
+                      <MetricsChart data={metrics.messageVolume} />
+                    </div>
+                  </div>
+                ) : (
+                  <EmptyState title="No metrics data" description="Metrics will appear after the instance processes messages." />
+                )}
+              </div>
+            )}
           </motion.div>
         </AnimatePresence>
       </div>
