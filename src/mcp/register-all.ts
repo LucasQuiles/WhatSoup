@@ -1,5 +1,5 @@
 // src/mcp/register-all.ts
-// Standalone function that registers all 16 tool modules onto a ToolRegistry.
+// Standalone function that registers all 17 tool modules onto a ToolRegistry.
 // Used by AgentRuntime and PassiveRuntime so both get the same tools.
 
 import { config } from '../config.ts';
@@ -24,11 +24,12 @@ import { registerProfileTools } from './tools/profile.ts';
 import { registerKnowledgeTools } from './tools/knowledge.ts';
 import { registerVoiceTools } from './tools/voice.ts';
 import { registerRetentionTools } from './tools/retention.ts';
+import { registerStatusTools } from './tools/status.ts';
 
 const log = createChildLogger('register-all');
 
 /**
- * Register all 15 tool modules onto the given registry.
+ * Register all 17 tool modules onto the given registry.
  *
  * Preserves the three calling conventions used by the individual modules:
  *   Pattern 1 (options-object): registerMessagingTools, registerMediaTools, registerVoiceTools
@@ -54,6 +55,7 @@ export function registerAllTools(
   try { registerMediaTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
   try { registerVoiceTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerVoiceTools failed'); }
   try { registerRetentionTools(registry, { db }); } catch (err) { log.error({ err }, 'registerRetentionTools failed'); }
+  try { registerStatusTools(registry, { db, getSock }); } catch (err) { log.error({ err }, 'registerStatusTools failed'); }
 
   // Pattern 2 — DB-dependent
   try { registerChatManagementTools(db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }
