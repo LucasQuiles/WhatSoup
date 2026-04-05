@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useLines, useChats, useMessages, useTyping } from '../hooks/use-fleet'
@@ -27,13 +27,8 @@ export default function Inbox() {
   const [hasMore, setHasMore] = useState(true)
   const [searchInput, setSearchInput] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
-  const [searchResults, setSearchResults] = useState<Message[]>([])
-  const [searchTotal, setSearchTotal] = useState(0)
-  const [searchLoading, setSearchLoading] = useState(false)
-  const [searchError, setSearchError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchScrollRef = useRef<HTMLDivElement>(null)
-  const searchRequestRef = useRef(0)
   const queryClient = useQueryClient()
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -59,13 +54,8 @@ export default function Inbox() {
 
   // Reset in-panel search when switching chats or lines
   useEffect(() => {
-    searchRequestRef.current += 1
     setSearchInput('')
     setDebouncedSearch('')
-    setSearchResults([])
-    setSearchTotal(0)
-    setSearchLoading(false)
-    setSearchError(null)
   }, [selectedChat, selectedLine])
 
   // Auto-focus textarea when a chat is selected
@@ -102,7 +92,20 @@ export default function Inbox() {
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
   const isSearchMode = searchInput.trim().length > 0
   const isDebouncingSearch = isSearchMode && searchInput.trim() !== debouncedSearch
+
+  // Search via React Query — cached, deduped, auto loading/error states
+  const searchEnabled = !!selectedChat && !!debouncedSearch
+  const { data: searchData, isLoading: searchLoading, error: searchQueryError } = useQuery({
+    queryKey: ['search', activeLine, selectedChat, debouncedSearch],
+    queryFn: () => api.searchMessages(activeLine, debouncedSearch, selectedChat!),
+    enabled: searchEnabled,
+    staleTime: 30_000, // Cache search results for 30s
+  })
+  const searchResults = searchData?.results ?? []
+  const searchTotal = searchData?.total ?? 0
+  const searchError = searchQueryError ? (searchQueryError instanceof Error ? searchQueryError.message : String(searchQueryError)) : null
   const isSearchBusy = searchLoading || isDebouncingSearch
+
   const renderedMessages = useMemo(() => toChronologicalMessages(messages ?? []), [messages])
 
   // Sticky scroll for messages area
@@ -117,39 +120,6 @@ export default function Inbox() {
   })
   const virtualMessageRows = selectVirtualMessageRows(renderedMessages, messageVirtualizer.getVirtualItems())
   const virtualSearchRows = selectVirtualMessageRows(searchResults, searchVirtualizer.getVirtualItems())
-
-  useEffect(() => {
-    if (!selectedChat || !debouncedSearch) {
-      searchRequestRef.current += 1
-      setSearchResults([])
-      setSearchTotal(0)
-      setSearchLoading(false)
-      setSearchError(null)
-      return
-    }
-
-    const requestId = ++searchRequestRef.current
-    setSearchLoading(true)
-    setSearchError(null)
-
-    api.searchMessages(activeLine, debouncedSearch, selectedChat)
-      .then((result) => {
-        if (requestId !== searchRequestRef.current) return
-        setSearchResults(result.results)
-        setSearchTotal(result.total)
-      })
-      .catch((error) => {
-        if (requestId !== searchRequestRef.current) return
-        setSearchResults([])
-        setSearchTotal(0)
-        setSearchError(error instanceof Error ? error.message : String(error))
-      })
-      .finally(() => {
-        if (requestId === searchRequestRef.current) {
-          setSearchLoading(false)
-        }
-      })
-  }, [activeLine, selectedChat, debouncedSearch])
 
   const handleLoadOlder = async () => {
     if (!selectedChat || loadingOlder) return
