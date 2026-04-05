@@ -12,10 +12,12 @@ export interface SubmissionReceipt {
   waMessageId: string | null;
 }
 
+export type TypingState = boolean | 'composing' | 'recording' | 'paused';
+
 export interface Messenger {
   sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt>;
-  /** Send composing/paused presence update. Fire-and-forget; failures are silently ignored. */
-  setTyping?(chatJid: string, typing: boolean): Promise<void>;
+  /** Send composing/paused/recording presence update. Fire-and-forget; failures are silently ignored. */
+  setTyping?(chatJid: string, typing: TypingState): Promise<void>;
   sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;
 }
 

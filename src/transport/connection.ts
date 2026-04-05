@@ -18,7 +18,7 @@ import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
 import { WhatSoupError } from '../errors.ts';
-import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt } from '../core/types.ts';
+import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
@@ -64,6 +64,12 @@ function withSendTimeout<T>(promise: Promise<T>, operation: string): Promise<T> 
 
 function toIso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
+}
+
+function resolveTypingState(state: TypingState): 'composing' | 'recording' | 'paused' {
+  if (state === true) return 'composing';
+  if (state === false) return 'paused';
+  return state;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,18 +273,29 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.contactsDir.contacts,
     );
 
+    const autoTyping = config.autoTyping;
+    if (autoTyping !== 'off') {
+      await this.setTyping(chatJid, autoTyping);
+    }
+
     let result;
-    if (hasMentions) {
-      this.log.info({ mentions }, 'Outbound message includes mentions');
-      result = await withSendTimeout(
-        this.sock.sendMessage(chatJid, { text: formatted, mentions }),
-        'sendMessage',
-      );
-    } else {
-      result = await withSendTimeout(
-        this.sock.sendMessage(chatJid, { text: formatted }),
-        'sendMessage',
-      );
+    try {
+      if (hasMentions) {
+        this.log.info({ mentions }, 'Outbound message includes mentions');
+        result = await withSendTimeout(
+          this.sock.sendMessage(chatJid, { text: formatted, mentions }),
+          'sendMessage',
+        );
+      } else {
+        result = await withSendTimeout(
+          this.sock.sendMessage(chatJid, { text: formatted }),
+          'sendMessage',
+        );
+      }
+    } finally {
+      if (autoTyping !== 'off') {
+        await this.setTyping(chatJid, 'paused');
+      }
     }
     this.log.info({ chatJid, messageId: result?.key?.id }, 'Sending message');
     return { waMessageId: result?.key?.id ?? null };
@@ -290,17 +307,32 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    */
   async sendRaw(chatJid: string, content: Record<string, unknown>): Promise<SubmissionReceipt> {
     if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
-    const result = await withSendTimeout(
-      this.sock.sendMessage(chatJid, content as any),
-      'sendRaw',
-    );
+    const autoTyping = typeof content['text'] === 'string' && config.autoTyping !== 'off'
+      ? config.autoTyping
+      : 'off';
+
+    if (autoTyping !== 'off') {
+      await this.setTyping(chatJid, autoTyping);
+    }
+
+    let result;
+    try {
+      result = await withSendTimeout(
+        this.sock.sendMessage(chatJid, content as any),
+        'sendRaw',
+      );
+    } finally {
+      if (autoTyping !== 'off') {
+        await this.setTyping(chatJid, 'paused');
+      }
+    }
     return { waMessageId: result?.key?.id ?? null };
   }
 
-  async setTyping(chatJid: string, typing: boolean): Promise<void> {
+  async setTyping(chatJid: string, typing: TypingState): Promise<void> {
     if (!this.sock) return;
     try {
-      await this.sock.sendPresenceUpdate(typing ? 'composing' : 'paused', chatJid);
+      await this.sock.sendPresenceUpdate(resolveTypingState(typing), chatJid);
     } catch (err) {
       // best-effort — presence failures must never surface to callers
       this.log.debug({ op: 'sendPresenceUpdate', error: (err as Error).message }, 'transport_op_swallowed');
