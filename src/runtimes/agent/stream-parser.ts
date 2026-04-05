@@ -4,7 +4,7 @@
 export type AgentEvent =
   | { type: 'init'; sessionId: string }
   | { type: 'compact_boundary' }
-  | { type: 'assistant_text'; text: string }
+  | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
   | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
   | { type: 'result'; text: string | null; inputTokens?: number; outputTokens?: number }

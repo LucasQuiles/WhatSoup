@@ -241,12 +241,12 @@ describe('Codex app-server parser (JSON-RPC)', () => {
 
     it('parses item/agentMessage/delta → assistant_text with delta text', () => {
       const event = parseCodexEvent(lines[4]!);
-      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+      expect(event).toEqual({ type: 'assistant_text', text: 'Four', itemId: 'item-1' });
     });
 
     it('parses item/completed agentMessage → assistant_text with full text', () => {
       const event = parseCodexEvent(lines[5]!);
-      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+      expect(event).toEqual({ type: 'assistant_text', text: 'Four', itemId: 'item-1', complete: true });
     });
 
     it('parses turn/completed → result with null text', () => {

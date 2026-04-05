@@ -461,4 +461,15 @@ describe('Codex turn lifecycle — runtime level', () => {
     expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 200, 40);
     expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 300, 60);
   });
+
+  it('does not double-enqueue a completed agent message after streaming deltas', async () => {
+    const onEvent = await setupSession();
+
+    onEvent({ type: 'assistant_text', text: 'Hello', itemId: 'item-1' } as AgentEvent);
+    onEvent({ type: 'assistant_text', text: ' world', itemId: 'item-1' } as AgentEvent);
+    onEvent({ type: 'assistant_text', text: 'Hello world', itemId: 'item-1', complete: true } as AgentEvent);
+
+    const calls = mockQueue.enqueueStreamingText.mock.calls.map((args) => args[0] as string);
+    expect(calls).toEqual(['Hello', ' world']);
+  });
 });

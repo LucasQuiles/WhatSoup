@@ -521,8 +521,10 @@ export class AgentRuntime implements Runtime {
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
   private currentTurnInboundContentType: string | null = null;
   private currentTurnAssistantText = '';
+  private currentTurnAssistantItemText: Map<string, string> = new Map();
   private perChatTurnContentType: Map<string, string> = new Map();
   private perChatTurnText: Map<string, string> = new Map();
+  private perChatAssistantItemText: Map<string, Map<string, string>> = new Map();
 
   // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
   // Used to replay a message when session resume fails and the turn was lost.
@@ -537,6 +539,38 @@ export class AgentRuntime implements Runtime {
   private globalSocketServer: WhatSoupSocketServer | null = null;
 
   private durability: DurabilityEngine | null = null;
+
+  private getPerChatAssistantItemMap(mapKey: string): Map<string, string> {
+    const existing = this.perChatAssistantItemText.get(mapKey);
+    if (existing) return existing;
+    const created = new Map<string, string>();
+    this.perChatAssistantItemText.set(mapKey, created);
+    return created;
+  }
+
+  private normalizeAssistantTextForDelivery(
+    event: Extract<AgentEvent, { type: 'assistant_text' }>,
+    mapKey?: string,
+  ): string | null {
+    if (!event.itemId) return event.text;
+
+    const itemMap = mapKey !== undefined
+      ? this.getPerChatAssistantItemMap(mapKey)
+      : this.currentTurnAssistantItemText;
+
+    const prior = itemMap.get(event.itemId) ?? '';
+
+    if (!event.complete) {
+      itemMap.set(event.itemId, prior + event.text);
+      return event.text;
+    }
+
+    itemMap.delete(event.itemId);
+    if (!prior) return event.text;
+    if (event.text === prior) return null;
+    if (event.text.startsWith(prior)) return event.text.slice(prior.length);
+    return event.text;
+  }
 
   // ─── Control session (self-healing repair) ────────────────────────────────
   private activeControlReportId: string | null = null;
@@ -1096,6 +1130,7 @@ export class AgentRuntime implements Runtime {
       // Track inbound contentType for voice reply (SP4)
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
+      this.currentTurnAssistantItemText.clear();
       this.turnQueue.enqueue({
         chatJid,
         senderJid: msg.senderJid,
@@ -1117,6 +1152,7 @@ export class AgentRuntime implements Runtime {
       // Track inbound contentType for voice reply (SP4)
       this.perChatTurnContentType.set(mapKey, msg.contentType);
       this.perChatTurnText.set(mapKey, '');
+      this.perChatAssistantItemText.delete(mapKey);
       await this.sendTurnPerChat(chatJid, text);
     } else {
       // single mode: store inbound seq on runtime + queue
@@ -1125,6 +1161,7 @@ export class AgentRuntime implements Runtime {
       // Track inbound contentType for voice reply (SP4)
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
+      this.currentTurnAssistantItemText.clear();
       await this.sendTurnNonShared(chatJid, text);
     }
   }
@@ -1325,10 +1362,14 @@ export class AgentRuntime implements Runtime {
 
       case 'assistant_text':
         session?.tickWatchdog();
-        queue.enqueueStreamingText(event.text);
-        // Accumulate assistant text for voice reply (SP4)
-        if (mapKey !== undefined) {
-          this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+        {
+          const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
+          if (!normalizedText) break;
+          queue.enqueueStreamingText(normalizedText);
+          // Accumulate assistant text for voice reply (SP4)
+          if (mapKey !== undefined) {
+            this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + normalizedText);
+          }
         }
         break;
 
@@ -1368,6 +1409,9 @@ export class AgentRuntime implements Runtime {
           if (mapKey !== undefined) {
             this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
           }
+        }
+        if (mapKey !== undefined) {
+          this.perChatAssistantItemText.delete(mapKey);
         }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = session?.getDbRowId() ?? null;
@@ -2211,10 +2255,14 @@ export class AgentRuntime implements Runtime {
 
       case 'assistant_text':
         this.session?.tickWatchdog();
-        queue.enqueueStreamingText(event.text);
-        this.turnHadVisibleOutput = true;
-        // Accumulate text for voice reply (SP4)
-        this.currentTurnAssistantText += event.text;
+        {
+          const normalizedText = this.normalizeAssistantTextForDelivery(event);
+          if (!normalizedText) break;
+          queue.enqueueStreamingText(normalizedText);
+          this.turnHadVisibleOutput = true;
+          // Accumulate text for voice reply (SP4)
+          this.currentTurnAssistantText += normalizedText;
+        }
         break;
 
       case 'tool_use':
@@ -2265,6 +2313,7 @@ export class AgentRuntime implements Runtime {
           // Accumulate result text for voice reply (SP4)
           this.currentTurnAssistantText += event.text;
         }
+        this.currentTurnAssistantItemText.clear();
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = this.session?.getDbRowId() ?? null;
           if (rowId !== null) {

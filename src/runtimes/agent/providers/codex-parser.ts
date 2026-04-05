@@ -115,7 +115,11 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
     case 'item/agentMessage/delta': {
       const delta = params['delta'];
       if (typeof delta === 'string') {
-        return { type: 'assistant_text', text: delta };
+        return {
+          type: 'assistant_text',
+          text: delta,
+          itemId: typeof params['itemId'] === 'string' ? String(params['itemId']) : undefined,
+        };
       }
       return { type: 'ignored' };
     }
@@ -146,6 +150,8 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
         return {
           type: 'assistant_text',
           text: String(item['text'] ?? ''),
+          itemId: String(item['id'] ?? ''),
+          complete: true,
         };
       }
 
@@ -352,6 +358,8 @@ function parseLegacyExecEvent(parsed: JsonObject): AgentEvent {
       return {
         type: 'assistant_text',
         text: extractMessage(item['text']) ?? extractMessage(item['content']) ?? '',
+        itemId: String(item['id'] ?? ''),
+        complete: true,
       };
     }
 
