@@ -7,6 +7,10 @@ import type { IncomingMessage } from '../../../src/core/types.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 
+const { mockUpdateMediaPath } = vi.hoisted(() => ({
+  mockUpdateMediaPath: vi.fn(),
+}));
+
 vi.mock('../../../src/logger.ts', () => ({
   createChildLogger: () => ({
     info: vi.fn(),
@@ -97,6 +101,7 @@ vi.mock('../../../src/config.ts', () => ({
 
 vi.mock('../../../src/core/messages.ts', () => ({
   getRecentMessages: vi.fn(() => []),
+  updateMediaPath: mockUpdateMediaPath,
 }));
 
 vi.mock('../../../src/core/access-list.ts', async (importOriginal) => {
@@ -182,6 +187,7 @@ describe('prepareContentForAgent', () => {
     mockWriteTempFile.mockReturnValue(FAKE_PATH);
     mockTranscribeAudio.mockResolvedValue('Hello world transcription.');
     mockExtractDocumentText.mockResolvedValue('Extracted document text.');
+    mockUpdateMediaPath.mockReset();
   });
 
   // ── text passthrough ──────────────────────────────────────────────────────
@@ -358,5 +364,40 @@ describe('prepareContentForAgent', () => {
     const msg = makeMsg({ contentType: 'unknown', content: 'some content', rawMessage: undefined });
     const result = await prepareContentForAgent(msg);
     expect(result).toBe('some content');
+  });
+
+  // ── media_path persistence ────────────────────────────────────────────────
+
+  it('calls updateMediaPath with db and messageId after writeTempFile for image', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/img.jpg');
+    const fakeDb = { raw: {} } as any;
+    const msg = makeMsg({ contentType: 'image', content: null, messageId: 'msg-persist-1' });
+    await prepareContentForAgent(msg, fakeDb, 'msg-persist-1');
+    expect(mockUpdateMediaPath).toHaveBeenCalledOnce();
+    expect(mockUpdateMediaPath).toHaveBeenCalledWith(fakeDb, 'msg-persist-1', '/tmp/img.jpg');
+  });
+
+  it('does not call updateMediaPath when db is not provided', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/img.jpg');
+    const msg = makeMsg({ contentType: 'image', content: null });
+    await prepareContentForAgent(msg);
+    expect(mockUpdateMediaPath).not.toHaveBeenCalled();
+  });
+
+  it('does not call updateMediaPath when messageId is not provided', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/img.jpg');
+    const fakeDb = { raw: {} } as any;
+    const msg = makeMsg({ contentType: 'image', content: null });
+    await prepareContentForAgent(msg, fakeDb, undefined);
+    expect(mockUpdateMediaPath).not.toHaveBeenCalled();
+  });
+
+  it('still returns file path even if updateMediaPath throws', async () => {
+    mockWriteTempFile.mockReturnValue('/tmp/img.jpg');
+    mockUpdateMediaPath.mockImplementation(() => { throw new Error('db error'); });
+    const fakeDb = { raw: {} } as any;
+    const msg = makeMsg({ contentType: 'image', content: null, messageId: 'msg-err' });
+    const result = await prepareContentForAgent(msg, fakeDb, 'msg-err');
+    expect(result).toBe('[Image: /tmp/img.jpg]');
   });
 });

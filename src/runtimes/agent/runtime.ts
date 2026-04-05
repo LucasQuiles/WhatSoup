@@ -31,7 +31,7 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
-import { getRecentMessages } from '../../core/messages.ts';
+import { getRecentMessages, updateMediaPath } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
@@ -76,7 +76,7 @@ const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
  *
  * Requires OPENAI_API_KEY in the environment for audio transcription (Whisper).
  */
-export async function prepareContentForAgent(msg: IncomingMessage): Promise<string> {
+export async function prepareContentForAgent(msg: IncomingMessage, db?: Database, messageId?: string): Promise<string> {
   const { contentType, content } = msg;
 
   // Text messages: use as-is
@@ -134,6 +134,15 @@ export async function prepareContentForAgent(msg: IncomingMessage): Promise<stri
 
   // Save to disk — do NOT clean up immediately; agent needs time to read the file
   const filePath = writeTempFile(result.buffer, ext);
+
+  // Persist media path to database for MCP access
+  if (db && messageId) {
+    try {
+      updateMediaPath(db, messageId, filePath);
+    } catch (err) {
+      createChildLogger('agent:media').warn({ err, messageId }, 'Failed to persist media_path');
+    }
+  }
 
   switch (contentType) {
     case 'audio': {
@@ -907,7 +916,7 @@ export class AgentRuntime implements Runtime {
     // to a plain-text representation suitable for the stream-json agent protocol.
     if (msg.contentType !== 'text') {
       try {
-        msg.content = await prepareContentForAgent(msg);
+        msg.content = await prepareContentForAgent(msg, this.db, msg.messageId);
       } catch (err) {
         log.warn(
           { err, contentType: msg.contentType, messageId: msg.messageId },
