@@ -315,8 +315,8 @@ export class SessionManager {
       }
     }
 
-    // Record token usage for budget tracking on result events
-    if (event.type === 'result' && this.budget) {
+    // Record token usage for budget tracking on result and token_usage events
+    if ((event.type === 'result' || event.type === 'token_usage') && this.budget) {
       const { inputTokens, outputTokens } = event;
       if (inputTokens !== undefined || outputTokens !== undefined) {
         this.budget.recordUsage(
