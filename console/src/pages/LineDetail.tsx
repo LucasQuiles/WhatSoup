@@ -95,6 +95,8 @@ export default function LineDetail() {
   const [logFilter, setLogFilter] = useState<string>('all')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showRelink, setShowRelink] = useState(false)
+  const [showConfigEditor, setShowConfigEditor] = useState(false)
+  const [showModeSwitch, setShowModeSwitch] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
   const handleDelete = useCallback(async () => {
@@ -278,8 +280,21 @@ export default function LineDetail() {
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
             className="flex-1 min-h-0 flex flex-col overflow-hidden"
           >
-            {activeTab === 'summary' && <SummaryTab line={line} />}
-            {activeTab === 'mode' && <ModeTab mode={line.mode} line={line} />}
+            {activeTab === 'summary' && (
+              <SummaryTab
+                line={line}
+                onEditConfig={() => setShowConfigEditor(true)}
+                onChangeMode={() => setShowModeSwitch(true)}
+              />
+            )}
+            {activeTab === 'mode' && (
+              <ModeTab
+                mode={line.mode}
+                line={line}
+                onEditConfig={() => setShowConfigEditor(true)}
+                onChangeMode={() => setShowModeSwitch(true)}
+              />
+            )}
             {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
             {activeTab === 'access' && <AccessTab access={access || []} lineName={name || ''} />}
             {activeTab === 'history' && (
@@ -318,7 +333,22 @@ export default function LineDetail() {
         onClose={() => setShowRelink(false)}
         onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
       />
+      {showConfigEditor && line.config && (
+        <ConfigEditDialog
+          config={line.config}
+          lineName={line.name}
+          adminPhonesDisplay={(line as unknown as { adminPhonesDisplay?: Record<string, string> }).adminPhonesDisplay}
+          onClose={() => setShowConfigEditor(false)}
+        />
+      )}
 
+      {showModeSwitch && (
+        <ModeSwitchDialog
+          currentMode={line.mode}
+          lineName={line.name}
+          onClose={() => setShowModeSwitch(false)}
+        />
+      )}
     </motion.div>
   )
 }
@@ -1047,11 +1077,17 @@ function ModeSwitchDialog({
 }
 
 /* ═══ Summary Tab — KPI strip + pipeline strip + config/actions columns ═══ */
-function SummaryTab({ line }: { line: LineInstance }) {
+function SummaryTab({
+  line,
+  onEditConfig,
+  onChangeMode,
+}: {
+  line: LineInstance
+  onEditConfig: () => void
+  onChangeMode: () => void
+}) {
   const toast = useToast()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
-  const [showConfigEditor, setShowConfigEditor] = useState(false)
-  const [showModeSwitch, setShowModeSwitch] = useState(false)
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
   const provider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
   const providerDisplay = line.mode === 'agent' && provider
@@ -1177,7 +1213,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             <span className="c-col-header text-t4">{line.mode} Configuration</span>
             {config && (
               <button
-                onClick={() => setShowConfigEditor(true)}
+                onClick={onEditConfig}
                 className="c-btn c-btn-ghost"
                 style={{ padding: '3px var(--sp-2)', fontSize: 'var(--font-size-xs)' }}
               >
@@ -1238,7 +1274,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
             </button>
             {line.mode !== 'passive' && (
               <button
-                onClick={() => setShowConfigEditor(true)}
+                onClick={onEditConfig}
                 className="c-btn w-full justify-center"
                 style={{ fontSize: 'var(--font-size-label)' }}
               >
@@ -1246,7 +1282,7 @@ function SummaryTab({ line }: { line: LineInstance }) {
               </button>
             )}
             <button
-              onClick={() => setShowModeSwitch(true)}
+              onClick={onChangeMode}
               className="c-btn w-full justify-center"
               style={{ fontSize: 'var(--font-size-label)' }}
             >
@@ -1312,25 +1348,6 @@ function SummaryTab({ line }: { line: LineInstance }) {
           <li>Messages received while stopped will not be delivered</li>
         </ul>
       </ConfirmDialog>
-
-      {/* Config editor dialog */}
-      {showConfigEditor && rawConfig && (
-        <ConfigEditDialog
-          config={rawConfig}
-          lineName={line.name}
-          adminPhonesDisplay={(line as unknown as { adminPhonesDisplay?: Record<string, string> }).adminPhonesDisplay}
-          onClose={() => setShowConfigEditor(false)}
-        />
-      )}
-
-      {/* Mode switch dialog */}
-      {showModeSwitch && (
-        <ModeSwitchDialog
-          currentMode={line.mode}
-          lineName={line.name}
-          onClose={() => setShowModeSwitch(false)}
-        />
-      )}
     </div>
   )
 }
@@ -1341,7 +1358,17 @@ function ConfigValue({ value, type }: { value: string; type: 'string' | 'number'
 }
 
 /* ═══ Mode Tab ═══ */
-function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
+export function ModeTab({
+  mode,
+  line,
+  onEditConfig,
+  onChangeMode,
+}: {
+  mode: Mode
+  line: LineInstance
+  onEditConfig: () => void
+  onChangeMode: () => void
+}) {
   if (mode === 'passive') {
     return (
       <div
@@ -1352,6 +1379,15 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
           title="Read-only Mode"
           description="Passive instances listen and store — no configuration required."
         />
+        <div className="flex justify-center" style={{ marginTop: 'var(--sp-5)' }}>
+          <button
+            onClick={onChangeMode}
+            className="c-btn"
+            style={{ fontSize: 'var(--font-size-label)' }}
+          >
+            <GitBranch size={13} strokeWidth={1.75} /> Change Mode
+          </button>
+        </div>
       </div>
     )
   }
@@ -1363,8 +1399,29 @@ function ModeTab({ mode, line }: { mode: Mode; line: LineInstance }) {
     <div
       style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
     >
-      <div className="c-col-header mb-5">
-        {mode} Configuration
+      <div
+        className="flex items-center justify-between flex-wrap"
+        style={{ gap: 'var(--sp-2)', marginBottom: 'var(--sp-5)' }}
+      >
+        <div className="c-col-header">
+          {mode} Configuration
+        </div>
+        <div className="flex flex-wrap" style={{ gap: 'var(--sp-2)' }}>
+          <button
+            onClick={onEditConfig}
+            className="c-btn"
+            style={{ fontSize: 'var(--font-size-label)' }}
+          >
+            <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
+          </button>
+          <button
+            onClick={onChangeMode}
+            className="c-btn"
+            style={{ fontSize: 'var(--font-size-label)' }}
+          >
+            <GitBranch size={13} strokeWidth={1.75} /> Change Mode
+          </button>
+        </div>
       </div>
       {/* c-config block — syntax-highlighted JSON-like display */}
       <div
