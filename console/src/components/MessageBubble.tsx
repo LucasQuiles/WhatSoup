@@ -28,17 +28,11 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
 
   return (
     <div
-      className="absolute z-50 pointer-events-none"
+      className="absolute z-50 pointer-events-none c-card c-card--detail"
       style={{
         bottom: '100%',
         left: 0,
         marginBottom: 'var(--sp-2)',
-        padding: 'var(--sp-3) var(--sp-4)',
-        background: 'var(--color-d5)',
-        borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b3)',
-        borderRadius: 'var(--radius-lg)',
-        boxShadow: 'var(--shadow-lg)',
-        minWidth: 'var(--tooltip-min-w)',
       }}
     >
       <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
