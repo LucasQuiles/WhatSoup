@@ -223,7 +223,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           creds: state.creds,
           keys: makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
         },
-        generateHighQualityLinkPreview: false,
+        generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
       });
 
       this.sock = sock;

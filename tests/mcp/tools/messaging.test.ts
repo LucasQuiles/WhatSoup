@@ -172,6 +172,31 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.content).not.toHaveProperty('viewOnce');
     });
+
+    // SP6: link_preview opt-out
+    it('does not set linkPreview when link_preview is omitted (auto default)', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      await registry.call('send_message', { text: 'https://example.com' }, session);
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content).not.toHaveProperty('linkPreview');
+    });
+
+    it('does not set linkPreview when link_preview is "auto"', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      await registry.call('send_message', { text: 'https://example.com', link_preview: 'auto' }, session);
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content).not.toHaveProperty('linkPreview');
+    });
+
+    it('sets linkPreview to null when link_preview is "off"', async () => {
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      await registry.call('send_message', { text: 'https://example.com', link_preview: 'off' }, session);
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content).toHaveProperty('linkPreview', null);
+    });
   });
 
   // ── reply_message ─────────────────────────────────────────────────────────
@@ -212,6 +237,25 @@ describe('registerMessagingTools', () => {
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toMatch(/Access denied/);
+    });
+
+    // SP6: link_preview opt-out for reply_message
+    it('does not set linkPreview when link_preview is omitted (auto default)', async () => {
+      const messageId = seedMessage(db, { conversation_key: '1234567890' });
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      await registry.call('reply_message', { messageId, text: 'https://example.com' }, session);
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content).not.toHaveProperty('linkPreview');
+    });
+
+    it('sets linkPreview to null when link_preview is "off"', async () => {
+      const messageId = seedMessage(db, { conversation_key: '1234567890' });
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      await registry.call('reply_message', { messageId, text: 'https://example.com', link_preview: 'off' }, session);
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content).toHaveProperty('linkPreview', null);
     });
   });
 

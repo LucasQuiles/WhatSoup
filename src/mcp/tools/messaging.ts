@@ -99,11 +99,13 @@ export function registerMessagingTools(
       chatJid: z.string(),
       text: z.string(),
       viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
+      link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
       const text = params['text'] as string;
       const viewOnce = params['viewOnce'] as boolean | undefined;
+      const linkPreviewMode = (params['link_preview'] as string | undefined) ?? 'auto';
 
       const { text: formatted, jids: mentions, hasMentions } = formatMentions(
         text,
@@ -114,6 +116,7 @@ export function registerMessagingTools(
         const content: Record<string, unknown> = hasMentions
           ? { text: formatted, mentions }
           : { text: formatted };
+        if (linkPreviewMode === 'off') content['linkPreview'] = null;
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
@@ -136,24 +139,28 @@ export function registerMessagingTools(
       chatJid: z.string(),
       messageId: z.string(),
       text: z.string(),
+      link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
     }),
     handler: async (params, session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
       const messageId = params['messageId'] as string;
       const text = params['text'] as string;
+      const linkPreviewMode = (params['link_preview'] as string | undefined) ?? 'auto';
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return { error };
 
       try {
-        await connection.sendRaw(chatJid, {
+        const content: Record<string, unknown> = {
           text,
           contextInfo: {
             stanzaId: row!.message_id,
             participant: row!.sender_jid,
             quotedMessage: { conversation: row!.content ?? '' },
           },
-        });
+        };
+        if (linkPreviewMode === 'off') content['linkPreview'] = null;
+        await connection.sendRaw(chatJid, content);
       } catch (err) {
         return { error: sanitizeError(err) };
       }

@@ -224,6 +224,9 @@ export const config = {
   // System prompt
   systemPrompt: (instance?.systemPrompt as string | undefined) ?? DEFAULT_SYSTEM_PROMPT,
 
+  // Link preview quality — when true, Baileys generates high-quality thumbnails
+  generateHighQualityLinkPreview: (instance?.generateHighQualityLinkPreview as boolean | undefined) ?? false,
+
 
   // Agent provider selection — read from agentOptions.provider / agentOptions.providerConfig
   // Defaults to 'claude-cli' for backward compatibility when not specified.
