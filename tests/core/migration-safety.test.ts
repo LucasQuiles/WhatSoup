@@ -148,25 +148,49 @@ CREATE TABLE IF NOT EXISTS enrichment_runs (
 /** Insert a test message directly via raw SQL. Returns the pk. */
 function insertTestMessage(
   raw: DatabaseSync,
-  overrides: { content?: string; messageId?: string; idx?: number } = {},
+  overrides: { content?: string; messageId?: string; idx?: number; contentText?: string | null } = {},
 ): number {
   const idx = overrides.idx ?? 1;
   const content = overrides.content ?? `test message ${idx}`;
   const messageId = overrides.messageId ?? `msg-test-${idx}-${randomBytes(4).toString('hex')}`;
-  raw
-    .prepare(
-      `INSERT INTO messages
-         (chat_jid, conversation_key, sender_jid, content, message_id, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      '15550100001@s.whatsapp.net',
-      '15550100001',
-      '15550100001@s.whatsapp.net',
-      content,
-      messageId,
-      Date.now() + idx,
-    );
+  // After MIGRATION_13, FTS triggers index content_text instead of content.
+  // Default content_text to content so FTS indexing works for text messages.
+  const contentText = overrides.contentText !== undefined ? overrides.contentText : content;
+  // Use content_text column if it exists (post MIGRATION_13), otherwise fall back to content-only insert
+  const cols = raw.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+  const hasContentText = cols.some((c) => c.name === 'content_text');
+  if (hasContentText) {
+    raw
+      .prepare(
+        `INSERT INTO messages
+           (chat_jid, conversation_key, sender_jid, content, content_text, message_id, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550100001@s.whatsapp.net',
+        '15550100001',
+        '15550100001@s.whatsapp.net',
+        content,
+        contentText,
+        messageId,
+        Date.now() + idx,
+      );
+  } else {
+    raw
+      .prepare(
+        `INSERT INTO messages
+           (chat_jid, conversation_key, sender_jid, content, message_id, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        '15550100001@s.whatsapp.net',
+        '15550100001',
+        '15550100001@s.whatsapp.net',
+        content,
+        messageId,
+        Date.now() + idx,
+      );
+  }
   const row = raw.prepare('SELECT pk FROM messages ORDER BY pk DESC LIMIT 1').get() as {
     pk: number;
   };
@@ -372,7 +396,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
     db2.close();
   });
@@ -475,7 +499,7 @@ describe('Test 5 — schema_migrations version tracking', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
     db.close();
   });
@@ -675,7 +699,7 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
     const tables = (
       db.raw
@@ -754,7 +778,7 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
 
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
     // raw_message column from migration 5
     const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;

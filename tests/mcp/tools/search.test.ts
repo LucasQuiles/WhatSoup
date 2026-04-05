@@ -31,12 +31,12 @@ function seedMessages(db: Database) {
     VALUES ('222@s.whatsapp.net', '222', 'Bob Jones', 'Bob');
 
     INSERT INTO messages
-      (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+      (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_text, content_type, is_from_me, timestamp)
     VALUES
-      ('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'msg1', 'Hello world', 'text', 0, 1000),
-      ('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'msg2', 'FTS search test', 'text', 0, 2000),
-      ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob',   'msg3', 'Another world message', 'text', 0, 3000),
-      ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob',   'msg4', 'Secret content', 'text', 0, 4000);
+      ('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'msg1', 'Hello world', 'Hello world', 'text', 0, 1000),
+      ('111@s.whatsapp.net', '111', '111@s.whatsapp.net', 'Alice', 'msg2', 'FTS search test', 'FTS search test', 'text', 0, 2000),
+      ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob',   'msg3', 'Another world message', 'Another world message', 'text', 0, 3000),
+      ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob',   'msg4', 'Secret content', 'Secret content', 'text', 0, 4000);
   `);
 }
 

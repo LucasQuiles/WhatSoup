@@ -43,12 +43,12 @@ function makeDb(): Database {
 function seedMessages(db: Database): void {
   db.raw.exec(`
     INSERT INTO messages
-      (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+      (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_text, content_type, is_from_me, timestamp)
     VALUES
-      ('${ALICE_JID}', '${ALICE_KEY}', '${ALICE_JID}', 'Alice', 'alice-msg-1', 'Hello from Alice', 'text', 0, 1000),
-      ('${ALICE_JID}', '${ALICE_KEY}', '${ALICE_JID}', 'Alice', 'alice-msg-2', 'Another Alice message', 'text', 0, 2000),
-      ('${BOB_JID}', '${BOB_KEY}', '${BOB_JID}', 'Bob',   'bob-msg-1',   'Hello from Bob', 'text', 0, 3000),
-      ('${BOB_JID}', '${BOB_KEY}', '${BOB_JID}', 'Bob',   'bob-msg-2',   'Bob second message', 'text', 0, 4000)
+      ('${ALICE_JID}', '${ALICE_KEY}', '${ALICE_JID}', 'Alice', 'alice-msg-1', 'Hello from Alice', 'Hello from Alice', 'text', 0, 1000),
+      ('${ALICE_JID}', '${ALICE_KEY}', '${ALICE_JID}', 'Alice', 'alice-msg-2', 'Another Alice message', 'Another Alice message', 'text', 0, 2000),
+      ('${BOB_JID}', '${BOB_KEY}', '${BOB_JID}', 'Bob',   'bob-msg-1',   'Hello from Bob', 'Hello from Bob', 'text', 0, 3000),
+      ('${BOB_JID}', '${BOB_KEY}', '${BOB_JID}', 'Bob',   'bob-msg-2',   'Bob second message', 'Bob second message', 'text', 0, 4000)
   `);
 }
 
