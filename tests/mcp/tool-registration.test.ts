@@ -19,6 +19,7 @@ import { registerCallTools } from '../../src/mcp/tools/calls.ts';
 import { registerPresenceTools } from '../../src/mcp/tools/presence.ts';
 import { registerProfileTools } from '../../src/mcp/tools/profile.ts';
 import { registerRetentionTools } from '../../src/mcp/tools/retention.ts';
+import { registerStatusTools } from '../../src/mcp/tools/status.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 
@@ -64,6 +65,7 @@ describe('tool registration', () => {
     registerCallTools(getSock, register);
     registerProfileTools(getSock, db, register);
     registerRetentionTools(registry, { db });
+    registerStatusTools(registry, { db, getSock });
 
     // Presence
     registerPresenceTools(getSock, connection.presenceCache, register);
@@ -78,6 +80,8 @@ describe('tool registration', () => {
     const uniqueNames = new Set(names);
     expect(uniqueNames.size).toBe(names.length);
     expect(names).toContain('cleanup_media');
+    expect(names).toContain('post_status');
+    expect(names).toContain('list_statuses');
 
     db.raw.close();
   });

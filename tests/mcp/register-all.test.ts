@@ -35,6 +35,8 @@ describe('registerAllTools', () => {
     const tools = registry.listTools({ tier: 'global' });
     expect(tools.length).toBeGreaterThanOrEqual(100);
     expect(tools.some((tool) => tool.name === 'cleanup_media')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'post_status')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'list_statuses')).toBe(true);
 
     db.raw.close();
   });
