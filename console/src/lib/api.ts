@@ -20,7 +20,7 @@ import type {
 const API_BASE = '';
 
 /** Read the fleet token from the meta tag injected by the production server. */
-function getFleetToken(): string | null {
+export function getFleetToken(): string | null {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]');
   return meta?.content || null;
 }
