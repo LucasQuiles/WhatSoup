@@ -125,6 +125,52 @@ export async function handleAccessUpdate(
   res.end(result.body);
 }
 
+/** POST /api/lines/:name/contacts — save a contact via MCP add_or_edit_contact tool. */
+export async function handleSaveContact(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+
+  const body = await readBody(req);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    jsonResponse(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+
+  const { jid, firstName, lastName, company, phone } = parsed;
+  if (typeof jid !== 'string' || !jid) {
+    jsonResponse(res, 400, { error: 'jid is required' });
+    return;
+  }
+
+  const contactParams: Record<string, string> = { jid };
+  if (typeof firstName === 'string') contactParams.firstName = firstName;
+  if (typeof lastName === 'string') contactParams.lastName = lastName;
+  if (typeof company === 'string') contactParams.company = company;
+  if (typeof phone === 'string') contactParams.phone = phone;
+
+  // Try MCP socket first (passive instances with verified socket)
+  if (instance.socketPath && fs.existsSync(instance.socketPath)) {
+    try {
+      const result = await mcpCall(instance.socketPath, 'add_or_edit_contact', contactParams);
+      jsonResponse(res, result.success ? 200 : 502, result);
+      return;
+    } catch { /* fall through to HTTP proxy */ }
+  }
+
+  // Fallback: proxy to instance health port /send endpoint isn't right for contacts.
+  // Contact management requires MCP — if socket unavailable, report error.
+  jsonResponse(res, 503, { error: 'MCP socket not available — contact management requires a running instance with MCP' });
+}
+
 /** Shared systemctl action handler for restart/stop. */
 async function handleSystemctlAction(
   verb: 'restart' | 'stop',

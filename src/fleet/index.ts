@@ -11,7 +11,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
-import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
+import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
 import { UpdateChecker } from './update-checker.ts';
@@ -57,6 +57,7 @@ const handlers: Record<string, HandlerFn> = {
   getAccess:    (req, res, deps, params) => handleGetAccess(req, res, deps, params as any),
   getLogs:      (req, res, deps, params) => handleGetLogs(req, res, deps, params as any),
   send:         (req, res, deps, params) => handleSend(req, res, deps, params as any),
+  saveContact:  (req, res, deps, params) => handleSaveContact(req, res, deps, params as any),
   accessUpdate: (req, res, deps, params) => handleAccessUpdate(req, res, deps, params as any),
   restart:      (req, res, deps, params) => handleRestart(req, res, deps, params as any),
   stop:         (req, res, deps, params) => handleStop(req, res, deps, params as any),
@@ -118,6 +119,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/access$/, handler: 'getAccess' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/logs$/, handler: 'getLogs' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/send$/, handler: 'send' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/contacts$/, handler: 'saveContact' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/access$/, handler: 'accessUpdate' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/restart$/, handler: 'restart' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },

@@ -103,6 +103,12 @@ export const api = {
     apiFetch<{ results: mock.Message[]; total: number; query: string }>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
     ),
+  saveContact: (name: string, contact: { jid: string; firstName?: string; lastName?: string }) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(contact),
+    }),
   getAccess: (name: string) => withFallback(
     () => apiFetch<mock.AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
     () => mock.getAccess(name),
