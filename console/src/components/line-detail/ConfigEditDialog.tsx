@@ -1,0 +1,441 @@
+import React, { useState, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { X, AlertTriangle, Save } from 'lucide-react'
+import TagInput from '../TagInput'
+import { normalizePhoneInput, validatePhone } from '../../lib/validation'
+import { useToast } from '../../hooks/toast-context'
+import { api } from '../../lib/api'
+import {
+  CONFIG_EXCLUDE_KEYS,
+  AGENT_OPTION_FIELDS,
+  ENUM_OPTIONS,
+  CUSTOM_ENUM_OPTION,
+  CUSTOMIZABLE_ENUM_KEYS,
+  FIELD_VALIDATORS,
+  isRecord,
+  getValueAtPath,
+  setValueAtPath,
+  deleteValueAtPath,
+  cloneRecord,
+  isEqualValue,
+} from './config-helpers'
+
+export function ConfigEditDialog({
+  config,
+  lineName,
+  adminPhonesDisplay,
+  onClose,
+}: {
+  config: Record<string, unknown>
+  lineName: string
+  adminPhonesDisplay?: Record<string, string>
+  onClose: () => void
+}) {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [patch, setPatch] = useState<Record<string, unknown>>({})
+  const [saving, setSaving] = useState(false)
+  const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
+
+  const editableEntries: [string, unknown][] = React.useMemo(() => {
+    const entries: [string, unknown][] = []
+    for (const [k, v] of Object.entries(config)) {
+      if (CONFIG_EXCLUDE_KEYS.has(k)) continue
+      if (k === 'agentOptions' && isRecord(v)) {
+        const remaining = cloneRecord(v)
+        for (const fieldKey of Object.keys(AGENT_OPTION_FIELDS)) {
+          const nestedPath = fieldKey.replace(/^agentOptions\./, '')
+          const fieldValue = getValueAtPath(v, nestedPath)
+          if (fieldValue === undefined) continue
+          deleteValueAtPath(remaining, nestedPath)
+          entries.push([fieldKey, fieldValue])
+        }
+        if (Object.keys(remaining).length > 0) {
+          entries.push(['agentOptions (other)', remaining])
+        }
+      } else {
+        entries.push([k, v])
+      }
+    }
+    return entries
+  }, [config])
+
+  const editableEntryValues = React.useMemo(
+    () => Object.fromEntries(editableEntries) as Record<string, unknown>,
+    [editableEntries],
+  )
+
+  const configValue = useCallback((key: string): unknown => {
+    return getValueAtPath(config, key)
+  }, [config])
+
+  const currentValue = useCallback((key: string): unknown => (
+    key in patch ? patch[key] : key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+  ), [patch, editableEntryValues, configValue])
+
+  const setField = useCallback((key: string, value: unknown) => {
+    setPatch(prev => {
+      const originalValue = key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+      if (isEqualValue(value, originalValue)) {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      }
+      return { ...prev, [key]: value }
+    })
+  }, [editableEntryValues, configValue])
+
+  const getFieldError = useCallback((key: string): string | null => {
+    const value = currentValue(key)
+    const enumOptions = ENUM_OPTIONS[key]
+    const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
+      && (key in customEnumFields || (typeof value === 'string' && !!enumOptions && !enumOptions.includes(value)))
+    if (customEnumActive && typeof value === 'string' && value.trim() === '') {
+      return 'Enter a custom model ID or choose a preset'
+    }
+    return FIELD_VALIDATORS[key]?.(value) ?? null
+  }, [currentValue, customEnumFields])
+
+  const handleSave = async () => {
+    if (Object.keys(patch).length === 0) {
+      onClose()
+      return
+    }
+    setSaving(true)
+    try {
+      const apiPatch: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(patch)) {
+        setValueAtPath(apiPatch, key, value)
+      }
+      await api.updateConfig(lineName, apiPatch)
+      toast.success('Configuration updated')
+      await queryClient.invalidateQueries({ queryKey: ['lines', lineName] })
+      onClose()
+    } catch (e) {
+      toast.error(`Update failed: ${(e as Error).message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const renderField = (key: string, originalValue: unknown) => {
+    const val = currentValue(key)
+
+    // Boolean -> checkbox
+    if (typeof originalValue === 'boolean') {
+      return (
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={val as boolean}
+            onChange={e => setField(key, e.target.checked)}
+            className="accent-current"
+            style={{ width: 16, height: 16 }}
+          />
+          <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
+            {String(val)}
+          </span>
+        </label>
+      )
+    }
+
+    // Number -> number input
+    if (typeof originalValue === 'number') {
+      return (
+        <input
+          type="number"
+          value={val as number}
+          onChange={e => setField(key, Number(e.target.value))}
+          className="font-mono"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-s-warn)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            outline: 'none',
+          }}
+        />
+      )
+    }
+
+    // Array of strings -> TagInput
+    if (Array.isArray(originalValue) && originalValue.every(v => typeof v === 'string')) {
+      const values = (val as string[]) ?? []
+      return (
+        <TagInput
+          values={values}
+          onChange={(newValues) => setField(key, newValues)}
+          placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
+          validate={key === 'adminPhones' ? validatePhone : undefined}
+          normalizeValue={key === 'adminPhones' ? normalizePhoneInput : undefined}
+          accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
+          displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
+        />
+      )
+    }
+
+    // Object -> read-only JSON textarea
+    if (typeof originalValue === 'object' && originalValue !== null) {
+      return (
+        <textarea
+          readOnly
+          value={JSON.stringify(val, null, 2)}
+          className="font-mono"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-t3)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            resize: 'vertical',
+            minHeight: 60,
+            filter: 'brightness(0.7)',
+          }}
+        />
+      )
+    }
+
+    // String with known enum -> select
+    const enumOpts = key in ENUM_OPTIONS ? ENUM_OPTIONS[key]
+      : key in AGENT_OPTION_FIELDS && AGENT_OPTION_FIELDS[key].type === 'enum' ? AGENT_OPTION_FIELDS[key].enum
+      : null
+    if (typeof originalValue === 'string' && enumOpts) {
+      const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
+        && (key in customEnumFields || !enumOpts.includes(val as string))
+      const clearCustomEnum = () => {
+        setCustomEnumFields(prev => {
+          if (!(key in prev)) return prev
+          const next = { ...prev }
+          delete next[key]
+          return next
+        })
+      }
+
+      return (
+        <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+          <select
+            value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
+            onChange={e => {
+              const nextValue = e.target.value
+              if (nextValue === CUSTOM_ENUM_OPTION) {
+                setCustomEnumFields(prev => ({ ...prev, [key]: true }))
+                setField(key, typeof val === 'string' && !enumOpts.includes(val) ? val : '')
+                return
+              }
+              clearCustomEnum()
+              setField(key, nextValue)
+            }}
+            className="font-mono cursor-pointer"
+            style={{
+              width: '100%',
+              padding: '6px var(--sp-3)',
+              fontSize: 'var(--font-size-data)',
+              background: 'var(--color-d1)',
+              color: 'var(--color-m-pas)',
+              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+              borderRadius: 'var(--radius-sm)',
+              outline: 'none',
+            }}
+          >
+            {enumOpts.map(opt => (
+              <option key={opt} value={opt}>{opt || '(default)'}</option>
+            ))}
+            {CUSTOMIZABLE_ENUM_KEYS.has(key) && (
+              <option value={CUSTOM_ENUM_OPTION}>Custom…</option>
+            )}
+          </select>
+          {customEnumActive && (
+            <input
+              type="text"
+              value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
+              onChange={e => setField(key, e.target.value)}
+              placeholder="Enter custom model ID"
+              className="font-mono"
+              style={{
+                width: '100%',
+                padding: '6px var(--sp-3)',
+                fontSize: 'var(--font-size-data)',
+                background: 'var(--color-d1)',
+                color: 'var(--color-m-pas)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+                borderRadius: 'var(--radius-sm)',
+                outline: 'none',
+              }}
+            />
+          )}
+        </div>
+      )
+    }
+
+    // String (long) -> textarea
+    if (typeof originalValue === 'string' && (originalValue as string).length > 80) {
+      return (
+        <textarea
+          value={val as string}
+          onChange={e => setField(key, e.target.value)}
+          className="font-mono"
+          style={{
+            width: '100%',
+            padding: '6px var(--sp-3)',
+            fontSize: 'var(--font-size-data)',
+            background: 'var(--color-d1)',
+            color: 'var(--color-m-pas)',
+            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+            borderRadius: 'var(--radius-sm)',
+            resize: 'vertical',
+            minHeight: 80,
+            outline: 'none',
+          }}
+        />
+      )
+    }
+
+    // String (short) -> text input
+    return (
+      <input
+        type="text"
+        value={val as string}
+        onChange={e => setField(key, e.target.value)}
+        className="font-mono"
+        style={{
+          width: '100%',
+          padding: '6px var(--sp-3)',
+          fontSize: 'var(--font-size-data)',
+          background: 'var(--color-d1)',
+          color: 'var(--color-m-pas)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+          borderRadius: 'var(--radius-sm)',
+          outline: 'none',
+        }}
+      />
+    )
+  }
+
+  const hasChanges = Object.keys(patch).length > 0
+  const hasErrors = editableEntries.some(([key]) => {
+    const isActive = key in patch || key in customEnumFields
+    return isActive && getFieldError(key) !== null
+  })
+
+  return (
+    <div
+      className="fixed inset-0 flex items-center justify-center z-50"
+      style={{ background: 'var(--overlay)' }}
+      onClick={onClose}
+    >
+      <div
+        className="flex flex-col overflow-hidden"
+        style={{
+          background: 'var(--color-d2)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+          borderRadius: 'var(--radius-lg)',
+          width: 560,
+          maxWidth: '90%',
+          maxHeight: '80vh',
+          boxShadow: 'var(--shadow-lg)',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between flex-shrink-0"
+          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
+        >
+          <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            Edit Configuration
+          </span>
+          <button
+            onClick={onClose}
+            className="text-t4 hover:text-t2 cursor-pointer c-hover"
+          >
+            <X size={18} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        {/* Restart warning */}
+        <div
+          className="flex items-center gap-2 flex-shrink-0"
+          style={{
+            padding: 'var(--sp-3) var(--sp-5)',
+            background: 'var(--s-warn-wash)',
+            borderBottom: 'var(--bw) solid var(--b1)',
+            fontSize: 'var(--font-size-sm)',
+            color: 'var(--color-s-warn)',
+          }}
+        >
+          <AlertTriangle size={14} strokeWidth={1.75} />
+          <span>Some changes may require a restart to take effect.</span>
+        </div>
+
+        {/* Body — scrollable */}
+        <div className="flex-1 overflow-y-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
+          <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+            {editableEntries.map(([key, originalValue]) => (
+              <div key={key}>
+                <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+                  {key}
+                  {(key in patch || key in customEnumFields) && (
+                    <span
+                      className="font-mono"
+                      style={{
+                        marginLeft: 'var(--sp-2)',
+                        fontSize: 'var(--font-size-xs)',
+                        color: 'var(--color-s-warn)',
+                      }}
+                    >
+                      modified
+                    </span>
+                  )}
+                </label>
+                {renderField(key, originalValue)}
+                {(key in patch || key in customEnumFields) && getFieldError(key) && (
+                  <span className="font-mono" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)', display: 'block' }}>
+                    {getFieldError(key)}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div
+          className="flex justify-end gap-2 flex-shrink-0"
+          style={{
+            padding: 'var(--sp-3) var(--sp-5)',
+            borderTop: 'var(--bw) solid var(--b1)',
+            background: 'var(--color-d1)',
+          }}
+        >
+          <button
+            onClick={onClose}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans text-t3 hover:text-t2 hover:bg-d4 cursor-pointer c-hover"
+            style={{ fontSize: 'var(--font-size-heading)', border: 'none', background: 'transparent' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !hasChanges || hasErrors}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
+            style={{
+              fontSize: 'var(--font-size-heading)',
+              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--color-m-cht)',
+              background: hasChanges ? 'var(--color-m-cht)' : 'transparent',
+              color: hasChanges ? 'var(--color-d0)' : 'var(--color-t5)',
+              opacity: saving ? 0.6 : 1,
+            }}
+          >
+            <Save size={14} strokeWidth={1.75} />
+            {saving ? 'Saving...' : `Save${hasChanges ? ` (${Object.keys(patch).length})` : ''}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
