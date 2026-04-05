@@ -406,6 +406,29 @@ function humanizeError(_toolName: string, text: string): string | null {
 }
 
 /**
+ * Detect provider usage-limit / quota-exceeded messages that should NOT be
+ * forwarded to WhatsApp.  When a Claude Code session hits its usage cap it
+ * emits a human-readable message like "You're out of extra usage · resets …".
+ * Forwarding this to a group chat can trigger other agents to respond, which
+ * spawns new sessions that also hit the cap → infinite flood.
+ *
+ * Returns `true` when the text looks like a provider usage-limit notice.
+ */
+export function isUsageLimitMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('out of extra usage') ||
+    lower.includes('usage limit') ||
+    lower.includes('usage cap') ||
+    lower.includes('exceeded your') && lower.includes('usage') ||
+    lower.includes('plan limit') ||
+    lower.includes('quota exceeded') ||
+    // Claude-specific patterns
+    /resets?\s+\d{1,2}\s*(am|pm)/i.test(text) && lower.includes('usage')
+  );
+}
+
+/**
  * Classify a tool_result error as either a blocked tool (permission/hook denial),
  * cancelled, or a genuine execution error. Returns an appropriate ToolUpdate with
  * user-friendly messaging.
@@ -1365,6 +1388,11 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
+          // Suppress usage-limit messages — don't flood WhatsApp with them
+          if (isUsageLimitMessage(normalizedText)) {
+            log.warn({ chatJid: queue.targetChatJid }, 'suppressed usage-limit message from assistant_text');
+            break;
+          }
           queue.enqueueStreamingText(normalizedText);
           // Accumulate assistant text for voice reply (SP4)
           if (mapKey !== undefined) {
@@ -1404,6 +1432,12 @@ export class AgentRuntime implements Runtime {
         session?.clearTurnWatchdog();
         this.activeToolNames.clear();
         if (event.text) {
+          // Suppress usage-limit messages — log and skip instead of forwarding
+          if (isUsageLimitMessage(event.text)) {
+            log.warn({ chatJid: queue.targetChatJid }, 'suppressed usage-limit message from result — session will be killed');
+            session?.shutdown();
+            break;
+          }
           queue.enqueueResultText(event.text);
           // Accumulate result text for voice reply (SP4)
           if (mapKey !== undefined) {
@@ -2258,6 +2292,11 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
           if (!normalizedText) break;
+          // Suppress usage-limit messages — don't flood WhatsApp with them
+          if (isUsageLimitMessage(normalizedText)) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'suppressed usage-limit message from assistant_text');
+            break;
+          }
           queue.enqueueStreamingText(normalizedText);
           this.turnHadVisibleOutput = true;
           // Accumulate text for voice reply (SP4)
@@ -2308,6 +2347,12 @@ export class AgentRuntime implements Runtime {
         this.activeToolNames.clear();
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
+          // Suppress usage-limit messages — log and kill session instead of forwarding
+          if (isUsageLimitMessage(event.text)) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'suppressed usage-limit message from result — session will be killed');
+            this.session?.shutdown();
+            break;
+          }
           queue.enqueueResultText(event.text);
           this.turnHadVisibleOutput = true;
           // Accumulate result text for voice reply (SP4)
