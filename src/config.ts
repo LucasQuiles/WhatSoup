@@ -230,6 +230,15 @@ export const config = {
   agentProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['provider'] as string | undefined) ?? 'claude-cli',
   agentProviderConfig: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
 
+  // Voice (ElevenLabs TTS)
+  elevenlabs: {
+    defaultVoiceId: (instance?.elevenlabs?.defaultVoiceId as string | undefined) ?? 'pNInz6obpgDQGcFmaJgB',
+    defaultModel: (instance?.elevenlabs?.defaultModel as string | undefined) ?? 'eleven_multilingual_v2',
+    stability: (instance?.elevenlabs?.stability as number | undefined) ?? 0.5,
+    similarityBoost: (instance?.elevenlabs?.similarityBoost as number | undefined) ?? 0.75,
+  },
+  voiceReply: ((instance?.voiceReply as string | undefined) ?? 'never') as 'always' | 'when_received' | 'never',
+
   // Access mode (from instance config, defaults to allowlist for backward compat)
   accessMode: (() => {
     const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;
