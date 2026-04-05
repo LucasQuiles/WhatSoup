@@ -1286,12 +1286,12 @@ Each level sheds the least-authoritative layer first. Work can continue at every
 
 ## 21. Open Questions
 
-1. **Local model triage:** What model is appropriate for the daemon triage layer? What's the decision boundary between "triage can handle this" and "spawn Opus"?
+1. **Local model triage:** *Deferred to post-proving-slice.* Start with direct Conductor spawning (no triage layer). The Deacon spawns Opus for every actionable event. Once cost data from real workstreams is available, evaluate whether a triage layer (e.g., a small local model or rules-based filter) reduces Opus invocations without missing critical evaluations. Decision criterion: if >50% of Conductor sessions take no action (false wakes), a triage layer is justified.
 
-2. **Merge coordination timing:** When does the Refinery pattern become necessary? How many concurrent workers before merge conflicts become the bottleneck?
+2. **Merge coordination timing:** *Deferred.* Phase 1-3 use scope-isolated workers — each bead touches non-overlapping files, so merge conflicts should be rare. Monitor conflict rate during real workstreams. If >10% of SYNTHESIZE sessions encounter merge conflicts, implement the Refinery pattern (sequential merge queue with dedicated resolver). Until then, the Conductor handles conflicts ad hoc during SYNTHESIZE.
 
-3. **Discovery budget calibration:** 20% cap is a starting point. How do we measure whether discovery is producing value vs noise?
+3. **Discovery budget calibration:** 20% cap is the starting point. Measure: (a) ratio of promoted findings from discovery beads vs execution beads, (b) false positive rate of discovery findings (suppressed/archived within 7 days), (c) human-agreement rate on promoted discovery items. If discovery findings have >40% false positive rate, reduce budget. If <20%, consider increasing. Track via the backpressure controller's signal quality metrics.
 
-4. **Cross-workstream learning:** When should operational memory from one workstream inform another? What's the contamination risk?
+4. **Cross-workstream learning:** *Deferred to post-single-workstream validation.* Risk: patterns learned from one codebase may not apply to another (different conventions, different domains). Start with per-workstream operational memory only. Once 5+ workstreams complete, evaluate whether shared remediation patterns improve or contaminate promotion quality. The `remediation_patterns` table can be scoped by repo if needed.
 
-5. **Brick cold start:** How does the system bootstrap when there's no prior operational memory? What's the minimum viable state packet for the first workstream?
+5. **Brick cold start:** *Resolved.* Phase 1 bootstrap creates a minimal state packet (workstream ID, repo, branch, mission, empty active_beads). The Conductor reads this on first DISPATCH — sufficient to dispatch beads without Brick enrichment. Brick is on-demand in Phase 1, not required for cold start. First EVALUATE session runs with reduced context quality (no Brick preprocessing, no vector recall) but works against authoritative state (beads + SQLite). Enrichment quality improves automatically as events accumulate through the feedback loop.
