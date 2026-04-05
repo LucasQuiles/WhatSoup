@@ -5,11 +5,17 @@ import { z } from 'zod';
 import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
+import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
+import { extractRawMime } from '../../core/media-mime.ts';
+import { updateMediaPath } from '../../core/messages.ts';
+import { createChildLogger } from '../../logger.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import type { OutboundMedia } from '../../core/types.ts';
+
+const log = createChildLogger('mcp:media');
 
 // ---------------------------------------------------------------------------
 // Deps interface
@@ -239,8 +245,82 @@ export function registerMediaTools(
         return { error: 'no_raw_message', message: 'Message has no raw data for media download. Media may not have been stored.' };
       }
 
-      // On-demand download will be implemented in Task 6
-      return { error: 'not_implemented', message: 'On-demand download not yet available.' };
+      // Parse raw_message and attempt download
+      let rawMsg: unknown;
+      try {
+        rawMsg = JSON.parse(row.raw_message);
+      } catch {
+        return { error: 'no_raw_message', message: 'Cannot parse raw message data.' };
+      }
+
+      // Determine MIME type and file extension
+      const mimeMap: Record<string, { defaultMime: string; ext: string }> = {
+        image:    { defaultMime: 'image/jpeg', ext: 'jpg' },
+        sticker:  { defaultMime: 'image/webp', ext: 'webp' },
+        audio:    { defaultMime: 'audio/ogg',  ext: 'ogg' },
+        video:    { defaultMime: 'video/mp4',  ext: 'mp4' },
+        document: { defaultMime: 'application/octet-stream', ext: 'bin' },
+      };
+
+      const typeInfo = mimeMap[row.content_type];
+      if (!typeInfo) {
+        return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
+      }
+
+      const mime = extractRawMime(rawMsg, row.content_type) ?? typeInfo.defaultMime;
+
+      // Build download function using Baileys
+      const downloadFn = async (): Promise<Buffer> => {
+        const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+        return downloadMediaMessage(rawMsg as any, 'buffer', {}) as Promise<Buffer>;
+      };
+
+      // Attempt download with timeout and size checks
+      let result: Awaited<ReturnType<typeof coreDownloadMedia>>;
+      try {
+        result = await coreDownloadMedia(downloadFn, mime);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/timed? ?out/i.test(msg)) {
+          return { error: 'download_timeout', message: 'Media download timed out after 30s.' };
+        }
+        if (/404|410|gone|expired/i.test(msg)) {
+          return { error: 'media_expired', message: 'WhatsApp media URL has expired. Media is only available for download within hours of receipt.' };
+        }
+        log.error({ err, messageId }, 'download_media failed');
+        return { error: 'download_failed', message: 'Media download failed.' };
+      }
+
+      if (!result) {
+        return { error: 'download_failed', message: 'Media download failed. The URL may have expired or the file exceeds the 25MB limit.' };
+      }
+
+      // Determine file extension — for documents, try original filename
+      let ext = typeInfo.ext;
+      if (row.content_type === 'document') {
+        const docMsg = (rawMsg as any)?.message?.documentMessage
+          ?? (rawMsg as any)?.message?.documentWithCaptionMessage?.message?.documentMessage;
+        const fileName = docMsg?.fileName as string | undefined;
+        if (fileName) {
+          const dotIdx = fileName.lastIndexOf('.');
+          if (dotIdx > 0) ext = fileName.substring(dotIdx + 1).toLowerCase();
+        }
+      }
+
+      // Save to disk
+      const filePath = writeTempFile(result.buffer, ext);
+
+      // Persist path to database
+      const dbWrapper = { raw: db } as import('../../core/database.ts').Database;
+      updateMediaPath(dbWrapper, messageId, filePath);
+
+      return {
+        file_path: filePath,
+        mime_type: result.mimeType,
+        file_size: result.buffer.length,
+        content_type: row.content_type,
+        cached: false,
+      };
     },
   });
 }
