@@ -41,7 +41,6 @@ export function registerVoiceTools(
     schema: z.object({
       text: z.string().describe('Text to synthesize and send as a voice note'),
       voice_id: z.string().optional().describe('ElevenLabs voice ID (defaults to instance config)'),
-      reply_to: z.string().optional().describe('Message ID to reply to'),
     }),
     handler: async (params, session: SessionContext) => {
       const text = (params['text'] as string).trim();

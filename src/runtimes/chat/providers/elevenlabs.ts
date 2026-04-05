@@ -141,6 +141,7 @@ export const _testing = {
     (breaker as any).failures = 0;
     (breaker as any).state = 'closed';
     (breaker as any).probing = false;
+    (breaker as any).lastFailureAt = 0;
     apiKey = null;
   },
 };
