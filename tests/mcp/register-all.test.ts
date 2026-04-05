@@ -37,6 +37,9 @@ describe('registerAllTools', () => {
     expect(tools.some((tool) => tool.name === 'cleanup_media')).toBe(true);
     expect(tools.some((tool) => tool.name === 'post_status')).toBe(true);
     expect(tools.some((tool) => tool.name === 'list_statuses')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'schedule_message')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'list_scheduled')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'cancel_scheduled')).toBe(true);
 
     db.raw.close();
   });
