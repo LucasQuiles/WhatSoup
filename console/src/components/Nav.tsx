@@ -7,7 +7,10 @@ import {
   CheckCircle2,
   AlertTriangle,
   Download,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
+import { useRealtime } from "../hooks/use-websocket";
 
 interface NavProps {
   alertCount?: number;
@@ -19,6 +22,7 @@ interface NavProps {
 }
 
 const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick }) => {
+  const { connected } = useRealtime();
   return (
     <nav
       className="bg-d1 flex items-center justify-between flex-shrink-0"
@@ -156,6 +160,18 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
 
       {/* Right cluster: system status */}
       <div className="flex items-center gap-2 font-mono" style={{ fontSize: "var(--font-size-xs)" }}>
+        {connected ? (
+          <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
+            <Wifi size={12} strokeWidth={1.75} />
+            <span>Live</span>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1 text-t5" title="Polling (WebSocket disconnected)">
+            <WifiOff size={12} strokeWidth={1.75} />
+            <span>Polling</span>
+          </span>
+        )}
+        <span className="text-t5">|</span>
         {alertCount === 0 ? (
           <>
             <CheckCircle2 size={14} strokeWidth={1.75} className="text-s-ok" />
