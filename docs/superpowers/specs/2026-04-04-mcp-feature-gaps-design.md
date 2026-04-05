@@ -73,7 +73,11 @@ Returns:
 4. Call Baileys `downloadMediaMessage()` to decrypt and download
 5. Save to `{save_dir}/{random_hex}.{ext}` (matches existing `writeTempFile` pattern — NOT `{message_id}.{ext}` to avoid predictable filenames and directory traversal risk)
 6. Persist the file path to `media_path` column
-7. If download fails (URL expired): return error with `{ error: "media_expired", message: "WhatsApp media URL has expired. Media is only available for download within hours of receipt." }`
+7. If download fails, return structured error (from guppy G10 — no error discrimination exists today):
+   - `{ error: "media_expired", message: "WhatsApp media URL has expired. Media is only available for download within hours of receipt." }` — HTTP 404/410
+   - `{ error: "download_timeout", message: "Media download timed out after 30s." }` — timeout
+   - `{ error: "file_too_large", message: "Media exceeds 25MB size limit." }` — size limit (currently returns null silently)
+   - `{ error: "unsupported_type", message: "Message does not contain downloadable media." }` — non-media message
 
 **New column: `media_path`**
 
@@ -87,7 +91,7 @@ Index added for `has_media` filter performance (SP3).
 **Files to modify:**
 - `src/mcp/tools/media.ts` — add `download_media` tool alongside `send_media`. Extend `MediaDeps` interface to include `db: Database` (currently only has `connection: ConnectionManager`)
 - `src/core/database.ts` — add migration for `media_path` column + index
-- `src/core/messages.ts` — add `media_path` to `MessageRow` interface (line 9-22), add `mediaPath` to `rowToMessage()` output (line 24-39), add `updateMediaPath(db, messageId, path)` helper
+- `src/core/messages.ts` — add `media_path: string | null` and `content_text: string | null` to `MessageRow` interface (line 9-22), add `mediaPath` and `contentText` to `rowToMessage()` output (line 24-39), add `updateMediaPath(db, messageId, path)` helper. Note: `list_messages` uses `SELECT *` (confirmed by guppy G14 at `chat-management.ts:43`) so new columns appear automatically at runtime, but TypeScript requires `MessageRow` interface updates
 - `src/mcp/register-all.ts:52` — change `registerMediaTools(registry, { connection })` to `registerMediaTools(registry, { connection, db })`
 - `src/runtimes/agent/runtime.ts:123-136` — after `writeTempFile()`, call `updateMediaPath()` to persist the file path to DB
 - `src/runtimes/chat/media/processor.ts` — after download, also save to disk and call `updateMediaPath()`
@@ -171,7 +175,9 @@ BEGIN
 END;
 ```
 
-Note: the existing `messages_fts_update` trigger already exists and uses the correct FTS5 `('delete', ...)` idiom. We must DROP and re-CREATE it in a new migration — not duplicate it. The existing trigger in MIGRATION_1 fires on `content`; the new trigger fires on `content_text`.
+Note: MIGRATION_1 defines 4 FTS triggers: `messages_fts_insert`, `messages_fts_update`, `messages_fts_soft_delete`, `messages_fts_delete` (confirmed by guppy G5 at `database.ts:36-58`). All 4 must be DROPped and re-CREATEd atomically in MIGRATION_13 to switch from indexing `content` to `content_text`. The soft_delete trigger must also be updated to reference `content_text`.
+
+**Migration numbering (from guppy G13):** Current last migration is MIGRATION_11 (token tracking). SP1 adds MIGRATION_12 (media_path column + index). SP2 adds MIGRATION_13 (content_text column + FTS trigger rebuild). Both use the established PRAGMA guard pattern for idempotency.
 
 **Content extraction in `parseIncomingMessage()`:**
 
@@ -270,24 +276,11 @@ db.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id =
   .run(JSON.stringify(parsed), transcriptionText, messageId);
 ```
 
-**Protect against ON CONFLICT overwrite (council finding):**
+**ON CONFLICT is not a risk (guppy swarm finding G9):**
 
-`storeMessage()` at `messages.ts:125-131` has `ON CONFLICT(message_id) DO UPDATE SET content = excluded.content`. This would overwrite enriched JSON content (including persisted transcriptions) on message re-delivery.
+The swarm confirmed that `storeMessage()` (the upsert) is **never called** in the current codebase. The only call site is `storeMessageIfNew()` at `ingest.ts:105`, which uses `INSERT OR IGNORE` — re-delivered messages are safely skipped, not upserted. SP2's transcription persistence uses direct `UPDATE` statements targeting specific rows by `message_id`, which is safe.
 
-Fix: change the upsert to preserve enriched content when the new value is less informative:
-
-```typescript
-ON CONFLICT(message_id) DO UPDATE SET
-  content = CASE
-    WHEN excluded.content IS NOT NULL AND messages.content IS NULL THEN excluded.content
-    WHEN excluded.content IS NOT NULL AND excluded.content != messages.content
-      AND messages.content NOT LIKE '{"type":"%' THEN excluded.content
-    ELSE messages.content
-  END,
-  content_text = COALESCE(excluded.content_text, messages.content_text),
-```
-
-Logic: if existing content is structured JSON (`{"type":"`...), don't overwrite with a re-delivered raw value. Otherwise accept the new value.
+No changes to the ON CONFLICT clause are needed.
 
 **New MCP tool: `transcribe_audio`**
 
@@ -541,3 +534,24 @@ Database migrations are additive. The ON CONFLICT fix (SP2) is the only change t
 | A1 | Architecture | Spec re-invents agent runtime download pattern | Reframed SP1 as persist-at-ingest + fallback |
 | A2 | Architecture | FTS JOIN pattern wrong when query is NULL | Split into dual-path query builder |
 | A3 | Architecture | JSON in FTS indexes key names not human text | Added content_text column; FTS indexes that instead |
+
+### Guppy Swarm Validation (2026-04-05)
+
+**3 waves, 14 guppies, 0 unclear.**
+
+| # | Directive | Finding | Spec Impact |
+|---|-----------|---------|-------------|
+| G1 | SP1 download path validation | Verified — writeTempFile at media-download.ts:46, random hex names | None — spec accurate |
+| G2 | MediaDeps interface | Verified — needs db. registerMessagingTools is the pattern precedent | Clarified in files-to-modify |
+| G3 | parseIncomingMessage content extraction | Verified — all 9 branches confirmed, lost data table accurate | None |
+| G4 | storeMessage ON CONFLICT | Verified — blindly overwrites content, content_type, timestamp, is_from_me | See G9 |
+| G5 | FTS triggers | Verified — 4 triggers (insert, update, soft_delete, delete) all on content column | FTS migration must DROP all 4 |
+| G6 | Whisper transcription ephemeral | Verified — neither agent nor chat runtime persists | None |
+| G7 | Search FTS pattern | Verified — FTS-first INNER JOIN, correct pattern | Spec's dual-path approach confirmed |
+| G8 | sendMedia ptt support | Verified — full OutboundMedia type with ptt flag | None |
+| G9 | storeMessage callers | **Only storeMessageIfNew called** (ingest.ts:105, INSERT OR IGNORE). storeMessage never called. | Removed ON CONFLICT fix — not needed |
+| G10 | Media error handling | No HTTP status inspection, no expiry detection, no retry | Added structured error types to download_media |
+| G11 | Chat runtime media persistence | Verified — buffer only, no disk save | SP1 must extend both runtimes |
+| G12 | Baileys downloadMediaMessage | Transport-agnostic callback pattern, no live socket needed | Confirmed SP1 approach is feasible |
+| G13 | Migration system | 11 migrations exist, PRAGMA guard pattern, version-tracked | Set SP1=MIGRATION_12, SP2=MIGRATION_13 |
+| G14 | rowToMessage + SELECT * | SELECT * used, new columns auto-appear, MessageRow must be updated | Added explicit interface changes |
