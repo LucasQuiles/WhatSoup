@@ -145,14 +145,10 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
 
       const itemType = String(item['type'] ?? '');
 
-      // agentMessage completed: full text (not a delta)
+      // agentMessage completed: completion signal only.
+      // The text itself is already streamed via item/agentMessage/delta.
       if (itemType === 'agentMessage') {
-        return {
-          type: 'assistant_text',
-          text: String(item['text'] ?? ''),
-          itemId: String(item['id'] ?? ''),
-          complete: true,
-        };
+        return { type: 'ignored' };
       }
 
       if (!isToolItemType(itemType)) return { type: 'ignored' };

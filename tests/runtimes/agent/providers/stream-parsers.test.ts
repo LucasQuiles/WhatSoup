@@ -244,9 +244,9 @@ describe('Codex app-server parser (JSON-RPC)', () => {
       expect(event).toEqual({ type: 'assistant_text', text: 'Four', itemId: 'item-1' });
     });
 
-    it('parses item/completed agentMessage → assistant_text with full text', () => {
+    it('ignores item/completed agentMessage because deltas already delivered the text', () => {
       const event = parseCodexEvent(lines[5]!);
-      expect(event).toEqual({ type: 'assistant_text', text: 'Four', itemId: 'item-1', complete: true });
+      expect(event).toEqual({ type: 'ignored' });
     });
 
     it('parses turn/completed → result with null text', () => {
@@ -298,8 +298,18 @@ describe('Codex app-server parser (JSON-RPC)', () => {
       });
     });
 
-    it('parses final turn/completed → result', () => {
+    it('parses final agentMessage delta → assistant_text', () => {
+      const event = parseCodexEvent(lines[6]!);
+      expect(event).toEqual({ type: 'assistant_text', text: 'Done! I created the file.', itemId: 'msg-2' });
+    });
+
+    it('ignores final item/completed agentMessage after deltas', () => {
       const event = parseCodexEvent(lines[7]!);
+      expect(event).toEqual({ type: 'ignored' });
+    });
+
+    it('parses final turn/completed → result', () => {
+      const event = parseCodexEvent(lines[8]!);
       expect(event).toEqual({ type: 'result', text: null });
     });
   });
