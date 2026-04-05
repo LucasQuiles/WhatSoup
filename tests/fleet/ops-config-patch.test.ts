@@ -71,6 +71,7 @@ function makeDeps(instance: DiscoveredInstance): OpsDeps {
       getInstance: vi.fn(() => instance),
       getInstances: vi.fn(() => new Map()),
     } as any,
+    realtime: { publish: vi.fn() },
   };
 }
 

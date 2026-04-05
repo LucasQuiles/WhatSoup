@@ -111,6 +111,7 @@ describe('handleConfigUpdate — settingsJson patch', () => {
         getInstance: vi.fn(() => instance),
         getInstances: vi.fn(() => new Map()),
       } as any,
+      realtime: { publish: vi.fn() },
     };
 
     const customSettings = {
@@ -162,6 +163,7 @@ describe('handleConfigUpdate — settingsJson patch', () => {
         getInstance: vi.fn(() => instance),
         getInstances: vi.fn(() => new Map()),
       } as any,
+      realtime: { publish: vi.fn() },
     };
 
     const req = mockReq(JSON.stringify({
@@ -209,6 +211,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
 
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
+      realtime: { publish: vi.fn() },
     };
 
     const plugins = { 'sdlc-os@sdlc-os-dev': false, 'tmup@tmup-dev': true };
@@ -247,6 +250,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
 
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
+      realtime: { publish: vi.fn() },
     };
 
     const req = mockReq(JSON.stringify({ agentOptions: { enabledPlugins: { 'foo@bar': true } } }));
@@ -280,6 +284,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
 
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
+      realtime: { publish: vi.fn() },
     };
 
     const req = mockReq(JSON.stringify({
@@ -310,6 +315,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
 
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
+      realtime: { publish: vi.fn() },
     };
 
     const req = mockReq(JSON.stringify({
@@ -348,6 +354,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
 
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
+      realtime: { publish: vi.fn() },
     };
 
     // Send null to clear

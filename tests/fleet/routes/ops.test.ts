@@ -95,6 +95,7 @@ function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
       getInstance: vi.fn(() => undefined),
       getInstances: vi.fn(() => new Map()),
     } as any,
+    realtime: { publish: vi.fn() },
     ...overrides,
   };
 }

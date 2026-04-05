@@ -18,6 +18,8 @@ import type { PermissionsSettings } from '../../core/settings-template.ts';
 import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
+import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
+import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -33,6 +35,7 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
 
 export interface OpsDeps {
   discovery: FleetDiscovery;
+  realtime: FleetRealtimePublisher;
 }
 
 /** POST /api/lines/:name/send — route a message to the instance. */
@@ -67,6 +70,11 @@ export async function handleSend(
       if (socketStat) {
         const parsed = JSON.parse(fixedBody);
         const result = await mcpCall(instance.socketPath, 'send_message', parsed);
+        if (result.success) {
+          publishMessageReceived(deps.realtime, params.name);
+          publishChatUpdated(deps.realtime, params.name);
+          publishFeedEvent(deps.realtime, params.name);
+        }
         jsonResponse(res, result.success ? 200 : 502, result);
         return;
       }
@@ -79,6 +87,11 @@ export async function handleSend(
     const result = await proxyToInstance(
       instance.healthPort, '/send', 'POST', fixedBody, instance.healthToken,
     );
+    if (result.status >= 200 && result.status < 300) {
+      publishMessageReceived(deps.realtime, params.name);
+      publishChatUpdated(deps.realtime, params.name);
+      publishFeedEvent(deps.realtime, params.name);
+    }
     res.writeHead(result.status, { 'Content-Type': 'application/json' });
     res.end(result.body);
     return;
@@ -121,6 +134,10 @@ export async function handleAccessUpdate(
   const result = await proxyToInstance(
     instance.healthPort, '/access', 'POST', body, instance.healthToken,
   );
+  if (result.status >= 200 && result.status < 300) {
+    publishAccessChanged(deps.realtime, params.name);
+    publishFeedEvent(deps.realtime, params.name);
+  }
   res.writeHead(result.status, { 'Content-Type': 'application/json' });
   res.end(result.body);
 }
@@ -184,6 +201,8 @@ async function handleSystemctlAction(
 
   try {
     await execFileAsync('systemctl', ['--user', verb, `whatsoup@${params.name}`]);
+    publishInstanceStatus(deps.realtime, params.name);
+    publishFeedEvent(deps.realtime, params.name);
     jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
   } catch (err) {
     jsonResponse(res, 500, {
@@ -367,6 +386,8 @@ export async function handleConfigUpdate(
     return;
   }
 
+  publishInstanceStatus(deps.realtime, params.name);
+  publishFeedEvent(deps.realtime, params.name);
   jsonResponse(res, 200, mergedClean);
 }
 
@@ -392,6 +413,8 @@ export async function handleDeleteLine(
   // 4. Re-scan discovery so the instance disappears from the UI
   deps.discovery.scan();
 
+  publishInstanceStatus(deps.realtime, params.name);
+  publishFeedEvent(deps.realtime, params.name);
   jsonResponse(res, 200, { deleted: params.name });
 }
 
@@ -693,6 +716,8 @@ export async function handleCreateLine(
     // --- Re-scan discovery ---
     deps.discovery.scan();
 
+    publishInstanceStatus(deps.realtime, name);
+    publishFeedEvent(deps.realtime, name);
     jsonResponse(res, 201, { name, healthPort });
   } catch (err) {
     cleanupPartial(name, createdExtras);

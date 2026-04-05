@@ -20,6 +20,7 @@ import { UpdateChecker } from './update-checker.ts';
 import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
+import type { FleetRealtimePublisher } from './realtime-publisher.ts';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
@@ -36,6 +37,7 @@ export interface RouteDeps {
   discovery: FleetDiscovery;
   healthPoller: HealthPoller;
   dbReader: FleetDbReader;
+  realtime: FleetRealtimePublisher;
   log: typeof log;
   updateChecker: UpdateChecker;
 }
@@ -314,7 +316,10 @@ export function createFleetServer(deps: FleetDeps) {
     return (s && s !== 'unknown') ? s : startupSha;
   };
   const staticHandler = createStaticHandler(distDir, deps.fleetToken, getVersion);
-  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, log, updateChecker };
+  // Realtime publisher is wired after wsServer creation — use a deferred reference
+  let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
+  const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
+  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, log, updateChecker };
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -368,9 +373,12 @@ export function createFleetServer(deps: FleetDeps) {
   // WebSocket server for real-time console updates
   const wsServer = new FleetWebSocketServer(server, deps.fleetToken);
 
+  // Now that wsServer exists, wire the deferred publisher
+  realtimePublish = (event) => wsServer.broadcast(event);
+
   // Wire HealthPoller status changes to WS broadcasts
   healthPoller.on('statusChange', (instance: string) => {
-    wsServer.broadcast({ type: 'instance_status', instance });
+    realtime.publish({ type: 'instance_status', instance });
   });
 
   return {
