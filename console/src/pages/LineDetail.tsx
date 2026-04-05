@@ -10,6 +10,8 @@ import { MetricsChart } from '../components/MetricsChart'
 import { ActiveHoursHeatmap } from '../components/ActiveHoursHeatmap'
 import type { MetricsRange } from '../types'
 import EmptyState from '../components/EmptyState'
+import { useVirtualMessages } from '../hooks/use-virtual-messages'
+import { selectVirtualMessageRows } from '../lib/inbox-virtualization'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { formatRelative, formatTime } from '../lib/format-time'
@@ -1807,6 +1809,13 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
   // Shared auto-scroll hook
   const { scrollRef: stickyScrollRef, showJump: showJumpToBottom, handleScroll, jumpToBottom } = useStickyScroll(reversed, selectedChat)
 
+  // Virtual scrolling for message list
+  const messageVirtualizer = useVirtualMessages({
+    messages: reversed,
+    getScrollElement: () => stickyScrollRef.current,
+  })
+  const virtualMessageRows = selectVirtualMessageRows(reversed, messageVirtualizer.getVirtualItems())
+
   return (
     <>
       <div className="relative flex-1 min-h-0 flex flex-col">
@@ -1843,21 +1852,31 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           )
         )}
 
-        {/* Message list */}
-        <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-          {reversed.map(msg => (
-            <MessageBubble
-              key={msg.pk}
-              msg={msg}
-              outgoingBg={outgoingBg}
-              onCreateContact={(name) => toast.info(`Save contact: ${name}`)}
-              animate={animatedPks.has(msg.pk)}
-            />
+        {/* Virtualized message list */}
+        <div
+          className="relative w-full"
+          style={{
+            height: `${messageVirtualizer.getTotalSize()}px`,
+            minHeight: `${messageVirtualizer.getTotalSize()}px`,
+          }}
+        >
+          {virtualMessageRows.map((row) => (
+            <div
+              key={String(row.key)}
+              ref={messageVirtualizer.measureElement}
+              data-index={row.index}
+              className="absolute left-0 top-0 w-full"
+              style={{ transform: `translateY(${row.start}px)` }}
+            >
+              <MessageBubble
+                msg={row.message}
+                outgoingBg={outgoingBg}
+                onCreateContact={(name) => toast.info(`Save contact: ${name}`)}
+                animate={animatedPks.has(row.message.pk)}
+              />
+            </div>
           ))}
         </div>
-
-        {/* Scroll anchor (empty div at bottom for content termination) */}
-        <div />
       </div>
 
       {/* Jump to newest — floats above the input bar, inside the positioned wrapper */}
