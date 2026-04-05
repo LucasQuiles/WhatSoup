@@ -1325,7 +1325,7 @@ export class AgentRuntime implements Runtime {
 
       case 'assistant_text':
         session?.tickWatchdog();
-        queue.enqueueText(event.text);
+        queue.enqueueStreamingText(event.text);
         // Accumulate assistant text for voice reply (SP4)
         if (mapKey !== undefined) {
           this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
@@ -2211,7 +2211,7 @@ export class AgentRuntime implements Runtime {
 
       case 'assistant_text':
         this.session?.tickWatchdog();
-        queue.enqueueText(event.text);
+        queue.enqueueStreamingText(event.text);
         this.turnHadVisibleOutput = true;
         // Accumulate text for voice reply (SP4)
         this.currentTurnAssistantText += event.text;

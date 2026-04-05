@@ -37,6 +37,7 @@ const { mockSession, mockQueue, callOrder } = vi.hoisted(() => {
 
   const mockQueue = {
     enqueueText: vi.fn(),
+    enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),

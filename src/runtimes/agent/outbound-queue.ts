@@ -41,6 +41,8 @@ export const MIN_SEND_GAP_MS = 500;
 /** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
 export const TYPING_REFRESH_MS = 8_000;
 export const SEND_TIMEOUT_MS = 15_000;
+/** Delay before flushing aggregated text — batches streaming provider fragments. */
+export const TEXT_AGGREGATE_DELAY_MS = 2_000;
 
 /**
  * Pre-process text for WhatsApp delivery:
@@ -91,6 +93,8 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
  */
 export interface IOutboundQueue {
   enqueueText(text: string): void;
+  /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
+  enqueueStreamingText(text: string): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
   enqueueResultText(text: string): void;
   enqueueToolUpdate(update: ToolUpdate): void;
@@ -241,14 +245,56 @@ export class OutboundQueue implements IOutboundQueue {
   /** Track whether the current turn has already sent visible text to the user. */
   private turnHasVisibleText = false;
 
+  /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
+  private streamBuffer = '';
+  /** Timer for flushing aggregated streaming text after a pause. */
+  private streamTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string): void {
     if (!text || text.trim() === '') return;
+    // Flush any pending streaming buffer first to maintain ordering
+    this.flushStreamBuffer();
     if (this.toolUpdateMode === 'minimal') {
       this.minimalLastSentAt = Date.now();
       this.clearMinimalHeartbeat();
     }
     this.turnHasVisibleText = true;
+    const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
+    for (const chunk of chunks) {
+      this.enqueue(chunk);
+    }
+  }
+
+  /**
+   * Enqueue streaming text delta — aggregates fragments with a debounce timer.
+   * Use this for `assistant_text` events from streaming providers (codex-cli, gemini-cli)
+   * that emit per-token or per-line deltas. Text is buffered and flushed after
+   * TEXT_AGGREGATE_DELAY_MS of silence, producing batched messages instead of spam.
+   */
+  enqueueStreamingText(text: string): void {
+    if (!text) return;
+    if (this.toolUpdateMode === 'minimal') {
+      this.minimalLastSentAt = Date.now();
+      this.clearMinimalHeartbeat();
+    }
+    this.turnHasVisibleText = true;
+    this.streamBuffer += text;
+    if (this.streamTimer) clearTimeout(this.streamTimer);
+    this.streamTimer = setTimeout(() => {
+      this.flushStreamBuffer();
+    }, TEXT_AGGREGATE_DELAY_MS);
+  }
+
+  /** Flush the streaming text buffer into the send queue. */
+  private flushStreamBuffer(): void {
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    const text = this.streamBuffer;
+    this.streamBuffer = '';
+    if (!text || text.trim() === '') return;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
     for (const chunk of chunks) {
       this.enqueue(chunk);
@@ -330,6 +376,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Flush all pending messages (tool buffer + send queue) immediately. */
   async flush(): Promise<void> {
+    this.flushStreamBuffer();
     this.flushToolBuffer();
     // Wait for the current chain to drain
     await this.chain;
@@ -356,6 +403,8 @@ export class OutboundQueue implements IOutboundQueue {
   abortTurn(): void {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
+    if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
+    this.streamBuffer = '';
     this.toolBuffer = [];
     this.minimalSentDetails.clear();
     this.minimalLastSentAt = Date.now();

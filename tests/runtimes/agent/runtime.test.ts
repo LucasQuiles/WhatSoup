@@ -29,6 +29,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
   // method that isn't reflected here — the mock cannot silently diverge.
   const mockQueue = {
     enqueueText: vi.fn(),
+    enqueueStreamingText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
@@ -597,7 +598,7 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello there!' });
 
-    expect(mockQueue.enqueueText).toHaveBeenCalledWith('Hello there!');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!');
   });
 
   it('tool_use event enqueues tool update', async () => {
