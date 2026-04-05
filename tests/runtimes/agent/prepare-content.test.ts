@@ -7,8 +7,12 @@ import type { IncomingMessage } from '../../../src/core/types.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 
-const { mockUpdateMediaPath } = vi.hoisted(() => ({
+const { mockUpdateMediaPath, mockDownloadMedia, mockWriteTempFile, mockTranscribeAudio, mockExtractDocumentText } = vi.hoisted(() => ({
   mockUpdateMediaPath: vi.fn(),
+  mockDownloadMedia: vi.fn(),
+  mockWriteTempFile: vi.fn(),
+  mockTranscribeAudio: vi.fn(),
+  mockExtractDocumentText: vi.fn(),
 }));
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -26,9 +30,6 @@ vi.mock('@whiskeysockets/baileys', () => ({
 }));
 
 // Mock media-download module: writeTempFile returns a predictable path
-const mockDownloadMedia = vi.fn();
-const mockWriteTempFile = vi.fn();
-
 vi.mock('../../../src/core/media-download.ts', () => ({
   downloadMedia: mockDownloadMedia,
   writeTempFile: mockWriteTempFile,
@@ -36,15 +37,11 @@ vi.mock('../../../src/core/media-download.ts', () => ({
 }));
 
 // Mock Whisper transcription
-const mockTranscribeAudio = vi.fn();
-
 vi.mock('../../../src/runtimes/chat/providers/whisper.ts', () => ({
   transcribeAudio: mockTranscribeAudio,
 }));
 
 // Mock document text extraction
-const mockExtractDocumentText = vi.fn();
-
 vi.mock('../../../src/runtimes/chat/media/documents.ts', () => ({
   extractDocumentText: mockExtractDocumentText,
 }));

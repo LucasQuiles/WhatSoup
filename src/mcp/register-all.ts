@@ -1,6 +1,6 @@
 // src/mcp/register-all.ts
-// Standalone function that registers all 14 tool modules onto a ToolRegistry.
-// Used by AgentRuntime and PassiveRuntime so both get the same 116 tools.
+// Standalone function that registers all 15 tool modules onto a ToolRegistry.
+// Used by AgentRuntime and PassiveRuntime so both get the same 132 tools.
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -27,7 +27,7 @@ import { registerVoiceTools } from './tools/voice.ts';
 const log = createChildLogger('register-all');
 
 /**
- * Register all 14 tool modules onto the given registry.
+ * Register all 15 tool modules onto the given registry.
  *
  * Preserves the three calling conventions used by the individual modules:
  *   Pattern 1 (options-object): registerMessagingTools, registerMediaTools, registerVoiceTools
