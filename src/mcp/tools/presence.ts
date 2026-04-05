@@ -1,10 +1,36 @@
 // src/mcp/tools/presence.ts
-// Presence tools: subscribe_presence, get_presence (all global scope).
+// Presence tools: send_typing, subscribe_presence, get_presence.
 
 import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { PresenceCache } from '../../transport/presence-cache.ts';
+
+const SendTypingSchema = z.object({
+  chatJid: z.string(),
+  type: z.enum(['composing', 'recording', 'paused']),
+});
+
+function makeSendTyping(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
+  return {
+    name: 'send_typing',
+    description:
+      'Send a typing indicator to the current chat. Use composing, recording, or paused.',
+    schema: SendTypingSchema,
+    scope: 'chat',
+    targetMode: 'injected',
+    replayPolicy: 'safe',
+    handler: async (params) => {
+      const { chatJid, type } = SendTypingSchema.parse(params);
+      const sock = getSock();
+      if (!sock) {
+        throw new Error('WhatsApp is not connected');
+      }
+      await sock.sendPresenceUpdate(type, chatJid);
+      return { success: true, type };
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // subscribe_presence
@@ -81,6 +107,7 @@ export function registerPresenceTools(
   presenceCache: PresenceCache,
   register: (tool: ToolDeclaration) => void,
 ): void {
+  register(makeSendTyping(getSock));
   register(makeSubscribePresence(getSock));
   register(makeGetPresence(presenceCache));
 }

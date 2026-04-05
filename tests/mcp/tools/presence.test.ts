@@ -16,6 +16,7 @@ function chatSession(conversationKey: string): SessionContext {
 function makeMockSock(): WhatsAppSocket {
   return {
     presenceSubscribe: vi.fn().mockResolvedValue(undefined),
+    sendPresenceUpdate: vi.fn().mockResolvedValue(undefined),
   } as unknown as WhatsAppSocket;
 }
 
@@ -34,6 +35,11 @@ describe('presence tools', () => {
   it('subscribe_presence is global-only', () => {
     const tools = registry.listTools(chatSession('111'));
     expect(tools.find((t) => t.name === 'subscribe_presence')).toBeUndefined();
+  });
+
+  it('send_typing is available in chat-scoped sessions', () => {
+    const tools = registry.listTools(chatSession('111'));
+    expect(tools.find((t) => t.name === 'send_typing')).toBeDefined();
   });
 
   it('get_presence is global-only', () => {
@@ -64,6 +70,40 @@ describe('presence tools', () => {
       const nullRegistry = new ToolRegistry();
       registerPresenceTools(() => null, presenceCache, (tool) => nullRegistry.register(tool));
       const result = await nullRegistry.call('subscribe_presence', { jid: '111@s.whatsapp.net' }, globalSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/not connected/);
+    });
+  });
+
+  // --- send_typing ---
+
+  describe('send_typing', () => {
+    it('calls sock.sendPresenceUpdate with the injected delivery JID', async () => {
+      const result = await registry.call(
+        'send_typing',
+        { type: 'composing' },
+        chatSession('111'),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect((mockSock as any).sendPresenceUpdate).toHaveBeenCalledWith('composing', '111@s.whatsapp.net');
+    });
+
+    it('supports recording state', async () => {
+      const result = await registry.call(
+        'send_typing',
+        { type: 'recording' },
+        chatSession('111'),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect((mockSock as any).sendPresenceUpdate).toHaveBeenCalledWith('recording', '111@s.whatsapp.net');
+    });
+
+    it('errors when sock is null', async () => {
+      const nullRegistry = new ToolRegistry();
+      registerPresenceTools(() => null, presenceCache, (tool) => nullRegistry.register(tool));
+      const result = await nullRegistry.call('send_typing', { type: 'paused' }, chatSession('111'));
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/not connected/);
     });
