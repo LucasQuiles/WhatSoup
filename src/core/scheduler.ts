@@ -17,12 +17,19 @@ interface ScheduledRow {
 
 export class MessageScheduler {
   private timer: NodeJS.Timeout | null = null;
+  private db: Database;
+  private connection: ConnectionManager;
+  private config: { intervalMs: number; maxRetries: number };
 
   constructor(
-    private readonly db: Database,
-    private readonly connection: ConnectionManager,
-    private readonly config: { intervalMs: number; maxRetries: number },
-  ) {}
+    db: Database,
+    connection: ConnectionManager,
+    config: { intervalMs: number; maxRetries: number },
+  ) {
+    this.db = db;
+    this.connection = connection;
+    this.config = config;
+  }
 
   start(): void {
     this.timer = setInterval(() => {
