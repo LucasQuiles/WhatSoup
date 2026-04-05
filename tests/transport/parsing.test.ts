@@ -226,13 +226,14 @@ describe('parseIncomingMessage — negative cases', () => {
     expect(result!.isResponseWorthy).toBe(false);
   });
 
-  it('status broadcast → returns null', () => {
+  it('status broadcast → stored but not response-worthy (SP8)', () => {
     const msg = msgWith(
       { conversation: 'status update' },
       { key: { id: 'stat-001', remoteJid: 'status@broadcast', fromMe: false } },
     );
     const result = parseIncomingMessage(msg);
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.isResponseWorthy).toBe(false);
   });
 
   it('null content on non-media type → isResponseWorthy=false', () => {
