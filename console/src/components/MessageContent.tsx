@@ -1,4 +1,4 @@
-import { type FC } from 'react'
+import { type FC, type ReactElement } from 'react'
 import { Image, Film, FileAudio, FileText, HelpCircle } from 'lucide-react'
 import type { Message } from '../types'
 import { formatWhatsAppText } from '../lib/format-wa-text'
@@ -10,6 +10,7 @@ import { formatWhatsAppText } from '../lib/format-wa-text'
 
 interface MessageContentProps {
   msg: Message
+  highlightQuery?: string
 }
 
 /** Format byte counts into human-readable strings. */
@@ -20,8 +21,8 @@ function formatBytes(bytes: number): string {
 }
 
 /** Media type indicator for non-text messages (fallback). */
-const MediaIndicator: FC<{ type: string; caption?: string | null }> = ({ type, caption }) => {
-  const icons: Record<string, JSX.Element> = {
+const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery?: string }> = ({ type, caption, highlightQuery }) => {
+  const icons: Record<string, ReactElement> = {
     image: <Image size={16} strokeWidth={1.75} className="text-m-cht" />,
     audio: <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />,
     document: <FileText size={16} strokeWidth={1.75} className="text-s-warn" />,
@@ -45,7 +46,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null }> = ({ type, c
       </span>
       {caption && (
         <span className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginLeft: 'var(--sp-1)' }}>
-          {caption.length > 60 ? caption.slice(0, 57) + '...' : caption}
+          {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
         </span>
       )}
     </div>
@@ -53,7 +54,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null }> = ({ type, c
 }
 
 /** Rich media renderer — extracts metadata from rawMessage, falls back to MediaIndicator. */
-const RichMedia: FC<{ msg: Message }> = ({ msg }) => {
+const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlightQuery }) => {
   // B01: Image thumbnails
   if (msg.type === 'image' && msg.rawMessage) {
     try {
@@ -72,7 +73,11 @@ const RichMedia: FC<{ msg: Message }> = ({ msg }) => {
                 display: 'block',
               }}
             />
-            {msg.content && <div className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginTop: 'var(--sp-1)' }}>{msg.content}</div>}
+            {msg.content && (
+              <div className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginTop: 'var(--sp-1)' }}>
+                {formatWhatsAppText(msg.content, highlightQuery)}
+              </div>
+            )}
           </div>
         )
       }
@@ -161,7 +166,7 @@ const RichMedia: FC<{ msg: Message }> = ({ msg }) => {
             </div>
             {msg.content && (
               <div className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginTop: 'var(--sp-1)' }}>
-                {msg.content}
+                {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
           </div>
@@ -171,15 +176,15 @@ const RichMedia: FC<{ msg: Message }> = ({ msg }) => {
   }
 
   // Fallback: generic media indicator
-  return <MediaIndicator type={msg.type} caption={msg.content} />
+  return <MediaIndicator type={msg.type} caption={msg.content} highlightQuery={highlightQuery} />
 }
 
-const MessageContent: FC<MessageContentProps> = ({ msg }) => {
+const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
   if (msg.type !== 'text' || !msg.content) {
-    return <RichMedia msg={msg} />
+    return <RichMedia msg={msg} highlightQuery={highlightQuery} />
   }
 
-  return <>{formatWhatsAppText(msg.content)}</>
+  return <>{formatWhatsAppText(msg.content, highlightQuery)}</>
 }
 
 export default MessageContent
