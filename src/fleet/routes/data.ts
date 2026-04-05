@@ -18,6 +18,14 @@ export interface DataDeps {
   dbReader: FleetDbReader;
 }
 
+// Typed row interfaces for SQLite query results (replaces `as any` casts)
+interface PreviewRow { content: string | null; sender_name: string | null; is_from_me: number }
+interface UnreadRow { unread_count: number }
+interface GroupNameRow { subject: string }
+interface ChatNameRow { name: string }
+interface ParticipantRow { sender_name: string }
+interface DmNameRow { sender_name: string }
+
 /** GET /api/lines/:name/chats — paginated chat list (ChatItem shape). */
 export function handleGetChats(
   req: IncomingMessage,
@@ -75,9 +83,9 @@ export function handleGetChats(
     `);
 
     return result.data.map((chat) => {
-      const lastMsg = previewStmt.get(chat.conversationKey) as any;
+      const lastMsg = previewStmt.get(chat.conversationKey) as PreviewRow | undefined;
       const preview = lastMsg?.content ?? null;
-      const unread = (unreadStmt.get(chat.conversationKey) as any)?.unread_count ?? 0;
+      const unread = (unreadStmt.get(chat.conversationKey) as UnreadRow | undefined)?.unread_count ?? 0;
 
       // Detect group: conversation_key contains _at_g.us or @g.us
       const isGroup = isGroupConversationKey(chat.conversationKey);
@@ -88,22 +96,22 @@ export function handleGetChats(
       if (isGroup) {
         // Convert _at_g.us back to @g.us for the groups table lookup
         const groupJid = conversationKeyToJid(chat.conversationKey);
-        const groupSubject = (groupNameStmt.get(groupJid) as any)?.subject;
-        const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
+        const groupSubject = (groupNameStmt.get(groupJid) as GroupNameRow | undefined)?.subject;
+        const chatName = (chatNameStmt.get(chat.conversationKey) as ChatNameRow | undefined)?.name;
         if (groupSubject) {
           displayName = groupSubject;
         } else if (chatName) {
           displayName = chatName;
         } else {
           // No metadata — build from participant names (temporary fallback)
-          const parts = (participantsStmt.all(chat.conversationKey) as any[]).map(p => p.sender_name);
+          const parts = (participantsStmt.all(chat.conversationKey) as ParticipantRow[]).map(p => p.sender_name);
           displayName = parts.length > 0 ? parts.join(', ') : chat.conversationKey;
           needsBackfill = true;
         }
       } else {
         // DM: prefer the other person's name
-        const chatName = (chatNameStmt.get(chat.conversationKey) as any)?.name;
-        const otherName = (dmNameStmt.get(chat.conversationKey) as any)?.sender_name;
+        const chatName = (chatNameStmt.get(chat.conversationKey) as ChatNameRow | undefined)?.name;
+        const otherName = (dmNameStmt.get(chat.conversationKey) as DmNameRow | undefined)?.sender_name;
         displayName = chatName || otherName || chat.senderName || chat.conversationKey;
       }
 
@@ -146,7 +154,8 @@ export function handleGetChats(
 
   // Fire-and-forget: resolve missing group names via this instance's connection
   if (groupsNeedingBackfill.length > 0) {
-    resolveGroupNames(instance, groupsNeedingBackfill);
+    Promise.resolve(resolveGroupNames(instance, groupsNeedingBackfill))
+      .catch(() => { /* group name backfill is best-effort — failure is not user-facing */ });
   }
 }
 
