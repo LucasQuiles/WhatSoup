@@ -242,6 +242,9 @@ export const config = {
   },
   voiceReply: ((instance?.voiceReply as string | undefined) ?? 'never') as 'always' | 'when_received' | 'never',
 
+  // Typing simulation (SP5)
+  autoTyping: ((instance?.autoTyping as string | undefined) ?? 'off') as 'composing' | 'recording' | 'off',
+
   // Access mode (from instance config, defaults to allowlist for backward compat)
   accessMode: (() => {
     const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;
