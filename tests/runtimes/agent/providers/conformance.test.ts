@@ -427,11 +427,12 @@ class ProviderHarness {
       case 'codex-cli':
         return JSON.stringify({
           jsonrpc: '2.0',
-          method: 'item/completed',
+          method: 'item/agentMessage/delta',
           params: {
             threadId: this.provider.sessionId,
             turnId: 'turn-1',
-            item: { type: 'agentMessage', id: 'msg-1', text, phase: null, memoryCitation: null },
+            itemId: 'msg-1',
+            delta: text,
           },
         });
       case 'gemini-cli':
