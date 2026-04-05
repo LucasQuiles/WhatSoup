@@ -7,23 +7,26 @@ interface TagInputProps {
   onChange: (values: string[]) => void
   placeholder?: string
   validate?: (value: string) => boolean
+  normalizeValue?: (value: string) => string
   accentColor?: string  // CSS var for pill accent, e.g. 'var(--wizard-accent)'
   /** Optional display labels for values. Map from value → display string. */
   displayLabels?: Record<string, string>
 }
 
-const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, accentColor, displayLabels }) => {
+const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, normalizeValue, accentColor, displayLabels }) => {
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
   const addTag = useCallback((raw: string) => {
-    const tag = raw.trim()
+    const trimmed = raw.trim()
+    if (!trimmed) return
+    const tag = normalizeValue ? normalizeValue(trimmed) : trimmed
     if (!tag) return
     if (values.includes(tag)) return
     if (validate && !validate(tag)) return
     onChange([...values, tag])
     setInput('')
-  }, [values, onChange, validate])
+  }, [values, onChange, validate, normalizeValue])
 
   const removeTag = useCallback((index: number) => {
     onChange(values.filter((_, i) => i !== index))

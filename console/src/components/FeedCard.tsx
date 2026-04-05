@@ -1,8 +1,7 @@
-import { type FC, useState } from "react";
+import { type FC, type ReactNode } from "react";
 import { RotateCw, Square, Copy, ExternalLink } from "lucide-react";
 import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
-import { formatTimeWithSeconds } from "../lib/format-time";
 import { formatWhatsAppText } from "../lib/format-wa-text";
 
 // ---------------------------------------------------------------------------
@@ -24,6 +23,26 @@ const modeClass: Record<Mode, string> = {
   chat: "fc-inst--chat",
   agent: "fc-inst--agent",
 };
+
+type BadgeTone = "neutral" | "ok" | "warn" | "crit" | "recv" | "sent" | "agent";
+
+const badgeToneClass: Record<BadgeTone, string> = {
+  neutral: "fc-badge--neutral",
+  ok: "fc-badge--ok",
+  warn: "fc-badge--warn",
+  crit: "fc-badge--crit",
+  recv: "fc-badge--recv",
+  sent: "fc-badge--sent",
+  agent: "fc-badge--agent",
+};
+
+type FeedDetail = NonNullable<FeedEvent["detail"]>;
+type ConnectionDetail = Extract<FeedDetail, { type: "connection" }>;
+type MessageDetail = Extract<FeedDetail, { type: "message" }>;
+type ToolErrorDetail = Extract<FeedDetail, { type: "tool_error" }>;
+type SessionDetail = Extract<FeedDetail, { type: "session" }>;
+type HealthDetail = Extract<FeedDetail, { type: "health" }>;
+type ImportDetail = Extract<FeedDetail, { type: "import" }>;
 
 function edgeColor(event: FeedEvent): string {
   const d = event.detail;
@@ -52,133 +71,211 @@ function cleanText(event: FeedEvent): string {
   return text;
 }
 
-// ---------------------------------------------------------------------------
-//  Card header — always present: time + icon + instance tag + type label
-// ---------------------------------------------------------------------------
+function shortChatJid(chatJid?: string): string | undefined {
+  return chatJid ? chatJid.replace(/@.*/, "").slice(-8) : undefined;
+}
 
-function CardHeader({ event, label, labelClass }: {
-  event: FeedEvent;
-  label: string;
-  labelClass?: string;
+function parseCollapsedCount(text: string): number | undefined {
+  const match = text.match(/\u00d7(\d+)/);
+  if (!match) return undefined;
+  const count = Number.parseInt(match[1], 10);
+  return Number.isNaN(count) ? undefined : count;
+}
+
+function connectionTone(event: FeedEvent, d: ConnectionDetail): BadgeTone {
+  if (event.isError) return "crit";
+  if (d.state === "connected") return "ok";
+  if (d.state === "connecting" || d.reconnecting) return "warn";
+  if (d.state === "disconnected" || d.statusCode) return "crit";
+  return "neutral";
+}
+
+function headlineTone(event: FeedEvent, d: FeedDetail): BadgeTone {
+  if (event.isError) return "crit";
+  switch (d.type) {
+    case "connection":
+      return connectionTone(event, d);
+    case "message":
+      return d.direction === "inbound" ? "recv" : "sent";
+    case "tool_error":
+      return "crit";
+    case "tool_use":
+    case "session":
+      return "agent";
+    case "health":
+      return d.status === "online" ? "ok" : d.status === "unreachable" ? "crit" : "warn";
+    default:
+      return "neutral";
+  }
+}
+
+function joinParts(parts: Array<string | undefined>): string | undefined {
+  const filtered = parts.filter(Boolean) as string[];
+  return filtered.length > 0 ? filtered.join(" · ") : undefined;
+}
+
+function Badge({ children, tone = "neutral" }: {
+  children: ReactNode;
+  tone?: BadgeTone;
 }) {
   return (
-    <div className="fc-header">
-      <span className="fc-time">{formatTimeWithSeconds(event.time)}</span>
-      <span className="fc-icon"><FeedIcon event={event} /></span>
-      {event.instance && (
-        <span className={`fc-inst ${modeClass[event.mode]}`}>
-          {event.instance}
-        </span>
-      )}
-      <span className={`fc-label ${labelClass ?? ""}`}>{label}</span>
-    </div>
+    <span className={`fc-badge ${badgeToneClass[tone]}`}>
+      {children}
+    </span>
   );
 }
 
-// ---------------------------------------------------------------------------
-//  Card body variants — each type gets its own multi-line layout
-// ---------------------------------------------------------------------------
+interface CardPresentation {
+  badge: string;
+  badgeTone?: BadgeTone;
+  headline: ReactNode;
+  headlineTone?: BadgeTone;
+  context?: ReactNode;
+  detail?: ReactNode;
+  detailClassName?: string;
+}
 
-function ConnectionBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "connection" }> }) {
-  if (d.state === "connected") return <CardHeader event={event} label="connected" labelClass="fc-label--ok" />;
-  if (d.state === "connecting") return <CardHeader event={event} label="connecting\u2026" labelClass="fc-label--muted" />;
-  if (d.state === "disconnected") return <CardHeader event={event} label="disconnected" labelClass="fc-label--warn" />;
-  if (d.reconnecting && !d.statusCode && !d.reason) return <CardHeader event={event} label="reconnecting\u2026" labelClass="fc-label--muted" />;
-
-  const code = d.statusCode;
+function connectionPresentation(event: FeedEvent, d: ConnectionDetail): CardPresentation {
   const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
+  let headline = "connection";
+  let context = reason;
 
-  if (!code && !reason) {
-    return <CardHeader event={event} label={cleanText(event)} labelClass="fc-label--muted" />;
+  if (d.state === "connected" && (d.statusCode || d.reason || d.reconnecting)) {
+    headline = "reconnected";
+    context = reason ?? (d.statusCode ? `status ${d.statusCode}` : "session restored");
+  } else if (d.state === "connected") {
+    headline = "connected";
+  } else if (d.state === "connecting") {
+    headline = "connecting";
+  } else if (d.reconnecting) {
+    headline = "reconnecting";
+    context = reason ?? (d.statusCode ? `status ${d.statusCode}` : "retry scheduled");
+  } else if (d.state === "disconnected") {
+    headline = "disconnected";
+  } else if (reason || d.statusCode) {
+    headline = "connection issue";
+    context = reason ?? (d.statusCode ? `status ${d.statusCode}` : undefined);
+  } else {
+    headline = cleanText(event);
   }
 
-  // Error with lifecycle — two-part header
-  let statusText = reason ?? "";
-  if (d.reconnecting) statusText += " \u2192 reconnecting";
-  if (d.state === "connected") statusText += " \u2192 reconnected";
-
   return (
-    <CardHeader
-      event={event}
-      label={`${code ? `${code} ` : ""}${statusText}`}
-      labelClass={event.isError ? "fc-label--crit" : ""}
-    />
+    {
+      badge: d.statusCode ? String(d.statusCode) : "conn",
+      badgeTone: connectionTone(event, d),
+      headline,
+      headlineTone: connectionTone(event, d),
+      context,
+    }
   );
 }
 
-function MessageBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "message" }> }) {
+function messagePresentation(event: FeedEvent, d: MessageDetail): CardPresentation {
   const isIn = d.direction === "inbound";
   const isNonText = d.contentType && d.contentType !== "text";
-  const chatShort = d.chatJid ? d.chatJid.replace(/@.*/, "").slice(-8) : undefined;
+  const count = parseCollapsedCount(event.text);
+  const chatShort = shortChatJid(d.chatJid);
 
-  // Parse collapsed count from event text
-  const countMatch = event.text.match(/\u00d7(\d+)/);
-  const count = countMatch ? parseInt(countMatch[1], 10) : undefined;
-
-  const who = d.senderName ?? chatShort ?? "";
-  const countSuffix = count && count > 1 ? ` \u00d7${count}` : "";
-
-  return (
-    <>
-      <CardHeader
-        event={event}
-        label={`${who}${countSuffix}${isNonText ? ` [${d.contentType}]` : ""}`}
-        labelClass={isIn ? "fc-label--recv" : "fc-label--sent"}
-      />
-      {d.preview && (
-        <div className="fc-body-text">
-          {formatWhatsAppText(d.preview)}
-        </div>
-      )}
-    </>
-  );
+  return {
+    badge: `${isIn ? "recv" : "sent"}${count && count > 1 ? ` \u00d7${count}` : ""}`,
+    badgeTone: isIn ? "recv" : "sent",
+    headline: d.senderName ?? chatShort ?? (isIn ? "incoming" : "outgoing"),
+    headlineTone: isIn ? "recv" : "sent",
+    context: joinParts([
+      d.senderName ? chatShort : undefined,
+      isNonText ? `[${d.contentType}]` : undefined,
+    ]),
+    detail: d.preview ? formatWhatsAppText(d.preview) : isNonText ? `[${d.contentType}]` : undefined,
+  };
 }
 
-function ToolErrorBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "tool_error" }> }) {
-  return (
-    <>
-      <CardHeader event={event} label={d.toolName} labelClass="fc-label--crit" />
-      <div className="fc-body-text fc-body-text--error">
-        {formatWhatsAppText(d.error)}
-      </div>
-    </>
-  );
+function toolErrorPresentation(d: ToolErrorDetail): CardPresentation {
+  return {
+    badge: d.toolName || "tool",
+    badgeTone: "crit",
+    headline: "tool failed",
+    headlineTone: "crit",
+    detail: formatWhatsAppText(d.error),
+    detailClassName: "fc-detail--error fc-detail--wrap",
+  };
 }
 
-function SessionBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "session" }> }) {
-  const shortId = d.sessionId?.slice(0, 8);
-  const label = `${d.action}${shortId ? ` [${shortId}]` : ""}`;
-  return (
-    <>
-      <CardHeader event={event} label={label} labelClass={event.isError ? "fc-label--crit" : "fc-label--agent"} />
-      {d.reason && <div className="fc-body-text fc-body-text--dim">{"\u2014"} {d.reason}</div>}
-    </>
-  );
+function sessionPresentation(event: FeedEvent, d: SessionDetail): CardPresentation {
+  return {
+    badge: "session",
+    badgeTone: "agent",
+    headline: d.action,
+    headlineTone: event.isError ? "crit" : "agent",
+    context: d.sessionId ? `#${d.sessionId.slice(0, 8)}` : undefined,
+    detail: d.reason ? `\u2014 ${d.reason}` : undefined,
+    detailClassName: "fc-detail--muted",
+  };
 }
 
-function HealthBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "health" }> }) {
-  const cls = d.status === "online" ? "fc-label--ok" : d.status === "unreachable" ? "fc-label--crit" : "fc-label--warn";
-  const label = d.status === "online" ? "came online" : d.status === "unreachable" ? "connection lost" : `degraded \u2014 ${d.error ?? "unknown"}`;
-  return <CardHeader event={event} label={label} labelClass={cls} />;
+function healthPresentation(event: FeedEvent, d: HealthDetail): CardPresentation {
+  const tone = headlineTone(event, d);
+  return {
+    badge: "health",
+    badgeTone: tone,
+    headline: d.status === "online" ? "came online" : d.status === "unreachable" ? "connection lost" : "degraded",
+    headlineTone: tone,
+    context: d.error,
+  };
 }
 
-function ImportBody({ event, d }: { event: FeedEvent; d: Extract<FeedEvent["detail"], { type: "import" }> }) {
-  const suffix = d.skipped ? " (skipped)" : d.count !== undefined ? ` \u2014 ${d.count} rows` : "";
-  return <CardHeader event={event} label={`import ${d.table ?? ""}${suffix}`} />;
+function importPresentation(d: ImportDetail): CardPresentation {
+  return {
+    badge: "import",
+    headline: d.table ?? "data",
+    context: d.skipped ? "skipped" : d.count !== undefined ? `${d.count} rows` : undefined,
+  };
 }
 
-function GenericBody({ event }: { event: FeedEvent }) {
-  return <CardHeader event={event} label={cleanText(event)} />;
+function genericPresentation(event: FeedEvent): CardPresentation {
+  return {
+    badge: "event",
+    headline: cleanText(event),
+  };
+}
+
+function renderCard(event: FeedEvent): CardPresentation {
+  const d = event.detail;
+  if (!d || d.type === "generic") return genericPresentation(event);
+
+  switch (d.type) {
+    case "connection":
+      return connectionPresentation(event, d);
+    case "message":
+      return messagePresentation(event, d);
+    case "tool_error":
+      return toolErrorPresentation(d);
+    case "tool_use":
+      return {
+        badge: d.toolName || "tool",
+        badgeTone: "agent",
+        headline: "tool used",
+        headlineTone: "agent",
+      };
+    case "session":
+      return sessionPresentation(event, d);
+    case "health":
+      return healthPresentation(event, d);
+    case "import":
+      return importPresentation(d);
+    default:
+      return genericPresentation(event);
+  }
 }
 
 // ---------------------------------------------------------------------------
 //  Metadata row — hover/focus disclosure
 // ---------------------------------------------------------------------------
 
-function MetaRow({ event }: { event: FeedEvent }) {
+function metadataParts(event: FeedEvent): string[] {
   const d = event.detail;
   const parts: string[] = [];
-  if (event.component) parts.push(event.component);
+  if (event.time) parts.push(`time:${event.time}`);
+  if (event.component) parts.push(`component:${event.component}`);
   if (d?.type === "message") {
     if (d.messageId) parts.push(`id:${d.messageId}`);
     if (d.chatJid) parts.push(d.chatJid);
@@ -187,8 +284,7 @@ function MetaRow({ event }: { event: FeedEvent }) {
   } else if (d?.type === "session" && d.chatJid) {
     parts.push(d.chatJid);
   }
-  if (!parts.length) return null;
-  return <div className="fc-meta">{parts.join(" \u00b7 ")}</div>;
+  return parts;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,39 +419,50 @@ interface FeedCardProps {
 }
 
 const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onCopyResult }) => {
-  const [expanded, setExpanded] = useState(false);
-  const d = event.detail;
   const isErr = !!event.isError;
-
-  let body: React.ReactNode;
-  if (!d || d.type === "generic") body = <GenericBody event={event} />;
-  else switch (d.type) {
-    case "connection": body = <ConnectionBody event={event} d={d} />; break;
-    case "message": body = <MessageBody event={event} d={d} />; break;
-    case "tool_error": body = <ToolErrorBody event={event} d={d} />; break;
-    case "session": body = <SessionBody event={event} d={d} />; break;
-    case "health": body = <HealthBody event={event} d={d} />; break;
-    case "import": body = <ImportBody event={event} d={d} />; break;
-    case "tool_use": body = <CardHeader event={event} label={d.toolName} />; break;
-    default: body = <GenericBody event={event} />;
-  }
+  const card = renderCard(event);
+  const meta = metadataParts(event);
+  const hasMeta = meta.length > 0;
 
   return (
     <div
       className={`fc ${isErr ? "fc--error" : ""}`}
       tabIndex={0}
-      onMouseEnter={() => setExpanded(true)}
-      onMouseLeave={() => setExpanded(false)}
-      onFocus={() => setExpanded(true)}
-      onBlur={(e) => {
-        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-        setExpanded(false);
-      }}
       style={{ borderLeftColor: edgeColor(event) }}
     >
-      {body}
-      {expanded && <MetaRow event={event} />}
-      {expanded && <QuickActions event={event} onRestart={onRestart} onStop={onStop} onNavigate={onNavigate} onCopyResult={onCopyResult} />}
+      <div className="fc-main">
+        <div className="fc-line1">
+          <span className="fc-icon"><FeedIcon event={event} /></span>
+          <Badge tone={card.badgeTone}>{card.badge}</Badge>
+          {event.instance && (
+            <span className={`fc-inst ${modeClass[event.mode]}`}>
+              {event.instance}
+            </span>
+          )}
+          <div className="fc-summary">
+            <span className={`fc-headline ${card.headlineTone ? `fc-headline--${card.headlineTone}` : ""}`}>
+              {card.headline}
+            </span>
+            {card.context && <span className="fc-context">{card.context}</span>}
+          </div>
+        </div>
+
+        {card.detail && (
+          <div className={`fc-detail ${card.detailClassName ?? ""}`}>
+            {card.detail}
+          </div>
+        )}
+
+        {hasMeta && <div className="fc-meta">{meta.join(" \u00b7 ")}</div>}
+      </div>
+
+      <QuickActions
+        event={event}
+        onRestart={onRestart}
+        onStop={onStop}
+        onNavigate={onNavigate}
+        onCopyResult={onCopyResult}
+      />
     </div>
   );
 };

@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react'
 import TagInput from '../components/TagInput'
-import { validatePhone } from '../lib/validation'
+import { normalizePhoneInput, validatePhone } from '../lib/validation'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -345,29 +345,136 @@ const CONFIG_EXCLUDE_KEYS = new Set(['name', 'type', 'paths', 'healthPort'])
 
 const CONFIG_PATH_KEYS = new Set(['cwd', 'instructionsPath', 'socketPath', 'configDir', 'dataDir', 'stateDir'])
 
-function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: 'string' | 'number' | 'boolean' | 'path' }[] {
-  return Object.entries(rawConfig)
-    .filter(([k]) => !CONFIG_EXCLUDE_KEYS.has(k))
-    .map(([key, value]) => {
-      let displayValue: string;
-      if (typeof value === 'object' && value !== null) {
-        displayValue = JSON.stringify(value);
-      } else {
-        displayValue = String(value);
+type ConfigEntryType = 'string' | 'number' | 'boolean' | 'path'
+
+type AgentOptionFieldType = 'string' | 'path' | 'boolean' | 'enum' | 'array'
+
+interface AgentOptionFieldDefinition {
+  type: AgentOptionFieldType
+  enum?: string[]
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function getValueAtPath(source: unknown, keyPath: string): unknown {
+  return keyPath.split('.').reduce<unknown>((value, segment) => (
+    isRecord(value) ? value[segment] : undefined
+  ), source)
+}
+
+function setValueAtPath(target: Record<string, unknown>, keyPath: string, value: unknown): void {
+  const segments = keyPath.split('.')
+  let cursor = target
+  for (const segment of segments.slice(0, -1)) {
+    const next = cursor[segment]
+    if (!isRecord(next)) {
+      cursor[segment] = {}
+    }
+    cursor = cursor[segment] as Record<string, unknown>
+  }
+  cursor[segments[segments.length - 1]] = value
+}
+
+function deleteValueAtPath(target: Record<string, unknown>, keyPath: string): void {
+  const segments = keyPath.split('.')
+  const parents: Record<string, unknown>[] = [target]
+  let cursor = target
+
+  for (const segment of segments.slice(0, -1)) {
+    const next = cursor[segment]
+    if (!isRecord(next)) return
+    parents.push(next)
+    cursor = next
+  }
+
+  delete cursor[segments[segments.length - 1]]
+
+  for (let i = segments.length - 2; i >= 0; i -= 1) {
+    const parent = parents[i]
+    const childKey = segments[i]
+    const child = parent[childKey]
+    if (isRecord(child) && Object.keys(child).length === 0) {
+      delete parent[childKey]
+      continue
+    }
+    break
+  }
+}
+
+function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>
+}
+
+function isEqualValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && left.every((item, index) => isEqualValue(item, right[index]))
+  }
+
+  if (isRecord(left) && isRecord(right)) {
+    const leftKeys = Object.keys(left)
+    const rightKeys = Object.keys(right)
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key) => key in right && isEqualValue(left[key], right[key]))
+  }
+
+  return false
+}
+
+function formatConfigValue(value: unknown): string {
+  const rawValue = typeof value === 'object' && value !== null
+    ? JSON.stringify(value)
+    : String(value)
+  return rawValue.length > 80 ? `${rawValue.slice(0, 77)}...` : rawValue
+}
+
+function getConfigEntryType(key: string, value: unknown, explicitType?: AgentOptionFieldType): ConfigEntryType {
+  if (explicitType === 'boolean' || typeof value === 'boolean') return 'boolean'
+  if (typeof value === 'number') return 'number'
+  if (explicitType === 'path' || CONFIG_PATH_KEYS.has(key)) return 'path'
+  return 'string'
+}
+
+function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: ConfigEntryType }[] {
+  const entries: { key: string; value: string; type: ConfigEntryType }[] = []
+
+  for (const [key, value] of Object.entries(rawConfig)) {
+    if (CONFIG_EXCLUDE_KEYS.has(key)) continue
+
+    if (key === 'agentOptions' && isRecord(value)) {
+      const remaining = cloneRecord(value)
+      for (const [fieldKey, fieldDef] of Object.entries(AGENT_OPTION_FIELDS)) {
+        const nestedPath = fieldKey.replace(/^agentOptions\./, '')
+        const nestedValue = getValueAtPath(value, nestedPath)
+        if (nestedValue === undefined) continue
+        deleteValueAtPath(remaining, nestedPath)
+        entries.push({
+          key: fieldKey,
+          value: formatConfigValue(nestedValue),
+          type: getConfigEntryType(fieldKey, nestedValue, fieldDef.type),
+        })
       }
-      // Truncate long string values (e.g., systemPrompt)
-      if (displayValue.length > 80) {
-        displayValue = displayValue.slice(0, 77) + '...';
+      if (Object.keys(remaining).length > 0) {
+        entries.push({
+          key: 'agentOptions (other)',
+          value: formatConfigValue(remaining),
+          type: 'string',
+        })
       }
-      return {
-        key,
-        value: displayValue,
-        type: typeof value === 'boolean' ? 'boolean' as const
-          : typeof value === 'number' ? 'number' as const
-          : CONFIG_PATH_KEYS.has(key) ? 'path' as const
-          : 'string' as const,
-      };
+      continue
+    }
+
+    entries.push({
+      key,
+      value: formatConfigValue(value),
+      type: getConfigEntryType(key, value),
     })
+  }
+
+  return entries
 }
 
 const TYPE_COLOR: Record<string, string> = {
@@ -375,15 +482,13 @@ const TYPE_COLOR: Record<string, string> = {
   boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
 }
 
-const AGENT_OPTION_FLAT: Record<string, 'string' | 'boolean' | 'enum' | 'array'> = {
-  sessionScope: 'enum',
-  cwd: 'string',
-  instructionsPath: 'string',
-  sandboxPerChat: 'boolean',
-  pluginDirs: 'array',
-}
-const AGENT_OPTION_ENUMS: Record<string, string[]> = {
-  sessionScope: ['single', 'shared', 'per_chat'],
+const AGENT_OPTION_FIELDS: Record<string, AgentOptionFieldDefinition> = {
+  'agentOptions.sessionScope': { type: 'enum', enum: ['single', 'shared', 'per_chat'] },
+  'agentOptions.cwd': { type: 'path' },
+  'agentOptions.instructionsPath': { type: 'path' },
+  'agentOptions.sandboxPerChat': { type: 'boolean' },
+  'agentOptions.pluginDirs': { type: 'array' },
+  'agentOptions.mcp.inheritUserConfig': { type: 'boolean' },
 }
 
 /* ═══ Enum options for known select fields ═══ */
@@ -393,7 +498,15 @@ const ENUM_OPTIONS: Record<string, string[]> = {
   model: ['', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
 }
 
+const CUSTOM_ENUM_OPTION = '__custom__'
+const CUSTOMIZABLE_ENUM_KEYS = new Set(['model'])
+
 const FIELD_VALIDATORS: Record<string, (val: unknown) => string | null> = {
+  adminPhones: v => Array.isArray(v) && v.length === 0
+    ? 'At least one admin phone is required'
+    : Array.isArray(v) && v.some((item) => typeof item !== 'string' || !validatePhone(item))
+    ? 'Phone numbers must contain 10-15 digits'
+    : null,
   maxTokens: v => typeof v === 'number' && v < 256 ? 'Min 256' : typeof v === 'number' && v > 200000 ? 'Max 200,000' : null,
   tokenBudget: v => typeof v === 'number' && v < 1000 ? 'Min 1,000' : typeof v === 'number' && v > 10000000 ? 'Max 10M' : null,
   rateLimitPerHour: v => typeof v === 'number' && v < 1 ? 'Min 1' : typeof v === 'number' && v > 10000 ? 'Max 10,000' : null,
@@ -415,23 +528,23 @@ function ConfigEditDialog({
   const queryClient = useQueryClient()
   const [patch, setPatch] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
+  const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
 
   const editableEntries: [string, unknown][] = React.useMemo(() => {
     const entries: [string, unknown][] = []
     for (const [k, v] of Object.entries(config)) {
       if (CONFIG_EXCLUDE_KEYS.has(k)) continue
-      if (k === 'agentOptions' && typeof v === 'object' && v !== null && !Array.isArray(v)) {
-        const obj = v as Record<string, unknown>
-        const otherKeys: Record<string, unknown> = {}
-        for (const [sk, sv] of Object.entries(obj)) {
-          if (sk in AGENT_OPTION_FLAT) {
-            entries.push([`agentOptions.${sk}`, sv])
-          } else {
-            otherKeys[sk] = sv
-          }
+      if (k === 'agentOptions' && isRecord(v)) {
+        const remaining = cloneRecord(v)
+        for (const fieldKey of Object.keys(AGENT_OPTION_FIELDS)) {
+          const nestedPath = fieldKey.replace(/^agentOptions\./, '')
+          const fieldValue = getValueAtPath(v, nestedPath)
+          if (fieldValue === undefined) continue
+          deleteValueAtPath(remaining, nestedPath)
+          entries.push([fieldKey, fieldValue])
         }
-        if (Object.keys(otherKeys).length > 0) {
-          entries.push(['agentOptions (other)', otherKeys])
+        if (Object.keys(remaining).length > 0) {
+          entries.push(['agentOptions (other)', remaining])
         }
       } else {
         entries.push([k, v])
@@ -440,30 +553,42 @@ function ConfigEditDialog({
     return entries
   }, [config])
 
+  const editableEntryValues = React.useMemo(
+    () => Object.fromEntries(editableEntries) as Record<string, unknown>,
+    [editableEntries],
+  )
+
   /** Resolve a config value, handling dotted keys like 'agentOptions.cwd'. */
   const configValue = useCallback((key: string): unknown => {
-    if (key.includes('.')) {
-      const [parent, child] = key.split('.')
-      return (config[parent] as Record<string, unknown> | undefined)?.[child]
-    }
-    return config[key]
+    return getValueAtPath(config, key)
   }, [config])
 
-  const currentValue = (key: string): unknown =>
-    key in patch ? patch[key] : configValue(key)
+  const currentValue = useCallback((key: string): unknown => (
+    key in patch ? patch[key] : key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+  ), [patch, editableEntryValues, configValue])
 
   const setField = useCallback((key: string, value: unknown) => {
     setPatch(prev => {
-      // If value matches original, remove from patch (only dirty fields tracked)
-      const originalValue = configValue(key)
-      if (value === originalValue) {
+      const originalValue = key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+      if (isEqualValue(value, originalValue)) {
         const next = { ...prev }
         delete next[key]
         return next
       }
       return { ...prev, [key]: value }
     })
-  }, [configValue])
+  }, [editableEntryValues, configValue])
+
+  const getFieldError = useCallback((key: string): string | null => {
+    const value = currentValue(key)
+    const enumOptions = ENUM_OPTIONS[key]
+    const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
+      && (key in customEnumFields || (typeof value === 'string' && !!enumOptions && !enumOptions.includes(value)))
+    if (customEnumActive && typeof value === 'string' && value.trim() === '') {
+      return 'Enter a custom model ID or choose a preset'
+    }
+    return FIELD_VALIDATORS[key]?.(value) ?? null
+  }, [currentValue, customEnumFields])
 
   const handleSave = async () => {
     if (Object.keys(patch).length === 0) {
@@ -474,13 +599,7 @@ function ConfigEditDialog({
     try {
       const apiPatch: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(patch)) {
-        if (key.includes('.')) {
-          const [parent, child] = key.split('.')
-          if (!apiPatch[parent]) apiPatch[parent] = {}
-          ;(apiPatch[parent] as Record<string, unknown>)[child] = value
-        } else {
-          apiPatch[key] = value
-        }
+        setValueAtPath(apiPatch, key, value)
       }
       await api.updateConfig(lineName, apiPatch)
       toast.success('Configuration updated')
@@ -545,6 +664,7 @@ function ConfigEditDialog({
           onChange={(newValues) => setField(key, newValues)}
           placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
           validate={key === 'adminPhones' ? validatePhone : undefined}
+          normalizeValue={key === 'adminPhones' ? normalizePhoneInput : undefined}
           accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
           displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
         />
@@ -575,31 +695,74 @@ function ConfigEditDialog({
     }
 
     // String with known enum -> select
-    const dotKey = key.includes('.') ? key.split('.')[1] : null
     const enumOpts = key in ENUM_OPTIONS ? ENUM_OPTIONS[key]
-      : (dotKey && dotKey in AGENT_OPTION_ENUMS) ? AGENT_OPTION_ENUMS[dotKey]
+      : key in AGENT_OPTION_FIELDS && AGENT_OPTION_FIELDS[key].type === 'enum' ? AGENT_OPTION_FIELDS[key].enum
       : null
     if (typeof originalValue === 'string' && enumOpts) {
+      const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
+        && (key in customEnumFields || !enumOpts.includes(val as string))
+      const clearCustomEnum = () => {
+        setCustomEnumFields(prev => {
+          if (!(key in prev)) return prev
+          const next = { ...prev }
+          delete next[key]
+          return next
+        })
+      }
+
       return (
-        <select
-          value={val as string}
-          onChange={e => setField(key, e.target.value)}
-          className="font-mono cursor-pointer"
-          style={{
-            width: '100%',
-            padding: '6px var(--sp-3)',
-            fontSize: 'var(--font-size-data)',
-            background: 'var(--color-d1)',
-            color: 'var(--color-m-pas)',
-            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
-            borderRadius: 'var(--radius-sm)',
-            outline: 'none',
-          }}
-        >
-          {enumOpts.map(opt => (
-            <option key={opt} value={opt}>{opt || '(default)'}</option>
-          ))}
-        </select>
+        <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+          <select
+            value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
+            onChange={e => {
+              const nextValue = e.target.value
+              if (nextValue === CUSTOM_ENUM_OPTION) {
+                setCustomEnumFields(prev => ({ ...prev, [key]: true }))
+                setField(key, typeof val === 'string' && !enumOpts.includes(val) ? val : '')
+                return
+              }
+              clearCustomEnum()
+              setField(key, nextValue)
+            }}
+            className="font-mono cursor-pointer"
+            style={{
+              width: '100%',
+              padding: '6px var(--sp-3)',
+              fontSize: 'var(--font-size-data)',
+              background: 'var(--color-d1)',
+              color: 'var(--color-m-pas)',
+              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+              borderRadius: 'var(--radius-sm)',
+              outline: 'none',
+            }}
+          >
+            {enumOpts.map(opt => (
+              <option key={opt} value={opt}>{opt || '(default)'}</option>
+            ))}
+            {CUSTOMIZABLE_ENUM_KEYS.has(key) && (
+              <option value={CUSTOM_ENUM_OPTION}>Custom…</option>
+            )}
+          </select>
+          {customEnumActive && (
+            <input
+              type="text"
+              value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
+              onChange={e => setField(key, e.target.value)}
+              placeholder="Enter custom model ID"
+              className="font-mono"
+              style={{
+                width: '100%',
+                padding: '6px var(--sp-3)',
+                fontSize: 'var(--font-size-data)',
+                background: 'var(--color-d1)',
+                color: 'var(--color-m-pas)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+                borderRadius: 'var(--radius-sm)',
+                outline: 'none',
+              }}
+            />
+          )}
+        </div>
       )
     }
 
@@ -648,9 +811,9 @@ function ConfigEditDialog({
   }
 
   const hasChanges = Object.keys(patch).length > 0
-  const hasErrors = Object.entries(patch).some(([key]) => {
-    const validator = FIELD_VALIDATORS[key]
-    return validator ? validator(currentValue(key)) !== null : false
+  const hasErrors = editableEntries.some(([key]) => {
+    const isActive = key in patch || key in customEnumFields
+    return isActive && getFieldError(key) !== null
   })
 
   return (
@@ -710,7 +873,7 @@ function ConfigEditDialog({
               <div key={key}>
                 <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
                   {key}
-                  {key in patch && (
+                  {(key in patch || key in customEnumFields) && (
                     <span
                       className="font-mono"
                       style={{
@@ -724,9 +887,9 @@ function ConfigEditDialog({
                   )}
                 </label>
                 {renderField(key, originalValue)}
-                {key in patch && FIELD_VALIDATORS[key]?.(currentValue(key)) && (
+                {(key in patch || key in customEnumFields) && getFieldError(key) && (
                   <span className="font-mono" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)', display: 'block' }}>
-                    {FIELD_VALIDATORS[key]!(currentValue(key))}
+                    {getFieldError(key)}
                   </span>
                 )}
               </div>
