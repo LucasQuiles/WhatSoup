@@ -17,6 +17,7 @@ import { handleGetVersion, handleUpdate } from './routes/update.ts';
 import { UpdateChecker } from './update-checker.ts';
 import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
+import { FleetWebSocketServer } from './websocket-server.ts';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
@@ -356,7 +357,6 @@ export function createFleetServer(deps: FleetDeps) {
   });
 
   // WebSocket server for real-time console updates
-  const { FleetWebSocketServer } = await import('./websocket-server.ts');
   const wsServer = new FleetWebSocketServer(server, deps.fleetToken);
 
   // Wire HealthPoller status changes to WS broadcasts
