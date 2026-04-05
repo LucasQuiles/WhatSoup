@@ -50,6 +50,14 @@ export function shouldRespond(
   }
 
   const effectivePhone = resolvePhoneFromJid(msg.senderJid, db);
+
+  // ── Sibling bot filter (anti-echo-loop) ──
+  // In groups, silently ignore messages from other WhatSoup instances to
+  // prevent infinite reply loops between co-located bots.
+  if (msg.isGroup && config.siblingPhones?.size > 0 && config.siblingPhones.has(effectivePhone)) {
+    log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: sibling bot in group — suppressed');
+    return { respond: false, reason: 'sibling_bot' };
+  }
   const accessMode: AccessMode = config.accessMode;
 
   // ── self_only mode (REQ-003.AC-01) ──

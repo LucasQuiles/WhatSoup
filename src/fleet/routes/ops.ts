@@ -24,7 +24,7 @@ const NAME_RE = /^[a-z][a-z0-9-]*$/;
 
 /** Guard: validate instance name from URL params before using in shell commands or path construction. */
 function validateInstanceName(name: string, res: ServerResponse): boolean {
-  if (!NAME_RE.test(name) || name.length < 2 || name.length > 30) {
+  if (!NAME_RE.test(name) || name.length < 1 || name.length > 30) {
     jsonResponse(res, 400, { error: 'invalid instance name' });
     return false;
   }

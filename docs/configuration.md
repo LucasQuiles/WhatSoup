@@ -119,6 +119,7 @@ into place during deployment.
 | `tokenBudget` | integer | no | `100000` | Total token budget (used by agent runtime). |
 | `rateLimitPerHour` | integer | no | `45` | Per-user rate limit. Overrides `RATE_LIMIT_PER_HOUR`. |
 | `healthPort` | integer | no | `9090` | Health server port. Overrides `HEALTH_PORT`. |
+| `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 
 ### Access Modes

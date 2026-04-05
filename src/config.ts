@@ -208,6 +208,15 @@ export const config = {
     Object.entries((instance?.controlPeers ?? {}) as Record<string, string>)
   ),
 
+  // Sibling bot phones — phone numbers of other WhatSoup instances that share
+  // groups with this instance.  Messages from siblings are silently ignored in
+  // groups to prevent infinite echo loops between co-located bots.
+  siblingPhones: new Set<string>(
+    (Array.isArray(instance?.siblingPhones) ? instance.siblingPhones : [])
+      .filter((p: unknown) => typeof p === 'string' && (p as string).trim() !== '')
+      .map((p: string) => normalizePhoneE164(p)),
+  ),
+
   // Media
   mediaDir,
 

@@ -600,6 +600,85 @@ describe('media implicit mention in known groups', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Sibling bot filter (anti-echo-loop)
+// ---------------------------------------------------------------------------
+
+describe('sibling bot filter', () => {
+  const SIBLING_PHONE = '15551112222';
+
+  it('MUST NOT respond to sibling bot in group (auto-respond group)', async () => {
+    const { config: realConfig } = await import('../../src/config.ts');
+    // Temporarily add a sibling phone
+    realConfig.siblingPhones.add(SIBLING_PHONE);
+    try {
+      const msg = makeMsg({
+        chatJid: AUTO_RESPOND_GROUP,
+        senderJid: `${SIBLING_PHONE}@s.whatsapp.net`,
+        isGroup: true,
+        mentionedJids: [BOT_JID],
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(false);
+      expect(result.reason).toBe('sibling_bot');
+    } finally {
+      realConfig.siblingPhones.delete(SIBLING_PHONE);
+    }
+  });
+
+  it('MUST NOT respond to sibling bot even when @mentioned in group', async () => {
+    const { config: realConfig } = await import('../../src/config.ts');
+    realConfig.siblingPhones.add(SIBLING_PHONE);
+    try {
+      const msg = makeMsg({
+        chatJid: MENTION_TEST_GROUP,
+        senderJid: `${SIBLING_PHONE}@s.whatsapp.net`,
+        isGroup: true,
+        mentionedJids: [BOT_JID],
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(false);
+      expect(result.reason).toBe('sibling_bot');
+    } finally {
+      realConfig.siblingPhones.delete(SIBLING_PHONE);
+    }
+  });
+
+  it('allows sibling bot in DMs (filter is group-only)', async () => {
+    const { config: realConfig } = await import('../../src/config.ts');
+    // Sibling must be in access_list to get past DM checks
+    db.raw.prepare(
+      `INSERT OR IGNORE INTO access_list (subject_type, subject_id, status, display_name, requested_at)
+       VALUES ('phone', ?, 'allowed', 'SiblingBot', datetime('now'))`
+    ).run(SIBLING_PHONE);
+    realConfig.siblingPhones.add(SIBLING_PHONE);
+    try {
+      const msg = makeMsg({
+        chatJid: `${SIBLING_PHONE}@s.whatsapp.net`,
+        senderJid: `${SIBLING_PHONE}@s.whatsapp.net`,
+        isGroup: false,
+      });
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(true);
+      expect(result.reason).toBe('dm_allowed');
+    } finally {
+      realConfig.siblingPhones.delete(SIBLING_PHONE);
+    }
+  });
+
+  it('no-op when siblingPhones is empty (default behavior preserved)', () => {
+    const msg = makeMsg({
+      chatJid: AUTO_RESPOND_GROUP,
+      senderJid: `${ALLOWED_USER}@s.whatsapp.net`,
+      isGroup: true,
+      mentionedJids: [],
+    });
+    const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+    expect(result.respond).toBe(true);
+    expect(result.reason).toBe('group_auto_respond');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // resolveLidPhone — LID→phone reverse mapping
 // ---------------------------------------------------------------------------
 
