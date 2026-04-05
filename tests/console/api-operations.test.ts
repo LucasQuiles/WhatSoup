@@ -65,6 +65,11 @@ describe('api read operations', () => {
     expect(api.getMessages.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('getMetrics is a function accepting (name, range)', () => {
+    expect(typeof api.getMetrics).toBe('function');
+    expect(api.getMetrics.length).toBe(2);
+  });
+
   it('getAccess is a function accepting (name)', () => {
     expect(typeof api.getAccess).toBe('function');
     expect(api.getAccess.length).toBe(1);
