@@ -7,6 +7,7 @@ import { extname } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
+import { extractQuotedMedia } from '../../core/quoted-media.ts';
 import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { Database } from '../../core/database.ts';
@@ -210,9 +211,11 @@ export function registerMediaTools(
     replayPolicy: 'read_only',
     schema: z.object({
       message_id: z.string().describe('The message ID to download media from'),
+      quoted: z.boolean().optional().describe('When true, download media from the quoted message instead of the message itself.'),
     }),
     handler: async (params) => {
       const messageId = params['message_id'] as string;
+      const quoted = params['quoted'] as boolean | undefined;
 
       // Look up the message
       const row = db.raw.prepare(
@@ -223,13 +226,13 @@ export function registerMediaTools(
         return { error: 'not_found', message: `No message found with ID: ${messageId}` };
       }
 
-      // Reject non-media types
-      if (!MEDIA_CONTENT_TYPES.has(row.content_type)) {
+      // Reject non-media types unless we are explicitly targeting quoted media.
+      if (!quoted && !MEDIA_CONTENT_TYPES.has(row.content_type)) {
         return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
       }
 
       // Return cached path if file still exists on disk
-      if (row.media_path && existsSync(row.media_path)) {
+      if (!quoted && row.media_path && existsSync(row.media_path)) {
         let fileSize = 0;
         try { fileSize = statSync(row.media_path).size; } catch { /* ignore */ }
         return {
@@ -253,6 +256,14 @@ export function registerMediaTools(
         return { error: 'no_raw_message', message: 'Cannot parse raw message data.' };
       }
 
+      const quotedMedia = quoted ? extractQuotedMedia(rawMsg) : null;
+      if (quoted && !quotedMedia) {
+        return { error: 'no_quoted_media', message: 'Message does not quote downloadable media.' };
+      }
+
+      const effectiveContentType = quotedMedia?.contentType ?? row.content_type;
+      const downloadTarget = quotedMedia?.message ?? rawMsg;
+
       // Determine MIME type and file extension
       const mimeMap: Record<string, { defaultMime: string; ext: string }> = {
         image:    { defaultMime: 'image/jpeg', ext: 'jpg' },
@@ -262,17 +273,17 @@ export function registerMediaTools(
         document: { defaultMime: 'application/octet-stream', ext: 'bin' },
       };
 
-      const typeInfo = mimeMap[row.content_type];
+      const typeInfo = mimeMap[effectiveContentType];
       if (!typeInfo) {
         return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
       }
 
-      const mime = extractRawMime(rawMsg, row.content_type) ?? typeInfo.defaultMime;
+      const mime = extractRawMime(downloadTarget, effectiveContentType) ?? typeInfo.defaultMime;
 
       // Build download function using Baileys
       const downloadFn = async (): Promise<Buffer> => {
         const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
-        return downloadMediaMessage(rawMsg as any, 'buffer', {}) as Promise<Buffer>;
+        return downloadMediaMessage(downloadTarget as any, 'buffer', {}) as Promise<Buffer>;
       };
 
       // Attempt download with timeout and size checks
@@ -297,9 +308,9 @@ export function registerMediaTools(
 
       // Determine file extension — for documents, try original filename
       let ext = typeInfo.ext;
-      if (row.content_type === 'document') {
-        const docMsg = (rawMsg as any)?.message?.documentMessage
-          ?? (rawMsg as any)?.message?.documentWithCaptionMessage?.message?.documentMessage;
+      if (effectiveContentType === 'document') {
+        const docMsg = (downloadTarget as any)?.message?.documentMessage
+          ?? (downloadTarget as any)?.message?.documentWithCaptionMessage?.message?.documentMessage;
         const fileName = docMsg?.fileName as string | undefined;
         if (fileName) {
           const dotIdx = fileName.lastIndexOf('.');
@@ -310,14 +321,16 @@ export function registerMediaTools(
       // Save to disk
       const filePath = writeTempFile(result.buffer, ext);
 
-      // Persist path to database
-      updateMediaPath(db, messageId, filePath);
+      // Persist path only for the message's own media. Quoted media has no canonical row to attach to.
+      if (!quoted) {
+        updateMediaPath(db, messageId, filePath);
+      }
 
       return {
         file_path: filePath,
         mime_type: result.mimeType,
         file_size: result.buffer.length,
-        content_type: row.content_type,
+        content_type: effectiveContentType,
         cached: false,
       };
     },
