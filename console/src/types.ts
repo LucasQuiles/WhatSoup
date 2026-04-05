@@ -89,6 +89,20 @@ export interface Message {
   rawMessage?: string;
 }
 
+export type MetricsRange = '24h' | '7d' | '30d';
+
+export interface MessageVolumeBucket {
+  bucket: string;
+  inbound: number;
+  outbound: number;
+}
+
+export interface LineMetrics {
+  range: MetricsRange;
+  messageVolume: MessageVolumeBucket[];
+  activeHours: number[][];
+}
+
 export interface AccessEntry {
   subjectType: 'phone' | 'group';
   subjectId: string;

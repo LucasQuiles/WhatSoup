@@ -7,7 +7,16 @@
  *   console always renders (useful for design iteration and demos)
  */
 
-import type { AccessEntry, ChatItem, FeedEvent, LineInstance, LogEntry, Message } from '../types';
+import type {
+  AccessEntry,
+  ChatItem,
+  FeedEvent,
+  LineInstance,
+  LineMetrics,
+  LogEntry,
+  Message,
+  MetricsRange,
+} from '../types';
 
 const API_BASE = '';
 
@@ -107,6 +116,8 @@ export const api = {
     ),
     async () => (await loadMockData()).getMessages(name, conversationKey),
   ),
+  getMetrics: (name: string, range: MetricsRange) =>
+    apiFetch<LineMetrics>(`/api/lines/${encodeURIComponent(name)}/metrics?range=${encodeURIComponent(range)}`),
   searchMessages: (name: string, query: string, conversationKey?: string) =>
     apiFetch<{ results: Message[]; total: number; query: string }>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
