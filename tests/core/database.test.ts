@@ -152,6 +152,42 @@ describe('Database schema', () => {
     expect(triggers).toHaveLength(1);
     expect(triggers[0].sql).toContain('content_text');
   });
+
+  it('scheduled_messages table exists with correct columns (MIGRATION_14)', () => {
+    const row = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_messages'")
+      .get() as { name: string } | undefined;
+    expect(row?.name).toBe('scheduled_messages');
+
+    const cols = db.raw
+      .prepare('PRAGMA table_info(scheduled_messages)')
+      .all() as Array<{ name: string; type: string; notnull: number; dflt_value: string | null }>;
+    const colMap = Object.fromEntries(cols.map((c) => [c.name, c]));
+
+    expect(colMap['id']).toBeDefined();
+    expect(colMap['chat_jid']).toBeDefined();
+    expect(colMap['chat_jid'].notnull).toBe(1);
+    expect(colMap['content_type']).toBeDefined();
+    expect(colMap['payload']).toBeDefined();
+    expect(colMap['payload'].notnull).toBe(1);
+    expect(colMap['scheduled_at']).toBeDefined();
+    expect(colMap['scheduled_at'].type).toBe('INTEGER');
+    expect(colMap['status']).toBeDefined();
+    expect(colMap['created_at']).toBeDefined();
+    expect(colMap['created_at'].type).toBe('INTEGER');
+    expect(colMap['sent_at']).toBeDefined();
+    expect(colMap['error']).toBeDefined();
+    expect(colMap['retry_count']).toBeDefined();
+  });
+
+  it('idx_scheduled_pending partial index exists (MIGRATION_14)', () => {
+    const indexes = db.raw
+      .prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND name='idx_scheduled_pending'")
+      .all() as Array<{ name: string; sql: string }>;
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0].sql).toContain('status');
+    expect(indexes[0].sql).toContain('scheduled_at');
+  });
 });
 
 // ─── Pragmas ─────────────────────────────────────────────────────────────────

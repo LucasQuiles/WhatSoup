@@ -36,6 +36,7 @@ import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
+import { MessageScheduler } from './core/scheduler.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -628,6 +629,14 @@ const lidReconcileInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'L6: LID reconciliation failed'); }
 }, 30 * 60 * 1000); // every 30 minutes
 
+// 15. Message scheduler (SP11)
+const messageScheduler = new MessageScheduler(db, connectionManager, {
+  intervalMs: 60_000,   // check every minute
+  maxRetries: 3,
+});
+messageScheduler.recoverStale();
+messageScheduler.start();
+
 // 14. Seed contacts directory from message history (so @name mentions work after restart)
 {
   // Inject DB into contacts directory so LID→phone resolution works for @mentions
@@ -729,6 +738,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(echoTimeoutInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
+    messageScheduler.stop();
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally
