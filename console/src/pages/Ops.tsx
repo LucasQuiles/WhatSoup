@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, lazy, Suspense } from 'react'
 import { motion } from 'framer-motion'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
 import { formatTimeWithSeconds } from '../lib/format-time'
@@ -21,7 +21,7 @@ import { useToast } from '../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
 import { displayInstanceName } from '../lib/text-utils'
 import ConfirmDialog from '../components/ConfirmDialog'
-import RelinkModal from '../components/RelinkModal'
+const RelinkModal = lazy(() => import('../components/RelinkModal'))
 
 export default function Ops() {
   const toast = useToast()
@@ -340,12 +340,14 @@ export default function Ops() {
         This will stop the process, remove all configuration, data, and message history for <strong>{deleteTarget}</strong>. This cannot be undone.
       </ConfirmDialog>
 
-      <RelinkModal
-        lineName={relinkTarget ?? ''}
-        open={!!relinkTarget}
-        onClose={() => setRelinkTarget(null)}
-        onLinked={() => { setRelinkTarget(null); queryClient.invalidateQueries({ queryKey: ['lines'] }); toast.success('Instance re-linked!'); }}
-      />
+      <Suspense fallback={null}>
+        <RelinkModal
+          lineName={relinkTarget ?? ''}
+          open={!!relinkTarget}
+          onClose={() => setRelinkTarget(null)}
+          onLinked={() => { setRelinkTarget(null); queryClient.invalidateQueries({ queryKey: ['lines'] }); toast.success('Instance re-linked!'); }}
+        />
+      </Suspense>
     </motion.div>
   )
 }

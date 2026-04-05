@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, lazy, Suspense } from 'react'
 import TagInput from '../components/TagInput'
 import { normalizePhoneInput, validatePhone } from '../lib/validation'
 import { useParams, useNavigate } from 'react-router-dom'
@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '../hooks/use-fleet'
 import { useMetrics } from '../hooks/use-metrics'
 import { MetricsChart } from '../components/MetricsChart'
+import { ActiveHoursHeatmap } from '../components/ActiveHoursHeatmap'
 import type { MetricsRange } from '../types'
 import EmptyState from '../components/EmptyState'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
@@ -18,13 +19,12 @@ import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
-import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import FilterPill from '../components/FilterPill'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
-import RelinkModal from '../components/RelinkModal'
+const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield, Send,
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
@@ -242,29 +242,20 @@ export default function LineDetail() {
         {TABS.map(tab => {
           const Icon = tab.icon
           const isActive = activeTab === tab.id
-          const isDeferred = tab.id === 'metrics'
           return (
             <button
               key={tab.id}
-              onClick={() => !isDeferred && setActiveTab(tab.id)}
+              onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-2 font-sans font-medium c-hover relative ${
-                isDeferred
-                  ? 'text-t5 cursor-default'
-                  : isActive
+                isActive
                   ? 'text-t1 cursor-pointer'
                   : 'text-t4 hover:text-t3 cursor-pointer'
               }`}
               style={{ padding: 'var(--sp-2h) var(--sp-4)', fontSize: 'var(--font-size-data)' }}
-              title={isDeferred ? 'Coming in Phase 2' : undefined}
             >
               <Icon size={15} strokeWidth={1.75} />
               {tab.label}
-              {isDeferred && (
-                <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)', marginLeft: '-4px' }}>
-                  P2
-                </span>
-              )}
-              {isActive && !isDeferred && (
+              {isActive && (
                 <div
                   className="absolute bottom-0 left-2 right-2 h-[2px] rounded-t"
                   style={{ background: `var(--color-m-${modeColor})` }}
@@ -342,10 +333,10 @@ export default function LineDetail() {
                   />
                 ) : metrics?.messageVolume && metrics.messageVolume.length > 0 ? (
                   <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
-                    <div>
-                      <div className="c-heading" style={{ marginBottom: 'var(--sp-2)' }}>Message Volume</div>
-                      <MetricsChart data={metrics.messageVolume} />
-                    </div>
+                    <MetricsChart data={metrics.messageVolume} />
+                    {metrics.activeHours && (
+                      <ActiveHoursHeatmap data={metrics.activeHours} />
+                    )}
                   </div>
                 ) : (
                   <EmptyState title="No metrics data" description="Metrics will appear after the instance processes messages." />
@@ -370,12 +361,14 @@ export default function LineDetail() {
         This will stop the process, remove all configuration, data, and message history for <strong>{line?.name}</strong>. This cannot be undone.
       </ConfirmDialog>
 
-      <RelinkModal
-        lineName={line?.name ?? ''}
-        open={showRelink}
-        onClose={() => setShowRelink(false)}
-        onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
-      />
+      <Suspense fallback={null}>
+        <RelinkModal
+          lineName={line?.name ?? ''}
+          open={showRelink}
+          onClose={() => setShowRelink(false)}
+          onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
+        />
+      </Suspense>
       {showConfigEditor && line.config && (
         <ConfigEditDialog
           config={line.config}

@@ -1,7 +1,7 @@
-import { type FC, useState, useMemo } from "react";
+import { type FC, useState, useMemo, lazy, Suspense } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, Plus } from "lucide-react";
-import AddLineWizard from "../components/AddLineWizard";
+const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
 import { computeKpis } from "../lib/compute-kpis";
@@ -442,7 +442,9 @@ const SoupKitchen: FC = () => {
         </div>
       </motion.div>
 
-      {showAddWizard && <AddLineWizard onClose={() => setShowAddWizard(false)} />}
+      <Suspense fallback={null}>
+        {showAddWizard && <AddLineWizard onClose={() => setShowAddWizard(false)} />}
+      </Suspense>
     </div>
   );
 };
