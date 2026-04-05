@@ -79,7 +79,9 @@ function makeMockSocket() {
       }),
     },
     sendMessage: vi.fn(),
+    query: vi.fn().mockResolvedValue({}),
     end: vi.fn(),
+    ws: { isOpen: true },
     user: {
       id: '18455943112:1@s.whatsapp.net',
       lid: '81536414179557:2@lid',
@@ -441,6 +443,34 @@ describe('ConnectionManager — terminal conditions', () => {
 
     await manager.shutdown();
   });
+
+  it('exhausted failure window triggers a graceful reconnect attempt', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    sockets[0]!.emit(closeEvent(428));
+    await vi.advanceTimersByTimeAsync(1_000);
+    sockets[1]!.emit(closeEvent(428));
+    await vi.advanceTimersByTimeAsync(2_000);
+    sockets[2]!.emit(closeEvent(428));
+
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1);
+    const countBeforeExhausted = vi.mocked(makeWASocket).mock.calls.length;
+    sockets[3]?.emit(closeEvent(428));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(countBeforeExhausted + 1);
+
+    await manager.shutdown();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -630,6 +660,56 @@ describe('ConnectionManager — new event handlers', () => {
 
     await Promise.resolve();
     expect(rejectCallSpy).not.toHaveBeenCalled();
+
+    await manager.shutdown();
+  });
+});
+
+describe('ConnectionManager — keepalive', () => {
+  it('sends periodic ping queries and records a pong timestamp after connection opens', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(mockSock.query).toHaveBeenCalledWith({
+      tag: 'iq',
+      attrs: {
+        to: 's.whatsapp.net',
+        type: 'get',
+        xmlns: 'w:p',
+      },
+      content: [{ tag: 'ping', attrs: {} }],
+    }, 10_000);
+
+    const state = (manager as any).getConnectionState?.();
+    expect(state?.lastPongAt ?? null).not.toBeNull();
+
+    await manager.shutdown();
+  });
+
+  it('failed keepalive triggers a fresh reconnect', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    sockets[0]!.mockSock.query.mockRejectedValueOnce(new Error('ping timeout'));
+    sockets[0]!.emit(openEvent());
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
 
     await manager.shutdown();
   });

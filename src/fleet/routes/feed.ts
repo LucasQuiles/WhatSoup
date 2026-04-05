@@ -36,6 +36,44 @@ interface FeedEvent {
   detail?: FeedDetail;
 }
 
+type MessageDetail = Extract<FeedDetail, { type: 'message' }>;
+
+interface FeedObservability {
+  parsed: number;
+  suppressed: number;
+  coalesced: number;
+  deduped: number;
+  previewHits: number;
+  previewFallbackHits: number;
+  previewMisses: number;
+  previewErrors: number;
+}
+
+interface FeedPreviewWarning {
+  instance: string;
+  stage: 'messageId' | 'fallback' | 'instance';
+  error: string;
+}
+
+function createFeedObservability(): FeedObservability {
+  return {
+    parsed: 0,
+    suppressed: 0,
+    coalesced: 0,
+    deduped: 0,
+    previewHits: 0,
+    previewFallbackHits: 0,
+    previewMisses: 0,
+    previewErrors: 0,
+  };
+}
+
+function sanitizePreview(content: string | null | undefined): string | undefined {
+  if (!content) return undefined;
+  const trimmed = content.trim();
+  return trimmed ? trimmed.slice(0, 120) : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Log parsing
 // ---------------------------------------------------------------------------
@@ -443,8 +481,10 @@ function enrichMessagePreviews(
   events: FeedEvent[],
   instances: Map<string, DiscoveredInstance>,
   dbReader: FleetDbReader,
-): void {
+  observability: FeedObservability,
+): FeedPreviewWarning[] {
   const byInstance = new Map<string, FeedEvent[]>();
+  const warnings: FeedPreviewWarning[] = [];
   for (const e of events) {
     const d = e.detail;
     if (d?.type === 'message' && e.instance) {
@@ -454,60 +494,114 @@ function enrichMessagePreviews(
     }
   }
 
+  const recordWarning = (
+    instance: string,
+    stage: FeedPreviewWarning['stage'],
+    error: string,
+  ) => {
+    observability.previewErrors++;
+    warnings.push({ instance, stage, error });
+  };
+
+  const fillFromFallback = (
+    instName: string,
+    inst: DiscoveredInstance,
+    event: FeedEvent,
+  ): 'hit' | 'miss' | 'error' => {
+    const d = event.detail as MessageDetail;
+    if (!d.chatJid) return 'miss';
+
+    let ck: string;
+    try {
+      ck = d.conversationKey ?? toConversationKey(d.chatJid);
+    } catch {
+      return 'miss';
+    }
+
+    const ts = Math.floor(Date.parse(event.time) / 1000);
+    if (Number.isNaN(ts)) return 'miss';
+
+    try {
+      const result = dbReader.getRecentMessagesByChat(instName, inst.dbPath, ck, d.direction, ts, 1);
+      if (!result.ok) {
+        recordWarning(instName, 'fallback', result.error);
+        return 'error';
+      }
+      if (result.data.length === 0) return 'miss';
+
+      const row = result.data[0];
+      d.preview = sanitizePreview(row.content);
+      d.senderName = d.senderName ?? row.sender_name ?? undefined;
+      d.contentType = d.contentType ?? row.content_type ?? undefined;
+      d.messageId = d.messageId ?? row.message_id ?? undefined;
+      d.conversationKey = d.conversationKey ?? ck;
+      return 'hit';
+    } catch (err) {
+      recordWarning(instName, 'fallback', (err as Error).message);
+      return 'error';
+    }
+  };
+
   for (const [instName, msgEvents] of byInstance) {
     try {
       const inst = instances.get(instName);
       if (!inst) continue;
 
       // 1. Batch lookup by messageId
-      const withIds = msgEvents.filter(e => (e.detail as any).messageId);
-      const ids = withIds.map(e => (e.detail as any).messageId as string);
+      const withIds = msgEvents.filter(e => (e.detail as MessageDetail).messageId);
+      const ids = withIds.map(e => (e.detail as MessageDetail).messageId as string);
       const dbRows = new Map<string, { content: string | null; sender_name: string | null; content_type: string }>();
 
       if (ids.length > 0) {
-        const result = dbReader.getMessagesByIds(instName, inst.dbPath, ids);
-        if (result.ok) {
-          for (const row of result.data) {
-            if (row.message_id) {
-              dbRows.set(row.message_id, { content: row.content, sender_name: row.sender_name, content_type: row.content_type });
+        try {
+          const result = dbReader.getMessagesByIds(instName, inst.dbPath, ids);
+          if (result.ok) {
+            for (const row of result.data) {
+              if (row.message_id) {
+                dbRows.set(row.message_id, { content: row.content, sender_name: row.sender_name, content_type: row.content_type });
+              }
             }
+          } else {
+            recordWarning(instName, 'messageId', result.error);
           }
+        } catch (err) {
+          recordWarning(instName, 'messageId', (err as Error).message);
         }
       }
 
       // 2. Enrich events that matched by messageId
       for (const e of withIds) {
-        const d = e.detail as any;
-        const row = dbRows.get(d.messageId);
+        const d = e.detail as MessageDetail;
+        const row = d.messageId ? dbRows.get(d.messageId) : undefined;
         if (row) {
-          d.preview = row.content ? row.content.trim().slice(0, 120) : undefined;
+          d.preview = sanitizePreview(row.content);
           d.senderName = d.senderName ?? row.sender_name ?? undefined;
           d.contentType = d.contentType ?? row.content_type ?? undefined;
+          observability.previewHits++;
+          continue;
         }
+
+        const fallback = fillFromFallback(instName, inst, e);
+        if (fallback === 'hit') observability.previewFallbackHits++;
+        else if (fallback === 'miss') observability.previewMisses++;
       }
 
       // 3. Fallback for events without messageId
-      const withoutIds = msgEvents.filter(e => !(e.detail as any).messageId);
+      const withoutIds = msgEvents.filter(e => !(e.detail as MessageDetail).messageId);
       for (const e of withoutIds) {
-        const d = e.detail as any;
-        if (!d.chatJid) continue;
-        let ck: string;
-        try { ck = toConversationKey(d.chatJid); } catch { continue; }
-        const ts = Math.floor(Date.parse(e.time) / 1000);
-        if (isNaN(ts)) continue;
-        const result = dbReader.getRecentMessagesByChat(instName, inst.dbPath, ck, d.direction, ts, 1);
-        if (result.ok && result.data.length > 0) {
-          const row = result.data[0];
-          d.preview = row.content ? row.content.trim().slice(0, 120) : undefined;
-          d.senderName = d.senderName ?? row.sender_name ?? undefined;
-          d.contentType = d.contentType ?? row.content_type ?? undefined;
-          d.messageId = d.messageId ?? row.message_id ?? undefined;
+        const fallback = fillFromFallback(instName, inst, e);
+        if (fallback === 'hit') {
+          observability.previewFallbackHits++;
+        } else if (fallback === 'miss') {
+          observability.previewMisses++;
         }
       }
     } catch (err) {
-      log.warn({ err: (err as Error).message, instance: instName }, 'feed: preview enrichment failed for instance');
+      recordWarning(instName, 'instance', (err as Error).message);
     }
   }
+
+  return warnings;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,46 +618,83 @@ export function handleGetFeed(
 
   const instances = deps.discovery.getInstances();
   const events: FeedEvent[] = [];
+  const observability = createFeedObservability();
 
   // 1. Synthesize health-change events from poller status deltas
   events.push(...synthesizeHealthEvents(instances, deps.healthPoller));
 
   // 2. Parse log files for business events
   for (const inst of instances.values()) {
-    const logFile = findLatestLogFile(inst.logDir);
-    if (!logFile) continue;
-    const lines = readTailLines(logFile, 60);
-    for (const line of lines) {
-      const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type });
-      if (result) {
-        events.push(result);
+    try {
+      const logFile = findLatestLogFile(inst.logDir);
+      if (!logFile) continue;
+      const lines = readTailLines(logFile, 60);
+      for (const line of lines) {
+        const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type });
+        if (result) {
+          events.push(result);
+          observability.parsed++;
+        } else {
+          observability.suppressed++;
+        }
       }
+    } catch (err) {
+      log.warn({ err: (err as Error).message, instance: inst.name }, 'feed: log parsing degraded for instance');
     }
   }
 
   // 3. Coalesce connection lifecycle per instance
-  const coalesced = coalesceConnectionEvents(events);
+  let coalesced = events;
+  try {
+    coalesced = coalesceConnectionEvents(events);
+    observability.coalesced = Math.max(0, events.length - coalesced.length);
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'feed: connection coalescing failed');
+  }
 
   // 4. Enrich message events with DB-backed content previews BEFORE collapsing,
   //    so each individual message gets its own preview by messageId.
   //    After collapsing, the merged card carries the last event's preview.
-  enrichMessagePreviews(coalesced, instances, deps.dbReader);
+  const previewWarnings = enrichMessagePreviews(coalesced, instances, deps.dbReader, observability);
 
   // 5. Collapse rapid outbound sends by instance + chatJid
-  const collapsed = collapseOutboundMessages(coalesced);
+  let collapsed = coalesced;
+  try {
+    collapsed = collapseOutboundMessages(coalesced);
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'feed: outbound collapse failed');
+  }
 
   // 6. Deduplicate identical events (messageId-aware)
-  const seen = new Set<string>();
-  const deduped = collapsed.filter(e => {
-    const d = e.detail;
-    const msgId = d?.type === 'message' ? (d as { messageId?: string }).messageId : undefined;
-    const key = msgId
-      ? `msg:${e.instance}|${msgId}`
-      : `${e.text}|${e.time.slice(0, 16)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  let deduped = collapsed;
+  try {
+    const seen = new Set<string>();
+    deduped = collapsed.filter(e => {
+      const d = e.detail;
+      const msgId = d?.type === 'message' ? (d as { messageId?: string }).messageId : undefined;
+      const key = msgId
+        ? `msg:${e.instance}|${msgId}`
+        : `${e.text}|${e.time.slice(0, 16)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    observability.deduped = Math.max(0, collapsed.length - deduped.length);
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'feed: dedupe failed');
+  }
+
+  if (previewWarnings.length > 0) {
+    log.warn(
+      {
+        previewWarnings,
+        stats: observability,
+      },
+      'feed: preview enrichment partially failed',
+    );
+  } else if (observability.previewFallbackHits > 0 || observability.suppressed > 0) {
+    log.debug({ stats: observability }, 'feed: request summary');
+  }
 
   // 6. Sort descending by time, take the first `limit`
   deduped.sort((a, b) => (a.time > b.time ? -1 : a.time < b.time ? 1 : 0));

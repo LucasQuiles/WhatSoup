@@ -37,6 +37,11 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
+vi.mock('../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(),
+  clearAlertSource: vi.fn(),
+}));
+
 // Mock sendTracked so tests don't attempt real sends
 vi.mock('../../src/core/durability.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/core/durability.ts')>();
@@ -53,6 +58,7 @@ vi.mock('../../src/core/durability.ts', async (importOriginal) => {
 import { Database } from '../../src/core/database.ts';
 import type { Messenger } from '../../src/core/types.ts';
 import { sendTracked } from '../../src/core/durability.ts';
+import { emitAlert } from '../../src/lib/emit-alert.ts';
 import {
   emitHealReport,
   handleHealComplete,
@@ -383,6 +389,36 @@ describe('checkGlobalValve', () => {
     }
 
     expect(checkGlobalValve(db)).toBe(false);
+  });
+
+  it('emits an operational alert when the global valve suppresses a new report', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    for (let i = 0; i < 5; i++) {
+      const id = emitHealReport(db, messenger, null, {
+        type: 'crash',
+        stderr: `UniqueError_${randomUUID().slice(0, 8)}: valve fill ${i}`,
+      });
+      expect(id).not.toBeNull();
+    }
+
+    vi.mocked(sendTracked).mockClear();
+
+    const sixth = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      stderr: 'ValveTripError: sixth attempt',
+    });
+
+    expect(sixth).toBeNull();
+    expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'WhatSoup',
+      'heal_repeated_failures',
+      expect.stringContaining('heal valve'),
+      expect.stringContaining('ValveTripError'),
+    );
   });
 
   it('does not count queued reports toward the valve limit', () => {

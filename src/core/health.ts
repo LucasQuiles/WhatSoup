@@ -10,6 +10,7 @@ import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
 import type { Runtime } from '../runtimes/types.ts';
+import type { ConnectionStateSnapshot } from '../transport/connection.ts';
 
 const log = createChildLogger('health');
 
@@ -50,6 +51,24 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
 }
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
+
+function getConnectionState(connectionManager: HealthDeps['connectionManager']): ConnectionStateSnapshot {
+  if (typeof (connectionManager as { getConnectionState?: unknown }).getConnectionState === 'function') {
+    return (connectionManager as { getConnectionState: () => ConnectionStateSnapshot }).getConnectionState();
+  }
+
+  const connected = connectionManager.botJid !== null;
+  return {
+    state: connected ? 'connected' : 'disconnected',
+    connected,
+    reconnectAttempts: 0,
+    reconnectPhase: null,
+    stateChangedAt: new Date().toISOString(),
+    firstFailureAt: null,
+    lastPingAt: null,
+    lastPongAt: null,
+  };
+}
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -296,8 +315,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     try {
       const enrichmentStats = deps.getEnrichmentStats();
+      const connectionState = getConnectionState(deps.connectionManager);
 
-      const isConnected = deps.connectionManager.botJid !== null;
+      const isConnected = connectionState.connected;
+      const isRecoveringConnection =
+        connectionState.state === 'connecting'
+        || connectionState.state === 'reconnecting'
+        || connectionState.state === 'cooldown';
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
@@ -308,7 +332,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const enrichmentIsStale = enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS;
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (!isConnected) {
-        status = 'unhealthy';
+        status = isRecoveringConnection ? 'degraded' : 'unhealthy';
       } else if (enrichmentIsStale || enrichmentStats.runtimeDegraded) {
         status = 'degraded';
       } else {
@@ -359,6 +383,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         whatsapp: {
           connected: isConnected,
           account_jid: deps.connectionManager.botJid ?? 'not connected',
+          connection: {
+            state: connectionState.state,
+            changed_at: connectionState.stateChangedAt,
+            reconnect_attempts: connectionState.reconnectAttempts,
+            reconnect_phase: connectionState.reconnectPhase,
+            first_failure_at: connectionState.firstFailureAt,
+            last_ping_at: connectionState.lastPingAt,
+            last_pong_at: connectionState.lastPongAt,
+          },
         },
         sqlite: {
           messages_total: messagesTotal,
@@ -380,9 +413,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         runtime: runtimeBlock,
       });
 
-      // 'degraded' returns 200: enrichment staleness is a warning, not a
-      // service outage. Callers check the JSON body for "status":"degraded".
-      // Only 'unhealthy' (WhatsApp disconnected) warrants a 503.
+      // 'degraded' returns 200: enrichment staleness and active reconnect/cooldown
+      // are warnings, not hard outages. Callers inspect the JSON body for detail.
+      // Only a fully disconnected/non-recovering state warrants a 503.
       const httpStatus = status === 'unhealthy' ? 503 : 200;
       res.writeHead(httpStatus, { 'Content-Type': 'application/json' });
       res.end(body);

@@ -3,6 +3,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import { emitAlert } from '../lib/emit-alert.ts';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
@@ -79,7 +80,20 @@ export function emitHealReport(
   const valveCount = getGlobalValveCount(db);
   if (valveCount >= GLOBAL_VALVE_LIMIT) {
     log.warn({ sendsThisHour: valveCount }, 'global heal valve triggered');
-    // TODO: send admin notification
+    emitAlert(
+      config.botName,
+      'heal_repeated_failures',
+      `whatsoup@${config.botName} heal valve triggered after ${valveCount} repair reports this hour`,
+      [
+        `type=${data.type}`,
+        `error_class=${errorClass}`,
+        data.chatJid ? `chat_jid=${data.chatJid}` : null,
+        data.exitCode !== undefined ? `exit_code=${data.exitCode}` : null,
+        data.signal ? `signal=${data.signal}` : null,
+        data.stderr ? `stderr=${data.stderr}` : null,
+        data.recentLogs ? `recent_logs=${data.recentLogs}` : null,
+      ].filter(Boolean).join('\n'),
+    );
     return null;
   }
 

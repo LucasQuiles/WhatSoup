@@ -186,6 +186,45 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('returns 200 with degraded status and connection state while reconnecting', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'reconnecting',
+          connected: false,
+          reconnectAttempts: 3,
+          reconnectPhase: 'retry',
+          lastPingAt: '2026-04-05T12:00:00.000Z',
+          lastPongAt: '2026-04-05T11:59:30.000Z',
+        }),
+      },
+    } as any);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.whatsapp.connected).toBe(false);
+    expect(json.whatsapp.connection).toMatchObject({
+      state: 'reconnecting',
+      reconnect_attempts: 3,
+      reconnect_phase: 'retry',
+      last_ping_at: '2026-04-05T12:00:00.000Z',
+      last_pong_at: '2026-04-05T11:59:30.000Z',
+    });
+    db2.close();
+  });
+
   it('returns 404 for unknown routes', async () => {
     const { status } = await httpReq(port, '/unknown', 'GET');
     expect(status).toBe(404);
