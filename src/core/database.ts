@@ -475,6 +475,17 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
         WHERE status IN ('pending', 'processing');
     `);
   }],
+  [15, (db: DatabaseSync) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metrics_hourly (
+        bucket TEXT NOT NULL,
+        metric TEXT NOT NULL,
+        value REAL NOT NULL,
+        PRIMARY KEY (bucket, metric)
+      );
+      CREATE INDEX IF NOT EXISTS idx_metrics_hourly_bucket ON metrics_hourly(bucket);
+    `);
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

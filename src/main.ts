@@ -37,6 +37,7 @@ import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
 import { MessageScheduler } from './core/scheduler.ts';
+import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -573,7 +574,20 @@ const startupCleanupTimeout = setTimeout(() => {
   } catch (err) { log.error({ err }, 'startup cleanup failed'); }
 }, 60_000);
 
-// 10. Daily retention + hourly rate limit cleanup
+// 10. Metrics backfill + hourly aggregation (piggybacks on enrichment cadence)
+const metricsBackfillTimeout = setTimeout(() => {
+  try {
+    backfillMetrics(db);
+  } catch (err) { log.error({ err }, 'metrics backfill failed'); }
+}, 5_000);
+
+const metricsInterval = setInterval(() => {
+  try {
+    collectHourlyMetrics(db);
+  } catch (err) { log.error({ err }, 'metrics collection failed'); }
+}, config.enrichmentIntervalMs);
+
+// 11. Daily retention + hourly rate limit cleanup
 const retentionInterval = setInterval(() => {
   try {
     const deleted = deleteOldMessages(db, config.retentionDays);
@@ -583,7 +597,7 @@ const retentionInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
 }, 24 * 60 * 60 * 1000);
 
-// 11. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories (SP7)
+// 12. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories (SP7)
 // config.mediaDir resolves to .../media/tmp; base is one level up
 const mediaBaseDir = join(config.mediaDir, '..');
 const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
@@ -593,14 +607,14 @@ const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
 });
 mediaRetentionTimer.start(config.mediaRetention.intervalHours * 60 * 60 * 1000);
 
-// 12. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
+// 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
 const echoTimeoutInterval = setInterval(() => {
   try {
     durability.sweepStaleSubmitted();
   } catch (err) { log.error({ err }, 'echo timeout sweep failed'); }
 }, 10_000);
 
-// 12. Degradation signal check — detect persistent decryption failures (Type 2)
+// 14. Degradation signal check — detect persistent decryption failures (Type 2)
 // Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
 // Q itself has controlPeers but no 'q' entry — running the timer on Q would accumulate
 // local heal_reports rows and consume valve/single-flight state for no operational benefit.
@@ -614,7 +628,7 @@ const degradationInterval = config.controlPeers.has('q') ? setInterval(() => {
   } catch (err) { log.error({ err }, 'degradation signal check failed'); }
 }, 60_000) : null;
 
-// 13. L6: Periodic LID reconciliation — re-reads auth dir + finds unresolved LIDs
+// 15. L6: Periodic LID reconciliation — re-reads auth dir + finds unresolved LIDs
 const lidReconcileInterval = setInterval(() => {
   try {
     const result = reconcileLidMappings(db, config.authDir);
@@ -629,7 +643,7 @@ const lidReconcileInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'L6: LID reconciliation failed'); }
 }, 30 * 60 * 1000); // every 30 minutes
 
-// 15. Message scheduler (SP11)
+// 16. Message scheduler (SP11)
 const messageScheduler = new MessageScheduler(db, connectionManager, {
   intervalMs: 60_000,   // check every minute
   maxRetries: 3,
@@ -637,7 +651,7 @@ const messageScheduler = new MessageScheduler(db, connectionManager, {
 messageScheduler.recoverStale();
 messageScheduler.start();
 
-// 14. Seed contacts directory from message history (so @name mentions work after restart)
+// 17. Seed contacts directory from message history (so @name mentions work after restart)
 {
   // Inject DB into contacts directory so LID→phone resolution works for @mentions
   connectionManager.contactsDir.setDatabase(db);
@@ -733,6 +747,8 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     clearTimeout(startupCleanupTimeout);
+    clearTimeout(metricsBackfillTimeout);
+    clearInterval(metricsInterval);
     clearInterval(retentionInterval);
     mediaRetentionTimer.stop();
     clearInterval(echoTimeoutInterval);
