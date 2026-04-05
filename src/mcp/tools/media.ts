@@ -7,7 +7,7 @@ import { extname } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
-import { updateMediaPath } from '../../core/messages.ts';
+import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
@@ -295,26 +295,8 @@ export function registerMediaTools(
         return { error: 'download_failed', message: 'Media download failed. The URL may have expired or the file exceeds the 25MB limit.' };
       }
 
-      // MIME-to-extension map for deriving the correct file extension from actual MIME type
-      const MIME_TO_EXT: Record<string, string> = {
-        'image/jpeg':  'jpg',
-        'image/png':   'png',
-        'image/gif':   'gif',
-        'image/webp':  'webp',
-        'image/heic':  'heic',
-        'image/heif':  'heif',
-        'audio/ogg':   'ogg',
-        'audio/mpeg':  'mp3',
-        'audio/mp4':   'm4a',
-        'audio/wav':   'wav',
-        'video/mp4':   'mp4',
-        'video/webm':  'webm',
-        'application/pdf': 'pdf',
-      };
-
-      // Determine file extension — derive from actual MIME type when possible,
-      // fall back to the content-type default; for documents, prefer original filename.
-      let ext = MIME_TO_EXT[result.mimeType] ?? typeInfo.ext;
+      // Determine file extension — for documents, try original filename
+      let ext = typeInfo.ext;
       if (row.content_type === 'document') {
         const docMsg = (rawMsg as any)?.message?.documentMessage
           ?? (rawMsg as any)?.message?.documentWithCaptionMessage?.message?.documentMessage;
@@ -336,6 +318,134 @@ export function registerMediaTools(
         mime_type: result.mimeType,
         file_size: result.buffer.length,
         content_type: row.content_type,
+        cached: false,
+      };
+    },
+  });
+
+  // ── transcribe_audio ─────────────────────────────────────────────────────────
+
+  registry.register({
+    name: 'transcribe_audio',
+    description:
+      'Transcribe an audio/voice message using Whisper. Downloads the audio if needed, transcribes it, and persists the transcription. Returns cached transcription if already transcribed.',
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    schema: z.object({
+      message_id: z.string().describe('The audio message ID to transcribe'),
+    }),
+    handler: async (params) => {
+      const messageId = params['message_id'] as string;
+
+      // Look up the message
+      const row = db.raw.prepare(
+        'SELECT message_id, content_type, content, content_text, media_path, raw_message FROM messages WHERE message_id = ?',
+      ).get(messageId) as {
+        message_id: string;
+        content_type: string;
+        content: string | null;
+        content_text: string | null;
+        media_path: string | null;
+        raw_message: string | null;
+      } | undefined;
+
+      if (!row) {
+        return { error: 'not_found', message: `No message found with ID: ${messageId}` };
+      }
+
+      if (row.content_type !== 'audio') {
+        return { error: 'not_audio', message: `Message is type "${row.content_type}", not audio.` };
+      }
+
+      // Check for cached transcription in content_text
+      if (row.content_text && row.content_text.length > 0) {
+        if (!row.content_text.includes('transcription unavailable')) {
+          return { transcription: row.content_text, cached: true };
+        }
+      }
+
+      // Also check structured content for existing transcription
+      if (row.content) {
+        try {
+          const parsed = JSON.parse(row.content);
+          if (parsed.transcription && !parsed.transcription.includes('transcription unavailable')) {
+            return { transcription: parsed.transcription, cached: true };
+          }
+        } catch { /* not JSON, continue */ }
+      }
+
+      // Need audio data — try media_path first, then download_media fallback
+      let audioBuffer: Buffer | null = null;
+      let audioMime = 'audio/ogg';
+
+      if (row.media_path && existsSync(row.media_path)) {
+        audioBuffer = readFileSync(row.media_path) as unknown as Buffer;
+        const ext = row.media_path.split('.').pop()?.toLowerCase();
+        if (ext === 'mp3') audioMime = 'audio/mpeg';
+        else if (ext === 'm4a') audioMime = 'audio/mp4';
+        else if (ext === 'wav') audioMime = 'audio/wav';
+        else if (ext === 'webm') audioMime = 'audio/webm';
+      } else if (row.raw_message) {
+        let rawMsg: unknown;
+        try {
+          rawMsg = JSON.parse(row.raw_message);
+        } catch {
+          return { error: 'no_audio_data', message: 'Cannot parse raw message data for audio download.' };
+        }
+
+        const mime = extractRawMime(rawMsg, 'audio') ?? 'audio/ogg';
+
+        const downloadFn = async (): Promise<Buffer> => {
+          const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+          return downloadMediaMessage(rawMsg as any, 'buffer', {}) as Promise<Buffer>;
+        };
+
+        try {
+          const result = await coreDownloadMedia(downloadFn, mime);
+          if (result) {
+            audioBuffer = result.buffer;
+            audioMime = result.mimeType;
+
+            // Save to disk and persist path
+            const ext = mime.includes('ogg') ? 'ogg' : mime.includes('mp4') ? 'm4a' : 'webm';
+            const filePath = writeTempFile(result.buffer, ext);
+            updateMediaPath(db, messageId, filePath);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (/404|410|gone|expired/i.test(msg)) {
+            return { error: 'media_expired', message: 'Audio media URL has expired.' };
+          }
+          return { error: 'download_failed', message: 'Failed to download audio for transcription.' };
+        }
+      }
+
+      if (!audioBuffer) {
+        return { error: 'no_audio_data', message: 'No audio data available. Media path missing and raw message unavailable.' };
+      }
+
+      // Transcribe via Whisper
+      const { transcribeAudio } = await import('../../runtimes/chat/providers/whisper.ts');
+      const transcription = await transcribeAudio(audioBuffer, audioMime);
+
+      if (!transcription || transcription.includes('transcription unavailable')) {
+        return { error: 'transcription_failed', message: 'Whisper transcription failed or is unavailable.' };
+      }
+
+      // Persist transcription
+      updateTranscription(db, messageId, transcription);
+
+      // Extract duration from structured content if available
+      let duration: number | null = null;
+      try {
+        const parsed = JSON.parse(row.content || '{}');
+        duration = parsed.duration ?? null;
+      } catch { /* ignore */ }
+
+      return {
+        transcription,
+        duration,
         cached: false,
       };
     },

@@ -113,27 +113,30 @@ describe('parseIncomingMessage — positive cases', () => {
     expect(result!.contentType).toBe('image');
   });
 
-  it('location with address → content=address, contentType=location', () => {
+  it('location with address → content=JSON, contentType=location', () => {
     const msg = msgWith({ locationMessage: { address: '123 Main St', degreesLatitude: 40.7, degreesLongitude: -74.0 } });
     const result = parseIncomingMessage(msg);
     expect(result).not.toBeNull();
-    expect(result!.content).toBe('123 Main St');
+    const parsed = JSON.parse(result!.content!);
+    expect(parsed.address).toBe('123 Main St');
     expect(result!.contentType).toBe('location');
   });
 
-  it('contact → content=displayName, contentType=contact', () => {
+  it('contact → content=JSON, contentType=contact', () => {
     const msg = msgWith({ contactMessage: { displayName: 'Bob Smith', vcard: 'BEGIN:VCARD\nEND:VCARD' } });
     const result = parseIncomingMessage(msg);
     expect(result).not.toBeNull();
-    expect(result!.content).toBe('Bob Smith');
+    const parsed = JSON.parse(result!.content!);
+    expect(parsed.displayName).toBe('Bob Smith');
     expect(result!.contentType).toBe('contact');
   });
 
-  it('poll creation → content=name, contentType=poll', () => {
+  it('poll creation → content=JSON, contentType=poll', () => {
     const msg = msgWith({ pollCreationMessage: { name: 'Favourite color?', options: [] } });
     const result = parseIncomingMessage(msg);
     expect(result).not.toBeNull();
-    expect(result!.content).toBe('Favourite color?');
+    const parsed = JSON.parse(result!.content!);
+    expect(parsed.name).toBe('Favourite color?');
     expect(result!.contentType).toBe('poll');
   });
 
@@ -242,11 +245,12 @@ describe('parseIncomingMessage — negative cases', () => {
     expect(result!.isResponseWorthy).toBe(false);
   });
 
-  it('audio with null content → isResponseWorthy=true (media processed via pipeline)', () => {
+  it('audio with JSON content → isResponseWorthy=true (media processed via pipeline)', () => {
     const msg = msgWith({ audioMessage: { mimeType: 'audio/ogg' } });
     const result = parseIncomingMessage(msg);
     expect(result).not.toBeNull();
-    expect(result!.content).toBeNull();
+    expect(result!.content).not.toBeNull();
+    expect(JSON.parse(result!.content!).type).toBe('audio');
     expect(result!.contentType).toBe('audio');
     expect(result!.isResponseWorthy).toBe(true);
   });
@@ -339,5 +343,261 @@ describe('unwrapMessage', () => {
     expect(result).not.toBeNull();
     expect(result!.content).toBe('ephemeral content');
     expect(result!.contentType).toBe('text');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SP2: Structured content extraction
+// ---------------------------------------------------------------------------
+
+describe('parseIncomingMessage — structured content (SP2)', () => {
+  it('location: content is JSON with lat/lng, contentText is human summary', () => {
+    const msg = msgWith({
+      locationMessage: {
+        degreesLatitude: 40.7128,
+        degreesLongitude: -74.006,
+        name: 'New York',
+        address: '123 Broadway',
+        url: 'https://maps.google.com/...',
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('location');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('location');
+    expect(parsed.latitude).toBe(40.7128);
+    expect(parsed.longitude).toBe(-74.006);
+    expect(parsed.name).toBe('New York');
+    expect(parsed.address).toBe('123 Broadway');
+    expect(result.contentText).toContain('Location');
+    expect(result.contentText).toContain('New York');
+    expect(result.contentText).toContain('40.7128');
+  });
+
+  it('location without name: falls back to address in contentText', () => {
+    const msg = msgWith({
+      locationMessage: {
+        degreesLatitude: 51.5,
+        degreesLongitude: -0.12,
+        address: '10 Downing St',
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentText).toContain('10 Downing St');
+  });
+
+  it('contact: content is JSON with vcard, contentText is display name', () => {
+    const msg = msgWith({
+      contactMessage: {
+        displayName: 'Bob Smith',
+        vcard: 'BEGIN:VCARD\nFN:Bob Smith\nTEL:+1234567890\nEND:VCARD',
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('contact');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('contact');
+    expect(parsed.displayName).toBe('Bob Smith');
+    expect(parsed.vcard).toContain('BEGIN:VCARD');
+    expect(result.contentText).toBe('Contact: Bob Smith');
+  });
+
+  it('contactsArray: content is JSON array, contentText lists names', () => {
+    const msg = msgWith({
+      contactsArrayMessage: {
+        contacts: [
+          { displayName: 'Alice', vcard: 'BEGIN:VCARD\nFN:Alice\nEND:VCARD' },
+          { displayName: 'Bob', vcard: 'BEGIN:VCARD\nFN:Bob\nEND:VCARD' },
+        ],
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('contact');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('contacts');
+    expect(parsed.contacts).toHaveLength(2);
+    expect(result.contentText).toContain('Alice');
+    expect(result.contentText).toContain('Bob');
+  });
+
+  it('poll: content is JSON with options, contentText is poll summary', () => {
+    const msg = msgWith({
+      pollCreationMessage: {
+        name: 'Favourite color?',
+        options: [
+          { optionName: 'Red' },
+          { optionName: 'Blue' },
+          { optionName: 'Green' },
+        ],
+        selectableOptionCount: 1,
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('poll');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('poll');
+    expect(parsed.name).toBe('Favourite color?');
+    expect(parsed.options).toEqual(['Red', 'Blue', 'Green']);
+    expect(parsed.selectableCount).toBe(1);
+    expect(result.contentText).toContain('Poll');
+    expect(result.contentText).toContain('Favourite color?');
+    expect(result.contentText).toContain('3 options');
+  });
+
+  it('audio: content is JSON with duration/ptt, contentText is null (filled by Whisper later)', () => {
+    const msg = msgWith({
+      audioMessage: {
+        seconds: 15,
+        ptt: true,
+        mimetype: 'audio/ogg; codecs=opus',
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('audio');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('audio');
+    expect(parsed.duration).toBe(15);
+    expect(parsed.ptt).toBe(true);
+    expect(parsed.transcription).toBeNull();
+    expect(result.contentText).toBeNull();
+  });
+
+  it('video with caption: content preserves caption, contentText is caption', () => {
+    const msg = msgWith({
+      videoMessage: {
+        caption: 'Check this out',
+        seconds: 30,
+        width: 1920,
+        height: 1080,
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('video');
+    expect(result.content).toBe('Check this out');
+    expect(result.contentText).toBe('Check this out');
+  });
+
+  it('video without caption: content is JSON metadata, contentText is duration summary', () => {
+    const msg = msgWith({
+      videoMessage: {
+        seconds: 45,
+        width: 1280,
+        height: 720,
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('video');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('video');
+    expect(parsed.duration).toBe(45);
+    expect(result.contentText).toContain('Video');
+    expect(result.contentText).toContain('45');
+  });
+
+  it('document with caption: content preserves caption, contentText is caption', () => {
+    const msg = msgWith({
+      documentMessage: {
+        caption: 'Here is the report',
+        fileName: 'report.pdf',
+        mimetype: 'application/pdf',
+        pageCount: 5,
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('document');
+    expect(result.content).toBe('Here is the report');
+    expect(result.contentText).toBe('Here is the report');
+  });
+
+  it('document without caption: content is JSON metadata, contentText is filename summary', () => {
+    const msg = msgWith({
+      documentMessage: {
+        fileName: 'data.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('document');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('document');
+    expect(parsed.fileName).toBe('data.xlsx');
+    expect(result.contentText).toContain('Document');
+    expect(result.contentText).toContain('data.xlsx');
+  });
+
+  it('sticker: content is JSON with emoji, contentText is emoji summary', () => {
+    const msg = msgWith({
+      stickerMessage: {
+        mimetype: 'image/webp',
+        isAnimated: false,
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('sticker');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('sticker');
+    expect(result.contentText).toBe('Sticker');
+  });
+
+  it('sticker with emoji association: contentText includes emoji', () => {
+    const msg = msgWith({
+      stickerMessage: {
+        mimetype: 'image/webp',
+        isAnimated: true,
+        associatedEmoji: '\u{1F602}',
+      },
+    });
+    const innerMsg = msg.message.stickerMessage;
+    innerMsg.emoji = innerMsg.associatedEmoji;
+    const result = parseIncomingMessage(msg)!;
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.emoji).toBeTruthy();
+  });
+
+  it('liveLocation: content is JSON with lat/lng/speed, contentText is summary', () => {
+    const msg = msgWith({
+      liveLocationMessage: {
+        degreesLatitude: 37.7749,
+        degreesLongitude: -122.4194,
+        speedInMps: 5.2,
+        sequenceNumber: 3,
+      },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('location');
+    const parsed = JSON.parse(result.content!);
+    expect(parsed.type).toBe('liveLocation');
+    expect(parsed.latitude).toBe(37.7749);
+    expect(parsed.speed).toBe(5.2);
+    expect(result.contentText).toContain('Live location');
+    expect(result.contentText).toContain('37.7749');
+  });
+
+  it('image with caption: content preserves caption, contentText is caption', () => {
+    const msg = msgWith({
+      imageMessage: { caption: 'Beach sunset', mimeType: 'image/jpeg' },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('image');
+    expect(result.content).toBe('Beach sunset');
+    expect(result.contentText).toBe('Beach sunset');
+  });
+
+  it('image without caption: content is null, contentText is null', () => {
+    const msg = msgWith({
+      imageMessage: { mimeType: 'image/jpeg' },
+    });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('image');
+    expect(result.content).toBeNull();
+    expect(result.contentText).toBeNull();
+  });
+
+  it('plain text: contentText is null (content IS the readable text)', () => {
+    const msg = msgWith({ conversation: 'Hello world' });
+    const result = parseIncomingMessage(msg)!;
+    expect(result.contentType).toBe('text');
+    expect(result.content).toBe('Hello world');
+    expect(result.contentText).toBeNull();
   });
 });

@@ -31,7 +31,7 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
-import { getRecentMessages, updateMediaPath } from '../../core/messages.ts';
+import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
@@ -148,6 +148,16 @@ export async function prepareContentForAgent(msg: IncomingMessage, db?: Database
     case 'audio': {
       const { transcribeAudio } = await import('../chat/providers/whisper.ts');
       const transcript = await transcribeAudio(result.buffer, result.mimeType);
+
+      // Persist transcription to DB for MCP access and FTS search
+      if (db && messageId && transcript && !transcript.includes('transcription unavailable')) {
+        try {
+          updateTranscription(db, messageId, transcript);
+        } catch (err) {
+          createChildLogger('agent:transcription').warn({ err, messageId }, 'Failed to persist transcription');
+        }
+      }
+
       return `[Voice note transcription]: ${transcript}\n[Audio file: ${filePath}]`;
     }
     case 'image':

@@ -1174,37 +1174,127 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   // --- Content extraction ---
   let content: string | null = null;
+  let contentText: string | null = null;
   let contentType: import('../core/types.ts').ContentType = 'unknown';
 
   if (innerMessage.conversation) {
     content = innerMessage.conversation;
+    contentText = null;
     contentType = 'text';
   } else if (innerMessage.extendedTextMessage?.text) {
     content = innerMessage.extendedTextMessage.text;
+    contentText = null;
     contentType = 'text';
   } else if (innerMessage.imageMessage) {
-    content = innerMessage.imageMessage.caption ?? null;
+    const caption = innerMessage.imageMessage.caption ?? null;
+    content = caption;
+    contentText = caption;
     contentType = 'image';
   } else if (innerMessage.videoMessage) {
-    content = innerMessage.videoMessage.caption ?? null;
+    const caption = innerMessage.videoMessage.caption ?? null;
+    const vm = innerMessage.videoMessage;
+    if (caption) {
+      content = caption;
+      contentText = caption;
+    } else {
+      content = JSON.stringify({
+        type: 'video',
+        duration: vm.seconds ?? null,
+        width: vm.width ?? null,
+        height: vm.height ?? null,
+      });
+      contentText = `Video: ${vm.seconds ?? '?'}s`;
+    }
     contentType = 'video';
   } else if (innerMessage.documentMessage) {
-    content = innerMessage.documentMessage.caption ?? innerMessage.documentMessage.fileName ?? null;
+    const dm = innerMessage.documentMessage;
+    const caption = dm.caption ?? null;
+    if (caption) {
+      content = caption;
+      contentText = caption;
+    } else {
+      content = JSON.stringify({
+        type: 'document',
+        fileName: dm.fileName ?? null,
+        mimetype: dm.mimetype ?? null,
+        pageCount: dm.pageCount ?? null,
+      });
+      contentText = `Document: ${dm.fileName ?? 'file'}`;
+    }
     contentType = 'document';
   } else if (innerMessage.audioMessage) {
-    content = null;
+    const am = innerMessage.audioMessage;
+    content = JSON.stringify({
+      type: 'audio',
+      duration: am.seconds ?? null,
+      ptt: am.ptt ?? false,
+      transcription: null,
+    });
+    contentText = null;
     contentType = 'audio';
   } else if (innerMessage.stickerMessage) {
-    content = null;
+    const sm = innerMessage.stickerMessage;
+    const emoji = (sm as any).emoji ?? (sm as any).associatedEmoji ?? null;
+    content = JSON.stringify({
+      type: 'sticker',
+      emoji,
+      isAnimated: sm.isAnimated ?? false,
+    });
+    contentText = emoji ? `Sticker: ${emoji}` : 'Sticker';
     contentType = 'sticker';
   } else if (innerMessage.locationMessage) {
-    content = innerMessage.locationMessage.address ?? null;
+    const lm = innerMessage.locationMessage;
+    content = JSON.stringify({
+      type: 'location',
+      latitude: lm.degreesLatitude ?? null,
+      longitude: lm.degreesLongitude ?? null,
+      name: lm.name ?? null,
+      address: lm.address ?? null,
+      url: lm.url ?? null,
+    });
+    contentText = `Location: ${lm.name || lm.address || 'shared'} (${lm.degreesLatitude}, ${lm.degreesLongitude})`;
+    contentType = 'location';
+  } else if (innerMessage.liveLocationMessage) {
+    const ll = innerMessage.liveLocationMessage;
+    content = JSON.stringify({
+      type: 'liveLocation',
+      latitude: ll.degreesLatitude ?? null,
+      longitude: ll.degreesLongitude ?? null,
+      speed: ll.speedInMps ?? null,
+      sequence: ll.sequenceNumber ?? null,
+    });
+    contentText = `Live location: (${ll.degreesLatitude}, ${ll.degreesLongitude})`;
     contentType = 'location';
   } else if (innerMessage.contactMessage) {
-    content = innerMessage.contactMessage.displayName ?? null;
+    const cm = innerMessage.contactMessage;
+    content = JSON.stringify({
+      type: 'contact',
+      displayName: cm.displayName ?? null,
+      vcard: cm.vcard ?? null,
+    });
+    contentText = `Contact: ${cm.displayName ?? 'Unknown'}`;
+    contentType = 'contact';
+  } else if (innerMessage.contactsArrayMessage) {
+    const contacts = (innerMessage.contactsArrayMessage.contacts ?? []).map((c: any) => ({
+      displayName: c.displayName ?? null,
+      vcard: c.vcard ?? null,
+    }));
+    content = JSON.stringify({
+      type: 'contacts',
+      contacts,
+    });
+    contentText = `Contacts: ${contacts.map((c: any) => c.displayName).join(', ')}`;
     contentType = 'contact';
   } else if (innerMessage.pollCreationMessage) {
-    content = innerMessage.pollCreationMessage.name ?? null;
+    const pm = innerMessage.pollCreationMessage;
+    const options = (pm.options ?? []).map((o: any) => o.optionName);
+    content = JSON.stringify({
+      type: 'poll',
+      name: pm.name ?? null,
+      options,
+      selectableCount: pm.selectableOptionCount ?? null,
+    });
+    contentText = `Poll: ${pm.name ?? 'Unnamed'} — ${options.length} options`;
     contentType = 'poll';
   }
 
@@ -1268,7 +1358,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     senderJid,
     senderName,
     content,
-    contentText: null, // SP2: will be set by parseIncomingMessage rewrite in Task 4
+    contentText,
     contentType,
     isFromMe: msg.key.fromMe ?? false,
     isGroup: isJidGroup(msg.key.remoteJid!) ?? false,

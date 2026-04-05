@@ -439,7 +439,7 @@ describe('download_media', () => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection, db };
+    deps = { connection, db: db };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);
@@ -556,5 +556,106 @@ describe('download_media', () => {
     const body = JSON.parse(result.content[0].text);
     // Download will fail because the URL is fake — should get media_expired or download_failed
     expect(['media_expired', 'download_failed', 'download_timeout']).toContain(body.error);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// transcribe_audio
+// ---------------------------------------------------------------------------
+
+describe('transcribe_audio', () => {
+  let registry: ToolRegistry;
+  let connection: ReturnType<typeof makeConnection>;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let testDb: Database;
+  let deps: MediaDeps;
+
+  beforeEach(() => {
+    testDb = new Database(':memory:');
+    testDb.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db: testDb };
+    registerMediaTools(registry, deps);
+  });
+
+  afterEach(() => {
+    testDb.close();
+  });
+
+  function insertAudioMessage(
+    messageId: string,
+    opts: { mediaPath?: string; content?: string } = {},
+  ): void {
+    testDb.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type,
+        content, is_from_me, timestamp, media_path)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, 'audio', ?, 0, 1700000000, ?)
+    `).run(
+      messageId,
+      opts.content ?? JSON.stringify({ type: 'audio', duration: 10, ptt: true, transcription: null }),
+      opts.mediaPath ?? null,
+    );
+  }
+
+  it('returns error for non-audio message', async () => {
+    testDb.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', 'msg-image', 'image', 0, 1700000000)
+    `).run();
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-image' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('not_audio');
+  });
+
+  it('returns error for unknown message_id', async () => {
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'nonexistent' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('not_found');
+  });
+
+  it('returns cached transcription if already transcribed', async () => {
+    insertAudioMessage('msg-transcribed', {
+      content: JSON.stringify({ type: 'audio', duration: 5, ptt: true, transcription: 'Already done' }),
+    });
+
+    // Set content_text too
+    testDb.raw.prepare('UPDATE messages SET content_text = ? WHERE message_id = ?')
+      .run('Already done', 'msg-transcribed');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-transcribed' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('Already done');
+    expect(body.cached).toBe(true);
+  });
+
+  it('returns error when no media_path and no raw_message', async () => {
+    insertAudioMessage('msg-no-media');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-no-media' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBeTruthy();
   });
 });
