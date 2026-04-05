@@ -457,6 +457,24 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       END;
     `);
   }],
+  [14, (db: DatabaseSync) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS scheduled_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_jid TEXT NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'text',
+        payload TEXT NOT NULL,
+        scheduled_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        sent_at INTEGER,
+        error TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_scheduled_pending ON scheduled_messages(status, scheduled_at)
+        WHERE status IN ('pending', 'processing');
+    `);
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
