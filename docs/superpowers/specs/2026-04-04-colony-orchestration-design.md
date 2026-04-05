@@ -978,13 +978,28 @@ suggested_actions: TEXT (JSON array)
 promotion_state:  TEXT NOT NULL DEFAULT 'open' CHECK (promotion_state IN 
                   ('open','promoted','deferred','suppressed','merged','escalated','archived'))
 suppression_reason: TEXT (nullable — required when suppressed or deferred)
+salience:         REAL NOT NULL DEFAULT 1.0 CHECK (salience BETWEEN 0.0 AND 1.0)
 created_at:       TEXT NOT NULL
 updated_at:       TEXT NOT NULL
 resolved_at:      TEXT
 schema_version:   INTEGER NOT NULL DEFAULT 1
 ```
 
-### 11.4 Migration Strategy
+### 11.4 Write Serialization Strategy
+
+SQLite WAL allows one writer at a time. With Deacon, Bridge, and BRIC all writing to events.db, contention is inevitable under load. The mitigation strategy:
+
+**events.db writes are funneled through the Deacon process.** Other components do not write directly to events.db. Instead:
+- Bridge emits events to a JSONL append file (`events-inbox.jsonl`) — atomic append, no lock contention
+- BRIC writes enrichment results to a JSONL append file (`enrichment-inbox.jsonl`)
+- The Deacon's maintenance loop (every 60s) batch-ingests from both inbox files into events.db as a single writer
+- High-value events that need immediate visibility (bead_completed, bead_failed) are written by the Deacon directly when it detects them via inotifywait on tmup.db
+
+**tmup.db contention is managed by existing WAL + busy_timeout=8000.** This is acceptable because tmup writes are short (single-row INSERT/UPDATE) and the existing 8-agent concurrency model has been tested with 698 tests.
+
+**Fallback:** If events.db becomes locked during the Deacon's batch ingest (e.g., concurrent schema migration), the Deacon retries after one WAL checkpoint cycle. If it fails 3 times, it logs a warning and continues — the inbox files serve as a durable buffer.
+
+### 11.5 Migration Strategy
 
 - All schema changes are additive: new columns with defaults, new tables, new indexes
 - Never drop or rename columns in production
@@ -1063,7 +1078,7 @@ A finding is auto-promoted when ALL of:
 - `confidence` >= 0.7
 - Evidence includes at least one file/line anchor
 - No conflicting open finding exists for the same scope
-- The finding pattern matches a known-successful remediation pattern
+- The finding pattern matches a known-successful remediation pattern (Phase 2+; relaxed during cold-start — first 10 workstreams skip this check)
 - Active mission allows follow-on work in the affected scope
 
 ### 14.2 Machine Adjudication Required
