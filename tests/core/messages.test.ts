@@ -14,6 +14,7 @@ import {
   markMessagesWithError,
   getMessagesBySender,
   updateMediaPath,
+  updateTranscription,
   rowToMessage,
   type StoreMessageInput,
   type MessageRow,
@@ -328,6 +329,60 @@ describe('messages', () => {
       .prepare('SELECT content_text FROM messages WHERE message_id = ?')
       .get(msg.messageId) as { content_text: string | null };
     expect(row.content_text).toBe('Contact: Bob');
+  });
+
+  // --- Task 3 (SP2): updateTranscription helper ---
+
+  it('updateTranscription persists transcription to content and content_text', () => {
+    const msg = makeMsg({
+      content: JSON.stringify({ type: 'audio', duration: 12, ptt: true, transcription: null }),
+      contentType: 'audio',
+    });
+    storeMessage(db, msg);
+
+    updateTranscription(db, msg.messageId, 'Hello, this is a test');
+
+    const row = db.raw
+      .prepare('SELECT content, content_text FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content: string; content_text: string };
+
+    const parsed = JSON.parse(row.content);
+    expect(parsed.transcription).toBe('Hello, this is a test');
+    expect(row.content_text).toBe('Hello, this is a test');
+  });
+
+  it('updateTranscription handles non-JSON content gracefully', () => {
+    const msg = makeMsg({
+      content: null,
+      contentType: 'audio',
+    });
+    storeMessage(db, msg);
+
+    updateTranscription(db, msg.messageId, 'Transcribed text');
+
+    const row = db.raw
+      .prepare('SELECT content, content_text FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content: string; content_text: string };
+
+    const parsed = JSON.parse(row.content);
+    expect(parsed.transcription).toBe('Transcribed text');
+    expect(row.content_text).toBe('Transcribed text');
+  });
+
+  it('updateTranscription is indexed by FTS after MIGRATION_13', () => {
+    const msg = makeMsg({
+      content: JSON.stringify({ type: 'audio', duration: 5, ptt: true, transcription: null }),
+      contentType: 'audio',
+      contentText: null,
+    });
+    storeMessage(db, msg);
+
+    updateTranscription(db, msg.messageId, 'searchable transcription');
+
+    const ftsResults = db.raw
+      .prepare("SELECT rowid FROM messages_fts WHERE content MATCH 'searchable'")
+      .all() as Array<{ rowid: number }>;
+    expect(ftsResults.length).toBeGreaterThan(0);
   });
 
 });

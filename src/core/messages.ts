@@ -310,3 +310,26 @@ export function updateMediaPath(db: Database, messageId: string, filePath: strin
   db.raw.prepare('UPDATE messages SET media_path = ? WHERE message_id = ?')
     .run(filePath, messageId);
 }
+
+/**
+ * Persist a Whisper transcription to both content (structured JSON)
+ * and content_text (human-readable, FTS-indexed).
+ * Called by agent runtime and transcribe_audio MCP tool after Whisper completes.
+ */
+export function updateTranscription(db: Database, messageId: string, transcription: string): void {
+  // Read existing content to merge transcription into structured JSON
+  const row = db.raw.prepare('SELECT content FROM messages WHERE message_id = ?')
+    .get(messageId) as { content: string | null } | undefined;
+
+  let updatedContent: string;
+  try {
+    const parsed = JSON.parse(row?.content || '{}');
+    parsed.transcription = transcription;
+    updatedContent = JSON.stringify(parsed);
+  } catch {
+    updatedContent = JSON.stringify({ transcription });
+  }
+
+  db.raw.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id = ?')
+    .run(updatedContent, transcription, messageId);
+}
