@@ -42,6 +42,7 @@ export async function handleSend(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
@@ -327,11 +328,7 @@ export async function handleDeleteLine(
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  // Defense-in-depth: validate name format before any fs/systemd operations
-  if (!NAME_RE.test(params.name)) {
-    jsonResponse(res, 400, { error: 'invalid instance name' });
-    return;
-  }
+  if (!validateInstanceName(params.name, res)) return;
 
   // 1. Stop the systemd unit (ignore failure — may already be stopped/gone)
   try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* ok */ }
