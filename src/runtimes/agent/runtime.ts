@@ -50,6 +50,8 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 import { generateMcpConfigFile } from './providers/mcp-bridge.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
+import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
+import { writeTempFile } from '../../core/media-download.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -514,6 +516,13 @@ export class AgentRuntime implements Runtime {
 
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
+
+  // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
+  // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
+  private currentTurnInboundContentType: string | null = null;
+  private currentTurnAssistantText = '';
+  private perChatTurnContentType: Map<string, string> = new Map();
+  private perChatTurnText: Map<string, string> = new Map();
 
   // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
   // Used to replay a message when session resume fails and the turn was lost.
@@ -1084,6 +1093,9 @@ export class AgentRuntime implements Runtime {
     if (this.shared) {
       // @check CHK-062 // @traces REQ-012.AC-01
       // @check CHK-063 // @traces REQ-012.AC-04
+      // Track inbound contentType for voice reply (SP4)
+      this.currentTurnInboundContentType = msg.contentType;
+      this.currentTurnAssistantText = '';
       this.turnQueue.enqueue({
         chatJid,
         senderJid: msg.senderJid,
@@ -1102,11 +1114,17 @@ export class AgentRuntime implements Runtime {
       if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
       this.perChatInboundSeqQueue.set(mapKey, seqQueue);
       this.getQueueForChat(chatJid)?.setInboundSeq(msg.inboundSeq);
+      // Track inbound contentType for voice reply (SP4)
+      this.perChatTurnContentType.set(mapKey, msg.contentType);
+      this.perChatTurnText.set(mapKey, '');
       await this.sendTurnPerChat(chatJid, text);
     } else {
       // single mode: store inbound seq on runtime + queue
       this.currentInboundSeq = msg.inboundSeq;
       this.queue?.setInboundSeq(msg.inboundSeq);
+      // Track inbound contentType for voice reply (SP4)
+      this.currentTurnInboundContentType = msg.contentType;
+      this.currentTurnAssistantText = '';
       await this.sendTurnNonShared(chatJid, text);
     }
   }
@@ -1291,7 +1309,7 @@ export class AgentRuntime implements Runtime {
       // Turn completed successfully — clear pending replay text
       this.pendingTurnText.delete(mapKey);
     }
-    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq);
+    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey);
   }
 
   /**
@@ -1299,7 +1317,7 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number): void {
+  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string): void {
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -1308,6 +1326,10 @@ export class AgentRuntime implements Runtime {
       case 'assistant_text':
         session?.tickWatchdog();
         queue.enqueueText(event.text);
+        // Accumulate assistant text for voice reply (SP4)
+        if (mapKey !== undefined) {
+          this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+        }
         break;
 
       case 'tool_use':
@@ -1342,6 +1364,10 @@ export class AgentRuntime implements Runtime {
         this.activeToolNames.clear();
         if (event.text) {
           queue.enqueueResultText(event.text);
+          // Accumulate result text for voice reply (SP4)
+          if (mapKey !== undefined) {
+            this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+          }
         }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = session?.getDbRowId() ?? null;
@@ -1362,7 +1388,30 @@ export class AgentRuntime implements Runtime {
         // Defense-in-depth: mark last op terminal so echo auto-complete fires if
         // the process crashes after send but before completeInbound runs.
         queue.markLastTerminal();
-        queue.flush().catch((err) => log.error({ err }, 'flush failed'));
+        {
+          // Capture voice reply context before flush (SP4)
+          const chatJidForVoice = queue.targetChatJid;
+          const inboundContentType = mapKey !== undefined ? (this.perChatTurnContentType.get(mapKey) ?? null) : null;
+          const responseText = mapKey !== undefined ? (this.perChatTurnText.get(mapKey) ?? '') : '';
+          // Clean up per-chat voice state
+          if (mapKey !== undefined) {
+            this.perChatTurnContentType.delete(mapKey);
+            this.perChatTurnText.delete(mapKey);
+          }
+          queue.flush()
+            .then(() => {
+              // Send voice reply after text is delivered (non-fatal, SP4)
+              if (
+                chatJidForVoice &&
+                responseText &&
+                config.voiceReply !== 'never' &&
+                (config.voiceReply === 'always' || inboundContentType === 'audio')
+              ) {
+                return this._sendVoiceReply(chatJidForVoice, responseText);
+              }
+            })
+            .catch((err) => log.error({ err }, 'flush or voice reply failed'));
+        }
         break;
 
       case 'token_usage':
@@ -2115,6 +2164,38 @@ export class AgentRuntime implements Runtime {
       });
   }
 
+  /**
+   * Synthesize the agent's text response via ElevenLabs and send as a PTT voice note.
+   * Non-fatal — called after the text response has already been delivered. (SP4)
+   */
+  private async _sendVoiceReply(chatJid: string, responseText: string): Promise<void> {
+    try {
+      const voiceResult = await synthesizeSpeech(responseText, {
+        voiceId: config.elevenlabs.defaultVoiceId,
+        modelId: config.elevenlabs.defaultModel,
+        stability: config.elevenlabs.stability,
+        similarityBoost: config.elevenlabs.similarityBoost,
+      });
+
+      const voicePath = writeTempFile(voiceResult.buffer, 'mp3');
+      const { readFileSync } = await import('node:fs');
+      const voiceBuffer = readFileSync(voicePath);
+
+      await (this.messenger as ConnectionManager).sendMedia(chatJid, {
+        type: 'audio',
+        buffer: voiceBuffer,
+        mimetype: 'audio/mpeg',
+        ptt: true,
+        seconds: voiceResult.duration,
+      });
+
+      log.info({ chatJid, duration: voiceResult.duration }, 'voice reply sent');
+    } catch (err) {
+      // Non-fatal: text response was already sent. Log and continue.
+      log.warn({ err, chatJid }, 'voice reply failed — text response already sent');
+    }
+  }
+
   private handleEvent(event: AgentEvent): void {
     // Route to current turn's chat in shared mode, or the single queue in non-shared mode
     const queue = this.shared
@@ -2132,6 +2213,8 @@ export class AgentRuntime implements Runtime {
         this.session?.tickWatchdog();
         queue.enqueueText(event.text);
         this.turnHadVisibleOutput = true;
+        // Accumulate text for voice reply (SP4)
+        this.currentTurnAssistantText += event.text;
         break;
 
       case 'tool_use':
@@ -2179,6 +2262,8 @@ export class AgentRuntime implements Runtime {
         if (event.text) {
           queue.enqueueResultText(event.text);
           this.turnHadVisibleOutput = true;
+          // Accumulate result text for voice reply (SP4)
+          this.currentTurnAssistantText += event.text;
         }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = this.session?.getDbRowId() ?? null;
@@ -2207,7 +2292,28 @@ export class AgentRuntime implements Runtime {
         // Defense-in-depth: mark last op terminal so echo auto-complete fires if
         // the process crashes after send but before completeInbound runs.
         queue.markLastTerminal();
-        queue.flush().catch((err) => log.error({ err }, 'flush failed'));
+        {
+          // Capture voice reply context before flush (SP4)
+          const chatJidForVoice = this.shared ? this.currentTurnChatJid : this.activeChatJid;
+          const inboundContentType = this.currentTurnInboundContentType;
+          const responseText = this.currentTurnAssistantText;
+          // Reset per-turn voice state
+          this.currentTurnInboundContentType = null;
+          this.currentTurnAssistantText = '';
+          queue.flush()
+            .then(() => {
+              // Send voice reply after text is delivered (non-fatal, SP4)
+              if (
+                chatJidForVoice &&
+                responseText &&
+                config.voiceReply !== 'never' &&
+                (config.voiceReply === 'always' || inboundContentType === 'audio')
+              ) {
+                return this._sendVoiceReply(chatJidForVoice, responseText);
+              }
+            })
+            .catch((err) => log.error({ err }, 'flush or voice reply failed'));
+        }
         break;
 
       case 'token_usage':

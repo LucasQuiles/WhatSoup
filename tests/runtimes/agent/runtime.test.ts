@@ -114,13 +114,37 @@ vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
 // Mock config — includes adminPhones and an empty controlPeers map.
 // emit_heal_result tool registration is gated on controlPeers.size > 0;
 // keeping it empty here avoids that path (which requires heal.ts / durability mocks).
-vi.mock('../../../src/config.ts', () => ({
-  config: {
+// mockConfig is mutable so individual tests can override voiceReply for voice reply tests.
+const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() => {
+  const mockConfig = {
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
-    toolUpdateMode: 'full',
-    pineconeAllowedIndexes: [],
-  },
+    toolUpdateMode: 'full' as 'full' | 'minimal',
+    pineconeAllowedIndexes: [] as string[],
+    voiceReply: 'never' as 'always' | 'when_received' | 'never',
+    elevenlabs: {
+      defaultVoiceId: 'test-voice-id',
+      defaultModel: 'eleven_multilingual_v2',
+      stability: 0.5,
+      similarityBoost: 0.75,
+    },
+  };
+  const mockSynthesizeSpeech = vi.fn();
+  const mockWriteTempFile = vi.fn().mockReturnValue('/tmp/voice-reply.mp3');
+  return { mockConfig, mockSynthesizeSpeech, mockWriteTempFile };
+});
+
+vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
+
+// Mock ElevenLabs synthesizeSpeech for voice reply tests
+vi.mock('../../../src/runtimes/chat/providers/elevenlabs.ts', () => ({
+  synthesizeSpeech: mockSynthesizeSpeech,
+}));
+
+// Mock writeTempFile and downloadMedia for voice reply tests
+vi.mock('../../../src/core/media-download.ts', () => ({
+  writeTempFile: mockWriteTempFile,
+  downloadMedia: vi.fn(),
 }));
 
 // extractLocal is a pure function — no need to mock, but mock the module so
@@ -187,6 +211,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
+    readFileSync: vi.fn().mockReturnValue(Buffer.from('fake-audio-data')),
   };
 });
 
@@ -214,12 +239,13 @@ function makeDb(): Database {
   } as unknown as Database;
 }
 
-function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
+function makeMessenger(): { messenger: Messenger & { sendMedia?: ReturnType<typeof vi.fn> }; sentMessages: Array<{ jid: string; text: string }> } {
   const sentMessages: Array<{ jid: string; text: string }> = [];
-  const messenger: Messenger = {
+  const messenger: Messenger & { sendMedia?: ReturnType<typeof vi.fn> } = {
     sendMessage: vi.fn(async (jid: string, text: string) => {
       sentMessages.push({ jid, text });
     }),
+    sendMedia: vi.fn(async () => {}),
   };
   return { messenger, sentMessages };
 }
@@ -267,7 +293,7 @@ async function sendAndDrainShared(runtime: AgentRuntime, msg: IncomingMessage): 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     capturedOnEventRef.current = null;
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
@@ -279,6 +305,23 @@ describe('AgentRuntime', () => {
       const key = chatJid.replace('@s.whatsapp.net', '').replace('@lid', '');
       return { kind: 'dm' as const, workspaceKey: key, workspacePath: `/tmp/${key}` };
     });
+    // Reset SessionManager mock to the default hoisted implementation.
+    // Some tests (per_chat /status, per_chat /new) override it; reset so voice reply
+    // tests (and others) see the default mock that captures capturedOnEventRef.
+    const { SessionManager: SessionManagerMock } = await import('../../../src/runtimes/agent/session.ts');
+    (SessionManagerMock as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      function (opts: { onEvent: (event: AgentEvent) => void; onResumeFailed?: () => void }) {
+        capturedOnEventRef.current = opts.onEvent;
+        capturedOnResumeFailedRef.current = opts.onResumeFailed ?? null;
+        return mockSession;
+      },
+    );
+    // Reset voice reply config to default (never) between tests
+    mockConfig.voiceReply = 'never';
+    mockSynthesizeSpeech.mockClear();
+    mockWriteTempFile.mockClear();
+    // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
+    mockQueue.flush.mockResolvedValue(undefined);
   });
 
   it('start() calls ensureAgentSchema', async () => {
@@ -1647,5 +1690,123 @@ describe('AgentRuntime', () => {
     // handleNew should have been called on A's session (key '111'), not B's ('222')
     expect(handleNewCalls).toContain('111');
     expect(handleNewCalls).not.toContain('222');
+  });
+
+  // ─── Voice reply integration tests (SP4) ─────────────────────────────────────
+
+  describe('voice reply (SP4)', () => {
+    it('does NOT call synthesizeSpeech when voiceReply is "never"', async () => {
+      mockConfig.voiceReply = 'never';
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's1', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: 'hello', contentType: 'audio' }));
+
+      // Fire result event to complete the turn
+      capturedOnEventRef.current?.({ type: 'assistant_text', text: 'Hi there!' });
+      capturedOnEventRef.current?.({ type: 'result', text: null });
+      await mockQueue.flush.mock.results[0]?.value;
+
+      expect(mockSynthesizeSpeech).not.toHaveBeenCalled();
+    });
+
+    it('synthesizes and sends voice when voiceReply is "always" and inbound is text', async () => {
+      mockConfig.voiceReply = 'always';
+      // Set up synthesizeSpeech to resolve on every call
+      mockSynthesizeSpeech.mockResolvedValue({
+        buffer: Buffer.from('audio-bytes'),
+        duration: 3,
+        mimeType: 'audio/mpeg',
+      });
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's1', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: 'hello', contentType: 'text' }));
+
+      capturedOnEventRef.current?.({ type: 'assistant_text', text: 'Hello back!' });
+      capturedOnEventRef.current?.({ type: 'result', text: null });
+      // Wait for flush and async voice reply chain to settle
+      await vi.waitFor(() => {
+        expect(mockSynthesizeSpeech).toHaveBeenCalledWith('Hello back!', expect.objectContaining({
+          voiceId: 'test-voice-id',
+        }));
+      }, { timeout: 500 });
+
+      expect((messenger as { sendMedia?: ReturnType<typeof vi.fn> }).sendMedia).toHaveBeenCalledWith(
+        'test@s.whatsapp.net',
+        expect.objectContaining({ ptt: true, type: 'audio' }),
+      );
+    });
+
+    it('synthesizes voice when voiceReply is "when_received" and inbound is audio', async () => {
+      mockConfig.voiceReply = 'when_received';
+      mockSynthesizeSpeech.mockResolvedValue({
+        buffer: Buffer.from('audio-bytes'),
+        duration: 5,
+        mimeType: 'audio/mpeg',
+      });
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's1', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: '[Voice note transcription]: test audio', contentType: 'audio' }));
+
+      capturedOnEventRef.current?.({ type: 'assistant_text', text: 'I heard you!' });
+      capturedOnEventRef.current?.({ type: 'result', text: null });
+      await vi.waitFor(() => {
+        expect(mockSynthesizeSpeech).toHaveBeenCalledWith('I heard you!', expect.anything());
+      }, { timeout: 500 });
+    });
+
+    it('does NOT synthesize voice when voiceReply is "when_received" and inbound is text', async () => {
+      mockConfig.voiceReply = 'when_received';
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's1', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: 'hello', contentType: 'text' }));
+
+      capturedOnEventRef.current?.({ type: 'assistant_text', text: 'Reply text' });
+      capturedOnEventRef.current?.({ type: 'result', text: null });
+      // Flush the microtask queue and wait briefly
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(mockSynthesizeSpeech).not.toHaveBeenCalled();
+    });
+
+    it('does not propagate synthesis errors — text response already sent', async () => {
+      mockConfig.voiceReply = 'always';
+      mockSynthesizeSpeech.mockRejectedValue(new Error('ElevenLabs circuit breaker open'));
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 's1', startedAt: new Date().toISOString(), messageCount: 0, lastMessageAt: null });
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ content: 'hello', contentType: 'text' }));
+
+      capturedOnEventRef.current?.({ type: 'assistant_text', text: 'Response text' });
+      capturedOnEventRef.current?.({ type: 'result', text: null });
+      // Should not throw — error is swallowed (non-fatal)
+      await vi.waitFor(() => {
+        expect(mockSynthesizeSpeech).toHaveBeenCalled();
+      }, { timeout: 500 });
+    });
   });
 });
