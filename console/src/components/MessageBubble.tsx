@@ -9,6 +9,7 @@ interface MessageBubbleProps {
   msg: Message
   outgoingBg?: string
   onCreateContact?: (senderName: string) => void
+  highlightQuery?: string
   /** When true, plays the slide-in entrance animation. */
   animate?: boolean
   /** Called when user clicks retry on a failed message. */
@@ -100,7 +101,7 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
   return <Check size={12} strokeWidth={2} className="text-s-ok" />
 }
 
-const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, animate, onRetry }) => {
+const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, highlightQuery, animate, onRetry }) => {
   const isMedia = msg.type !== 'text'
   const [showDetail, setShowDetail] = useState(false)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -157,7 +158,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
           }}
         >
           <div className="text-t1 leading-relaxed" style={{ overflowWrap: 'break-word' }}>
-            <MessageContent msg={msg} />
+            <MessageContent msg={msg} highlightQuery={highlightQuery} />
           </div>
         </div>
       </div>

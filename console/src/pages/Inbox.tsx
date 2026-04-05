@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
@@ -11,7 +11,7 @@ import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
-import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2 } from 'lucide-react'
+import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -23,7 +23,14 @@ export default function Inbox() {
   const [isSending, setIsSending] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [hasMore, setHasMore] = useState(true)
+  const [searchInput, setSearchInput] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [searchResults, setSearchResults] = useState<Message[]>([])
+  const [searchTotal, setSearchTotal] = useState(0)
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const searchRequestRef = useRef(0)
   const queryClient = useQueryClient()
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -47,6 +54,17 @@ export default function Inbox() {
   // Reset hasMore when chat changes
   useEffect(() => { setHasMore(true) }, [selectedChat, selectedLine])
 
+  // Reset in-panel search when switching chats or lines
+  useEffect(() => {
+    searchRequestRef.current += 1
+    setSearchInput('')
+    setDebouncedSearch('')
+    setSearchResults([])
+    setSearchTotal(0)
+    setSearchLoading(false)
+    setSearchError(null)
+  }, [selectedChat, selectedLine])
+
   // Auto-focus textarea when a chat is selected
   useEffect(() => {
     if (selectedChat && textareaRef.current) {
@@ -62,6 +80,12 @@ export default function Inbox() {
     }
   }, [msgText])
 
+  useEffect(() => {
+    const trimmed = searchInput.trim()
+    const timer = setTimeout(() => setDebouncedSearch(trimmed), trimmed ? 300 : 0)
+    return () => clearTimeout(timer)
+  }, [searchInput])
+
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
   const { data: chats } = useChats(activeLine)
   const { data: messages } = useMessages(activeLine, selectedChat || '')
@@ -73,9 +97,45 @@ export default function Inbox() {
 
   const currentLine = lines?.find(l => l.name === activeLine)
   const currentChat = chats?.find(c => c.conversationKey === selectedChat)
+  const isSearchMode = searchInput.trim().length > 0
+  const isDebouncingSearch = isSearchMode && searchInput.trim() !== debouncedSearch
+  const isSearchBusy = searchLoading || isDebouncingSearch
 
   // Sticky scroll for messages area
   const { scrollRef, showJump, handleScroll, jumpToBottom } = useStickyScroll(messages ?? [], selectedChat)
+
+  useEffect(() => {
+    if (!selectedChat || !debouncedSearch) {
+      searchRequestRef.current += 1
+      setSearchResults([])
+      setSearchTotal(0)
+      setSearchLoading(false)
+      setSearchError(null)
+      return
+    }
+
+    const requestId = ++searchRequestRef.current
+    setSearchLoading(true)
+    setSearchError(null)
+
+    api.searchMessages(activeLine, debouncedSearch, selectedChat)
+      .then((result) => {
+        if (requestId !== searchRequestRef.current) return
+        setSearchResults(result.results)
+        setSearchTotal(result.total)
+      })
+      .catch((error) => {
+        if (requestId !== searchRequestRef.current) return
+        setSearchResults([])
+        setSearchTotal(0)
+        setSearchError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (requestId === searchRequestRef.current) {
+          setSearchLoading(false)
+        }
+      })
+  }, [activeLine, selectedChat, debouncedSearch])
 
   const handleLoadOlder = async () => {
     if (!selectedChat || loadingOlder) return
@@ -215,63 +275,148 @@ export default function Inbox() {
               <span className="c-label">{currentChat.unreadCount > 0 ? `${currentChat.unreadCount} unread` : 'read'}</span>
             </div>
 
-            {/* Messages */}
             <div
-              ref={scrollRef}
-              onScroll={handleScroll}
-              className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative"
-              style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+              className="flex items-center"
+              style={{
+                padding: 'var(--sp-3) var(--sp-4)',
+                gap: 'var(--sp-3)',
+                borderBottom: 'var(--bw) solid var(--b1)',
+                background: 'var(--color-d2)',
+              }}
             >
-              {messages && messages.length > 0 && hasMore && (
-                <button
-                  onClick={handleLoadOlder}
-                  disabled={loadingOlder}
-                  className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
-                  style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)', background: 'none', border: 'none', width: '100%' }}
-                >
-                  {loadingOlder
-                    ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
-                    : <ChevronsUp size={14} strokeWidth={1.75} />
-                  }
-                  <span style={{ fontSize: 'var(--font-size-sm)' }}>
-                    {loadingOlder ? 'Loading…' : 'Load older messages'}
-                  </span>
-                </button>
-              )}
-              <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-                {[...(messages ?? [])].reverse().map(msg => (
-                  <MessageBubble key={msg.pk} msg={msg} animate={animatedPks.has(msg.pk)} />
-                ))}
-              </div>
-              {(!messages || messages.length === 0) && (
-                <div className="flex-1 flex items-center justify-center">
-                  <EmptyState
-                    icon={<MessageSquare size={40} strokeWidth={1.25} />}
-                    title="No messages loaded"
-                    description="Messages will appear here."
-                  />
-                </div>
-              )}
-
-              {showJump && (
-                <button
-                  onClick={jumpToBottom}
-                  className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-1 font-mono c-hover cursor-pointer"
+              <div className="relative flex-1">
+                <Search
+                  size={13}
+                  strokeWidth={1.75}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t5 pointer-events-none"
+                />
+                <input
+                  type="text"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  placeholder="Search this conversation..."
+                  className="w-full bg-d1 text-t2 font-mono outline-none placeholder:text-t5"
                   style={{
-                    padding: 'var(--sp-1h) var(--sp-3)',
-                    fontSize: 'var(--font-size-sm)',
-                    background: 'var(--color-d5)',
-                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b3)',
-                    borderRadius: 'var(--radius-md)',
-                    boxShadow: 'var(--shadow-md)',
-                    color: 'var(--color-t2)',
-                    zIndex: 10,
+                    fontSize: 'var(--font-size-data)',
+                    padding: 'var(--sp-1h) var(--sp-8) var(--sp-1h) var(--sp-7)',
+                    height: 'var(--input-h)',
+                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+                    borderRadius: 'var(--radius-sm)',
+                    transition: 'border-color var(--dur-norm) var(--ease)',
                   }}
-                >
-                  <ChevronDown size={14} /> New messages
-                </button>
+                />
+                {isSearchBusy ? (
+                  <Loader2
+                    size={14}
+                    strokeWidth={1.75}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 animate-spin text-t4"
+                  />
+                ) : isSearchMode ? (
+                  <button
+                    onClick={() => setSearchInput('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 c-hover cursor-pointer text-t5 hover:text-t2"
+                    style={{ padding: 'var(--sp-1)' }}
+                    title="Clear search"
+                  >
+                    <X size={14} strokeWidth={1.75} />
+                  </button>
+                ) : null}
+              </div>
+              {isSearchMode && (
+                <span className="c-label" style={{ whiteSpace: 'nowrap' }}>
+                  {isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`}
+                </span>
               )}
             </div>
+
+            {/* Messages */}
+            {isSearchMode ? (
+              <div
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0"
+                style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+              >
+                {searchError ? (
+                  <div className="flex-1 flex items-center justify-center">
+                    <EmptyState
+                      icon={<Search size={40} strokeWidth={1.25} />}
+                      title="Search failed"
+                      description={searchError}
+                    />
+                  </div>
+                ) : searchResults.length > 0 ? (
+                  <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+                    {searchResults.map(msg => (
+                      <MessageBubble key={`search-${msg.pk}`} msg={msg} highlightQuery={debouncedSearch} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex-1 flex items-center justify-center">
+                    <EmptyState
+                      icon={isSearchBusy ? <Loader2 size={40} strokeWidth={1.25} className="animate-spin" /> : <Search size={40} strokeWidth={1.25} />}
+                      title={isSearchBusy ? 'Searching messages' : 'No matches'}
+                      description={isSearchBusy ? 'Looking for matching messages…' : 'Try a different search term.'}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div
+                ref={scrollRef}
+                onScroll={handleScroll}
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative"
+                style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+              >
+                {messages && messages.length > 0 && hasMore && (
+                  <button
+                    onClick={handleLoadOlder}
+                    disabled={loadingOlder}
+                    className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
+                    style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)', background: 'none', border: 'none', width: '100%' }}
+                  >
+                    {loadingOlder
+                      ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
+                      : <ChevronsUp size={14} strokeWidth={1.75} />
+                    }
+                    <span style={{ fontSize: 'var(--font-size-sm)' }}>
+                      {loadingOlder ? 'Loading…' : 'Load older messages'}
+                    </span>
+                  </button>
+                )}
+                <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+                  {[...(messages ?? [])].reverse().map(msg => (
+                    <MessageBubble key={msg.pk} msg={msg} animate={animatedPks.has(msg.pk)} />
+                  ))}
+                </div>
+                {(!messages || messages.length === 0) && (
+                  <div className="flex-1 flex items-center justify-center">
+                    <EmptyState
+                      icon={<MessageSquare size={40} strokeWidth={1.25} />}
+                      title="No messages loaded"
+                      description="Messages will appear here."
+                    />
+                  </div>
+                )}
+
+                {showJump && (
+                  <button
+                    onClick={jumpToBottom}
+                    className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-1 font-mono c-hover cursor-pointer"
+                    style={{
+                      padding: 'var(--sp-1h) var(--sp-3)',
+                      fontSize: 'var(--font-size-sm)',
+                      background: 'var(--color-d5)',
+                      borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b3)',
+                      borderRadius: 'var(--radius-md)',
+                      boxShadow: 'var(--shadow-md)',
+                      color: 'var(--color-t2)',
+                      zIndex: 10,
+                    }}
+                  >
+                    <ChevronDown size={14} /> New messages
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Input bar */}
             <div
