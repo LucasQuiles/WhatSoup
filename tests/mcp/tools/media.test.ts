@@ -1,6 +1,6 @@
 // tests/mcp/tools/media.test.ts
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync } from 'node:fs';
@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerMediaTools, type MediaDeps } from '../../../src/mcp/tools/media.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+import { Database } from '../../../src/core/database.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -48,6 +49,9 @@ function globalSession(): SessionContext {
 // Tests
 // ---------------------------------------------------------------------------
 
+const testDb = new Database(':memory:');
+testDb.open();
+
 describe('registerMediaTools', () => {
   let registry: ToolRegistry;
   let mediaCalls: Array<{ chatJid: string; media: unknown }>;
@@ -57,11 +61,15 @@ describe('registerMediaTools', () => {
   let filesToClean: string[] = [];
   let dirsToClean: string[] = [];
 
+  afterAll(() => {
+    testDb.close();
+  });
+
   beforeEach(() => {
     registry = new ToolRegistry();
     mediaCalls = makeCalls();
     connection = makeConnection(mediaCalls);
-    deps = { connection };
+    deps = { connection, db: testDb.raw };
     registerMediaTools(registry, deps);
     workspace = tempDir();
     dirsToClean.push(workspace);

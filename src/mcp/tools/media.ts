@@ -4,6 +4,7 @@
 import { z } from 'zod';
 import { statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
@@ -15,6 +16,7 @@ import type { OutboundMedia } from '../../core/types.ts';
 
 export interface MediaDeps {
   connection: ConnectionManager;
+  db: DatabaseSync;
 }
 
 // ---------------------------------------------------------------------------
