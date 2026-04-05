@@ -94,6 +94,8 @@ process.env.LOG_DIR = logDir;
 
 const mediaDir = instance ? (instance.paths.mediaDir as string) : join(dataRoot, 'media', 'tmp');
 mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
+// Ensure media/cache/ sibling directory exists alongside media/tmp/ (SP7)
+mkdirSync(join(mediaDir, '..', 'cache'), { recursive: true, mode: 0o700 });
 
 // ---------------------------------------------------------------------------
 // Model defaults — priority: instance.models > env vars > hardcoded defaults
@@ -244,6 +246,13 @@ export const config = {
 
   // Typing simulation (SP5)
   autoTyping: ((instance?.autoTyping as string | undefined) ?? 'off') as 'composing' | 'recording' | 'off',
+
+  // Media retention (SP7) — per-instance config with safe defaults
+  mediaRetention: {
+    tempHours:     (instance?.mediaRetention?.tempHours     as number | undefined) ?? 72,
+    cacheHours:    (instance?.mediaRetention?.cacheHours    as number | undefined) ?? 168, // 7 days
+    intervalHours: (instance?.mediaRetention?.intervalHours as number | undefined) ?? 6,
+  },
 
   // Access mode (from instance config, defaults to allowlist for backward compat)
   accessMode: (() => {

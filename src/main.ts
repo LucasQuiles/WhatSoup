@@ -35,6 +35,7 @@ import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticip
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
+import { MediaRetentionTimer } from './core/media-retention.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -581,7 +582,17 @@ const retentionInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
 }, 24 * 60 * 60 * 1000);
 
-// 11. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
+// 11. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories (SP7)
+// config.mediaDir resolves to .../media/tmp; base is one level up
+const mediaBaseDir = join(config.mediaDir, '..');
+const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
+  intervalMs:    config.mediaRetention.intervalHours * 60 * 60 * 1000,
+  tempMaxAgeMs:  config.mediaRetention.tempHours     * 60 * 60 * 1000,
+  cacheMaxAgeMs: config.mediaRetention.cacheHours    * 60 * 60 * 1000,
+});
+mediaRetentionTimer.start(config.mediaRetention.intervalHours * 60 * 60 * 1000);
+
+// 12. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
 const echoTimeoutInterval = setInterval(() => {
   try {
     durability.sweepStaleSubmitted();
@@ -714,6 +725,7 @@ async function shutdown(signal: string): Promise<void> {
   try {
     clearTimeout(startupCleanupTimeout);
     clearInterval(retentionInterval);
+    mediaRetentionTimer.stop();
     clearInterval(echoTimeoutInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
