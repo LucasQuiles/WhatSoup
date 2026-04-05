@@ -295,7 +295,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
               {phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
             </span>
           </div>
-          <button onClick={handleClose} className="c-btn c-btn-ghost">
+          <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">
             <X size={16} />
           </button>
         </div>
@@ -309,7 +309,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 Pull latest code, rebuild, and restart the fleet server?
               </p>
               <div className="flex justify-end" style={{ gap: 'var(--sp-2)' }}>
-                <button onClick={handleClose} className="c-btn c-btn-ghost">Cancel</button>
+                <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Cancel</button>
                 <button onClick={startUpdate} className="c-btn c-btn-primary">
                   <Download size={14} />
                   Update
@@ -359,7 +359,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 <span className="text-t2 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>{error}</span>
               </div>
               <div className="flex justify-end">
-                <button onClick={handleClose} className="c-btn c-btn-ghost">Close</button>
+                <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Close</button>
               </div>
             </div>
           )}
@@ -412,7 +412,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 })}
               </div>
               <div className="flex justify-end" style={{ gap: 'var(--sp-2)', paddingTop: 'var(--sp-2)' }}>
-                <button onClick={handleClose} className="c-btn c-btn-ghost">Skip</button>
+                <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Skip</button>
                 <button
                   onClick={restartSelectedInstances}
                   className="c-btn c-btn-primary"
