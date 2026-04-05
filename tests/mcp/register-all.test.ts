@@ -34,6 +34,7 @@ describe('registerAllTools', () => {
 
     const tools = registry.listTools({ tier: 'global' });
     expect(tools.length).toBeGreaterThanOrEqual(100);
+    expect(tools.some((tool) => tool.name === 'cleanup_media')).toBe(true);
 
     db.raw.close();
   });
