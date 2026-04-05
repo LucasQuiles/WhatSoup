@@ -7,7 +7,7 @@
  *   console always renders (useful for design iteration and demos)
  */
 
-import * as mock from '../mock-data';
+import type { AccessEntry, ChatItem, FeedEvent, LineInstance, LogEntry, Message } from '../types';
 
 const API_BASE = '';
 
@@ -25,6 +25,14 @@ function authHeaders(): Record<string, string> {
 
 let fleetAvailable: boolean | null = null;
 let checkInFlight: Promise<boolean> | null = null;
+let mockDataPromise: Promise<typeof import('../mock-data.ts')> | null = null;
+
+async function loadMockData(): Promise<typeof import('../mock-data.ts')> {
+  if (!mockDataPromise) {
+    mockDataPromise = import('../mock-data.ts');
+  }
+  return mockDataPromise;
+}
 
 async function checkFleetAvailable(): Promise<boolean> {
   if (fleetAvailable !== null) return fleetAvailable;
@@ -68,7 +76,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** Try fleet API first, fall back to mock data if unavailable. */
-async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => T): Promise<T> {
+async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
   const available = await checkFleetAvailable();
   if (!available) return mockFn();
   try {
@@ -82,25 +90,25 @@ async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => T): Promis
 
 export const api = {
   getLines: () => withFallback(
-    () => apiFetch<mock.LineInstance[]>('/api/lines'),
-    () => mock.getLines(),
+    () => apiFetch<LineInstance[]>('/api/lines'),
+    async () => (await loadMockData()).getLines(),
   ),
   getLine: (name: string) => withFallback(
-    () => apiFetch<mock.LineInstance>(`/api/lines/${encodeURIComponent(name)}`),
-    () => mock.getLine(name)!,
+    () => apiFetch<LineInstance>(`/api/lines/${encodeURIComponent(name)}`),
+    async () => (await loadMockData()).getLine(name)!,
   ),
   getChats: (name: string) => withFallback(
-    () => apiFetch<mock.ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
-    () => mock.getChats(name),
+    () => apiFetch<ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
+    async () => (await loadMockData()).getChats(name),
   ),
   getMessages: (name: string, conversationKey: string, beforePk?: number) => withFallback(
-    () => apiFetch<mock.Message[]>(
+    () => apiFetch<Message[]>(
       `/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`
     ),
-    () => mock.getMessages(name, conversationKey),
+    async () => (await loadMockData()).getMessages(name, conversationKey),
   ),
   searchMessages: (name: string, query: string, conversationKey?: string) =>
-    apiFetch<{ results: mock.Message[]; total: number; query: string }>(
+    apiFetch<{ results: Message[]; total: number; query: string }>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
     ),
   saveContact: (name: string, contact: { jid: string; firstName?: string; lastName?: string }) =>
@@ -110,16 +118,16 @@ export const api = {
       body: JSON.stringify(contact),
     }),
   getAccess: (name: string) => withFallback(
-    () => apiFetch<mock.AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
-    () => mock.getAccess(name),
+    () => apiFetch<AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
+    async () => (await loadMockData()).getAccess(name),
   ),
   getLogs: (name: string) => withFallback(
-    () => apiFetch<mock.LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
-    () => mock.getLogs(name),
+    () => apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
+    async () => (await loadMockData()).getLogs(name),
   ),
   getFeed: () => withFallback(
-    () => apiFetch<mock.FeedEvent[]>('/api/feed'),
-    () => mock.getFeed(),
+    () => apiFetch<FeedEvent[]>('/api/feed'),
+    async () => (await loadMockData()).getFeed(),
   ),
 
   getTyping: () =>

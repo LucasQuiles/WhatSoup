@@ -5,7 +5,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { computeKpis } from '../mock-data'; // Keep KPI computation (pure function)
+import { computeKpis } from '../lib/compute-kpis';
 export { computeKpis };
 
 /** All line instances — refreshes every 5 s. */

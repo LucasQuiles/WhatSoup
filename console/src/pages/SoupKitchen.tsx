@@ -4,7 +4,7 @@ import { Search, Plus } from "lucide-react";
 import AddLineWizard from "../components/AddLineWizard";
 import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
-import { computeKpis } from "../mock-data";
+import { computeKpis } from "../lib/compute-kpis";
 import type { Mode } from "../types";
 import KpiCard from "../components/KpiCard";
 import AlertBanner from "../components/AlertBanner";
