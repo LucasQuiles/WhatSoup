@@ -125,6 +125,12 @@ export const api = {
     () => apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
     async () => (await loadMockData()).getLogs(name),
   ),
+  getMetrics: (name: string, range: '24h' | '7d' | '30d' = '24h') =>
+    apiFetch<{
+      range: string;
+      messageVolume: { bucket: string; inbound: number; outbound: number }[];
+      activeHours: number[][];
+    }>(`/api/lines/${encodeURIComponent(name)}/metrics?range=${range}`),
   getFeed: () => withFallback(
     () => apiFetch<FeedEvent[]>('/api/feed'),
     async () => (await loadMockData()).getFeed(),

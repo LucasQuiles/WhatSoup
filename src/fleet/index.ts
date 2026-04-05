@@ -13,6 +13,7 @@ import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
+import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
 import { UpdateChecker } from './update-checker.ts';
 import { xdgDir } from './paths.ts';
@@ -51,6 +52,7 @@ type RouteParamsByHandler = {
   getChats: NameRouteParams;
   getMessages: NameRouteParams;
   searchMessages: NameRouteParams;
+  getMetrics: NameRouteParams;
   getAccess: NameRouteParams;
   getLogs: NameRouteParams;
   send: NameRouteParams;
@@ -89,6 +91,7 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getChats',
   'getMessages',
   'searchMessages',
+  'getMetrics',
   'getAccess',
   'getLogs',
   'send',
@@ -112,6 +115,7 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getChats:     (req, res, deps, params) => handleGetChats(req, res, deps, params),
   getMessages:  (req, res, deps, params) => handleGetMessages(req, res, deps, params),
   searchMessages: (req, res, deps, params) => handleSearchMessages(req, res, deps, params),
+  getMetrics:     (req, res, deps, params) => handleGetMetrics(req, res, deps, params),
   getAccess:    (req, res, deps, params) => handleGetAccess(req, res, deps, params),
   getLogs:      (req, res, deps, params) => handleGetLogs(req, res, deps, params),
   send:         (req, res, deps, params) => handleSend(req, res, deps, params),
@@ -174,6 +178,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/messages$/, handler: 'getMessages' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/messages\/search$/, handler: 'searchMessages' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/metrics$/, handler: 'getMetrics' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/access$/, handler: 'getAccess' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/logs$/, handler: 'getLogs' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/send$/, handler: 'send' },

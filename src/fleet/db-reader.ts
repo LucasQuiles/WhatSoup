@@ -245,6 +245,55 @@ export class FleetDbReader {
     });
   }
 
+  /** Fetch hourly metrics for an instance within a time range. */
+  getMetrics(
+    name: string,
+    dbPath: string,
+    opts: { range: '24h' | '7d' | '30d' },
+  ): DbResult<{ messageVolume: { bucket: string; inbound: number; outbound: number }[]; activeHours: number[][] }> {
+    const rangeHours = opts.range === '24h' ? 24 : opts.range === '7d' ? 168 : 720;
+    const cutoff = new Date(Date.now() - rangeHours * 60 * 60 * 1000).toISOString();
+
+    return this.query(name, dbPath, (db) => {
+      // Message volume from metrics_hourly buckets
+      const volumeRows = db.prepare(`
+        SELECT bucket, metric, value FROM metrics_hourly
+        WHERE bucket >= ? AND metric IN ('messages_in', 'messages_out')
+        ORDER BY bucket ASC
+      `).all(cutoff) as { bucket: string; metric: string; value: number }[];
+
+      // Group by bucket
+      const bucketMap = new Map<string, { inbound: number; outbound: number }>();
+      for (const row of volumeRows) {
+        const existing = bucketMap.get(row.bucket) ?? { inbound: 0, outbound: 0 };
+        if (row.metric === 'messages_in') existing.inbound = row.value;
+        if (row.metric === 'messages_out') existing.outbound = row.value;
+        bucketMap.set(row.bucket, existing);
+      }
+      const messageVolume = Array.from(bucketMap.entries()).map(([bucket, v]) => ({
+        bucket, inbound: v.inbound, outbound: v.outbound,
+      }));
+
+      // Active hours heatmap (7 days × 24 hours) from raw messages
+      const heatmapRows = db.prepare(`
+        SELECT
+          CAST(strftime('%w', timestamp, 'unixepoch') AS INTEGER) AS dow,
+          CAST(strftime('%H', timestamp, 'unixepoch') AS INTEGER) AS hour,
+          COUNT(*) AS cnt
+        FROM messages
+        WHERE timestamp >= ? AND deleted_at IS NULL
+        GROUP BY dow, hour
+      `).all(Math.floor(new Date(cutoff).getTime() / 1000)) as { dow: number; hour: number; cnt: number }[];
+
+      const activeHours: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+      for (const row of heatmapRows) {
+        activeHours[row.dow][row.hour] = row.cnt;
+      }
+
+      return { messageVolume, activeHours };
+    });
+  }
+
   /** Fetch messages by a set of message_ids (for feed preview enrichment). */
   getMessagesByIds(name: string, dbPath: string, messageIds: string[]): DbResult<FeedMessageRow[]> {
     if (messageIds.length === 0) return { ok: true, data: [] };
