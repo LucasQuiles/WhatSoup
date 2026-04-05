@@ -12,45 +12,46 @@
 | Frame | complete | 2026-04-04 |
 | Scout | complete | 2026-04-04 (guppy swarm: 14 guppies, 3 waves) |
 | Architect | complete | 2026-04-04 (spec + council review: 3C, 5I, 3A findings) |
-| Execute | complete | 2026-04-05 |
+| Execute Phase 1 | complete | 2026-04-05 |
+| Execute Phase 2 | complete | 2026-04-05 |
 | Synthesize | complete | 2026-04-05 |
+| Deploy (canary) | complete | 2026-04-05 — BES Bot canary, 6/6 smoke test PASS |
+| Deploy (full) | pending | — Q instance needs restart from Lucas |
 
 ## Bead Manifest
 
-| Bead | Type | Status | Runner | Commits | Tests |
-|------|------|--------|--------|---------|-------|
-| SP1-media-access | implement | merged | Q + BES Bot | 8 | ~30 |
-| SP2-content-completeness | implement | merged | Q + BES Bot | 5 | ~25 |
-| SP3-search-enhancement | implement | merged | BES Bot | 1 | ~20 |
-| SP4-two-way-voice | implement | merged | Q | 4 | ~15 |
-| review-fixes | fix | merged | Q + BES Bot | 5 | — |
-| docs-update | docs | merged | BES Bot + Q | 1 | — |
-| spec-cleanup | docs | merged | Q | 1 | — |
+### Phase 1
+| Bead | Type | Status | Runner | Commits |
+|------|------|--------|--------|---------|
+| SP1-media-access | implement | merged | Q + BES Bot | 8 |
+| SP2-content-completeness | implement | merged | Q + BES Bot | 5 |
+| SP3-search-enhancement | implement | merged | BES Bot | 1 |
+| SP4-two-way-voice | implement | merged | Q | 4 |
+
+### Phase 2
+| Bead | Type | Status | Runner | Commits |
+|------|------|--------|--------|---------|
+| SP5-typing-simulation | implement | merged | BES Bot + Q (config) | 2 |
+| SP6-link-preview-optout | implement | merged | Q | 1 |
+| SP7-media-cleanup | implement | merged | Q | 2 |
+| SP8-status-stories | implement | merged | Q (transport) + BES Bot (tools) | 3 |
+| SP9-broadcast-lists | investigate | cut | Q (proof test) | 1 (docs) |
+| SP10-quoted-media | implement | merged | Q (helper) + BES Bot (handler) | 2 |
+| SP11-message-scheduling | implement | merged | Q (infra) + BES Bot (tools) | 3 |
 
 ## Final Verification
-- **Tests:** 3278 passed | 0 failed | 152 test files
-- **TypeScript:** 0 errors
-- **Regressions:** 0
-- **Total commits:** 28+
-
-## Execution Summary
-- 28+ commits across the session
-- ~90 new tests added
-- 5 new MCP tools: download_media, transcribe_audio, search_messages_advanced, send_voice_reply, knowledge_search (documented)
-- 2 new DB migrations: MIGRATION_12 (media_path), MIGRATION_13 (content_text + FTS rebuild)
-- 2 new source files: elevenlabs.ts, voice.ts
-- docs/tools.md updated (127→132 tools)
+- **Tests:** 3366 passed | 1 pre-existing failure | 161 test files
+- **TypeScript:** 0 errors from Phase 1/2 work
+- **Canary smoke test:** 6/6 PASS (BES Bot instance)
+- **Logs:** Clean — migration applied, all tools registered, scheduler running
 
 ## Workers
-- **Q**: Orchestrator + implementer. Foundation layers (schema, types, helpers) for SP1+SP2. All of SP4. Gap analysis, spec cleanup, review fix coordination.
-- **BES Bot**: Implementation partner + reviewer. Parsing/tool layers for SP1+SP2. All of SP3. Independent verification, code review with 5 findings (2 fixed).
-
-## Remaining Items
-- **Deferred:** ElevenLabs API key not in GNOME Keyring — SP4 voice features disabled until key is added
-- **Deployment:** WhatSoup instances need restart to activate SP2/SP3/SP4 (SP1 demo'd on BES Bot)
+- **Q**: Orchestrator + implementer. Foundation layers, spec writing, guppy swarms, council reviews, SP9 proof test, deployment coordination.
+- **BES Bot**: Implementation partner + reviewer. Parsing, tools, independent verification, code review, smoke testing.
 
 ## Key Artifacts
-- Spec: `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md`
+- Phase 1 spec: `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md`
+- Phase 2 spec: `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md`
+- SP9 proof: `docs/sdlc/active/whatsapp-mcp-features/sp9-broadcast-proof.md`
+- Release note: `docs/releases/2026-04-05-phase2-release.md`
 - Plans: `docs/superpowers/plans/2026-04-05-sp{1,2,3,4}-*.md`
-- Council review: Appendix in spec
-- Guppy swarm validation: Appendix in spec (14 guppies, 3 waves)
