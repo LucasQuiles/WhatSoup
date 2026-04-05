@@ -19,6 +19,7 @@ export interface MessageRow {
   timestamp: number;
   quoted_message_id: string | null;
   created_at: string;
+  media_path: string | null;
 }
 
 export function rowToMessage(row: MessageRow) {
@@ -35,6 +36,7 @@ export function rowToMessage(row: MessageRow) {
     timestamp: row.timestamp,
     quotedMessageId: row.quoted_message_id ?? null,
     createdAt: row.created_at,
+    mediaPath: row.media_path ?? null,
   };
 }
 
@@ -53,6 +55,7 @@ export interface StoredMessage {
   enrichmentProcessedAt: string | null;
   enrichmentRetries: number;
   createdAt: string;
+  mediaPath: string | null;
 }
 
 export interface StoreMessageInput {
@@ -88,6 +91,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     enrichmentProcessedAt: (row.enrichment_processed_at as string | null) ?? null,
     enrichmentRetries: (row.enrichment_retries as number) ?? 0,
     createdAt: row.created_at as string,
+    mediaPath: (row.media_path as string | null) ?? null,
   };
 }
 
@@ -288,4 +292,13 @@ export function getMessagesBySender(db: Database, senderJid: string, limit = 50)
      LIMIT ?`
   ).all(senderJid, limit) as Record<string, unknown>[];
   return rows.map(rowToStoredMessage);
+}
+
+/**
+ * Persist the local file path for a downloaded media message.
+ * Called by agent/chat runtimes after writing media to disk.
+ */
+export function updateMediaPath(db: Database, messageId: string, filePath: string): void {
+  db.raw.prepare('UPDATE messages SET media_path = ? WHERE message_id = ?')
+    .run(filePath, messageId);
 }

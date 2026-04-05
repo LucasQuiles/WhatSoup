@@ -13,7 +13,10 @@ import {
   deleteOldMessages,
   markMessagesWithError,
   getMessagesBySender,
+  updateMediaPath,
+  rowToMessage,
   type StoreMessageInput,
+  type MessageRow,
 } from '../../src/core/messages.ts';
 
 function tempDbPath(): string {
@@ -217,6 +220,68 @@ describe('messages', () => {
       .get(msg.pk) as { enrichment_error: string; enrichment_processed_at: string };
     expect(row.enrichment_error).toBe('timeout');
     expect(row.enrichment_processed_at).not.toBeNull();
+  });
+
+  // --- Task 2: media_path in rowToMessage ---
+
+  it('rowToMessage exposes media_path as mediaPath', () => {
+    const msg = makeMsg({ content: 'photo caption' });
+    storeMessage(db, msg);
+
+    // Manually set media_path
+    db.raw.prepare('UPDATE messages SET media_path = ? WHERE message_id = ?')
+      .run('/tmp/whatsoup-media/abc123.jpg', msg.messageId);
+
+    const rows = db.raw
+      .prepare('SELECT * FROM messages WHERE message_id = ?')
+      .all(msg.messageId) as unknown as MessageRow[];
+
+    const mapped = rowToMessage(rows[0]);
+    expect(mapped.mediaPath).toBe('/tmp/whatsoup-media/abc123.jpg');
+  });
+
+  it('rowToMessage returns null mediaPath when column is NULL', () => {
+    const msg = makeMsg({ content: 'text only' });
+    storeMessage(db, msg);
+
+    const rows = db.raw
+      .prepare('SELECT * FROM messages WHERE message_id = ?')
+      .all(msg.messageId) as unknown as MessageRow[];
+
+    const mapped = rowToMessage(rows[0]);
+    expect(mapped.mediaPath).toBeNull();
+  });
+
+  // --- Task 3: updateMediaPath helper ---
+
+  it('updateMediaPath sets the media_path column', () => {
+    const msg = makeMsg({ content: 'image caption' });
+    storeMessage(db, msg);
+
+    updateMediaPath(db, msg.messageId, '/tmp/whatsoup-media/a1b2c3d4.jpg');
+
+    const row = db.raw
+      .prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { media_path: string | null };
+    expect(row.media_path).toBe('/tmp/whatsoup-media/a1b2c3d4.jpg');
+  });
+
+  it('updateMediaPath overwrites an existing media_path', () => {
+    const msg = makeMsg({ content: 'image caption' });
+    storeMessage(db, msg);
+
+    updateMediaPath(db, msg.messageId, '/tmp/whatsoup-media/old.jpg');
+    updateMediaPath(db, msg.messageId, '/tmp/whatsoup-media/new.jpg');
+
+    const row = db.raw
+      .prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { media_path: string | null };
+    expect(row.media_path).toBe('/tmp/whatsoup-media/new.jpg');
+  });
+
+  it('updateMediaPath is a no-op for unknown message_id', () => {
+    // Should not throw
+    expect(() => updateMediaPath(db, 'nonexistent-id', '/tmp/x.jpg')).not.toThrow();
   });
 
 });
