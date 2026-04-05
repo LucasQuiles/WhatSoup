@@ -435,23 +435,25 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       CREATE TRIGGER messages_fts_update AFTER UPDATE OF content_text ON messages
       BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content)
-          VALUES ('delete', OLD.pk, COALESCE(OLD.content_text, ''));
+          SELECT 'delete', OLD.pk, OLD.content_text
+          WHERE OLD.content_text IS NOT NULL;
         INSERT INTO messages_fts(rowid, content)
           SELECT NEW.pk, NEW.content_text
           WHERE NEW.content_text IS NOT NULL AND NEW.deleted_at IS NULL;
       END;
 
       CREATE TRIGGER messages_fts_soft_delete AFTER UPDATE OF deleted_at ON messages
-        WHEN NEW.deleted_at IS NOT NULL
+        WHEN NEW.deleted_at IS NOT NULL AND OLD.content_text IS NOT NULL
       BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content)
-          VALUES ('delete', OLD.pk, COALESCE(OLD.content_text, ''));
+          VALUES ('delete', OLD.pk, OLD.content_text);
       END;
 
       CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages
+        WHEN OLD.content_text IS NOT NULL
       BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content)
-          VALUES ('delete', OLD.pk, COALESCE(OLD.content_text, ''));
+          VALUES ('delete', OLD.pk, OLD.content_text);
       END;
     `);
   }],

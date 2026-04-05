@@ -284,4 +284,50 @@ describe('messages', () => {
     expect(() => updateMediaPath(db, 'nonexistent-id', '/tmp/x.jpg')).not.toThrow();
   });
 
+  // --- Task 2 (SP2): content_text in rowToMessage and StoreMessageInput ---
+
+  it('rowToMessage exposes content_text as contentText', () => {
+    const msg = makeMsg({ content: '{"type":"location","latitude":40.7}', contentType: 'location' });
+    storeMessage(db, msg);
+
+    // Manually set content_text
+    db.raw.prepare('UPDATE messages SET content_text = ? WHERE message_id = ?')
+      .run('Location: shared (40.7, -74.0)', msg.messageId);
+
+    const rows = db.raw
+      .prepare('SELECT * FROM messages WHERE message_id = ?')
+      .all(msg.messageId) as unknown as MessageRow[];
+
+    const mapped = rowToMessage(rows[0]);
+    expect(mapped.contentText).toBe('Location: shared (40.7, -74.0)');
+  });
+
+  it('rowToMessage returns content as contentText fallback for text messages', () => {
+    const msg = makeMsg({ content: 'hello world', contentType: 'text' });
+    storeMessage(db, msg);
+
+    const rows = db.raw
+      .prepare('SELECT * FROM messages WHERE message_id = ?')
+      .all(msg.messageId) as unknown as MessageRow[];
+
+    const mapped = rowToMessage(rows[0]);
+    expect(mapped.contentText).toBe('hello world');
+  });
+
+  it('storeMessageIfNew persists content_text when provided', () => {
+    const msg = makeMsg({
+      content: '{"type":"contact","displayName":"Bob"}',
+      contentType: 'contact',
+      contentText: 'Contact: Bob',
+    });
+
+    const { storeMessageIfNew } = require('../../src/core/messages.ts');
+    storeMessageIfNew(db, msg);
+
+    const row = db.raw
+      .prepare('SELECT content_text FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { content_text: string | null };
+    expect(row.content_text).toBe('Contact: Bob');
+  });
+
 });

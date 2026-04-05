@@ -20,6 +20,7 @@ export interface MessageRow {
   quoted_message_id: string | null;
   created_at: string;
   media_path: string | null;
+  content_text: string | null;
 }
 
 export function rowToMessage(row: MessageRow) {
@@ -37,6 +38,7 @@ export function rowToMessage(row: MessageRow) {
     quotedMessageId: row.quoted_message_id ?? null,
     createdAt: row.created_at,
     mediaPath: row.media_path ?? null,
+    contentText: row.content_text ?? row.content ?? null,
   };
 }
 
@@ -56,6 +58,7 @@ export interface StoredMessage {
   enrichmentRetries: number;
   createdAt: string;
   mediaPath: string | null;
+  contentText: string | null;
 }
 
 export interface StoreMessageInput {
@@ -71,6 +74,8 @@ export interface StoreMessageInput {
   quotedMessageId?: string | null;
   /** JSON-serialised WAMessage — stored in raw_message for native forward support */
   rawMessage?: string | null;
+  /** Human-readable summary for FTS indexing (SP2). Null for text messages. */
+  contentText?: string | null;
 }
 
 // --- Row mapping ---
@@ -92,6 +97,7 @@ function rowToStoredMessage(row: Record<string, unknown>): StoredMessage {
     enrichmentRetries: (row.enrichment_retries as number) ?? 0,
     createdAt: row.created_at as string,
     mediaPath: (row.media_path as string | null) ?? null,
+    contentText: (row.content_text as string | null) ?? (row.content as string | null) ?? null,
   };
 }
 
@@ -110,6 +116,7 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
     timestamp: msg.timestamp,
     quoted_message_id: msg.quotedMessageId ?? null,
     raw_message: msg.rawMessage ?? null,
+    content_text: msg.contentText ?? null,
   };
 }
 
@@ -122,10 +129,10 @@ export function storeMessage(db: Database, msg: StoreMessageInput): void {
   db.raw.prepare(`
     INSERT INTO messages
       (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type,
-       is_from_me, timestamp, quoted_message_id, raw_message)
+       is_from_me, timestamp, quoted_message_id, raw_message, content_text)
     VALUES
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
-       @is_from_me, @timestamp, @quoted_message_id, @raw_message)
+       @is_from_me, @timestamp, @quoted_message_id, @raw_message, @content_text)
     ON CONFLICT(message_id) DO UPDATE SET
       sender_name       = COALESCE(excluded.sender_name, sender_name),
       content           = excluded.content,
@@ -133,7 +140,8 @@ export function storeMessage(db: Database, msg: StoreMessageInput): void {
       is_from_me        = excluded.is_from_me,
       timestamp         = excluded.timestamp,
       quoted_message_id = COALESCE(excluded.quoted_message_id, quoted_message_id),
-      raw_message       = COALESCE(excluded.raw_message, raw_message)
+      raw_message       = COALESCE(excluded.raw_message, raw_message),
+      content_text      = excluded.content_text
   `).run(toInsertParams(msg));
 }
 
@@ -146,10 +154,10 @@ export function storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean
   const result = db.raw.prepare(`
     INSERT OR IGNORE INTO messages
       (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type,
-       is_from_me, timestamp, quoted_message_id, raw_message)
+       is_from_me, timestamp, quoted_message_id, raw_message, content_text)
     VALUES
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
-       @is_from_me, @timestamp, @quoted_message_id, @raw_message)
+       @is_from_me, @timestamp, @quoted_message_id, @raw_message, @content_text)
   `).run(toInsertParams(msg));
   const inserted = (result.changes as number) > 0;
   if (inserted) {

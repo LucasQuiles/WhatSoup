@@ -28,6 +28,24 @@ import { jitteredDelay } from '../core/retry.ts';
 export type { IncomingMessage } from '../core/types.ts';
 
 export type WhatsAppSocket = ReturnType<typeof makeWASocket>;
+export type ConnectionLifecycleState =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'cooldown'
+  | 'shutting_down';
+
+export interface ConnectionStateSnapshot {
+  state: ConnectionLifecycleState;
+  connected: boolean;
+  reconnectAttempts: number;
+  reconnectPhase: 'backoff' | 'cooldown' | 'retry' | null;
+  stateChangedAt: string;
+  firstFailureAt: string | null;
+  lastPingAt: string | null;
+  lastPongAt: string | null;
+}
 
 /** Maximum time to wait for a send operation before aborting. */
 const SEND_TIMEOUT_MS = 30_000;
@@ -42,6 +60,10 @@ function withSendTimeout<T>(promise: Promise<T>, operation: string): Promise<T> 
     );
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(handle!));
+}
+
+function toIso(value: number | null): string | null {
+  return value === null ? null : new Date(value).toISOString();
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +146,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private reconnectPhase: 'backoff' | 'cooldown' | 'retry' = 'backoff';
   private firstFailureAt: number | null = null;
   private cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+  private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private keepaliveInFlight = false;
+  private gracefulReconnectInFlight = false;
+  private lastPingAt: number | null = null;
+  private lastPongAt: number | null = null;
+  private connectionState: ConnectionLifecycleState = 'disconnected';
+  private stateChangedAt = Date.now();
   private static readonly MAX_FAILURE_DURATION_MS = 30 * 60 * 1000;
   private static readonly COOLDOWN_MS = 5 * 60 * 1000;
+  private static readonly KEEPALIVE_INTERVAL_MS = 30_000;
+  private static readonly KEEPALIVE_TIMEOUT_MS = 10_000;
 
   private readonly log = createChildLogger('connection');
 
@@ -162,6 +193,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   constructor() {
     super();
     // authDir is sourced from config — no constructor parameters needed
+    this.on('exhausted', () => {
+      void this.handleExhausted();
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -171,6 +205,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   async connect(): Promise<void> {
     if (this.shuttingDown) return;
 
+    this.setConnectionState('connecting');
     this.log.info('Connecting to WhatsApp');
 
     try {
@@ -327,14 +362,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.cooldownTimer) {
-      clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = null;
-    }
+    this.setConnectionState('shutting_down');
+    this.clearReconnectTimers();
+    this.stopKeepalive();
     if (this.sock) {
       try {
         this.sock.end(undefined);
@@ -343,6 +373,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
       this.sock = null;
     }
+    this.clearIdentity();
+  }
+
+  getConnectionState(): ConnectionStateSnapshot {
+    return {
+      state: this.connectionState,
+      connected: this.connectionState === 'connected' && this.botJid !== null,
+      reconnectAttempts: this.reconnectAttempts,
+      reconnectPhase: this.connectionState === 'connected' ? null : this.reconnectPhase,
+      stateChangedAt: new Date(this.stateChangedAt).toISOString(),
+      firstFailureAt: toIso(this.firstFailureAt),
+      lastPingAt: toIso(this.lastPingAt),
+      lastPongAt: toIso(this.lastPongAt),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -708,6 +752,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.reconnectAttempts = 0;
       this.reconnectPhase = 'backoff';
       this.firstFailureAt = null;
+      this.gracefulReconnectInFlight = false;
       if (this.cooldownTimer !== null) {
         clearTimeout(this.cooldownTimer);
         this.cooldownTimer = null;
@@ -722,6 +767,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.selfMentionRegexJid = bare ? new RegExp(`@${bare}\\b`, 'g') : null;
       const lidBare = this.botLid ? bareNumber(this.botLid) : undefined;
       this.selfMentionRegexLid = (lidBare && lidBare !== bare) ? new RegExp(`@${lidBare}\\b`, 'g') : null;
+      this.setConnectionState('connected');
+      this.startKeepalive(sock);
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
     }
@@ -733,12 +780,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.log.warn({ statusCode, reason }, 'WhatsApp connection closed');
 
       // Invalidate the stale socket before deciding whether to reconnect
+      this.stopKeepalive();
       try { sock.end(undefined); } catch { /* best-effort */ }
       this.sock = null;
-      this.botJid = null;
-      this.botLid = null;
+      this.clearIdentity();
 
       if (statusCode === DisconnectReason.loggedOut) {
+        this.setConnectionState('disconnected');
         this.log.error('Logged out — re-authenticate with the auth CLI');
         // Do NOT reconnect; credentials are invalid
         return;
@@ -747,6 +795,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (statusCode === DisconnectReason.restartRequired) {
         // Baileys signals a clean internal restart — reconnect immediately
         if (!this.shuttingDown) {
+          this.setConnectionState('reconnecting');
           void this.connect();
         }
         return;
@@ -793,12 +842,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           `Max attempts reached — entering ${ConnectionManager.COOLDOWN_MS / 1000}s cooldown`,
         );
         this.reconnectPhase = 'cooldown';
+        this.setConnectionState('cooldown');
         this.cooldownTimer = setTimeout(() => {
           this.cooldownTimer = null;
           this.reconnectAttempts = 0;
           this.reconnectPhase = 'retry';
+          this.setConnectionState('reconnecting');
           void this.connect();
         }, ConnectionManager.COOLDOWN_MS);
+        this.cooldownTimer.unref?.();
         return;
       }
 
@@ -813,11 +865,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         { attempt: this.reconnectAttempts, backoffMs, phase: this.reconnectPhase },
         'Scheduling reconnect',
       );
+      this.setConnectionState('reconnecting');
 
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
+        this.setConnectionState('connecting');
         void this.connect();
       }, backoffMs);
+      this.reconnectTimer.unref?.();
       return;
     }
 
@@ -960,6 +1015,132 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
     }
   }
+
+  private clearIdentity(): void {
+    this.botJid = null;
+    this.botLid = null;
+    this.selfMentionRegexJid = null;
+    this.selfMentionRegexLid = null;
+  }
+
+  private clearReconnectTimers(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.cooldownTimer !== null) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
+  }
+
+  private setConnectionState(state: ConnectionLifecycleState): void {
+    if (this.connectionState === state) return;
+    this.connectionState = state;
+    this.stateChangedAt = Date.now();
+  }
+
+  private startKeepalive(sock: WhatsAppSocket): void {
+    this.stopKeepalive();
+    this.keepaliveTimer = setInterval(() => {
+      void this.runKeepalive(sock);
+    }, ConnectionManager.KEEPALIVE_INTERVAL_MS);
+    this.keepaliveTimer.unref?.();
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer !== null) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+    this.keepaliveInFlight = false;
+  }
+
+  private async runKeepalive(sock: WhatsAppSocket): Promise<void> {
+    if (this.shuttingDown || this.sock !== sock || this.keepaliveInFlight) return;
+    if (!(sock as any).ws?.isOpen) return;
+
+    this.keepaliveInFlight = true;
+    this.lastPingAt = Date.now();
+
+    try {
+      const result = await sock.query({
+        tag: 'iq',
+        attrs: {
+          to: 's.whatsapp.net',
+          type: 'get',
+          xmlns: 'w:p',
+        },
+        content: [{ tag: 'ping', attrs: {} }],
+      }, ConnectionManager.KEEPALIVE_TIMEOUT_MS);
+
+      if (!result) {
+        throw new Error('keepalive timed out');
+      }
+
+      if (this.shuttingDown || this.sock !== sock) return;
+      this.lastPongAt = Date.now();
+    } catch (err) {
+      if (this.shuttingDown || this.sock !== sock) return;
+      this.log.warn({ err }, 'keepalive failed — forcing reconnect');
+      await this.gracefulReconnect(sock, 'keepalive_failed');
+    } finally {
+      this.keepaliveInFlight = false;
+    }
+  }
+
+  private async handleExhausted(): Promise<void> {
+    if (this.shuttingDown || this.gracefulReconnectInFlight) return;
+
+    this.gracefulReconnectInFlight = true;
+    this.log.warn('reconnect window exhausted — forcing fresh connect');
+    this.stopKeepalive();
+    this.clearReconnectTimers();
+    this.sock = null;
+    this.clearIdentity();
+    this.reconnectAttempts = 0;
+    this.reconnectPhase = 'backoff';
+    this.firstFailureAt = null;
+    this.setConnectionState('reconnecting');
+
+    try {
+      await this.connect();
+    } finally {
+      if (this.connectionState !== 'connected') {
+        this.gracefulReconnectInFlight = false;
+      }
+    }
+  }
+
+  private async gracefulReconnect(sock: WhatsAppSocket, reason: 'keepalive_failed' | 'connection_exhausted'): Promise<void> {
+    if (this.gracefulReconnectInFlight || this.shuttingDown) return;
+    if (this.sock !== sock) return;
+
+    this.gracefulReconnectInFlight = true;
+    this.log.warn({ reason }, 'graceful reconnect requested');
+    this.stopKeepalive();
+    this.clearReconnectTimers();
+    this.sock = null;
+    this.clearIdentity();
+    this.reconnectAttempts = 0;
+    this.reconnectPhase = 'backoff';
+    this.firstFailureAt = null;
+    this.setConnectionState('reconnecting');
+
+    try {
+      sock.end(undefined);
+    } catch {
+      // best-effort
+    }
+
+    try {
+      await this.connect();
+    } finally {
+      if (this.connectionState !== 'connected') {
+        this.gracefulReconnectInFlight = false;
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1268,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     senderJid,
     senderName,
     content,
+    contentText: null, // SP2: will be set by parseIncomingMessage rewrite in Task 4
     contentType,
     isFromMe: msg.key.fromMe ?? false,
     isGroup: isJidGroup(msg.key.remoteJid!) ?? false,

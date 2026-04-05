@@ -529,6 +529,7 @@ const healthServer = startHealthServer({
             senderJid: msg.senderJid,
             senderName: msg.senderName,
             content: msg.content,
+            contentText: msg.contentText ?? null,
             contentType: msg.contentType,
             isFromMe: false,
             isGroup: false,

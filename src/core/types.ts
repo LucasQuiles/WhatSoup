@@ -27,6 +27,8 @@ export interface IncomingMessage {
   senderJid: string;
   senderName: string | null;
   content: string | null;
+  /** Human-readable summary for FTS indexing. Null for text messages (content is already readable). */
+  contentText: string | null;
   contentType: ContentType;
   isFromMe: boolean;
   isGroup: boolean;

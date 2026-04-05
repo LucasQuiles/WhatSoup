@@ -109,6 +109,7 @@ export function createIngestHandler(
           senderName: msg.senderName,
           messageId: msg.messageId,
           content: msg.content,
+          contentText: msg.contentText ?? null,
           contentType: msg.contentType,
           isFromMe: msg.isFromMe,
           timestamp: msg.timestamp,
