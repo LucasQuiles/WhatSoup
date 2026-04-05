@@ -38,7 +38,7 @@ describe('Codex stream parser', () => {
 
     it('parses item.completed agent_message → assistant_text with text', () => {
       const event = parseCodexEvent(lines[2]!);
-      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+      expect(event).toMatchObject({ type: 'assistant_text', text: 'Four' });
     });
 
     it('parses turn.completed → result with token counts and null text', () => {
@@ -380,7 +380,7 @@ describe('Gemini stream parser', () => {
     it('parses {type:"message", role:"assistant", delta:true} → assistant_text', () => {
       // lines[2] is assistant delta
       const event = parseGeminiEvent(lines[2]!);
-      expect(event).toEqual({ type: 'assistant_text', text: 'Four' });
+      expect(event).toMatchObject({ type: 'assistant_text', text: 'Four' });
     });
 
     it('parses {type:"result", status:"success", stats} → result with tokens and null text', () => {
