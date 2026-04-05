@@ -33,7 +33,7 @@ export interface MessageRow {
 }
 
 /** Feed-path message row — raw_message intentionally excluded. */
-export type FeedMessageRow = Omit<MessageRow, 'raw_message'>;
+type FeedMessageRow = Omit<MessageRow, 'raw_message'>;
 
 export interface AccessEntry {
   subjectType: string;
@@ -51,6 +51,10 @@ export interface DbStats {
 }
 
 export type DbResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] = {
+  readOnly: true,
+};
 
 // ---------------------------------------------------------------------------
 // FleetDbReader
@@ -82,7 +86,7 @@ export class FleetDbReader {
 
     let db: DatabaseSync | null = null;
     try {
-      db = new DatabaseSync(dbPath, { readOnly: true } as any);
+      db = new DatabaseSync(dbPath, READ_ONLY_DATABASE_OPTIONS);
       const result = fn(db);
       return { ok: true, data: result };
     } catch (err) {
