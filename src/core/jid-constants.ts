@@ -21,7 +21,7 @@ export const JID_LID = `@${DOMAIN_LID}`;
 /** WhatsApp group chat JID suffix */
 export const JID_GROUP = `@${DOMAIN_GROUP}`;
 /** WhatsApp newsletter/channel JID suffix */
-export const JID_NEWSLETTER = '@newsletter';
+// JID_NEWSLETTER removed — no newsletter support yet
 
 // ── JID builders ────────────────────────────────────────────────────────────
 
@@ -47,10 +47,7 @@ export function isPnJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_PERSONAL);
 }
 
-/** Check if a JID is a group JID (@g.us). */
-export function isGroupJid(jid: string | null | undefined): boolean {
-  return !!jid && jid.endsWith(JID_GROUP);
-}
+// isGroupJid removed — use isGroupConversationKey from conversation-key.ts instead
 
 // ── JID parsing ─────────────────────────────────────────────────────────────
 

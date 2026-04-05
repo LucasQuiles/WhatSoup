@@ -218,17 +218,8 @@ export interface ProviderSession {
 /** Factory function that creates a {@link ProviderSession} instance. */
 export type ProviderFactory = () => ProviderSession;
 
-/** Registry of available providers. */
-export interface ProviderRegistry {
-  /** Register a provider factory under the given id. */
-  register(id: string, factory: ProviderFactory): void;
-  /** Create a new session for the provider identified by `id`. */
-  create(id: string): ProviderSession;
-  /** List descriptors for all registered providers. */
-  list(): ProviderDescriptor[];
-  /** Check whether a provider with the given id is registered. */
-  has(id: string): boolean;
-}
+// ProviderRegistry interface removed — provider selection is config-driven
+// via agentOptions.provider string, not a runtime registry pattern.
 
 // ---------------------------------------------------------------------------
 // Provider config — per-instance configuration (from config.json)

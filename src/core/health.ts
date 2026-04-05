@@ -4,7 +4,7 @@ import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
-import { getPendingCount, upsertAccess, type SubjectType } from './access-list.ts';
+import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';

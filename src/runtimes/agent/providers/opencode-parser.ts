@@ -12,7 +12,7 @@
 // compatible with (line: string) => AgentEvent | null.
 
 import type { AgentEvent } from '../stream-parser.ts';
-import { type JsonObject, isRecord, stringifyValue } from './parser-utils.ts';
+import { isRecord, stringifyValue } from './parser-utils.ts';
 
 export interface OpenCodeParser {
   parse: (line: string) => AgentEvent | null;

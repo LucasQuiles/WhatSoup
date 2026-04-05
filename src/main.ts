@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, readdirSync, constants, existsSync } from 'node:fs';
+import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config, DEFAULT_PINECONE_INDEX } from './config.ts';

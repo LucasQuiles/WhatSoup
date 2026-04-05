@@ -7,7 +7,7 @@
 // - Server requests:      { jsonrpc: "2.0", id: "...", method: "...", params: {...} }
 
 import type { AgentEvent } from '../stream-parser.ts';
-import { type JsonObject, isRecord, stringifyValue, getNestedNumber, extractMessage, extractTokenCounts } from './parser-utils.ts';
+import { type JsonObject, isRecord, stringifyValue, extractMessage, extractTokenCounts } from './parser-utils.ts';
 
 // ─── Item helpers ─────────────────────────────────────────────────────────────
 

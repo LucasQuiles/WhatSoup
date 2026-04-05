@@ -8,10 +8,10 @@ const log = createChildLogger('durability');
 
 // ── Status string unions ──
 
-export type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
-export type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
+type OutboundStatus = 'pending' | 'sending' | 'submitted' | 'echoed' | 'maybe_sent' | 'failed_permanent' | 'quarantined';
+type InboundStatus = 'pending' | 'processing' | 'turn_done' | 'complete' | 'failed';
 export type SessionStatus = 'active' | 'suspended' | 'orphaned' | 'ended';
-export type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'replayed' | 'quarantined';
+type ToolCallStatus = 'pending' | 'executing' | 'complete' | 'replayed' | 'quarantined';
 
 // ── SQLite row interfaces ──
 

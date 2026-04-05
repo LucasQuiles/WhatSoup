@@ -49,24 +49,6 @@ export interface RuntimeHealth {
   details: Record<string, unknown>;
 }
 
-export interface InstanceInfo {
-  name: string;
-  mode: 'passive' | 'chat' | 'agent';
-  accessMode: string;
-}
-
-export interface ChatRuntimeDetails {
-  queueDepth: number;
-  enrichmentUnprocessed: number;
-}
-
-export interface AgentRuntimeDetails {
-  activeSessions: number;
-  lastSessionStatus: string | null;
-  lastSessionStartedAt: string | null;
-}
-
-export interface PassiveRuntimeDetails {
-  unreadCount: number;
-  lastActivityAt: string | null;
-}
+// InstanceInfo, ChatRuntimeDetails, AgentRuntimeDetails, PassiveRuntimeDetails
+// removed — these were designed for a typed health response that was never implemented.
+// The health endpoint uses inline object shapes instead.
