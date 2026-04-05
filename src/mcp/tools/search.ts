@@ -151,6 +151,102 @@ function makeSearchContacts(db: Database): ToolDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// search_messages_advanced — dual-path metadata + FTS search
+// ---------------------------------------------------------------------------
+
+const SearchAdvancedSchema = z.object({
+  query: z.string().optional().describe('FTS text search query. When absent, only metadata filters apply.'),
+  sender_jid: z.string().optional().describe('Filter by sender JID'),
+  content_type: z.string().optional().describe('Filter by content type (text, image, audio, video, document, sticker, location, contact, poll)'),
+  conversation_key: z.string().optional().describe('Filter by conversation'),
+  after: z.number().optional().describe('Unix timestamp — messages after this time'),
+  before: z.number().optional().describe('Unix timestamp — messages before this time'),
+  has_media: z.boolean().optional().describe('Filter for messages with (true) or without (false) media'),
+  limit: z.number().optional().describe('Max results to return (default 20)'),
+});
+
+function makeSearchMessagesAdvanced(db: Database): ToolDeclaration {
+  return {
+    name: 'search_messages_advanced',
+    description:
+      'Advanced message search with metadata filters (sender, date range, content type, conversation, media presence) and optional full-text search. When a text query is provided, uses FTS5 for ranking. When absent, filters on metadata only.',
+    schema: SearchAdvancedSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    handler: async (params) => {
+      const {
+        query,
+        sender_jid: sender,
+        content_type: contentType,
+        conversation_key: conv,
+        after,
+        before,
+        has_media: hasMedia,
+        limit = 20,
+      } = SearchAdvancedSchema.parse(params);
+
+      const bindings: unknown[] = [];
+      const conditions: string[] = ['m.deleted_at IS NULL'];
+
+      // Metadata filters
+      if (sender) {
+        conditions.push('m.sender_jid = ?');
+        bindings.push(sender);
+      }
+      if (contentType) {
+        conditions.push('m.content_type = ?');
+        bindings.push(contentType);
+      }
+      if (conv) {
+        conditions.push('m.conversation_key = ?');
+        bindings.push(conv);
+      }
+      if (after != null) {
+        conditions.push('m.timestamp >= ?');
+        bindings.push(after);
+      }
+      if (before != null) {
+        conditions.push('m.timestamp <= ?');
+        bindings.push(before);
+      }
+      if (hasMedia === true) {
+        conditions.push('m.media_path IS NOT NULL');
+      } else if (hasMedia === false) {
+        conditions.push('m.media_path IS NULL');
+      }
+
+      const where = conditions.join(' AND ');
+
+      let sql: string;
+      if (query) {
+        // FTS-first path: join through messages_fts for text matching
+        sql = `SELECT m.*
+               FROM messages_fts fts
+               JOIN messages m ON m.pk = fts.rowid
+               WHERE fts.content MATCH ?
+                 AND ${where}
+               ORDER BY m.timestamp DESC
+               LIMIT ?`;
+        bindings.unshift(query);
+      } else {
+        // Metadata-only path: query messages directly
+        sql = `SELECT m.*
+               FROM messages m
+               WHERE ${where}
+               ORDER BY m.timestamp DESC
+               LIMIT ?`;
+      }
+      bindings.push(limit);
+
+      const rows = db.raw.prepare(sql).all(...bindings as Array<string | number | null>) as unknown as MessageRow[];
+
+      return { messages: rows.map(rowToMessage), total: rows.length };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
@@ -158,4 +254,5 @@ export function registerSearchTools(db: Database, register: (tool: ToolDeclarati
   register(makeSearchMessages(db));
   register(makeSearchChatMessages(db));
   register(makeSearchContacts(db));
+  register(makeSearchMessagesAdvanced(db));
 }
