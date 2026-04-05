@@ -1,3 +1,4 @@
+import { promises as dns } from 'node:dns';
 import { createChildLogger } from '../../../logger.ts';
 
 const log = createChildLogger('media:links');
@@ -27,6 +28,24 @@ export function isPrivateHost(hostname: string): boolean {
   return false;
 }
 
+/**
+ * Check if a resolved IP address falls within private/reserved ranges.
+ * Used as a DNS-aware SSRF guard: even if the hostname looks public,
+ * reject it when it resolves to a private IP.
+ */
+export function isPrivateIP(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length === 4 && parts.every((n) => n >= 0 && n <= 255)) {
+    if (parts[0] === 10) return true;                                // 10.0.0.0/8
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12
+    if (parts[0] === 192 && parts[1] === 168) return true;          // 192.168.0.0/16
+    if (parts[0] === 127) return true;                               // 127.0.0.0/8 loopback
+    if (parts[0] === 169 && parts[1] === 254) return true;          // 169.254.0.0/16 link-local / cloud metadata
+  }
+  if (ip === '0.0.0.0' || ip === '::1' || ip === '::') return true;
+  return false;
+}
+
 export interface LinkContent {
   title: string;
   content: string;
@@ -41,10 +60,12 @@ export function extractUrls(text: string): string[] {
 
 export async function extractLinkContent(url: string): Promise<LinkContent> {
   // SSRF protection: reject private/internal hostnames before fetching
+  let hostname: string | undefined;
   try {
     const parsed = new URL(url);
-    if (isPrivateHost(parsed.hostname)) {
-      log.warn({ url, hostname: parsed.hostname }, 'Blocked SSRF attempt to private host');
+    hostname = parsed.hostname;
+    if (isPrivateHost(hostname)) {
+      log.warn({ url, hostname }, 'Blocked SSRF attempt to private host');
       return {
         title: url,
         content: `[blocked: private host]`,
@@ -53,6 +74,29 @@ export async function extractLinkContent(url: string): Promise<LinkContent> {
     }
   } catch {
     // Invalid URL — proceed and let fetch handle it
+  }
+
+  // DNS-aware SSRF protection: resolve hostname and verify the IP is not private.
+  // Catches attacker-controlled domains that resolve to 127.0.0.1, 169.254.169.254, etc.
+  if (hostname) {
+    try {
+      const { address } = await dns.lookup(hostname);
+      if (isPrivateIP(address)) {
+        log.warn({ url, resolvedIP: address }, 'SSRF: domain resolves to private IP');
+        return {
+          title: url,
+          content: `[blocked: private host]`,
+          fallbackLevel: 'raw',
+        };
+      }
+    } catch {
+      // DNS resolution failed — skip the fetch
+      return {
+        title: url,
+        content: `[couldn't fetch content]`,
+        fallbackLevel: 'raw',
+      };
+    }
   }
 
   let html = '';

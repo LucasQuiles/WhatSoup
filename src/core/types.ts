@@ -21,7 +21,7 @@ export interface Messenger {
   sendMedia(chatJid: string, media: OutboundMedia): Promise<SubmissionReceipt>;
 }
 
-export type ContentType = 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location' | 'contact' | 'poll' | 'unknown';
+export type ContentType = 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location' | 'live_location' | 'contact' | 'poll' | 'group_invite' | 'product' | 'pin' | 'interactive' | 'unknown';
 
 export interface IncomingMessage {
   messageId: string;

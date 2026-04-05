@@ -9,6 +9,27 @@ const log = createChildLogger('media:download');
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_SIZE_BYTES = 25 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// Magic-byte MIME detection (first 16 bytes)
+// ---------------------------------------------------------------------------
+
+const SIGNATURES: Array<[string, Buffer]> = [
+  ['image/png', Buffer.from([0x89, 0x50, 0x4e, 0x47])],
+  ['image/jpeg', Buffer.from([0xff, 0xd8, 0xff])],
+  ['image/gif', Buffer.from([0x47, 0x49, 0x46])],
+  ['image/webp', Buffer.from([0x52, 0x49, 0x46, 0x46])], // RIFF
+  ['application/pdf', Buffer.from([0x25, 0x50, 0x44, 0x46])],
+  ['video/mp4', Buffer.from([0x00, 0x00, 0x00])], // ftyp at offset 4
+  ['audio/ogg', Buffer.from([0x4f, 0x67, 0x67, 0x53])],
+];
+
+export function detectMime(buf: Buffer): string | null {
+  for (const [mime, sig] of SIGNATURES) {
+    if (buf.length >= sig.length && buf.subarray(0, sig.length).equals(sig)) return mime;
+  }
+  return null;
+}
+
 export interface MediaDownload {
   buffer: Buffer;
   mimeType: string;
@@ -36,6 +57,16 @@ export async function downloadMedia(
     }
 
     const durationMs = Date.now() - startMs;
+
+    // Magic-byte validation: warn if declared MIME disagrees with file signature
+    const detectedMime = detectMime(buffer);
+    if (detectedMime && detectedMime !== mimeType) {
+      log.warn(
+        { declared: mimeType, detected: detectedMime, sizeBytes: buffer.length },
+        'Media MIME mismatch — declared type differs from magic bytes',
+      );
+    }
+
     log.info({ mimeType, sizeBytes: buffer.length, durationMs }, 'Media downloaded');
     return { buffer, mimeType };
   } catch (err) {

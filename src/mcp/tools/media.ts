@@ -154,6 +154,9 @@ export function registerMediaTools(
       }
 
       // ── Read file ─────────────────────────────────────────────────────
+      // TODO(SP8): Future optimization — stream file to Baileys instead of
+      // reading the entire file into memory. Blocked on inconsistent Baileys
+      // stream support; revisit when upstream stabilizes.
 
       let buffer: Buffer;
       try {

@@ -555,21 +555,19 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     expect(parsed.emoji).toBeTruthy();
   });
 
-  it('liveLocation: content is JSON with lat/lng/speed, contentText is summary', () => {
+  it('liveLocation: content is text with lat/lng/accuracy, contentType is live_location', () => {
     const msg = msgWith({
       liveLocationMessage: {
         degreesLatitude: 37.7749,
         degreesLongitude: -122.4194,
+        accuracyInMeters: 15,
         speedInMps: 5.2,
         sequenceNumber: 3,
       },
     });
     const result = parseIncomingMessage(msg)!;
-    expect(result.contentType).toBe('location');
-    const parsed = JSON.parse(result.content!);
-    expect(parsed.type).toBe('liveLocation');
-    expect(parsed.latitude).toBe(37.7749);
-    expect(parsed.speed).toBe(5.2);
+    expect(result.contentType).toBe('live_location');
+    expect(result.content).toBe('Live location: 37.7749, -122.4194 (accuracy: 15m)');
     expect(result.contentText).toContain('Live location');
     expect(result.contentText).toContain('37.7749');
   });

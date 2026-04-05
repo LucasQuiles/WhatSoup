@@ -1355,15 +1355,39 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     contentType = 'location';
   } else if (innerMessage.liveLocationMessage) {
     const ll = innerMessage.liveLocationMessage;
-    content = JSON.stringify({
-      type: 'liveLocation',
-      latitude: ll.degreesLatitude ?? null,
-      longitude: ll.degreesLongitude ?? null,
-      speed: ll.speedInMps ?? null,
-      sequence: ll.sequenceNumber ?? null,
-    });
-    contentText = `Live location: (${ll.degreesLatitude}, ${ll.degreesLongitude})`;
-    contentType = 'location';
+    const lat = ll.degreesLatitude ?? 0;
+    const lng = ll.degreesLongitude ?? 0;
+    const accuracy = ll.accuracyInMeters ?? 0;
+    content = `Live location: ${lat}, ${lng} (accuracy: ${accuracy}m)`;
+    contentText = content;
+    contentType = 'live_location';
+  } else if (innerMessage.groupInviteMessage) {
+    const gi = innerMessage.groupInviteMessage;
+    const groupName = gi.groupName ?? 'Unknown group';
+    const caption = gi.caption ?? '';
+    content = `Group invite: ${groupName}${caption ? ` - ${caption}` : ''}`;
+    contentText = content;
+    contentType = 'group_invite';
+  } else if (innerMessage.productMessage) {
+    const pi = innerMessage.productMessage?.product ?? innerMessage.productMessage;
+    const title = pi?.title ?? 'Unknown product';
+    const description = pi?.description ?? '';
+    const currencyCode = pi?.currencyCode ?? '';
+    const priceAmount = pi?.priceAmount1000 != null ? (Number(pi.priceAmount1000) / 1000).toString() : '';
+    content = `Product: ${title}${description ? ` - ${description}` : ''}${currencyCode || priceAmount ? ` (${currencyCode} ${priceAmount})`.trim() : ''}`;
+    contentText = content;
+    contentType = 'product';
+  } else if (innerMessage.pinInChatMessage) {
+    content = 'Pinned a message';
+    contentText = content;
+    contentType = 'pin';
+  } else if (innerMessage.interactiveMessage) {
+    const im = innerMessage.interactiveMessage;
+    const bodyText = im.body?.text ?? null;
+    const type = im.type ?? 'interactive';
+    content = `Interactive: ${bodyText || type}`;
+    contentText = content;
+    contentType = 'interactive';
   } else if (innerMessage.contactMessage) {
     const cm = innerMessage.contactMessage;
     content = JSON.stringify({
