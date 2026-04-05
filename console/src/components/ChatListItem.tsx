@@ -15,7 +15,12 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+      aria-label={`Open conversation with ${displayName}`}
+      aria-selected={isSelected}
       className={`flex cursor-pointer c-chat-item ${isSelected ? 'active' : ''}`}
       style={{
         padding: 'var(--sp-3) var(--sp-4)',

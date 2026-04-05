@@ -38,6 +38,8 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
 
   return (
     <div
+      role="alert"
+      aria-live="polite"
       className="flex items-center gap-2.5 font-medium"
       style={{
         padding: 'var(--sp-2h) var(--sp-4)',
@@ -54,6 +56,7 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
       <button
         onClick={onClose}
         className="text-t5 hover:text-t3 cursor-pointer c-hover"
+        aria-label="Dismiss notification"
       >
         <X size={14} strokeWidth={1.75} />
       </button>

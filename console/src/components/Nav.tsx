@@ -181,6 +181,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                 background: 'var(--m-cht-soft)',
               }}
               title={`Update available: ${version} → ${remoteSha}`}
+              aria-label={`Update available: ${version} to ${remoteSha}`}
             >
               <Download size={12} strokeWidth={2} />
               <span>{version} → {remoteSha}</span>
