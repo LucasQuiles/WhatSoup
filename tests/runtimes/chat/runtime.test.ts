@@ -732,12 +732,12 @@ describe('Rate limiting', () => {
 
 describe('Media processing', () => {
   it('processMedia called with the incoming message', async () => {
-    const { handler } = makeHandler();
+    const { handler, db } = makeHandler();
     const msg = makeIncomingMessage({ contentType: 'image' });
 
     await handleAndDrain(handler, msg);
 
-    expect(mockProcessMedia).toHaveBeenCalledWith(msg, null);
+    expect(mockProcessMedia).toHaveBeenCalledWith(msg, null, db, msg.messageId);
   });
 
   it('media content used for LLM request and Pinecone context query', async () => {

@@ -187,7 +187,7 @@ export class ChatRuntime implements Runtime {
     const downloadFn = msg.rawMessage
       ? () => downloadMediaMessage(msg.rawMessage as any, 'buffer', {})
       : null;
-    const media: ProcessedMedia = await processMedia(msg, downloadFn);
+    const media: ProcessedMedia = await processMedia(msg, downloadFn, this.db, msg.messageId);
     const mediaContent = media.content;
     const mediaImages = media.images;
 

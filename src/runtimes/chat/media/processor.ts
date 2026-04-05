@@ -1,7 +1,9 @@
 import { createChildLogger } from '../../../logger.ts';
 import type { IncomingMessage } from '../../../core/types.ts';
 import { transcribeAudio } from '../providers/whisper.ts';
-import { downloadMedia } from '../../../core/media-download.ts';
+import { downloadMedia, writeTempFile } from '../../../core/media-download.ts';
+import { updateMediaPath } from '../../../core/messages.ts';
+import type { Database } from '../../../core/database.ts';
 import { extractFrames } from './video.ts';
 import { extractUrls, extractLinkContent } from './links.ts';
 import { extractDocumentText } from './documents.ts';
@@ -16,9 +18,28 @@ export interface ProcessedMedia {
   images: Array<{ mimeType: string; base64: string }>;
 }
 
+function persistMediaPath(
+  buffer: Buffer,
+  ext: string,
+  db: Database | undefined,
+  messageId: string | undefined,
+): string | null {
+  if (!db || !messageId) return null;
+  try {
+    const filePath = writeTempFile(buffer, ext);
+    updateMediaPath(db, messageId, filePath);
+    return filePath;
+  } catch (err) {
+    log.warn({ err, messageId }, 'Failed to persist media to disk');
+    return null;
+  }
+}
+
 export async function processMedia(
   msg: IncomingMessage,
   downloadFn: (() => Promise<Buffer>) | null,
+  db?: Database,
+  messageId?: string,
 ): Promise<ProcessedMedia> {
   const { contentType, content } = msg;
 
@@ -61,6 +82,9 @@ export async function processMedia(
       return { content: `[${label} — couldn't download]`, images: [] };
     }
 
+    const ext = contentType === 'sticker' ? 'webp' : 'jpg';
+    persistMediaPath(result.buffer, ext, db, messageId);
+
     return {
       content: content ?? '',
       images: [{ mimeType: result.mimeType, base64: result.buffer.toString('base64') }],
@@ -79,6 +103,8 @@ export async function processMedia(
     if (!result) {
       return { content: "[audio — couldn't download]", images: [] };
     }
+
+    persistMediaPath(result.buffer, 'ogg', db, messageId);
 
     try {
       const transcript = await transcribeAudio(result.buffer, result.mimeType);
@@ -101,6 +127,8 @@ export async function processMedia(
     if (!result) {
       return { content: "[video — couldn't download]", images: [] };
     }
+
+    persistMediaPath(result.buffer, 'mp4', db, messageId);
 
     let frames: Awaited<ReturnType<typeof extractFrames>>;
     try {
@@ -139,6 +167,11 @@ export async function processMedia(
     if (!result) {
       return { content: "[document — couldn't download]", images: [] };
     }
+
+    let docExt = 'bin';
+    const dotIdx = fileName.lastIndexOf('.');
+    if (dotIdx > 0) docExt = fileName.substring(dotIdx + 1).toLowerCase();
+    persistMediaPath(result.buffer, docExt, db, messageId);
 
     try {
       const text = await extractDocumentText(result.buffer, result.mimeType, fileName);
