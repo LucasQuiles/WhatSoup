@@ -1,6 +1,6 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 127 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 132 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
 ## Scope and Replay Policy Glossary
 
@@ -24,10 +24,10 @@ Complete reference for all 127 MCP tools exposed by WhatSoup. Tools are grouped 
 | Module | Tools |
 |--------|------:|
 | [messaging.ts](#messagingts) | 9 |
-| [media.ts](#mediats) | 1 |
+| [media.ts](#mediats) | 3 |
 | [chat-management.ts](#chat-managementts) | 10 |
 | [chat-operations.ts](#chat-operationsts) | 11 |
-| [search.ts](#searchts) | 3 |
+| [search.ts](#searchts) | 4 |
 | [groups.ts](#groupsts) | 19 |
 | [community.ts](#communityts) | 12 |
 | [newsletter.ts](#newsletterts) | 19 |
@@ -36,7 +36,9 @@ Complete reference for all 127 MCP tools exposed by WhatSoup. Tools are grouped 
 | [advanced.ts](#advancedts) | 13 |
 | [calls.ts](#callsts) | 1 |
 | [presence.ts](#presencets) | 2 |
-| **Total** | **127** |
+| [voice.ts](#voicets) | 1 |
+| [knowledge.ts](#knowledgets) | 1 |
+| **Total** | **132** |
 
 ---
 
@@ -251,6 +253,50 @@ Send a media file (image, document, audio, video, or sticker) from the local fil
 **Supported extensions:** `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.pdf`, `.doc`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.zip`, `.mp3`, `.ogg`, `.m4a`, `.wav`, `.mp4`, `.mov`, `.webm`
 
 **Limit:** 50 MB. Sandboxed sessions enforce `allowedRoot` filesystem boundary.
+
+---
+
+### download_media
+
+Download media from a received WhatsApp message. Returns the local file path. Uses cached path if media was already downloaded; otherwise downloads from WhatsApp CDN via the raw message data.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| message_id | string | required | The message ID to download media from |
+
+**Returns:** `file_path`, `content_type`, `file_size`, `cached` (boolean), and `mime_type` (for fresh downloads).
+
+**Error codes:** `not_found`, `unsupported_type`, `no_raw_message`, `media_expired`, `download_timeout`, `download_failed`.
+
+---
+
+### transcribe_audio
+
+Transcribe an audio/voice message using Whisper. Downloads the audio if needed, transcribes it, and persists the transcription to both `content` (structured JSON) and `content_text` (FTS-indexed). Returns cached transcription if already transcribed.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| message_id | string | required | The audio message ID to transcribe |
+
+**Returns:** `transcription`, `duration`, `cached` (boolean).
+
+**Error codes:** `not_found`, `not_audio`, `no_audio_data`, `media_expired`, `download_failed`, `transcription_failed`.
 
 ---
 
@@ -745,6 +791,33 @@ Search contacts by display name or phone number (global). Returns matching conta
 |------|------|----------|-------------|
 | query | string | required | Substring to match against display_name, notify_name, canonical_phone, or JID |
 | limit | number | optional | Max results; defaults to 20 |
+
+---
+
+### search_messages_advanced
+
+Advanced message search with metadata filters and optional full-text search. When a text `query` is provided, uses FTS5 for ranking (joins `messages_fts`). When absent, filters on metadata only. Supports combining multiple filters.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| query | string | optional | FTS text search query. When absent, only metadata filters apply |
+| sender_jid | string | optional | Filter by sender JID |
+| content_type | string | optional | Filter by content type (`text`, `image`, `audio`, `video`, `document`, `sticker`, `location`, `contact`, `poll`) |
+| conversation_key | string | optional | Filter by conversation |
+| after | number | optional | Unix timestamp — messages after this time |
+| before | number | optional | Unix timestamp — messages before this time |
+| has_media | boolean | optional | Filter for messages with (`true`) or without (`false`) downloaded media |
+| limit | number | optional | Max results; defaults to 20 |
+
+**Returns:** `messages` array (standard message format via `rowToMessage`) and `total` count.
 
 ---
 
@@ -2502,3 +2575,60 @@ Get the cached presence status for a WhatsApp contact JID. Returns `null` if no 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | jid | string | required | Contact JID |
+
+---
+
+## voice.ts
+
+Text-to-speech tool using ElevenLabs API with circuit breaker protection.
+
+> Uses `targetMode: injected` — see note in messaging section above.
+
+---
+
+### send_voice_reply
+
+Synthesize text to speech via ElevenLabs and send as a WhatsApp voice note (PTT). The audio is generated, written to a temp file, and sent as a push-to-talk voice message.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| text | string | required | Text to synthesize and send as a voice note |
+| voice_id | string | optional | ElevenLabs voice ID (defaults to instance config) |
+
+**Requires:** `ELEVENLABS_API_KEY` in GNOME Keyring. Circuit breaker trips after 3 consecutive failures (60s recovery window).
+
+---
+
+## knowledge.ts
+
+Pinecone-backed semantic search across configured knowledge base indexes.
+
+---
+
+### knowledge_search
+
+Search company knowledge bases using natural language queries. Results are pre-formatted summaries from Pinecone vector search with reranking.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| index | string (enum) | required | Pinecone index name to search |
+| query | string | required | Natural language search query (2-500 chars) |
+| top_k | number | optional | Number of results (1-20) |
+| namespace | string | optional | Override default namespace(s) |
+
+**Returns:** Formatted search results with relevance scores. Available indexes are dynamically configured per instance.
