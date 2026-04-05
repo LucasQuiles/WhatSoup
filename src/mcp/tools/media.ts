@@ -3,13 +3,14 @@
 
 import { z } from 'zod';
 import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
-import { extname } from 'node:path';
+import { extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { extractQuotedMedia } from '../../core/quoted-media.ts';
 import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
+import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
@@ -231,16 +232,28 @@ export function registerMediaTools(
         return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
       }
 
-      // Return cached path if file still exists on disk
-      if (!quoted && row.media_path && existsSync(row.media_path)) {
-        let fileSize = 0;
-        try { fileSize = statSync(row.media_path).size; } catch { /* ignore */ }
-        return {
-          file_path: row.media_path,
-          content_type: row.content_type,
-          file_size: fileSize,
-          cached: true,
-        };
+      // Return cached path if file still exists on disk — but only if it's under the managed
+      // media directory. A path pointing elsewhere (e.g. /etc/passwd) is treated as stale/invalid
+      // to prevent path-confinement escapes from poisoned DB rows.
+      if (!quoted && row.media_path) {
+        const normalizedPath = normalize(row.media_path);
+        const mediaBase = normalize(config.mediaDir);
+        const isConfined =
+          normalizedPath === mediaBase ||
+          normalizedPath.startsWith(mediaBase + '/');
+        if (!isConfined) {
+          log.warn({ media_path: row.media_path, mediaBase }, 'download_media: cached path is outside managed media dir — treating as stale');
+          // fall through to re-download
+        } else if (existsSync(normalizedPath)) {
+          let fileSize = 0;
+          try { fileSize = statSync(normalizedPath).size; } catch { /* ignore */ }
+          return {
+            file_path: normalizedPath,
+            content_type: row.content_type,
+            file_size: fileSize,
+            cached: true,
+          };
+        }
       }
 
       // Need raw_message to attempt download

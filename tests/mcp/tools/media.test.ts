@@ -18,6 +18,23 @@ vi.mock('@whiskeysockets/baileys', () => ({
   downloadMediaMessage: mockDownloadMediaMessage,
 }));
 
+// Mock config so path confinement checks use tmpdir() as the managed media directory.
+// This allows tests to write files under /tmp and have them treated as within the media base.
+vi.mock('../../../src/config.ts', () => ({
+  config: {
+    mediaDir: tmpdir(),
+    adminPhones: new Set<string>(),
+    accessMode: 'allowlist',
+    healthPort: 9090,
+    models: {
+      conversation: 'claude-opus-4-5',
+      extraction: 'claude-haiku-4-5',
+      validation: 'claude-haiku-4-5',
+      fallback: 'claude-sonnet-4-5',
+    },
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -747,5 +764,311 @@ describe('transcribe_audio', () => {
 
     const body = JSON.parse(result.content[0].text);
     expect(body.error).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download_media — path confinement security
+// ---------------------------------------------------------------------------
+
+describe('download_media — path confinement', () => {
+  let registry: ToolRegistry;
+  let connection: ReturnType<typeof makeConnection>;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let db: Database;
+  let deps: MediaDeps;
+  let workspace: string;
+  let filesToClean: string[] = [];
+  let dirsToClean: string[] = [];
+
+  beforeEach(() => {
+    mockDownloadMediaMessage.mockReset();
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('downloaded-media'));
+
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db };
+    registerMediaTools(registry, deps);
+    workspace = tempDir();
+    dirsToClean.push(workspace);
+    filesToClean = [];
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+    for (const d of [...dirsToClean].reverse()) {
+      try { rmdirSync(d, { recursive: true } as any); } catch { /* ignore */ }
+    }
+    dirsToClean = [];
+  });
+
+  function insertMessage(
+    messageId: string,
+    contentType: string,
+    opts: { mediaPath?: string; rawMessage?: string } = {},
+  ): void {
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, media_path, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, ?, 0, 1700000000, ?, ?)
+    `).run(messageId, contentType, opts.mediaPath ?? null, opts.rawMessage ?? null);
+  }
+
+  it('does not return a cached media_path that points outside the managed media dir', async () => {
+    // Seed a row with a media_path pointing to a sensitive system file.
+    // Even though the file "exists", the confinement check must reject it.
+    insertMessage('msg-escape', 'image', { mediaPath: '/etc/passwd' });
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-escape' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    // Must NOT return cached: true with /etc/passwd as file_path.
+    expect(body.cached).not.toBe(true);
+    expect(body.file_path).not.toBe('/etc/passwd');
+    // Without raw_message it falls through to a no_raw_message error — not a file path leak.
+    expect(body.error).toBeTruthy();
+  });
+
+  it('does not return a cached path that escapes mediaDir via path traversal', async () => {
+    // A path that normalises to outside mediaDir via traversal segments.
+    insertMessage('msg-traversal', 'image', { mediaPath: `${tmpdir()}/whatsoup-media/../../etc/passwd` });
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-traversal' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.cached).not.toBe(true);
+    expect(body.file_path).toBeUndefined();
+    expect(body.error).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download_media — stale cache + valid raw_message fallback
+// ---------------------------------------------------------------------------
+
+describe('download_media — stale cache with raw_message fallback', () => {
+  let registry: ToolRegistry;
+  let connection: ReturnType<typeof makeConnection>;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let db: Database;
+  let deps: MediaDeps;
+  let filesToClean: string[] = [];
+
+  beforeEach(() => {
+    mockDownloadMediaMessage.mockReset();
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('fresh-download'));
+
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db };
+    registerMediaTools(registry, deps);
+    filesToClean = [];
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+  });
+
+  it('re-downloads and updates media_path when cached file no longer exists on disk', async () => {
+    // media_path points inside mediaDir (tmpdir) but the file has been deleted.
+    const stalePath = join(tmpdir(), `whatsoup-stale-${randomBytes(4).toString('hex')}.jpg`);
+    // Do NOT create the file — it's intentionally absent.
+
+    const rawMessage = JSON.stringify({
+      message: {
+        imageMessage: {
+          url: 'https://mmg.whatsapp.net/fake',
+          mimetype: 'image/jpeg',
+          mediaKey: Buffer.from('fake-key').toString('base64'),
+          fileEncSha256: Buffer.from('fake-hash').toString('base64'),
+          fileSha256: Buffer.from('fake-sha').toString('base64'),
+          fileLength: 512,
+          directPath: '/fake/path',
+        },
+      },
+    });
+
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, media_path, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', 'msg-stale-fallback', 'image', 0, 1700000000, ?, ?)
+    `).run(stalePath, rawMessage);
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-stale-fallback' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    // Should have re-downloaded, not returned stale cached path.
+    expect(body.cached).toBe(false);
+    expect(body.content_type).toBe('image');
+    expect(body.file_size).toBe(Buffer.from('fresh-download').length);
+    expect(body.file_path).not.toBe(stalePath);
+    expect(existsSync(body.file_path)).toBe(true);
+    filesToClean.push(body.file_path);
+
+    // DB row must be updated with the new path.
+    const row = db.raw.prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get('msg-stale-fallback') as { media_path: string | null };
+    expect(row.media_path).toBe(body.file_path);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download_media — MIME / extension handling for documents
+// ---------------------------------------------------------------------------
+
+describe('download_media — document MIME and extension handling', () => {
+  let registry: ToolRegistry;
+  let connection: ReturnType<typeof makeConnection>;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let db: Database;
+  let deps: MediaDeps;
+  let filesToClean: string[] = [];
+
+  beforeEach(() => {
+    mockDownloadMediaMessage.mockReset();
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('doc-content'));
+
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db };
+    registerMediaTools(registry, deps);
+    filesToClean = [];
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+  });
+
+  it('derives file extension from documentMessage.fileName when present', async () => {
+    const rawMessage = JSON.stringify({
+      message: {
+        documentMessage: {
+          url: 'https://mmg.whatsapp.net/fake-doc',
+          mimetype: 'application/pdf',
+          fileName: 'report.pdf',
+          mediaKey: Buffer.from('fake-key').toString('base64'),
+          fileEncSha256: Buffer.from('fake-hash').toString('base64'),
+          fileSha256: Buffer.from('fake-sha').toString('base64'),
+          fileLength: 2048,
+          directPath: '/fake/doc-path',
+        },
+      },
+    });
+
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', 'msg-doc-pdf', 'document', 0, 1700000000, ?)
+    `).run(rawMessage);
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-doc-pdf' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.cached).toBe(false);
+    expect(body.content_type).toBe('document');
+    // File path should end in .pdf — derived from fileName in documentMessage.
+    expect(body.file_path).toMatch(/\.pdf$/);
+    expect(existsSync(body.file_path)).toBe(true);
+    filesToClean.push(body.file_path);
+  });
+
+  it('falls back to .bin extension when documentMessage has no fileName', async () => {
+    const rawMessage = JSON.stringify({
+      message: {
+        documentMessage: {
+          url: 'https://mmg.whatsapp.net/fake-bin',
+          mimetype: 'application/octet-stream',
+          mediaKey: Buffer.from('fake-key').toString('base64'),
+          fileEncSha256: Buffer.from('fake-hash').toString('base64'),
+          fileSha256: Buffer.from('fake-sha').toString('base64'),
+          fileLength: 1024,
+          directPath: '/fake/bin-path',
+        },
+      },
+    });
+
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', 'msg-doc-bin', 'document', 0, 1700000000, ?)
+    `).run(rawMessage);
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-doc-bin' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.cached).toBe(false);
+    expect(body.content_type).toBe('document');
+    // No fileName → falls back to default 'bin' extension.
+    expect(body.file_path).toMatch(/\.bin$/);
+    expect(existsSync(body.file_path)).toBe(true);
+    filesToClean.push(body.file_path);
+  });
+
+  it('uses mimetype from raw documentMessage when extractRawMime finds one', async () => {
+    const rawMessage = JSON.stringify({
+      message: {
+        documentMessage: {
+          url: 'https://mmg.whatsapp.net/fake-xlsx',
+          mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          fileName: 'data.xlsx',
+          mediaKey: Buffer.from('fake-key').toString('base64'),
+          fileEncSha256: Buffer.from('fake-hash').toString('base64'),
+          fileSha256: Buffer.from('fake-sha').toString('base64'),
+          fileLength: 4096,
+          directPath: '/fake/xlsx-path',
+        },
+      },
+    });
+
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', 'msg-doc-xlsx', 'document', 0, 1700000000, ?)
+    `).run(rawMessage);
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-doc-xlsx' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.cached).toBe(false);
+    expect(body.mime_type).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect(body.file_path).toMatch(/\.xlsx$/);
+    filesToClean.push(body.file_path);
   });
 });
