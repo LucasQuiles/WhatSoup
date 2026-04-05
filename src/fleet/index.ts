@@ -41,34 +41,91 @@ export interface RouteDeps {
 // Handler dispatch map
 // ---------------------------------------------------------------------------
 
-type HandlerFn = (
+type EmptyRouteParams = Record<string, never>;
+type NameRouteParams = { name: string };
+
+type RouteParamsByHandler = {
+  getLines: EmptyRouteParams;
+  getLine: NameRouteParams;
+  getChats: NameRouteParams;
+  getMessages: NameRouteParams;
+  searchMessages: NameRouteParams;
+  getAccess: NameRouteParams;
+  getLogs: NameRouteParams;
+  send: NameRouteParams;
+  saveContact: NameRouteParams;
+  accessUpdate: NameRouteParams;
+  restart: NameRouteParams;
+  stop: NameRouteParams;
+  configUpdate: NameRouteParams;
+  getTyping: EmptyRouteParams;
+  getFeed: EmptyRouteParams;
+  createLine: EmptyRouteParams;
+  deleteLine: NameRouteParams;
+  checkExists: NameRouteParams;
+  checkDirectory: EmptyRouteParams;
+  auth: NameRouteParams;
+  getVersion: EmptyRouteParams;
+  update: EmptyRouteParams;
+  getLidMappings: EmptyRouteParams;
+  syncLidMappings: EmptyRouteParams;
+};
+
+type RouteKey = keyof RouteParamsByHandler;
+type NamedRouteKey = {
+  [K in RouteKey]: RouteParamsByHandler[K] extends NameRouteParams ? K : never
+}[RouteKey];
+type RouteHandler<K extends RouteKey> = (
   req: IncomingMessage,
   res: ServerResponse,
   deps: RouteDeps,
-  params: Record<string, string>,
+  params: RouteParamsByHandler[K],
 ) => void | Promise<void>;
 
-const handlers: Record<string, HandlerFn> = {
+const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
+const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
+  'getLine',
+  'getChats',
+  'getMessages',
+  'searchMessages',
+  'getAccess',
+  'getLogs',
+  'send',
+  'saveContact',
+  'accessUpdate',
+  'restart',
+  'stop',
+  'configUpdate',
+  'deleteLine',
+  'checkExists',
+  'auth',
+]);
+
+function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
+  return NAME_ROUTE_HANDLERS.has(handler);
+}
+
+const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getLines:     (req, res, deps, _params) => handleGetLines(req, res, deps),
-  getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params as any),
-  getChats:     (req, res, deps, params) => handleGetChats(req, res, deps, params as any),
-  getMessages:  (req, res, deps, params) => handleGetMessages(req, res, deps, params as any),
-  searchMessages: (req, res, deps, params) => handleSearchMessages(req, res, deps, params as any),
-  getAccess:    (req, res, deps, params) => handleGetAccess(req, res, deps, params as any),
-  getLogs:      (req, res, deps, params) => handleGetLogs(req, res, deps, params as any),
-  send:         (req, res, deps, params) => handleSend(req, res, deps, params as any),
-  saveContact:  (req, res, deps, params) => handleSaveContact(req, res, deps, params as any),
-  accessUpdate: (req, res, deps, params) => handleAccessUpdate(req, res, deps, params as any),
-  restart:      (req, res, deps, params) => handleRestart(req, res, deps, params as any),
-  stop:         (req, res, deps, params) => handleStop(req, res, deps, params as any),
-  configUpdate: (req, res, deps, params) => handleConfigUpdate(req, res, deps, params as any),
+  getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
+  getChats:     (req, res, deps, params) => handleGetChats(req, res, deps, params),
+  getMessages:  (req, res, deps, params) => handleGetMessages(req, res, deps, params),
+  searchMessages: (req, res, deps, params) => handleSearchMessages(req, res, deps, params),
+  getAccess:    (req, res, deps, params) => handleGetAccess(req, res, deps, params),
+  getLogs:      (req, res, deps, params) => handleGetLogs(req, res, deps, params),
+  send:         (req, res, deps, params) => handleSend(req, res, deps, params),
+  saveContact:  (req, res, deps, params) => handleSaveContact(req, res, deps, params),
+  accessUpdate: (req, res, deps, params) => handleAccessUpdate(req, res, deps, params),
+  restart:      (req, res, deps, params) => handleRestart(req, res, deps, params),
+  stop:         (req, res, deps, params) => handleStop(req, res, deps, params),
+  configUpdate: (req, res, deps, params) => handleConfigUpdate(req, res, deps, params),
   getTyping:    (req, res, deps, _params) => handleGetTyping(req, res, deps),
   getFeed:      (req, res, deps, _params) => handleGetFeed(req, res, deps),
   createLine:   (req, res, deps, _params) => handleCreateLine(req, res, deps),
-  deleteLine:   (req, res, deps, params) => handleDeleteLine(req, res, deps, params as any),
-  checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params as any),
+  deleteLine:   (req, res, deps, params) => handleDeleteLine(req, res, deps, params),
+  checkExists:  (req, res, deps, params) => handleCheckExists(req, res, deps, params),
   checkDirectory: (req, res) => handleCheckDirectory(req, res),
-  auth:         (req, res, deps, params) => handleAuth(req, res, deps, params as any),
+  auth:         (req, res, deps, params) => handleAuth(req, res, deps, params),
   getVersion:   (_req, res, deps, _params) => handleGetVersion(_req, res, deps.updateChecker),
   update:       (req, res, deps, _params) => handleUpdate(req, res, deps.updateChecker, repoRoot),
   getLidMappings:  (_req, res, deps, _params) => handleGetLidMappings(_req, res, deps),
@@ -129,7 +186,7 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/update$/,  handler: 'update' },
   { method: 'GET',   path: /^\/api\/lid-mappings$/, handler: 'getLidMappings' },
   { method: 'POST',  path: /^\/api\/lid-mappings\/sync$/, handler: 'syncLidMappings' },
-] as const;
+] as const satisfies ReadonlyArray<{ method: string; path: RegExp; handler: RouteKey }>;
 
 // ---------------------------------------------------------------------------
 // L5: Cross-instance LID mapping sync handlers
@@ -268,11 +325,14 @@ export function createFleetServer(deps: FleetDeps) {
       for (const route of ROUTES) {
         const params = parseRoute(method, url, route);
         if (params) {
-          const handler = handlers[route.handler];
-          if (handler) {
-            await handler(req, res, routeDeps, params);
+          if (hasNameParam(route.handler)) {
+            if (typeof params.name !== 'string') continue;
+            await handlers[route.handler](req, res, routeDeps, { name: params.name });
             return;
           }
+
+          await handlers[route.handler](req, res, routeDeps, EMPTY_ROUTE_PARAMS);
+          return;
         }
       }
 
