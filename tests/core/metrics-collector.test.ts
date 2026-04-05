@@ -116,4 +116,60 @@ describe('metrics collector', () => {
       { bucket: '2026-04-05T15:00:00.000Z', metric: 'messages_out', value: 0 },
     ])
   })
+
+  it('collects zero-valued metrics for an empty current hour', () => {
+    const now = new Date('2026-04-05T16:05:00.000Z')
+
+    insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T15:59:59.000Z'), fromMe: false, contentType: 'text', messageId: 'previous-hour-only' })
+
+    collectHourlyMetrics(db, now)
+
+    const rows = db.raw.prepare(
+      'SELECT bucket, metric, value FROM metrics_hourly WHERE bucket = ? ORDER BY metric',
+    ).all('2026-04-05T16:00:00.000Z') as Array<{ bucket: string; metric: string; value: number }>
+
+    expect(rows).toEqual([
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_in', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_media', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_out', value: 0 },
+    ])
+  })
+
+  it('treats hour boundaries as inclusive start and exclusive end', () => {
+    const now = new Date('2026-04-05T16:30:00.000Z')
+
+    insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T16:00:00.000Z'), fromMe: false, contentType: 'text', messageId: 'boundary-start' })
+    insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T16:59:59.000Z'), fromMe: true, contentType: 'image', messageId: 'boundary-end-minus-one' })
+    insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T17:00:00.000Z'), fromMe: false, contentType: 'text', messageId: 'next-hour-start' })
+
+    collectHourlyMetrics(db, now)
+
+    const rows = db.raw.prepare(
+      'SELECT bucket, metric, value FROM metrics_hourly WHERE bucket = ? ORDER BY metric',
+    ).all('2026-04-05T16:00:00.000Z') as Array<{ bucket: string; metric: string; value: number }>
+
+    expect(rows).toEqual([
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_in', value: 1 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_media', value: 1 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_out', value: 1 },
+    ])
+  })
+
+  it('backfills only hours that contain messages and preserves gaps', () => {
+    const now = new Date('2026-04-05T18:30:00.000Z')
+
+    insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T18:05:00.000Z'), fromMe: false, contentType: 'text', messageId: 'current-hour' })
+    insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T16:15:00.000Z'), fromMe: true, contentType: 'document', messageId: 'two-hours-back' })
+
+    backfillMetrics(db, 1, now)
+
+    const buckets = db.raw.prepare(
+      'SELECT DISTINCT bucket FROM metrics_hourly ORDER BY bucket',
+    ).all() as Array<{ bucket: string }>
+
+    expect(buckets).toEqual([
+      { bucket: '2026-04-05T16:00:00.000Z' },
+      { bucket: '2026-04-05T18:00:00.000Z' },
+    ])
+  })
 })
