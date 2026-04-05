@@ -1,6 +1,6 @@
 // tests/mcp/tools/media.test.ts
 
-import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync } from 'node:fs';
@@ -9,6 +9,14 @@ import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerMediaTools, type MediaDeps } from '../../../src/mcp/tools/media.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { Database } from '../../../src/core/database.ts';
+
+const { mockDownloadMediaMessage } = vi.hoisted(() => ({
+  mockDownloadMediaMessage: vi.fn(),
+}));
+
+vi.mock('@whiskeysockets/baileys', () => ({
+  downloadMediaMessage: mockDownloadMediaMessage,
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -434,6 +442,9 @@ describe('download_media', () => {
   let dirsToClean: string[] = [];
 
   beforeEach(() => {
+    mockDownloadMediaMessage.mockReset();
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('downloaded-media'));
+
     db = new Database(':memory:');
     db.open();
     registry = new ToolRegistry();
@@ -554,8 +565,87 @@ describe('download_media', () => {
     );
 
     const body = JSON.parse(result.content[0].text);
-    // Download will fail because the URL is fake — should get media_expired or download_failed
-    expect(['media_expired', 'download_failed', 'download_timeout']).toContain(body.error);
+    expect(body.cached).toBe(false);
+    expect(body.content_type).toBe('image');
+    expect(body.file_size).toBe(Buffer.from('downloaded-media').length);
+    expect(existsSync(body.file_path)).toBe(true);
+    filesToClean.push(body.file_path);
+
+    const row = db.raw.prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get('msg-download') as { media_path: string | null };
+    expect(row.media_path).toBe(body.file_path);
+  });
+
+  it('downloads quoted media when quoted=true on a text message', async () => {
+    const rawMessage = JSON.stringify({
+      key: {
+        remoteJid: 'chat@g.us',
+      },
+      message: {
+        extendedTextMessage: {
+          text: 'check this',
+          contextInfo: {
+            stanzaId: 'quoted-msg-1',
+            quotedMessage: {
+              imageMessage: {
+                mimetype: 'image/png',
+                url: 'https://mmg.whatsapp.net/fake-quoted',
+                mediaKey: Buffer.from('fake-key').toString('base64'),
+              },
+            },
+          },
+        },
+      },
+    });
+
+    insertMessage('msg-quoted', 'text', { rawMessage });
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-quoted', quoted: true },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.cached).toBe(false);
+    expect(body.content_type).toBe('image');
+    expect(body.mime_type).toBe('image/png');
+    expect(existsSync(body.file_path)).toBe(true);
+    filesToClean.push(body.file_path);
+
+    const row = db.raw.prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get('msg-quoted') as { media_path: string | null };
+    expect(row.media_path).toBeNull();
+  });
+
+  it('returns no_quoted_media when quoted=true but no downloadable quoted message exists', async () => {
+    const rawMessage = JSON.stringify({
+      key: {
+        remoteJid: 'chat@g.us',
+      },
+      message: {
+        extendedTextMessage: {
+          text: 'check this',
+          contextInfo: {
+            stanzaId: 'quoted-msg-2',
+            quotedMessage: {
+              conversation: 'plain quoted text',
+            },
+          },
+        },
+      },
+    });
+
+    insertMessage('msg-no-quoted-media', 'text', { rawMessage });
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-no-quoted-media', quoted: true },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('no_quoted_media');
   });
 });
 
