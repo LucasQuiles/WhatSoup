@@ -412,6 +412,49 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       db.exec('CREATE INDEX idx_messages_media_path ON messages(media_path) WHERE media_path IS NOT NULL');
     }
   }],
+  [13, (db: DatabaseSync) => {
+    const cols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'content_text')) {
+      db.exec('ALTER TABLE messages ADD COLUMN content_text TEXT');
+    }
+
+    // Rebuild all 4 FTS triggers to index content_text instead of content.
+    // Must DROP all first, then re-CREATE — atomic within the migration transaction.
+    db.exec(`
+      DROP TRIGGER IF EXISTS messages_fts_insert;
+      DROP TRIGGER IF EXISTS messages_fts_update;
+      DROP TRIGGER IF EXISTS messages_fts_soft_delete;
+      DROP TRIGGER IF EXISTS messages_fts_delete;
+
+      CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages
+        WHEN NEW.content_text IS NOT NULL AND NEW.deleted_at IS NULL
+      BEGIN
+        INSERT INTO messages_fts(rowid, content) VALUES (NEW.pk, NEW.content_text);
+      END;
+
+      CREATE TRIGGER messages_fts_update AFTER UPDATE OF content_text ON messages
+      BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+          VALUES ('delete', OLD.pk, COALESCE(OLD.content_text, ''));
+        INSERT INTO messages_fts(rowid, content)
+          SELECT NEW.pk, NEW.content_text
+          WHERE NEW.content_text IS NOT NULL AND NEW.deleted_at IS NULL;
+      END;
+
+      CREATE TRIGGER messages_fts_soft_delete AFTER UPDATE OF deleted_at ON messages
+        WHEN NEW.deleted_at IS NOT NULL
+      BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+          VALUES ('delete', OLD.pk, COALESCE(OLD.content_text, ''));
+      END;
+
+      CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages
+      BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+          VALUES ('delete', OLD.pk, COALESCE(OLD.content_text, ''));
+      END;
+    `);
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
@@ -708,8 +751,8 @@ export class Database {
         INSERT OR IGNORE INTO main.messages
           (pk, chat_jid, conversation_key, sender_jid, sender_name, message_id,
            content, content_type, is_from_me, timestamp, quoted_message_id,
-           enrichment_processed_at, enrichment_error, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           enrichment_processed_at, enrichment_error, created_at, content_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       let msgCount = 0;
@@ -736,6 +779,7 @@ export class Database {
           row.enrichment_processed_at,
           row.enrichment_error,
           row.created_at,
+          row.content, // content_text falls back to content for legacy text messages
         );
         msgCount++;
       }

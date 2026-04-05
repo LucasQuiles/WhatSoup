@@ -110,6 +110,48 @@ describe('Database schema', () => {
       .all() as Array<{ name: string }>;
     expect(indexes).toHaveLength(1);
   });
+
+  it('messages table has content_text column (MIGRATION_13)', () => {
+    const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{
+      name: string;
+      type: string;
+    }>;
+    const col = cols.find((c) => c.name === 'content_text');
+    expect(col).toBeDefined();
+    expect(col!.type).toBe('TEXT');
+  });
+
+  it('FTS insert trigger references content_text (MIGRATION_13)', () => {
+    const triggers = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_insert'")
+      .all() as Array<{ sql: string }>;
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].sql).toContain('content_text');
+  });
+
+  it('FTS update trigger fires on content_text changes (MIGRATION_13)', () => {
+    const triggers = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_update'")
+      .all() as Array<{ sql: string }>;
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].sql).toContain('content_text');
+  });
+
+  it('FTS soft_delete trigger references content_text (MIGRATION_13)', () => {
+    const triggers = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_soft_delete'")
+      .all() as Array<{ sql: string }>;
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].sql).toContain('content_text');
+  });
+
+  it('FTS delete trigger references content_text (MIGRATION_13)', () => {
+    const triggers = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_delete'")
+      .all() as Array<{ sql: string }>;
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].sql).toContain('content_text');
+  });
 });
 
 // ─── Pragmas ─────────────────────────────────────────────────────────────────
@@ -148,6 +190,7 @@ describe('FTS5 triggers', () => {
     conversationKey?: string;
     senderJid?: string;
     content?: string | null;
+    contentText?: string | null;
     deletedAt?: string | null;
   }) {
     const {
@@ -155,15 +198,19 @@ describe('FTS5 triggers', () => {
       conversationKey = '15550100001',
       senderJid = '15550100001@s.whatsapp.net',
       content = 'hello world',
+      contentText = undefined,
       deletedAt = null,
     } = opts;
+    // After MIGRATION_13, FTS triggers index content_text (not content).
+    // Use content_text if provided, otherwise fall back to content for text messages.
+    const effectiveContentText = contentText !== undefined ? contentText : content;
     db.raw
       .prepare(
         `INSERT INTO messages
-          (chat_jid, conversation_key, sender_jid, content, timestamp, deleted_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+          (chat_jid, conversation_key, sender_jid, content, content_text, timestamp, deleted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(chatJid, conversationKey, senderJid, content, Date.now(), deletedAt);
+      .run(chatJid, conversationKey, senderJid, content, effectiveContentText, Date.now(), deletedAt);
     const row = db.raw
       .prepare('SELECT pk FROM messages ORDER BY pk DESC LIMIT 1')
       .get() as { pk: number };
@@ -180,25 +227,25 @@ describe('FTS5 triggers', () => {
     ).map((r) => r.rowid);
   }
 
-  it('insert trigger indexes non-null content', () => {
-    const pk = insertMsg({ content: 'xyzalpha unique term' });
+  it('insert trigger indexes non-null content_text', () => {
+    const pk = insertMsg({ content: 'xyzalpha unique term', contentText: 'xyzalpha unique term' });
     expect(ftsMatch('xyzalpha')).toContain(pk);
   });
 
-  it('insert trigger does not index null content', () => {
-    // Insert a null-content row and verify it does not appear in any MATCH
-    insertMsg({ content: null });
+  it('insert trigger does not index null content_text', () => {
+    // Insert a null content_text row and verify it does not appear in any MATCH
+    insertMsg({ content: null, contentText: null });
     // No term to search for — assert the FTS shadow has no entry for pk by
     // ensuring a wildcard-style search for a known string yields nothing
     const hits = ftsMatch('xyzNULLTEST999');
     expect(hits).toHaveLength(0);
   });
 
-  it('content update trigger re-indexes updated content', () => {
-    const pk = insertMsg({ content: 'xyzbeta original phrasing' });
+  it('content_text update trigger re-indexes updated content_text', () => {
+    const pk = insertMsg({ content: 'xyzbeta original phrasing', contentText: 'xyzbeta original phrasing' });
     expect(ftsMatch('xyzbeta')).toContain(pk);
 
-    db.raw.prepare('UPDATE messages SET content = ? WHERE pk = ?').run('xyzgamma updated phrasing', pk);
+    db.raw.prepare('UPDATE messages SET content_text = ? WHERE pk = ?').run('xyzgamma updated phrasing', pk);
 
     // Old term no longer indexed; new term is indexed
     expect(ftsMatch('xyzbeta')).not.toContain(pk);
@@ -206,7 +253,7 @@ describe('FTS5 triggers', () => {
   });
 
   it('soft-delete trigger removes entry from FTS', () => {
-    const pk = insertMsg({ content: 'xyzdelta to be soft deleted' });
+    const pk = insertMsg({ content: 'xyzdelta to be soft deleted', contentText: 'xyzdelta to be soft deleted' });
     expect(ftsMatch('xyzdelta')).toContain(pk);
 
     db.raw
@@ -217,7 +264,7 @@ describe('FTS5 triggers', () => {
   });
 
   it('physical delete trigger removes entry from FTS', () => {
-    const pk = insertMsg({ content: 'xyzepsilon to be physically deleted' });
+    const pk = insertMsg({ content: 'xyzepsilon to be physically deleted', contentText: 'xyzepsilon to be physically deleted' });
     expect(ftsMatch('xyzepsilon')).toContain(pk);
 
     db.raw.prepare('DELETE FROM messages WHERE pk = ?').run(pk);
