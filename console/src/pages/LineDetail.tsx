@@ -21,14 +21,13 @@ import FilterPill from '../components/FilterPill'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
 import RelinkModal from '../components/RelinkModal'
-import EditConfigModal from '../components/EditConfigModal'
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield, Send,
   MessageSquare, ScrollText, BarChart3, UserCheck, Ban,
   User, Users, UserPlus, UserX,
   RotateCw, MessageSquareOff, Bot, ChevronsUp, Power,
   X, AlertTriangle, Save, Loader2,
-  Trash2, Link2, Settings,
+  Trash2, Link2,
 } from 'lucide-react'
 import type { Mode, ChatItem, AccessEntry, LogEntry, Message, LineInstance } from '../types'
 
@@ -96,7 +95,6 @@ export default function LineDetail() {
   const [logFilter, setLogFilter] = useState<string>('all')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showRelink, setShowRelink] = useState(false)
-  const [showEditConfig, setShowEditConfig] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
   const handleDelete = useCallback(async () => {
@@ -214,15 +212,6 @@ export default function LineDetail() {
               <RotateCw size={11} strokeWidth={1.75} /> Restart
             </button>
           )}
-          {line.status === 'unreachable' && (
-            <button
-              onClick={() => setShowEditConfig(true)}
-              className="c-btn c-btn-ghost"
-              style={{ fontSize: 'var(--font-size-label)' }}
-            >
-              <Settings size={11} strokeWidth={1.75} /> Configure
-            </button>
-          )}
           <button
             onClick={() => setShowDeleteConfirm(true)}
             className="c-btn c-btn-ghost"
@@ -330,12 +319,6 @@ export default function LineDetail() {
         onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
       />
 
-      <EditConfigModal
-        lineName={line?.name ?? ''}
-        open={showEditConfig}
-        onClose={() => setShowEditConfig(false)}
-        onSaved={() => { setShowEditConfig(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success('Config saved'); }}
-      />
     </motion.div>
   )
 }
