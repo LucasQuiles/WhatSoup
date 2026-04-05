@@ -24,6 +24,11 @@ export class ControlQueue implements IOutboundQueue {
     this.log.push(text);
   }
 
+  /** No-op aggregation — control sessions buffer all text via enqueueText. */
+  enqueueStreamingText(text: string): void {
+    this.log.push(text);
+  }
+
   enqueueResultText(text: string): void {
     this.log.push(text);
   }

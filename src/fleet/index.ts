@@ -103,7 +103,7 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
 ]);
 
 function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
-  return NAME_ROUTE_HANDLERS.has(handler);
+  return NAME_ROUTE_HANDLERS.has(handler as NamedRouteKey);
 }
 
 const handlers: { [K in RouteKey]: RouteHandler<K> } = {

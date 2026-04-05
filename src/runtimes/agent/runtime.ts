@@ -1659,7 +1659,7 @@ export class AgentRuntime implements Runtime {
 
   /** Return the ControlQueue for the control session, or null if none exists. */
   getControlQueue(): ControlQueue | null {
-    return (this.chatQueues.get('control@heal.internal') as ControlQueue) ?? null;
+    return (this.chatQueues.get('control@heal.internal') as unknown as ControlQueue) ?? null;
   }
 
   /** Report ID currently being repaired, or null if no repair is in-flight. */

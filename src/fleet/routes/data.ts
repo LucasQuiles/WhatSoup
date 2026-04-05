@@ -104,7 +104,7 @@ export function handleGetChats(
           displayName = chatName;
         } else {
           // No metadata — build from participant names (temporary fallback)
-          const parts = (participantsStmt.all(chat.conversationKey) as ParticipantRow[]).map(p => p.sender_name);
+          const parts = (participantsStmt.all(chat.conversationKey) as unknown as ParticipantRow[]).map(p => p.sender_name);
           displayName = parts.length > 0 ? parts.join(', ') : chat.conversationKey;
           needsBackfill = true;
         }
