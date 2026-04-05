@@ -5,7 +5,9 @@ import { motion } from 'framer-motion'
 import { useLines, useChats, useMessages, useTyping } from '../hooks/use-fleet'
 import { useToast } from '../hooks/toast-context'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
+import { useVirtualMessages } from '../hooks/use-virtual-messages'
 import { api } from '../lib/api'
+import { selectVirtualMessageRows, toChronologicalMessages } from '../lib/inbox-virtualization'
 import type { Message } from '../types'
 import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
@@ -30,6 +32,7 @@ export default function Inbox() {
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const searchScrollRef = useRef<HTMLDivElement>(null)
   const searchRequestRef = useRef(0)
   const queryClient = useQueryClient()
 
@@ -100,9 +103,20 @@ export default function Inbox() {
   const isSearchMode = searchInput.trim().length > 0
   const isDebouncingSearch = isSearchMode && searchInput.trim() !== debouncedSearch
   const isSearchBusy = searchLoading || isDebouncingSearch
+  const renderedMessages = useMemo(() => toChronologicalMessages(messages ?? []), [messages])
 
   // Sticky scroll for messages area
-  const { scrollRef, showJump, handleScroll, jumpToBottom } = useStickyScroll(messages ?? [], selectedChat)
+  const { scrollRef, showJump, handleScroll, jumpToBottom } = useStickyScroll(renderedMessages, selectedChat)
+  const messageVirtualizer = useVirtualMessages({
+    messages: renderedMessages,
+    getScrollElement: () => scrollRef.current,
+  })
+  const searchVirtualizer = useVirtualMessages({
+    messages: searchResults,
+    getScrollElement: () => searchScrollRef.current,
+  })
+  const virtualMessageRows = selectVirtualMessageRows(renderedMessages, messageVirtualizer.getVirtualItems())
+  const virtualSearchRows = selectVirtualMessageRows(searchResults, searchVirtualizer.getVirtualItems())
 
   useEffect(() => {
     if (!selectedChat || !debouncedSearch) {
@@ -332,6 +346,7 @@ export default function Inbox() {
             {/* Messages */}
             {isSearchMode ? (
               <div
+                ref={searchScrollRef}
                 className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0"
                 style={{ padding: 'var(--sp-4) var(--sp-5)' }}
               >
@@ -344,9 +359,23 @@ export default function Inbox() {
                     />
                   </div>
                 ) : searchResults.length > 0 ? (
-                  <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-                    {searchResults.map(msg => (
-                      <MessageBubble key={`search-${msg.pk}`} msg={msg} highlightQuery={debouncedSearch} />
+                  <div
+                    className="relative w-full"
+                    style={{
+                      height: `${searchVirtualizer.getTotalSize()}px`,
+                      minHeight: `${searchVirtualizer.getTotalSize()}px`,
+                    }}
+                  >
+                    {virtualSearchRows.map((row) => (
+                      <div
+                        key={`search-${row.key}`}
+                        ref={searchVirtualizer.measureElement}
+                        data-index={row.index}
+                        className="absolute left-0 top-0 w-full"
+                        style={{ transform: `translateY(${row.start}px)` }}
+                      >
+                        <MessageBubble msg={row.message} highlightQuery={debouncedSearch} />
+                      </div>
                     ))}
                   </div>
                 ) : (
@@ -382,12 +411,27 @@ export default function Inbox() {
                     </span>
                   </button>
                 )}
-                <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-                  {[...(messages ?? [])].reverse().map(msg => (
-                    <MessageBubble key={msg.pk} msg={msg} animate={animatedPks.has(msg.pk)} />
-                  ))}
-                </div>
-                {(!messages || messages.length === 0) && (
+                {renderedMessages.length > 0 ? (
+                  <div
+                    className="relative w-full"
+                    style={{
+                      height: `${messageVirtualizer.getTotalSize()}px`,
+                      minHeight: `${messageVirtualizer.getTotalSize()}px`,
+                    }}
+                  >
+                    {virtualMessageRows.map((row) => (
+                      <div
+                        key={String(row.key)}
+                        ref={messageVirtualizer.measureElement}
+                        data-index={row.index}
+                        className="absolute left-0 top-0 w-full"
+                        style={{ transform: `translateY(${row.start}px)` }}
+                      >
+                        <MessageBubble msg={row.message} animate={animatedPks.has(row.message.pk)} />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
                   <div className="flex-1 flex items-center justify-center">
                     <EmptyState
                       icon={<MessageSquare size={40} strokeWidth={1.25} />}
@@ -396,7 +440,6 @@ export default function Inbox() {
                     />
                   </div>
                 )}
-
                 {showJump && (
                   <button
                     onClick={jumpToBottom}
