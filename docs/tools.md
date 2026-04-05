@@ -1,6 +1,6 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 132 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 139 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
 ## Scope and Replay Policy Glossary
 
@@ -35,10 +35,13 @@ Complete reference for all 132 MCP tools exposed by WhatSoup. Tools are grouped 
 | [profile.ts](#profilets) | 14 |
 | [advanced.ts](#advancedts) | 13 |
 | [calls.ts](#callsts) | 1 |
-| [presence.ts](#presencets) | 2 |
+| [presence.ts](#presencets) | 3 |
 | [voice.ts](#voicets) | 1 |
 | [knowledge.ts](#knowledgets) | 1 |
-| **Total** | **132** |
+| [retention.ts](#retentionts) | 1 |
+| [status.ts](#statusts) | 2 |
+| [scheduling.ts](#schedulingts) | 3 |
+| **Total** | **139** |
 
 ---
 
@@ -2538,7 +2541,28 @@ Reject an incoming WhatsApp call by call ID and caller JID.
 
 ## presence.ts
 
-Presence monitoring tools: subscribe to presence updates and read cached presence state.
+Presence tools: send typing indicators and monitor contact presence state.
+
+---
+
+### send_typing
+
+Send a typing indicator to the current chat.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `safe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| chatJid | string | required | JID of the chat to send the typing indicator to (auto-injected in chat-scoped sessions) |
+| type | `"composing"` \| `"recording"` \| `"paused"` | required | Presence type to broadcast |
+
+**Returns:** `{ success: true, type }`.
 
 ---
 
@@ -2632,3 +2656,197 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | namespace | string | optional | Override default namespace(s) |
 
 **Returns:** Formatted search results with relevance scores. Available indexes are dynamically configured per instance.
+
+---
+
+## retention.ts
+
+On-demand media file cleanup with optional dry-run support.
+
+> Uses `scope: global` and `targetMode: caller-supplied`.
+
+---
+
+### cleanup_media
+
+Scan and delete expired media files (downloads, voice notes, cached thumbnails) from the instance media directories. Files in `media/tmp/` are expired after `tempMaxAgeHours` (default 72 h); files in `media/cache/` after 7 days. Use `dry_run: true` to preview what would be deleted without deleting anything.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `safe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| max_age_hours | number | optional | Override temp file max age in hours for this run. Default: uses instance retention config. |
+| dry_run | boolean | optional | If `true`, report what would be deleted without deleting. Default: `false`. |
+
+**Returns:** `{ dry_run, deleted, skipped, bytes_freed }`.
+
+---
+
+## status.ts
+
+WhatsApp Status (Stories) tools for posting and listing status updates.
+
+> Uses `scope: global` and `targetMode: caller-supplied`.
+
+---
+
+### post_status
+
+Post a WhatsApp Status update to all known contacts. Supports text statuses and image/video statuses from local files.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| text | string | optional | Text content for a text status. Required if `filePath` is not provided. |
+| filePath | string | optional | Absolute path to an image or video file (`.png`, `.jpg`, `.jpeg`, `.gif`, `.mp4`, `.mov`, `.webm`). Required if `text` is not provided. |
+| caption | string | optional | Caption to overlay on image/video statuses. Falls back to `text` if omitted. |
+| backgroundColor | string | optional | Background color for text statuses (hex string). |
+| font | number | optional | Font index for text statuses. |
+
+**Returns:** `{ sent: true, statusType, recipientCount, messageId }`.
+
+**Errors:**
+
+| Code | Condition |
+|------|-----------|
+| `Error` | Neither `text` nor `filePath` provided |
+| `Error` | No status recipients found in contacts table |
+| `Error` | WhatsApp is not connected |
+| `Error` | File not found or outside allowed workspace root |
+| `Error` | File exceeds 50 MB limit |
+| `Error` | Unsupported media extension |
+
+---
+
+### list_statuses
+
+List stored WhatsApp Status messages grouped by sender. Optionally mark the returned statuses as read.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `safe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| limit | number | optional | Max statuses to return (1–200). Default: 50. |
+| sender_jid | string | optional | Filter statuses by sender JID. |
+| mark_read | boolean | optional | If `true`, send read receipts for all returned statuses. Default: `false`. |
+
+**Returns:** `{ count, markedRead, senders[] }` where each sender entry contains `senderJid`, `senderName`, `count`, and `statuses[]`.
+
+---
+
+## scheduling.ts
+
+Scheduled message tools: create, list, and cancel messages queued for future delivery.
+
+> Uses `scope: chat` — in chat-scoped sessions `chatJid` is auto-injected for `schedule_message`.
+
+---
+
+### schedule_message
+
+Schedule a text or media message to be sent later. In chat-scoped sessions the current chat is used automatically.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `injected` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| chatJid | string | required | Target chat JID (auto-injected in chat-scoped sessions). |
+| scheduled_at | number (int) | required | UTC Unix timestamp in seconds. Must be in the future. |
+| text | string | optional | Text content. Required if `filePath` is not provided. |
+| filePath | string | optional | Absolute path to a media file (see supported extensions below). Required if `text` is not provided. |
+| caption | string | optional | Caption for image, video, or document media. |
+| filename | string | optional | Override filename for document attachments. |
+| ptt | boolean | optional | Send audio as a push-to-talk voice note. |
+| seconds | number (int) | optional | Audio duration in seconds. |
+| ptv | boolean | optional | Send video as a push-to-talk video note. |
+| gifPlayback | boolean | optional | Send video with GIF-style auto-play. |
+| viewOnce | boolean | optional | Send image or video as view-once. |
+| isAnimated | boolean | optional | Mark a WebP sticker as animated. |
+| mediaType | `"image"` \| `"video"` \| `"audio"` \| `"document"` \| `"sticker"` | optional | Override the media type inferred from the file extension. |
+
+**Supported file extensions:** `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.pdf`, `.doc`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.zip`, `.mp3`, `.ogg`, `.m4a`, `.wav`, `.mp4`, `.mov`, `.webm`.
+
+**Returns:** `{ id, chatJid, contentType, scheduledAt, status: "pending" }`.
+
+**Errors:**
+
+| Code | Condition |
+|------|-----------|
+| `Error` | `scheduled_at` is not a future timestamp |
+| `Error` | Neither `text` nor `filePath` provided |
+| `Error` | File not found, outside workspace root, too large (> 50 MB), or unsupported extension |
+
+---
+
+### list_scheduled
+
+List scheduled messages. Chat-scoped sessions only see messages for the current conversation.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| chatJid | string | optional | Filter by target chat JID. |
+| limit | number | optional | Max messages to return (1–200). Default: 100. |
+| status | `"pending"` \| `"processing"` \| `"failed"` \| `"cancelled"` \| `"sent"` | optional | Filter by status. Default: returns `pending` and `processing` only. |
+
+**Returns:** `{ count, messages[] }` where each message contains `id`, `chatJid`, `contentType`, `payload`, `scheduledAt`, `status`, `createdAt`, `sentAt`, `error`, `retryCount`.
+
+---
+
+### cancel_scheduled
+
+Cancel a pending scheduled message by ID.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `safe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number (int) | required | Scheduled message ID (from `schedule_message` or `list_scheduled`). |
+
+**Returns:** `{ cancelled: true, id }`.
+
+**Errors:**
+
+| Code | Condition |
+|------|-----------|
+| `Error` | Scheduled message ID not found |
+| `Error` | Access denied: message belongs to a different conversation (chat-scoped sessions) |
+| `Error` | Message is not in `pending` status (already sent, cancelled, processing, or failed) |
