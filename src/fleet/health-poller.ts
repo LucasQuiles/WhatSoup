@@ -20,6 +20,8 @@ export interface InstanceStatus {
   error: string | null;
 }
 
+export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
+
 export class HealthPoller {
   private statuses: Map<string, InstanceStatus> = new Map();
   private pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -27,6 +29,7 @@ export class HealthPoller {
   private selfName: string;
   private getSelfHealth: () => Record<string, unknown>;
   private intervalMs: number;
+  private statusChangeListeners: StatusChangeCallback[] = [];
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -38,6 +41,17 @@ export class HealthPoller {
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
+  }
+
+  /** Register a callback for instance status changes. */
+  on(event: 'statusChange', callback: StatusChangeCallback): void {
+    if (event === 'statusChange') this.statusChangeListeners.push(callback);
+  }
+
+  private emitStatusChange(instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']): void {
+    for (const cb of this.statusChangeListeners) {
+      try { cb(instance, newStatus, oldStatus); } catch { /* listener errors must not break poller */ }
+    }
   }
 
   start(): void {
@@ -105,6 +119,7 @@ export class HealthPoller {
         }
 
         const health = (await res.json()) as Record<string, unknown>;
+        const prevStatus = this.statuses.get(name)?.status ?? 'online';
         this.statuses.set(name, {
           name,
           health,
@@ -113,6 +128,9 @@ export class HealthPoller {
           status: 'online',
           error: null,
         });
+        if (prevStatus !== 'online') {
+          this.emitStatusChange(name, 'online', prevStatus);
+        }
       } catch (err) {
         this.updateFailure(name, (err as Error).message);
       }
@@ -136,6 +154,11 @@ export class HealthPoller {
       status: newStatus,
       error,
     });
+
+    // Notify listeners on any status transition
+    if (newStatus !== prevStatus) {
+      this.emitStatusChange(name, newStatus, prevStatus);
+    }
 
     // Emit alert on transition into unreachable (exactly when failures crosses 2→3)
     if (newStatus === 'unreachable' && prevStatus !== 'unreachable') {

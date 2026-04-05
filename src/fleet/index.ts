@@ -355,23 +355,34 @@ export function createFleetServer(deps: FleetDeps) {
     });
   });
 
+  // WebSocket server for real-time console updates
+  const { FleetWebSocketServer } = await import('./websocket-server.ts');
+  const wsServer = new FleetWebSocketServer(server, deps.fleetToken);
+
+  // Wire HealthPoller status changes to WS broadcasts
+  healthPoller.on('statusChange', (instance: string) => {
+    wsServer.broadcast({ type: 'instance_status', instance });
+  });
+
   return {
     server,
     discovery,
     healthPoller,
     dbReader,
+    wsServer,
     start(port: number): void {
       discovery.startAutoRefresh();
       healthPoller.start();
       updateChecker.start();
       server.listen(port, '127.0.0.1', () => {
-        log.info({ port }, 'fleet server listening');
+        log.info({ port, ws: true }, 'fleet server listening');
       });
     },
     stop(): void {
       healthPoller.stop();
       discovery.stop();
       updateChecker.stop();
+      wsServer.close();
       server.close();
     },
   };
