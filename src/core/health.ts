@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
@@ -12,6 +12,14 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import type { Runtime } from '../runtimes/types.ts';
 
 const log = createChildLogger('health');
+
+/** Timing-safe bearer token comparison to prevent timing attacks. */
+function verifyBearer(header: string | undefined, expectedToken: string | undefined): boolean {
+  if (!expectedToken || !header) return false;
+  const expected = `Bearer ${expectedToken}`;
+  if (header.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+}
 
 export interface HealthDeps {
   db: Database;
@@ -50,7 +58,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // Shared-secret Authorization header check
       const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
       const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-      if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+      if (!verifyBearer(authHeader, expectedToken)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
@@ -107,7 +115,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // Auth check — same pattern as /send
         const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
         const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-        if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+        if (!verifyBearer(authHeader, expectedToken)) {
           res.writeHead(401, jsonHeaders);
           res.end(JSON.stringify({ error: 'unauthorized' }));
           return;
@@ -183,7 +191,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // Auth — same pattern as /send and /heal
         const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
         const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-        if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+        if (!verifyBearer(authHeader, expectedToken)) {
           res.writeHead(401, jsonHeaders);
           res.end(JSON.stringify({ error: 'unauthorized' }));
           return;
