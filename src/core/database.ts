@@ -405,6 +405,13 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       db.exec('ALTER TABLE agent_sessions ADD COLUMN total_output_tokens INTEGER DEFAULT 0');
     }
   }],
+  [12, (db: DatabaseSync) => {
+    const cols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'media_path')) {
+      db.exec('ALTER TABLE messages ADD COLUMN media_path TEXT');
+      db.exec('CREATE INDEX idx_messages_media_path ON messages(media_path) WHERE media_path IS NOT NULL');
+    }
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

@@ -93,6 +93,23 @@ describe('Database schema', () => {
       .get() as { name: string } | undefined;
     expect(row?.name).toBe('enrichment_runs');
   });
+
+  it('messages table has media_path column (MIGRATION_12)', () => {
+    const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{
+      name: string;
+      type: string;
+    }>;
+    const col = cols.find((c) => c.name === 'media_path');
+    expect(col).toBeDefined();
+    expect(col!.type).toBe('TEXT');
+  });
+
+  it('idx_messages_media_path partial index exists', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_messages_media_path'")
+      .all() as Array<{ name: string }>;
+    expect(indexes).toHaveLength(1);
+  });
 });
 
 // ─── Pragmas ─────────────────────────────────────────────────────────────────
