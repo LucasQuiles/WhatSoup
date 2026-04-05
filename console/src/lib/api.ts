@@ -99,6 +99,10 @@ export const api = {
     ),
     () => mock.getMessages(name, conversationKey),
   ),
+  searchMessages: (name: string, query: string, conversationKey?: string) =>
+    apiFetch<{ results: mock.Message[]; total: number; query: string }>(
+      `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
+    ),
   getAccess: (name: string) => withFallback(
     () => apiFetch<mock.AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
     () => mock.getAccess(name),

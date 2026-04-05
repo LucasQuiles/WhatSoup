@@ -212,6 +212,39 @@ export class FleetDbReader {
     });
   }
 
+  /** Full-text search within an instance's messages using FTS5. */
+  searchMessages(
+    name: string,
+    dbPath: string,
+    opts: { query: string; conversationKey?: string; limit: number },
+  ): DbResult<MessageRow[]> {
+    return this.query(name, dbPath, (db) => {
+      if (opts.conversationKey) {
+        return db.prepare(`
+          SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
+                 m.message_id, m.content, m.content_type, m.timestamp, m.is_from_me, m.raw_message
+          FROM messages_fts fts
+          JOIN messages m ON m.pk = fts.rowid
+          WHERE messages_fts MATCH ?
+            AND m.deleted_at IS NULL
+            AND m.conversation_key = ?
+          ORDER BY m.timestamp DESC
+          LIMIT ?
+        `).all(opts.query, opts.conversationKey, opts.limit) as unknown as MessageRow[];
+      }
+      return db.prepare(`
+        SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
+               m.message_id, m.content, m.content_type, m.timestamp, m.is_from_me, m.raw_message
+        FROM messages_fts fts
+        JOIN messages m ON m.pk = fts.rowid
+        WHERE messages_fts MATCH ?
+          AND m.deleted_at IS NULL
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `).all(opts.query, opts.limit) as unknown as MessageRow[];
+    });
+  }
+
   /** Fetch messages by a set of message_ids (for feed preview enrichment). */
   getMessagesByIds(name: string, dbPath: string, messageIds: string[]): DbResult<FeedMessageRow[]> {
     if (messageIds.length === 0) return { ok: true, data: [] };

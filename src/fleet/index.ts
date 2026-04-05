@@ -10,7 +10,7 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
-import { handleGetChats, handleGetMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
+import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
@@ -53,6 +53,7 @@ const handlers: Record<string, HandlerFn> = {
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params as any),
   getChats:     (req, res, deps, params) => handleGetChats(req, res, deps, params as any),
   getMessages:  (req, res, deps, params) => handleGetMessages(req, res, deps, params as any),
+  searchMessages: (req, res, deps, params) => handleSearchMessages(req, res, deps, params as any),
   getAccess:    (req, res, deps, params) => handleGetAccess(req, res, deps, params as any),
   getLogs:      (req, res, deps, params) => handleGetLogs(req, res, deps, params as any),
   send:         (req, res, deps, params) => handleSend(req, res, deps, params as any),
@@ -113,6 +114,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/messages$/, handler: 'getMessages' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/messages\/search$/, handler: 'searchMessages' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/access$/, handler: 'getAccess' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/logs$/, handler: 'getLogs' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/send$/, handler: 'send' },

@@ -205,6 +205,52 @@ export function handleGetMessages(
   jsonResponse(res, 200, messages);
 }
 
+/** GET /api/lines/:name/messages/search — full-text search within an instance's messages. */
+export function handleSearchMessages(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DataDeps,
+  params: { name: string },
+): void {
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+
+  const qs = parseQueryString(req.url);
+  const query = qs.q;
+  if (!query) {
+    jsonResponse(res, 400, { error: 'missing required query parameter: q' });
+    return;
+  }
+
+  const conversationKey = qs.conversation_key || undefined;
+  const limit = parseIntParam(qs, 'limit', 20, 1, 100);
+
+  const result = deps.dbReader.searchMessages(instance.name, instance.dbPath, {
+    query,
+    conversationKey,
+    limit,
+  });
+
+  if (!result.ok) {
+    jsonResponse(res, 500, { error: result.error });
+    return;
+  }
+
+  const messages = result.data.map((row) => ({
+    pk: row.pk,
+    conversationKey: row.conversation_key,
+    senderJid: row.sender_jid,
+    senderName: row.sender_name,
+    content: row.content,
+    type: row.content_type,
+    timestamp: toIsoFromUnix(row.timestamp),
+    fromMe: row.is_from_me === 1,
+    rawMessage: row.raw_message ?? null,
+  }));
+
+  jsonResponse(res, 200, { results: messages, total: messages.length, query });
+}
+
 /** GET /api/lines/:name/access — access list entries. */
 export function handleGetAccess(
   _req: IncomingMessage,
