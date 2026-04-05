@@ -266,7 +266,7 @@ describe('handleGetLogs', () => {
   it('parses NDJSON log lines and returns them', () => {
     const inst = fakeInstance({ logDir: tmpDir });
     const logLines = [
-      JSON.stringify({ level: 30, msg: 'started', time: 1 }),
+      JSON.stringify({ level: 30, msg: 'started', time: '2026-04-05 19:30:00' }),
       JSON.stringify({ level: 40, msg: 'warning', time: 2 }),
       JSON.stringify({ level: 30, msg: 'request', time: 3 }),
     ];
@@ -282,6 +282,7 @@ describe('handleGetLogs', () => {
     const body = JSON.parse(res._body);
     expect(body).toHaveLength(3);
     expect(body[0].msg).toBe('started');
+    expect(body[0].timestamp).toBe('2026-04-05T19:30:00.000Z');
   });
 
   it('filters by numeric level', () => {

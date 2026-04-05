@@ -81,6 +81,17 @@ describe('parsePinoLine', () => {
     expect(parsePinoLine(makeLine({ msg: 42 }), CTX)).toBeNull();
   });
 
+  it('normalizes SQLite-style timestamp strings to ISO', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'WhatsApp connected', time: '2026-04-05 19:30:00', component: 'connection' }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.time).toBe('2026-04-05T19:30:00.000Z');
+    }
+  });
+
   it('identifies connection error — stream errored out (marked as _streamError for coalescing)', () => {
     const result = parsePinoLine(
       makeLine({ msg: 'stream errored out', fullErrorNode: { tag: 'stream:error', attrs: { code: '408' } } }),

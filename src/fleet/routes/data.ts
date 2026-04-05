@@ -11,7 +11,7 @@ import { configRoot } from '../paths.ts';
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
-import { toIsoFromUnix } from '../time-utils.ts';
+import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 
 export interface DataDeps {
   discovery: FleetDiscovery;
@@ -338,11 +338,7 @@ export function handleGetLogs(
 
       // Derive ISO timestamp from pino's time/timestamp field
       const rawTs = obj.time ?? obj.timestamp;
-      const timestamp = typeof rawTs === 'number'
-        ? toIsoFromUnix(rawTs)
-        : typeof rawTs === 'string'
-          ? rawTs
-          : new Date().toISOString();
+      const timestamp = normalizeTimestamp(rawTs) ?? new Date().toISOString();
 
       const level: 'debug' | 'info' | 'warn' | 'error' =
         typeof obj.level === 'number' ? (pinoLevelMap[obj.level] ?? 'info') : 'info';

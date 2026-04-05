@@ -3,7 +3,7 @@ import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller } from '../health-poller.ts';
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
-import { toIsoFromUnix } from '../time-utils.ts';
+import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -108,11 +108,7 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
   const isWarnOrAbove = pinoLevel >= WARN_LEVEL;
 
   const rawTs = obj.time ?? obj.timestamp;
-  const time = typeof rawTs === 'number'
-    ? toIsoFromUnix(rawTs)
-    : typeof rawTs === 'string'
-      ? rawTs
-      : new Date().toISOString();
+  const time = normalizeTimestamp(rawTs) ?? new Date().toISOString();
 
   const component = (obj.component ?? obj.name ?? obj.module ?? '') as string;
   const prefix = component ? `[${component}] ` : '';
