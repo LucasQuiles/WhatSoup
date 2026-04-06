@@ -24,6 +24,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, c
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
+    getDbRowId: vi.fn(() => null),
     setDurability: vi.fn((_durability: unknown) => {}),
   };
 
@@ -43,6 +44,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, c
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
@@ -86,6 +88,7 @@ const { mockBackfillWorkspaceKeys, mockSweepOrphanedSessions, mockGetResumableSe
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   ensureAgentSchema: vi.fn(),
   createSession: vi.fn(() => 1),
+  accumulateSessionTokens: vi.fn(),
   incrementMessageCount: vi.fn(),
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
@@ -347,6 +350,7 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
     targetChatJid,
     getLastOpId: vi.fn(() => undefined),
@@ -2646,6 +2650,111 @@ describe('AgentRuntime', () => {
     );
 
     expect(queueB.enqueueToolUpdate).toHaveBeenLastCalledWith({ category: 'error', detail: 'Bash — boom' });
+  });
+
+  it('per_chat result batches turn completion writes through durability.completeTurn', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as { durability: { completeTurn: typeof completeTurn } }).durability = {
+      completeTurn,
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: typeof session | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    handleEventWithContext(
+      { type: 'result', text: null, inputTokens: 3, outputTokens: 5 },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+    );
+
+    expect(completeTurn).toHaveBeenCalledWith({
+      sessionTokens: { dbRowId: 41, inputTokens: 3, outputTokens: 5 },
+      checkpoint: {
+        conversationKey: 'conv-111',
+        fields: {
+          activeTurnId: null,
+          lastInboundSeq: 17,
+          lastFlushedOutboundId: 77,
+        },
+      },
+      inbound: { seq: 17, terminalReason: 'response_sent' },
+      lastOpId: 77,
+    });
+    expect(queue.markLastTerminal).not.toHaveBeenCalled();
+    expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+  });
+
+  it('shared result batches turn completion writes through durability.completeTurn', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(88);
+
+    const state = runtime as unknown as {
+      durability: { completeTurn: typeof completeTurn };
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      currentInboundSeq: number | undefined;
+      turnHadVisibleOutput: boolean;
+      outboundQueues: Map<string, IOutboundQueue>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.durability = { completeTurn };
+    state.session = Object.assign({}, mockSession, {
+      getDbRowId: vi.fn(() => 52),
+      clearTurnWatchdog: vi.fn(),
+    });
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.currentInboundSeq = 23;
+    state.turnHadVisibleOutput = true;
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    state.handleEvent({ type: 'result', text: 'done', inputTokens: 8, outputTokens: 13 });
+
+    expect(completeTurn).toHaveBeenCalledWith({
+      sessionTokens: { dbRowId: 52, inputTokens: 8, outputTokens: 13 },
+      checkpoint: {
+        conversationKey: '111',
+        fields: {
+          activeTurnId: null,
+          lastInboundSeq: 23,
+          lastFlushedOutboundId: 88,
+        },
+      },
+      inbound: { seq: 23, terminalReason: 'response_sent' },
+      lastOpId: 88,
+    });
+    expect(queue.markLastTerminal).not.toHaveBeenCalled();
+    expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+    expect(state.currentInboundSeq).toBeUndefined();
   });
 
   // ─── Voice reply integration tests (SP4) ─────────────────────────────────────

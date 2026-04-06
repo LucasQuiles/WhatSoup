@@ -114,6 +114,8 @@ export interface IOutboundQueue {
   setInboundSeq(seq: number | undefined): void;
   /** Return the id of the most recently created outbound op, or undefined if none. */
   getLastOpId(): number | undefined;
+  /** Clear the tracked last outbound op id without touching durability. */
+  clearLastOpId(): void;
   /** Mark the last outbound op created by this queue as terminal. */
   markLastTerminal(): void;
   /** Propagate durability engine after late initialization. */
@@ -238,12 +240,16 @@ export class OutboundQueue implements IOutboundQueue {
     return this.lastOpId;
   }
 
+  clearLastOpId(): void {
+    this.lastOpId = undefined;
+  }
+
   /** Mark the last outbound op created by this queue as terminal (defense-in-depth echo fallback). */
   markLastTerminal(): void {
     if (this.lastOpId !== undefined && this.durability) {
       this.durability.markTerminal(this.lastOpId);
-      this.lastOpId = undefined;
     }
+    this.clearLastOpId();
   }
 
   /** Track whether the current turn has already sent visible text to the user. */

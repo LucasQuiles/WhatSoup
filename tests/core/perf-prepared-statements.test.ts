@@ -26,7 +26,7 @@ describe('prepared statement caching', () => {
     const prepareSpy = vi.spyOn(db.raw, 'prepare');
     const engine = new DurabilityEngine(db);
 
-    expect(prepareSpy).toHaveBeenCalledTimes(40);
+    expect(prepareSpy).toHaveBeenCalledTimes(41);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -92,6 +92,26 @@ describe('prepared statement caching', () => {
     engine.markSessionOrphaned('conv-1');
     engine.getPendingInbound();
     engine.getOutboundByStatus('pending');
+    engine.completeTurn({
+      sessionTokens: {
+        dbRowId: 999,
+        inputTokens: 1,
+        outputTokens: 2,
+      },
+      checkpoint: {
+        conversationKey: 'conv-1',
+        fields: {
+          activeTurnId: null,
+          lastInboundSeq: completeSeq,
+          lastFlushedOutboundId: quarantinedOpId,
+        },
+      },
+      inbound: {
+        seq: completeSeq,
+        terminalReason: 'response_sent',
+      },
+      lastOpId: quarantinedOpId,
+    });
 
     engine.preConnectRecovery();
     engine.postConnectRecovery();

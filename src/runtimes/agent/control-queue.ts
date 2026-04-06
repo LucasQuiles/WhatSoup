@@ -80,6 +80,11 @@ export class ControlQueue implements IOutboundQueue {
     return undefined;
   }
 
+  /** No-op — control sessions never retain outbound op ids. */
+  clearLastOpId(): void {
+    // intentional no-op
+  }
+
   /** No-op — no outbound ops to mark terminal. */
   markLastTerminal(): void {
     // intentional no-op
