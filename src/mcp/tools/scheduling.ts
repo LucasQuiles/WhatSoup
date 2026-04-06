@@ -397,9 +397,9 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       if (updates.length === 0) throw new Error('No fields to update');
 
       values.push(id);
-      db.raw.prepare(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+      db.raw.prepare(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = ?`).run(...(values as import('node:sqlite').SQLInputValue[]));
 
-      const updated = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as ScheduledMessageRow;
+      const updated = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as unknown as ScheduledMessageRow;
       return rowToScheduledMessage(updated);
     },
   });
