@@ -179,12 +179,82 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
   return <MediaIndicator type={msg.type} caption={msg.content} highlightQuery={highlightQuery} />
 }
 
+/** Extract quoted message context from rawMessage proto. */
+function extractQuotedContext(rawMessage?: string): { participant?: string; text?: string } | null {
+  if (!rawMessage) return null
+  try {
+    const raw = JSON.parse(rawMessage)
+    const msgContent = raw?.message
+    if (!msgContent) return null
+    // Check all message types for contextInfo.quotedMessage
+    for (const key of Object.keys(msgContent)) {
+      const inner = msgContent[key]
+      if (inner?.contextInfo?.quotedMessage) {
+        const quoted = inner.contextInfo.quotedMessage
+        const participant = inner.contextInfo.participant ?? inner.contextInfo.remoteJid ?? undefined
+        // Extract text from quoted message (check common message types)
+        const text = quoted.conversation
+          ?? quoted.extendedTextMessage?.text
+          ?? (quoted.imageMessage ? '📷 Photo' : undefined)
+          ?? (quoted.videoMessage ? '🎥 Video' : undefined)
+          ?? (quoted.audioMessage ? '🎵 Audio' : undefined)
+          ?? (quoted.documentMessage ? `📎 ${quoted.documentMessage.fileName ?? 'Document'}` : undefined)
+          ?? (quoted.stickerMessage ? '🏷️ Sticker' : undefined)
+          ?? undefined
+        if (text || participant) return { participant, text }
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return null
+}
+
+/** Quoted message reply bar. */
+const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participant, text }) => (
+  <div
+    style={{
+      borderLeftWidth: 'var(--bw-accent, 3px)',
+      borderLeftStyle: 'solid',
+      borderLeftColor: 'var(--color-m-cht)',
+      padding: 'var(--sp-1) var(--sp-2)',
+      marginBottom: 'var(--sp-2)',
+      background: 'var(--color-d4)',
+      borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
+      fontSize: 'var(--font-size-sm)',
+      maxHeight: '48px',
+      overflow: 'hidden',
+    }}
+  >
+    {participant && (
+      <div className="font-sans font-medium text-m-cht truncate" style={{ fontSize: 'var(--font-size-xs)' }}>
+        {participant.replace(/@.*/, '')}
+      </div>
+    )}
+    {text && (
+      <div className="text-t3 truncate leading-snug">
+        {text}
+      </div>
+    )}
+  </div>
+)
+
 const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
+  const quoted = extractQuotedContext(msg.rawMessage)
+
   if (msg.type !== 'text' || !msg.content) {
-    return <RichMedia msg={msg} highlightQuery={highlightQuery} />
+    return (
+      <>
+        {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
+        <RichMedia msg={msg} highlightQuery={highlightQuery} />
+      </>
+    )
   }
 
-  return <>{formatWhatsAppText(msg.content, highlightQuery)}</>
+  return (
+    <>
+      {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
+      {formatWhatsAppText(msg.content, highlightQuery)}
+    </>
+  )
 }
 
 export default MessageContent
