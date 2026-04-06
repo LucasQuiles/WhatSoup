@@ -29,7 +29,7 @@ export default function Ops() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [relinkTarget, setRelinkTarget] = useState<string | null>(null)
-  const { data: lines = [] } = useLines()
+  const { data: lines = [], isLoading: linesLoading } = useLines()
   const { data: feed = [] } = useFeed()
   const [logFilter, setLogFilter] = useState<string>('all')
   const [selectedLine, setSelectedLine] = useState<string>('')
@@ -120,7 +120,15 @@ export default function Ops() {
         {/* Instance cards */}
         <div className="flex-1 overflow-auto scrollbar-hide" style={{ padding: 'var(--sp-3)' }}>
           <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
-            {lines.map(line => (
+            {linesLoading ? (
+              <div className="text-t5 text-center py-8 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
+                Loading fleet status...
+              </div>
+            ) : lines.length === 0 ? (
+              <div className="text-t5 text-center py-8 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
+                No instances discovered. Create one from the Soup Kitchen.
+              </div>
+            ) : lines.map(line => (
               <div
                 key={line.name}
                 className={`c-hover cursor-pointer ${
@@ -216,6 +224,7 @@ export default function Ops() {
             ))}
           </div>
         </div>
+
       </div>
 
       {/* ═══ RIGHT: Log stream (swapped from left) ═══ */}
