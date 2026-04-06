@@ -1326,6 +1326,7 @@ describe('AgentRuntime', () => {
           workspacePath: string;
           socketServer: { stop: () => void } | null;
           mediaBridge: (() => void) | null;
+          lastActivity: number;
         }>;
         controlSessionTimeout: ReturnType<typeof setTimeout> | null;
         activeToolNames: Map<string, Map<string, string>>;
@@ -1346,12 +1347,14 @@ describe('AgentRuntime', () => {
           workspacePath: '/tmp/a',
           socketServer: { stop: workspaceSocketStopA },
           mediaBridge: workspaceMediaStopA,
+          lastActivity: Date.now(),
         }],
         ['chat-b', {
           socketPath: '/tmp/b.sock',
           workspacePath: '/tmp/b',
           socketServer: { stop: workspaceSocketStopB },
           mediaBridge: workspaceMediaStopB,
+          lastActivity: Date.now(),
         }],
       ]);
       runtimeState.controlSessionTimeout = timeout;
@@ -1466,6 +1469,7 @@ describe('AgentRuntime', () => {
           workspacePath: string;
           socketServer: { stop: () => void } | null;
           mediaBridge: (() => void) | null;
+          lastActivity: number;
         }>;
         healthStatsTimer: ReturnType<typeof setInterval> | null;
       };
@@ -1479,6 +1483,7 @@ describe('AgentRuntime', () => {
         workspacePath: '/tmp/a',
         socketServer: null,
         mediaBridge: null,
+        lastActivity: Date.now(),
       });
 
       mockRuntimeLogger.info.mockClear();
@@ -1629,6 +1634,223 @@ describe('AgentRuntime', () => {
 
     expect(source).toContain('this.queueSweepTimer.unref?.();');
     expect(source).toContain('clearInterval(this.queueSweepTimer);');
+  });
+
+  it('sandboxPerChat sweepIdleWorkspaces evicts idle workspace resources', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'sandbox', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    const socketStop = vi.fn();
+    const mediaBridgeStop = vi.fn();
+    const runtimeState = runtime as unknown as {
+      workspaceResources: Map<string, {
+        socketPath: string;
+        workspacePath: string;
+        socketServer: { stop: () => void } | null;
+        mediaBridge: (() => void) | null;
+        lastActivity: number;
+      }>;
+      sweepIdleWorkspaces: () => void;
+    };
+
+    runtimeState.workspaceResources.set('chat-a', {
+      socketPath: '/tmp/a.sock',
+      workspacePath: '/tmp/a',
+      socketServer: { stop: socketStop },
+      mediaBridge: mediaBridgeStop,
+      lastActivity: Date.now() - (31 * 60_000),
+    });
+
+    runtimeState.sweepIdleWorkspaces();
+
+    expect(socketStop).toHaveBeenCalledTimes(1);
+    expect(mediaBridgeStop).toHaveBeenCalledTimes(1);
+    expect(runtimeState.workspaceResources.has('chat-a')).toBe(false);
+  });
+
+  it('sandboxPerChat sweepIdleWorkspaces preserves active chat sessions and refreshes lastActivity', () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date('2026-04-06T16:00:00.000Z');
+      vi.setSystemTime(now);
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+      const runtime = new AgentRuntime(db, messenger, 'sandbox', {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+        sandbox,
+        cwd: tmpdir(),
+      });
+      const socketStop = vi.fn();
+      const mediaBridgeStop = vi.fn();
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, { getStatus: () => { active: boolean } }>;
+        workspaceResources: Map<string, {
+          socketPath: string;
+          workspacePath: string;
+          socketServer: { stop: () => void } | null;
+          mediaBridge: (() => void) | null;
+          lastActivity: number;
+        }>;
+        sweepIdleWorkspaces: () => void;
+      };
+
+      runtimeState.chatSessions.set('chat-a', {
+        getStatus: () => ({ active: true }),
+      });
+      runtimeState.workspaceResources.set('chat-a', {
+        socketPath: '/tmp/a.sock',
+        workspacePath: '/tmp/a',
+        socketServer: { stop: socketStop },
+        mediaBridge: mediaBridgeStop,
+        lastActivity: Date.now() - (60 * 60_000),
+      });
+
+      runtimeState.sweepIdleWorkspaces();
+
+      const entry = runtimeState.workspaceResources.get('chat-a');
+      expect(entry).toBeDefined();
+      expect(entry?.lastActivity).toBe(now.getTime());
+      expect(socketStop).not.toHaveBeenCalled();
+      expect(mediaBridgeStop).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sandboxPerChat recreates workspace resources on the next message after eviction', async () => {
+    const { WhatSoupSocketServer: MockSocketServer } = await import('../../../src/mcp/socket-server.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
+      kind: 'dm' as const,
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
+    }));
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'sandbox', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
+
+    const runtimeState = runtime as unknown as {
+      workspaceResources: Map<string, unknown>;
+      chatSessions: Map<string, unknown>;
+      chatQueues: Map<string, unknown>;
+    };
+
+    runtimeState.workspaceResources.clear();
+    runtimeState.chatSessions.clear();
+    runtimeState.chatQueues.clear();
+    mockSocketServerInstance.start.mockClear();
+    (MockSocketServer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'msg-2',
+      chatJid: '15550100001@s.whatsapp.net',
+      content: 'hello again',
+    }));
+
+    expect(runtimeState.workspaceResources.has('15550100001')).toBe(true);
+    expect(MockSocketServer).toHaveBeenCalledTimes(1);
+    expect(mockSocketServerInstance.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('sandboxPerChat refreshes workspace lastActivity on turn completion', async () => {
+    vi.useFakeTimers();
+    try {
+      const firstTurnAt = new Date('2026-04-06T15:00:00.000Z');
+      const resultAt = new Date('2026-04-06T15:10:00.000Z');
+      vi.setSystemTime(firstTurnAt);
+
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
+        kind: 'dm' as const,
+        workspaceKey: '15550100001',
+        workspacePath: '/tmp/15550100001',
+      }));
+
+      const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+      const runtime = new AgentRuntime(db, messenger, 'sandbox', {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+        sandbox,
+        cwd: tmpdir(),
+      });
+      await runtime.start();
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
+
+      const runtimeState = runtime as unknown as {
+        workspaceResources: Map<string, {
+          socketPath: string;
+          workspacePath: string;
+          socketServer: { stop: () => void } | null;
+          mediaBridge: (() => void) | null;
+          lastActivity: number;
+        }>;
+      };
+
+      const entry = runtimeState.workspaceResources.get('15550100001');
+      expect(entry).toBeDefined();
+      entry!.lastActivity = firstTurnAt.getTime() - (31 * 60_000);
+
+      vi.setSystemTime(resultAt);
+      capturedOnEventRef.current?.({ type: 'result', text: 'done' });
+
+      expect(runtimeState.workspaceResources.get('15550100001')?.lastActivity).toBe(resultAt.getTime());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sandboxPerChat workspace sweep timer is started with the runtime and cleared on shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+      const runtime = new AgentRuntime(db, messenger, 'sandbox', {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+        sandbox,
+        cwd: tmpdir(),
+      });
+      const runtimeState = runtime as unknown as {
+        workspaceSweepTimer: ReturnType<typeof setInterval> | null;
+      };
+
+      await runtime.start();
+      expect(runtimeState.workspaceSweepTimer).not.toBeNull();
+
+      await runtime.shutdown();
+      expect(runtimeState.workspaceSweepTimer).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sandboxPerChat workspace sweep timer is unrefd and cleared structurally', async () => {
+    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('this.workspaceSweepTimer.unref?.();');
+    expect(source).toContain('clearInterval(this.workspaceSweepTimer);');
   });
 
   // ─── Session resume ────────────────────────────────────────────────────────
