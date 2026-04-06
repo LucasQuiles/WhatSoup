@@ -213,6 +213,35 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ PADDING TOKEN IN STYLE ═══
+        // padding: 'var(--sp-N)' → p-[var(--sp-N)] class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="padding"][value.value=/^var\\(--sp-\\w+\\)$/]',
+          message: '⛔ padding token in style. FIX: remove padding from style, add to className. padding: "var(--sp-4)"→"p-[var(--sp-4)]". Pattern: p-[var(--sp-N)].',
+        },
+        // padding: 'var(--sp-Y) var(--sp-X)' → py-[var(--sp-Y)] px-[var(--sp-X)]
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="padding"][value.value=/^var\\(--sp-\\w+\\) var\\(--sp-\\w+\\)$/]',
+          message: '⛔ Compound padding token in style. FIX: remove padding from style, add BOTH to className. padding: "var(--sp-2) var(--sp-4)"→"py-[var(--sp-2)] px-[var(--sp-4)]". First value is Y (top/bottom), second is X (left/right).',
+        },
+        // paddingTop/Bottom/Left/Right with token
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="paddingTop"][value.value=/^var\\(--sp-/]',
+          message: '⛔ paddingTop token in style. FIX: remove from style, add to className. paddingTop: "var(--sp-2)"→"pt-[var(--sp-2)]".',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="paddingBottom"][value.value=/^var\\(--sp-/]',
+          message: '⛔ paddingBottom token in style. FIX: remove from style, add to className. paddingBottom: "var(--sp-2)"→"pb-[var(--sp-2)]".',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="paddingLeft"][value.value=/^var\\(--sp-/]',
+          message: '⛔ paddingLeft token in style. FIX: remove from style, add to className. paddingLeft: "var(--sp-2)"→"pl-[var(--sp-2)]".',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="paddingRight"][value.value=/^var\\(--sp-/]',
+          message: '⛔ paddingRight token in style. FIX: remove from style, add to className. paddingRight: "var(--sp-2)"→"pr-[var(--sp-2)]".',
+        },
+
         // ═══ GAP TOKEN IN STYLE ═══
         // gap: 'var(--sp-*)' in JSX style should be a gap-[var(--sp-*)] class
         {
