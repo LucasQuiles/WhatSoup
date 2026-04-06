@@ -87,7 +87,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
               className="text-t5 font-mono leading-tight"
               style={{
                 flex: 1,
-                fontSize: '9px',
+                fontSize: 'var(--font-size-xs)',
                 textAlign: 'center',
               }}
             >
@@ -136,7 +136,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
             key={`h-${h}`}
             className="text-t5 font-mono leading-tight"
             style={{
-              fontSize: '9px',
+              fontSize: 'var(--font-size-xs)',
               textAlign: 'center',
             }}
           >
@@ -180,7 +180,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
       <div
         className="flex items-center text-t5 font-mono"
         style={{
-          fontSize: '9px',
+          fontSize: 'var(--font-size-xs)',
           marginTop: 'var(--sp-3)',
           gap: 'var(--sp-2)',
           justifyContent: 'flex-end',

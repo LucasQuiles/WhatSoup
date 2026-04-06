@@ -73,13 +73,9 @@ export default function Ops() {
 
       {/* ═══ LEFT: Fleet Status (swapped from right) ═══ */}
       <div
-        className="flex flex-col min-h-0"
+        className="c-card flex flex-col min-h-0 overflow-hidden"
         style={{
           flex: 1,
-          background: 'var(--color-d1)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
-          overflow: 'hidden',
         }}
       >
         {/* Row 1: Header — matches toolbar pattern */}
@@ -131,18 +127,16 @@ export default function Ops() {
             ) : lines.map(line => (
               <div
                 key={line.name}
-                className={`c-hover cursor-pointer ${
+                className={`c-card c-hover cursor-pointer ${
                   line.name === activeLine ? 'ring-1 ring-m-cht/30' : ''
                 }`}
                 style={{
                   padding: 'var(--sp-3) var(--sp-4)',
-                  borderRadius: 'var(--radius-md)',
                   background: line.status === 'unreachable'
                     ? 'var(--s-crit-wash)'
                     : line.status === 'degraded'
                     ? 'var(--s-warn-wash)'
                     : 'var(--color-d2)',
-                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
                 }}
                 onClick={() => setSelectedLine(line.name)}
               >
@@ -229,12 +223,9 @@ export default function Ops() {
 
       {/* ═══ RIGHT: Log stream (swapped from left) ═══ */}
       <div
-        className="flex flex-col min-h-0"
+        className="c-card flex flex-col min-h-0 overflow-hidden"
         style={{
           flex: 1.6,
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
-          overflow: 'hidden',
         }}
       >
         {/* Row 1: Line picker toolbar — matches c-toolbar */}

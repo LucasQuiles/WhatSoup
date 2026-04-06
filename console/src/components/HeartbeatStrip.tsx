@@ -21,7 +21,11 @@ const HeartbeatStrip: FC<HeartbeatStripProps> = ({ beats }) => {
     : [...Array<Beat>(STRIP_LENGTH - beats.length).fill('up'), ...beats];
 
   return (
-    <div className="flex gap-[1px] h-5 items-end">
+    <div
+      className="flex gap-[1px] h-5 items-end"
+      role="img"
+      aria-label={`Health: ${beats.filter(b => b === 'up').length} of ${beats.length} heartbeats healthy`}
+    >
       {normalized.map((beat, i) => {
         const { colorClass, height, opacity } = beatConfig[beat];
         return (

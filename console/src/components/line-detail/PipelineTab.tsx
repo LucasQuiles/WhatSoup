@@ -17,28 +17,45 @@ function PipelineNode({
   selected?: boolean
   onClick?: () => void
 }) {
-  const modeKey = color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt';
+  const modeKey = color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt'
+  const pillStyle = {
+    padding: onClick ? 'var(--sp-0h) var(--sp-3)' : '5px var(--sp-3)',
+    borderRadius: 'var(--radius-sm)',
+    fontSize: 'var(--font-size-label)',
+    background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
+    color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
+    border: selected
+      ? `2px solid var(--color-m-${modeKey})`
+      : active
+        ? `var(--bw) solid var(--m-${modeKey}-soft)`
+        : 'var(--bw) solid transparent',
+  } satisfies React.CSSProperties
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5"
+        style={pillStyle}
+      >
+        <span>{label}</span>
+        {value && (
+          <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
+            {value}
+          </span>
+        )}
+      </button>
+    )
+  }
+
   return (
     <span
       className="inline-flex items-center gap-1.5"
-      onClick={onClick}
-      style={{ cursor: onClick ? 'pointer' : 'default' }}
     >
       <span
         className="font-mono font-medium"
-        style={{
-          padding: '5px var(--sp-3)',
-          borderRadius: 'var(--radius-sm)',
-          fontSize: 'var(--font-size-label)',
-          background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
-          color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
-          border: selected
-            ? `2px solid var(--color-m-${modeKey})`
-            : active
-              ? `var(--bw) solid var(--m-${modeKey}-soft)`
-              : 'var(--bw) solid transparent',
-
-        }}
+        style={pillStyle}
       >
         {label}
       </span>

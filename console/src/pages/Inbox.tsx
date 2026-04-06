@@ -189,13 +189,9 @@ export default function Inbox() {
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
-        className="flex-shrink-0 flex flex-col"
+        className="c-card flex-shrink-0 flex flex-col overflow-hidden"
         style={{
           width: 'var(--panel-chat-list)',
-          background: 'var(--color-d1)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
-          overflow: 'hidden',
         }}
       >
         {/* Line picker — toolbar pattern */}
@@ -227,12 +223,8 @@ export default function Inbox() {
 
       {/* ═══ Center: Messages ═══ */}
       <div
-        className="flex-1 flex flex-col min-h-0"
+        className="c-card flex-1 flex flex-col min-h-0 overflow-hidden"
         style={{
-          background: 'var(--color-d0)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
-          overflow: 'hidden',
         }}
       >
         {selectedChat && currentChat ? (
@@ -295,6 +287,7 @@ export default function Inbox() {
                     className="absolute right-2 top-1/2 -translate-y-1/2 c-hover cursor-pointer text-t5 hover:text-t2"
                     style={{ padding: 'var(--sp-1)' }}
                     title="Clear search"
+                    aria-label="Clear search"
                   >
                     <X size={14} strokeWidth={1.75} />
                   </button>
@@ -363,8 +356,14 @@ export default function Inbox() {
                   <button
                     onClick={handleLoadOlder}
                     disabled={loadingOlder}
-                    className="flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
-                    style={{ padding: 'var(--sp-2) 0 var(--sp-4)', gap: 'var(--sp-2)', background: 'none', border: 'none', width: '100%' }}
+                    className="c-btn c-btn-ghost"
+                    style={{
+                      padding: 'var(--sp-2) 0 var(--sp-4)',
+                      gap: 'var(--sp-2)',
+                      width: '100%',
+                      justifyContent: 'center',
+                      color: 'var(--color-t5)',
+                    }}
                   >
                     {loadingOlder
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
@@ -407,16 +406,15 @@ export default function Inbox() {
                 {showJump && (
                   <button
                     onClick={jumpToBottom}
-                    className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-1 font-mono c-hover cursor-pointer"
+                    className="c-btn c-btn-sm"
                     style={{
-                      padding: 'var(--sp-1h) var(--sp-3)',
+                      position: 'absolute',
+                      left: '50%',
+                      bottom: '4rem',
+                      transform: 'translateX(-50%)',
                       fontSize: 'var(--font-size-sm)',
-                      background: 'var(--color-d5)',
-                      borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b3)',
-                      borderRadius: 'var(--radius-md)',
                       boxShadow: 'var(--shadow-md)',
-                      color: 'var(--color-t2)',
-                      zIndex: 10,
+                      zIndex: 'var(--z-float)',
                     }}
                   >
                     <ChevronDown size={14} /> New messages
@@ -445,6 +443,7 @@ export default function Inbox() {
                   overflow: 'hidden',
                 }}
                 placeholder="Type a message..."
+                aria-label="Type a message"
                 value={msgText}
                 onChange={e => {
                   setMsgText(e.target.value)
@@ -480,13 +479,9 @@ export default function Inbox() {
 
       {/* ═══ Right: Contact details ═══ */}
       <div
-        className="flex-shrink-0 flex flex-col"
+        className="c-card flex-shrink-0 flex flex-col overflow-hidden"
         style={{
           width: 'var(--panel-contact)',
-          background: 'var(--color-d1)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
-          overflow: 'hidden',
         }}
       >
         {currentChat ? (

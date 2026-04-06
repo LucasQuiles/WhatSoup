@@ -66,7 +66,7 @@ const Tag: FC<{ tag: TagDef }> = ({ tag }) => {
         borderRadius: 'var(--radius-sm)',
         color: tag.color,
         backgroundColor: tag.bg,
-        gap: '3px',
+        gap: 'var(--sp-0h)',
         whiteSpace: 'nowrap',
       }}
     >
@@ -101,7 +101,7 @@ const LineTags: FC<LineTagsProps> = ({ line }) => {
   if (tags.length === 0) return null
 
   return (
-    <div className="flex flex-wrap items-center" style={{ gap: '3px' }}>
+    <div className="flex flex-wrap items-center" style={{ gap: 'var(--sp-0h)' }}>
       {tags.map(tag => <Tag key={tag.label} tag={tag} />)}
     </div>
   )

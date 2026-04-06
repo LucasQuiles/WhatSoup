@@ -259,6 +259,9 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       className="fixed inset-0 z-50 flex items-center justify-center"
       style={{ background: 'var(--overlay)' }}
       onClick={handleClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wizard-title"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -287,7 +290,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           className="flex items-center justify-between c-toolbar"
           style={{ borderBottom: 'var(--bw) solid var(--b1)' }}
         >
-          <h2 className="c-heading-lg">Add New Line</h2>
+          <h2 id="wizard-title" className="c-heading-lg">Add New Line</h2>
           <button onClick={handleClose} aria-label="Close wizard" className="c-btn c-btn-ghost">
             <X size={16} />
           </button>
