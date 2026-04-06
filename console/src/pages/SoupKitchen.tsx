@@ -1,6 +1,6 @@
-import { type FC, useState, useMemo, lazy, Suspense } from "react";
+import { type FC, useState, useMemo, useCallback, lazy, Suspense } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, Plus } from "lucide-react";
+import { Search, Plus, ChevronUp, ChevronDown } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
@@ -21,6 +21,22 @@ import { formatPhone, displayInstanceName, formatCompact } from "../lib/text-uti
 const ease = [0.22, 1, 0.36, 1] as const;
 
 type KpiFilter = "connected" | "attention" | "unread" | "agent" | "messages" | null;
+type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv" | "tokens" | "sessions" | "active" | null;
+type SortDir = "asc" | "desc";
+
+const COLUMNS: { label: string; w: string | undefined; center: boolean; sortKey: SortKey }[] = [
+  { label: "Mode", w: "90px", center: false, sortKey: "mode" },
+  { label: "Line", w: undefined, center: false, sortKey: "name" },
+  { label: "Chats", w: "60px", center: true, sortKey: "chats" },
+  { label: "Groups", w: "64px", center: true, sortKey: "groups" },
+  { label: "Unread", w: "64px", center: true, sortKey: "unread" },
+  { label: "Sent", w: "68px", center: true, sortKey: "sent" },
+  { label: "Recv", w: "68px", center: true, sortKey: "recv" },
+  { label: "Tokens", w: "80px", center: true, sortKey: "tokens" },
+  { label: "Sessions", w: "72px", center: true, sortKey: "sessions" },
+  { label: "Tags", w: undefined, center: false, sortKey: null },
+  { label: "Active", w: "80px", center: true, sortKey: "active" },
+];
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
 
@@ -40,6 +56,20 @@ const SoupKitchen: FC = () => {
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [search, setSearch] = useState("");
   const [showAddWizard, setShowAddWizard] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const toggleSort = useCallback((key: SortKey) => {
+    if (!key) return;
+    setSortKey(prev => {
+      if (prev === key) {
+        setSortDir(d => d === "asc" ? "desc" : "asc");
+        return key;
+      }
+      setSortDir("desc");
+      return key;
+    });
+  }, []);
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
   const { data: fleetMetrics } = useFleetMetrics('24h');
@@ -107,8 +137,32 @@ const SoupKitchen: FC = () => {
       );
     }
 
+    // Sort
+    if (sortKey) {
+      const dir = sortDir === "asc" ? 1 : -1;
+      result = [...result].sort((a, b) => {
+        let av: number | string = 0;
+        let bv: number | string = 0;
+        switch (sortKey) {
+          case "mode": av = a.mode; bv = b.mode; break;
+          case "name": av = a.name.toLowerCase(); bv = b.name.toLowerCase(); break;
+          case "chats": av = a.chatCounts?.chats ?? 0; bv = b.chatCounts?.chats ?? 0; break;
+          case "groups": av = a.chatCounts?.groups ?? 0; bv = b.chatCounts?.groups ?? 0; break;
+          case "unread": av = a.unread ?? 0; bv = b.unread ?? 0; break;
+          case "sent": av = a.messageStats?.sent ?? 0; bv = b.messageStats?.sent ?? 0; break;
+          case "recv": av = a.messageStats?.received ?? 0; bv = b.messageStats?.received ?? 0; break;
+          case "tokens": av = (a.tokenUsage?.input ?? 0) + (a.tokenUsage?.output ?? 0); bv = (b.tokenUsage?.input ?? 0) + (b.tokenUsage?.output ?? 0); break;
+          case "sessions": av = a.totalSessions ?? 0; bv = b.totalSessions ?? 0; break;
+          case "active": av = a.lastActive ?? ""; bv = b.lastActive ?? ""; break;
+        }
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+      });
+    }
+
     return result;
-  }, [lines, activeKpi, modeFilter, search]);
+  }, [lines, activeKpi, modeFilter, search, sortKey, sortDir]);
 
   function toggleKpi(key: KpiFilter) {
     setActiveKpi((prev) => (prev === key ? null : key));
@@ -273,27 +327,22 @@ const SoupKitchen: FC = () => {
                   className="sticky top-0 bg-d3 z-10"
                   style={{ borderBottom: "var(--bw) solid var(--b2)" }}
                 >
-                  {[
-                    { label: "Mode", w: "90px", center: false },
-                    { label: "Line", w: undefined, center: false },
-                    { label: "Chats", w: "60px", center: true },
-                    { label: "Groups", w: "64px", center: true },
-                    { label: "Unread", w: "64px", center: true },
-                    { label: "Sent", w: "68px", center: true },
-                    { label: "Recv", w: "68px", center: true },
-                    { label: "Tokens", w: "80px", center: true },
-                    { label: "Sessions", w: "72px", center: true },
-                    { label: "Tags", w: undefined, center: false },
-                    { label: "Active", w: "80px", center: true },
-                  ].map((h) => (
+                  {COLUMNS.map((h) => (
                     <th
                       key={h.label}
-                      className={`c-col-header c-cell ${h.center ? "text-center" : "text-left"}`}
-                      style={{
-                        width: h.w,
-                      }}
+                      className={`c-col-header c-cell ${h.center ? "text-center" : "text-left"} ${h.sortKey ? "cursor-pointer select-none" : ""}`}
+                      style={{ width: h.w }}
+                      onClick={h.sortKey ? () => toggleSort(h.sortKey) : undefined}
+                      aria-sort={sortKey === h.sortKey ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
                     >
-                      {h.label}
+                      <span className={`inline-flex items-center ${h.center ? "justify-center" : ""}`} style={{ gap: "var(--sp-1)" }}>
+                        {h.label}
+                        {sortKey === h.sortKey && (
+                          sortDir === "asc"
+                            ? <ChevronUp size={12} strokeWidth={2} className="text-t3" />
+                            : <ChevronDown size={12} strokeWidth={2} className="text-t3" />
+                        )}
+                      </span>
                     </th>
                   ))}
                 </tr>
