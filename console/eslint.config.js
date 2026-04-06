@@ -189,6 +189,20 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
+        // ═══ CURSOR IN STYLE ═══
+        // Cursor values have direct Tailwind equivalents
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="cursor"]',
+          message: '⛔ Inline cursor in style. FIX: remove from style, add to className. pointer→"cursor-pointer" not-allowed→"cursor-not-allowed" default→"cursor-default" grab→"cursor-grab" text→"cursor-text".',
+        },
+
+        // ═══ MIN-WIDTH ZERO ═══
+        // minWidth: 0 has a Tailwind equivalent
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="minWidth"][value.type="Literal"][value.raw="0"]',
+          message: '⛔ Inline minWidth: 0 in style. FIX: remove from style, add "min-w-0" to className.',
+        },
+
         // ═══ FLEX SHORTHAND IN STYLE ═══
         // Raw numeric flex values have Tailwind equivalents
         {
