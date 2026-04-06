@@ -13,6 +13,7 @@ import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import ModeBadge from "../components/ModeBadge";
 import FilterPill from "../components/FilterPill";
+import { FleetMetricsChart } from "../components/FleetMetricsChart";
 import LineTags from "../components/LineTags";
 import { formatRelative } from "../lib/format-time";
 import { formatPhone, displayInstanceName, formatCompact } from "../lib/text-utils";
@@ -238,6 +239,11 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "messages"}
         />
       </motion.div>
+
+      {/* Fleet Metrics Chart */}
+      {fleetMetrics?.messageVolume && fleetMetrics.messageVolume.length > 0 && (
+        <FleetMetricsChart data={fleetMetrics.messageVolume} />
+      )}
 
       {/* Alert Banner */}
       <AlertBanner alerts={alerts} />

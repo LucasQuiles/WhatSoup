@@ -1,0 +1,92 @@
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import type { MessageVolumeBucket } from '../types';
+
+const AXIS_TICK = {
+  fontSize: 'var(--font-size-xs)',
+  fill: 'var(--color-t4)',
+};
+
+function formatBucketLabel(bucket: string): string {
+  const d = new Date(bucket);
+  return d.toLocaleTimeString([], { hour: 'numeric' });
+}
+
+/** Stacked area chart showing fleet-wide inbound/outbound message volume. */
+export function FleetMetricsChart({ data }: { data: MessageVolumeBucket[] }) {
+  return (
+    <section
+      className="c-card font-mono flex-shrink-0"
+      style={{ padding: 'var(--sp-4)', background: 'var(--color-d2)' }}
+    >
+      <div
+        className="font-mono text-t4"
+        style={{
+          fontSize: 'var(--font-size-xs)',
+          marginBottom: 'var(--sp-3)',
+          textTransform: 'uppercase',
+          letterSpacing: 'var(--tracking-label)',
+        }}
+      >
+        Fleet Message Volume (24h)
+      </div>
+      <ResponsiveContainer width="100%" height={120}>
+        <AreaChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+          <CartesianGrid stroke="var(--b1)" vertical={false} />
+          <XAxis
+            dataKey="bucket"
+            tick={AXIS_TICK}
+            tickLine={false}
+            axisLine={{ stroke: 'var(--b1)' }}
+            minTickGap={40}
+            tickFormatter={formatBucketLabel}
+          />
+          <YAxis
+            tick={AXIS_TICK}
+            tickLine={false}
+            axisLine={false}
+            width={28}
+            allowDecimals={false}
+          />
+          <Tooltip
+            contentStyle={{
+              background: 'var(--color-d3)',
+              borderWidth: 'var(--bw)',
+              borderStyle: 'solid',
+              borderColor: 'var(--b2)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: 'var(--shadow-md)',
+              fontSize: 'var(--font-size-xs)',
+            }}
+            labelFormatter={(v) => new Date(String(v)).toLocaleString()}
+          />
+          <Area
+            type="monotone"
+            dataKey="inbound"
+            name="Inbound"
+            stackId="msgs"
+            stroke="var(--color-m-pas)"
+            fill="var(--color-m-pas)"
+            fillOpacity={0.3}
+          />
+          <Area
+            type="monotone"
+            dataKey="outbound"
+            name="Outbound"
+            stackId="msgs"
+            stroke="var(--color-m-cht)"
+            fill="var(--color-m-cht)"
+            fillOpacity={0.3}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </section>
+  );
+}
