@@ -103,12 +103,35 @@ export async function runCleanup(
   await runCleanupDir(join(baseMediaDir, 'tmp'),   retention.tempMaxAgeMs,  db, result);
   await runCleanupDir(join(baseMediaDir, 'cache'), retention.cacheMaxAgeMs, db, result);
 
+  // SP9: purge failed scheduled messages with stale BLOB data
+  purgeFailedScheduledMessages(db);
+
   log.info(
     { deleted: result.deleted, skipped: result.skipped, bytesFreed: result.bytesFreed },
     'media retention: cleanup run complete',
   );
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled-message purge (SP9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Delete failed scheduled messages older than `maxAgeDays` days.
+ * Returns the number of rows deleted.
+ */
+export function purgeFailedScheduledMessages(db: Database, maxAgeDays = 7): number {
+  const cutoff = Math.floor(Date.now() / 1000) - maxAgeDays * 24 * 60 * 60;
+  const result = db.raw
+    .prepare(`DELETE FROM scheduled_messages WHERE status = 'failed' AND created_at < ?`)
+    .run(cutoff);
+  const count = Number(result.changes);
+  if (count > 0) {
+    log.info({ count, maxAgeDays }, 'media retention: purged failed scheduled messages');
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------

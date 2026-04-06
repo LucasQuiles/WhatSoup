@@ -108,11 +108,33 @@ describe('scheduling tools', () => {
 
     expect(row.chat_jid).toBe('222@s.whatsapp.net');
     expect(row.content_type).toBe('image');
-    const payload = JSON.parse(row.payload) as { type: string; caption: string; mimetype: string; buffer: { type: string; data: number[] } };
+    const payload = JSON.parse(row.payload) as { type: string; caption: string; mimetype: string };
     expect(payload.type).toBe('image');
     expect(payload.caption).toBe('launch poster');
     expect(payload.mimetype).toBe('image/jpeg');
-    expect(payload.buffer.type).toBe('Buffer');
+    // SP9: buffer should NOT be in the JSON payload
+    expect(payload).not.toHaveProperty('buffer');
+
+    // SP9: media_blob should be stored as a BLOB column
+    const blobRow = db.raw.prepare(
+      'SELECT media_blob FROM scheduled_messages WHERE id = 1',
+    ).get() as { media_blob: Uint8Array | null };
+    expect(blobRow.media_blob).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(blobRow.media_blob!).toString()).toBe('fake-image');
+  });
+
+  it('schedule_message stores null media_blob for text messages', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    await registry.call(
+      'schedule_message',
+      { scheduled_at: scheduledAt, text: 'just text' },
+      chatSession('333'),
+    );
+
+    const row = db.raw.prepare(
+      'SELECT media_blob FROM scheduled_messages WHERE id = 1',
+    ).get() as { media_blob: Uint8Array | null };
+    expect(row.media_blob).toBeNull();
   });
 
   it('list_scheduled shows pending and processing rows for the current chat only', async () => {

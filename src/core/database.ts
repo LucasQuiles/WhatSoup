@@ -486,6 +486,9 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       CREATE INDEX IF NOT EXISTS idx_metrics_hourly_bucket ON metrics_hourly(bucket);
     `);
   }],
+  [16, (db: DatabaseSync) => {
+    db.exec(`ALTER TABLE scheduled_messages ADD COLUMN media_blob BLOB`);
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────

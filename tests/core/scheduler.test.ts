@@ -42,6 +42,7 @@ function insertScheduledMessage(
     scheduledAt?: number;
     status?: string;
     retryCount?: number;
+    mediaBlob?: Buffer | null;
   } = {},
 ): number {
   const {
@@ -51,13 +52,14 @@ function insertScheduledMessage(
     scheduledAt = Math.floor(Date.now() / 1000) - 10,
     status = 'pending',
     retryCount = 0,
+    mediaBlob = null,
   } = opts;
 
   const stmt = raw.prepare(`
-    INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, retry_count)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, retry_count, media_blob)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(chatJid, contentType, payload, scheduledAt, status, retryCount);
+  const result = stmt.run(chatJid, contentType, payload, scheduledAt, status, retryCount, mediaBlob);
   return result.lastInsertRowid as number;
 }
 
@@ -167,6 +169,29 @@ describe('MessageScheduler — tick()', () => {
       .get(id) as { status: string };
     expect(row.status).toBe('processing');
     expect(conn.sendRaw).not.toHaveBeenCalled();
+  });
+
+  it('reconstructs media Buffer from media_blob BLOB column (SP9)', async () => {
+    const { mock: conn2, sendMediaCalls } = makeMockConnection();
+    const mediaContent = Buffer.from('fake-image-data');
+    insertScheduledMessage(db.raw, {
+      chatJid: 'media@s.whatsapp.net',
+      contentType: 'image',
+      payload: JSON.stringify({ type: 'image', caption: 'test', mimetype: 'image/jpeg' }),
+      mediaBlob: mediaContent,
+    });
+
+    const scheduler = new MessageScheduler(db, conn2 as ConnectionManager, { intervalMs: 60_000, maxRetries: 3 });
+    await scheduler.tick();
+
+    expect(sendMediaCalls).toHaveLength(1);
+    const [chatJid, media] = sendMediaCalls[0] as [string, { type: string; buffer: Buffer; caption: string; mimetype: string }];
+    expect(chatJid).toBe('media@s.whatsapp.net');
+    expect(media.type).toBe('image');
+    expect(media.caption).toBe('test');
+    expect(media.mimetype).toBe('image/jpeg');
+    expect(Buffer.isBuffer(media.buffer)).toBe(true);
+    expect(media.buffer.toString()).toBe('fake-image-data');
   });
 
   it('passes correct chatJid and text to sendRaw for text messages', async () => {

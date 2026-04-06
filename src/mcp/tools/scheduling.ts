@@ -7,7 +7,7 @@ import type { OutboundMedia } from '../../core/types.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 
-const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
 const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string }> = {
   '.png':  { type: 'image',    mime: 'image/png' },
@@ -112,7 +112,7 @@ function resolveFile(filePath: string, session: SessionContext): { resolved: str
 
   const stat = statSync(resolved);
   if (stat.size > MAX_FILE_SIZE_BYTES) {
-    throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (limit 50 MB)`);
+    throw new Error(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)} MB (limit 25 MB)`);
   }
 
   const info = EXTENSION_MAP[extname(resolved).toLowerCase()];
@@ -123,7 +123,7 @@ function resolveFile(filePath: string, session: SessionContext): { resolved: str
   return { resolved, info, buffer: readFileSync(resolved) };
 }
 
-function buildScheduledPayload(params: z.infer<typeof ScheduleMessageSchema>, session: SessionContext): { contentType: string; payload: Record<string, unknown> } {
+function buildScheduledPayload(params: z.infer<typeof ScheduleMessageSchema>, session: SessionContext): { contentType: string; payload: Record<string, unknown>; mediaBlob: Buffer | null } {
   const {
     text,
     filePath,
@@ -146,6 +146,7 @@ function buildScheduledPayload(params: z.infer<typeof ScheduleMessageSchema>, se
     return {
       contentType: 'text',
       payload: { text: text! },
+      mediaBlob: null,
     };
   }
 
@@ -157,27 +158,32 @@ function buildScheduledPayload(params: z.infer<typeof ScheduleMessageSchema>, se
     case 'image':
       return {
         contentType: 'image',
-        payload: { type: 'image', buffer, caption: caption ?? text, mimetype: info.mime, viewOnce },
+        payload: { type: 'image', caption: caption ?? text, mimetype: info.mime, viewOnce },
+        mediaBlob: buffer,
       };
     case 'document':
       return {
         contentType: 'document',
-        payload: { type: 'document', buffer, filename: basename, mimetype: info.mime, caption: caption ?? text },
+        payload: { type: 'document', filename: basename, mimetype: info.mime, caption: caption ?? text },
+        mediaBlob: buffer,
       };
     case 'audio':
       return {
         contentType: 'audio',
-        payload: { type: 'audio', buffer, mimetype: info.mime, ptt, seconds },
+        payload: { type: 'audio', mimetype: info.mime, ptt, seconds },
+        mediaBlob: buffer,
       };
     case 'video':
       return {
         contentType: 'video',
-        payload: { type: 'video', buffer, caption: caption ?? text, mimetype: info.mime, ptv, gifPlayback, viewOnce },
+        payload: { type: 'video', caption: caption ?? text, mimetype: info.mime, ptv, gifPlayback, viewOnce },
+        mediaBlob: buffer,
       };
     case 'sticker':
       return {
         contentType: 'sticker',
-        payload: { type: 'sticker', buffer, mimetype: info.mime, isAnimated },
+        payload: { type: 'sticker', mimetype: info.mime, isAnimated },
+        mediaBlob: buffer,
       };
   }
 }
@@ -214,11 +220,11 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
         throw new Error('scheduled_at must be a future UTC unix timestamp');
       }
 
-      const { contentType, payload } = buildScheduledPayload(parsed, session);
+      const { contentType, payload, mediaBlob } = buildScheduledPayload(parsed, session);
       const result = db.raw.prepare(
-        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
-         VALUES (?, ?, ?, ?, 'pending')`,
-      ).run(parsed.chatJid, contentType, JSON.stringify(payload), parsed.scheduled_at);
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, media_blob)
+         VALUES (?, ?, ?, ?, 'pending', ?)`,
+      ).run(parsed.chatJid, contentType, JSON.stringify(payload), parsed.scheduled_at, mediaBlob);
 
       return {
         id: Number(result.lastInsertRowid),

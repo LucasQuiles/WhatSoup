@@ -14,8 +14,9 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { MediaRetentionTimer, runCleanup, DEFAULT_RETENTION } from '../../src/core/media-retention.ts';
+import { MediaRetentionTimer, runCleanup, DEFAULT_RETENTION, purgeFailedScheduledMessages } from '../../src/core/media-retention.ts';
 import type { RetentionConfig } from '../../src/core/media-retention.ts';
+import { Database } from '../../src/core/database.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,8 +43,11 @@ function makeDb(updatedPaths: string[] = []): any {
   return {
     raw: {
       prepare: vi.fn().mockReturnValue({
-        run: vi.fn().mockImplementation((path: string) => {
-          updatedPaths.push(path);
+        run: vi.fn().mockImplementation((...args: unknown[]) => {
+          if (typeof args[0] === 'string' && !args[0].toString().match(/^\d+$/)) {
+            updatedPaths.push(args[0] as string);
+          }
+          return { changes: 0 };
         }),
       }),
     },
@@ -226,14 +230,19 @@ describe('runCleanup — DB nullification', () => {
     expect(nullifiedPaths).toContain(f2);
   });
 
-  it('does not call DB when no files are deleted', async () => {
+  it('does not call DB for media_path nullification when no files are deleted', async () => {
     const recentFile = makeFile(tmpDir, 'recent.jpg');
     setMtime(recentFile, 5 * 60 * 60 * 1000); // 5 hours old
 
     const db = makeDb();
     await runCleanup(baseDir, db, DEFAULT_RETENTION);
 
-    expect(db.raw.prepare).not.toHaveBeenCalled();
+    // The only prepare call should be from purgeFailedScheduledMessages, not media_path nullification
+    const prepareCalls = (db.raw.prepare as ReturnType<typeof vi.fn>).mock.calls;
+    const mediaPathCalls = prepareCalls.filter(
+      (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('media_path'),
+    );
+    expect(mediaPathCalls).toHaveLength(0);
   });
 });
 
@@ -345,5 +354,66 @@ describe('MediaRetentionTimer', () => {
       timer.stop();
       timer.stop();
     }).not.toThrow();
+  });
+});
+
+describe('purgeFailedScheduledMessages (SP9)', () => {
+  let realDb: Database;
+
+  beforeEach(() => {
+    realDb = new Database(':memory:');
+    realDb.open();
+  });
+
+  afterEach(() => {
+    realDb.raw.close();
+  });
+
+  it('deletes failed rows older than maxAgeDays', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const eightDaysAgo = now - 8 * 24 * 60 * 60;
+    const twoDaysAgo = now - 2 * 24 * 60 * 60;
+
+    realDb.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'failed', ?)`,
+    ).run('111@s.whatsapp.net', 'text', '{"text":"old"}', eightDaysAgo, eightDaysAgo);
+
+    realDb.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'failed', ?)`,
+    ).run('111@s.whatsapp.net', 'text', '{"text":"recent"}', twoDaysAgo, twoDaysAgo);
+
+    const purged = purgeFailedScheduledMessages(realDb, 7);
+    expect(purged).toBe(1);
+
+    const remaining = realDb.raw.prepare('SELECT COUNT(*) as cnt FROM scheduled_messages').get() as { cnt: number };
+    expect(remaining.cnt).toBe(1);
+  });
+
+  it('does not delete pending or sent rows', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const eightDaysAgo = now - 8 * 24 * 60 * 60;
+
+    realDb.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'pending', ?)`,
+    ).run('111@s.whatsapp.net', 'text', '{"text":"a"}', eightDaysAgo, eightDaysAgo);
+
+    realDb.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'sent', ?)`,
+    ).run('111@s.whatsapp.net', 'text', '{"text":"b"}', eightDaysAgo, eightDaysAgo);
+
+    const purged = purgeFailedScheduledMessages(realDb, 7);
+    expect(purged).toBe(0);
+
+    const remaining = realDb.raw.prepare('SELECT COUNT(*) as cnt FROM scheduled_messages').get() as { cnt: number };
+    expect(remaining.cnt).toBe(2);
+  });
+
+  it('returns 0 when no rows match', () => {
+    const purged = purgeFailedScheduledMessages(realDb, 7);
+    expect(purged).toBe(0);
   });
 });

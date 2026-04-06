@@ -13,6 +13,7 @@ interface ScheduledRow {
   content_type: string;
   payload: string;
   retry_count: number;
+  media_blob: Uint8Array | null;
 }
 
 export class MessageScheduler {
@@ -67,7 +68,7 @@ export class MessageScheduler {
     // crash before recoverStale() ran) are left alone.
     const candidates = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob
          FROM scheduled_messages
          WHERE status = 'pending' AND scheduled_at <= ?`,
       )
@@ -88,7 +89,7 @@ export class MessageScheduler {
     // Only process the rows we just claimed (re-fetch to confirm claimed status)
     const rows = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob
          FROM scheduled_messages
          WHERE id IN (${placeholders}) AND status = 'processing'`,
       )
@@ -138,20 +139,26 @@ export class MessageScheduler {
       await this.connection.sendRaw(row.chat_jid, payload);
     } else {
       // media types: image, video, audio, document, sticker
-      const { type, buffer: bufferData, ...rest } = payload as {
-        type: string;
-        buffer: { type: 'Buffer'; data: number[] } | number[];
-        [key: string]: unknown;
-      };
+      const { type, ...rest } = payload as { type: string; [key: string]: unknown };
 
-      // Deserialize Buffer from JSON (stored as { type: 'Buffer', data: [...] })
+      // SP9: media is stored as a BLOB column, not in the JSON payload
       let buf: Buffer;
-      if (bufferData && typeof bufferData === 'object' && 'data' in bufferData) {
-        buf = Buffer.from((bufferData as { type: 'Buffer'; data: number[] }).data);
-      } else if (Array.isArray(bufferData)) {
-        buf = Buffer.from(bufferData as number[]);
+      if (row.media_blob) {
+        buf = Buffer.from(row.media_blob);
       } else {
-        throw new Error(`scheduler: unserializable buffer in payload for id=${row.id}`);
+        // Legacy fallback: deserialize Buffer from JSON payload
+        const { buffer: bufferData, ...legacyRest } = rest as {
+          buffer?: { type: 'Buffer'; data: number[] } | number[];
+          [key: string]: unknown;
+        };
+        if (bufferData && typeof bufferData === 'object' && 'data' in bufferData) {
+          buf = Buffer.from((bufferData as { type: 'Buffer'; data: number[] }).data);
+        } else if (Array.isArray(bufferData)) {
+          buf = Buffer.from(bufferData as number[]);
+        } else {
+          throw new Error(`scheduler: no media_blob and no buffer in payload for id=${row.id}`);
+        }
+        Object.assign(rest, legacyRest);
       }
 
       await this.connection.sendMedia(row.chat_jid, { type, buffer: buf, ...rest } as Parameters<ConnectionManager['sendMedia']>[1]);
