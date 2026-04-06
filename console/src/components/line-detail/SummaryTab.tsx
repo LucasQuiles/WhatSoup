@@ -71,7 +71,7 @@ export function SummaryTab({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(6, 1fr)',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
           gap: 'var(--sp-2)',
           background: 'var(--color-d1)',
           borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',

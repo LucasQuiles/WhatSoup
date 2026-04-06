@@ -42,6 +42,7 @@ export function MetricsTab({
               downloadCSV(csv, `${lineName ?? 'metrics'}-${metricsRange}.csv`);
             }}
             title="Export metrics as CSV"
+            aria-label="Export metrics as CSV"
           >
             <Download size={14} />
           </button>

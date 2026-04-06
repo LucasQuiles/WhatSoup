@@ -1,16 +1,35 @@
+import { useState } from 'react'
 import { UserCheck, Ban, User, Users, UserPlus, UserX } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
+import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api'
+import ConfirmDialog from '../ConfirmDialog'
 import type { AccessEntry } from './types'
+
+interface PendingAction { subjectType: string; subjectId: string; subjectName: string; action: 'allow' | 'block' }
 
 export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineName: string }) {
   const toast = useToast()
+  const queryClient = useQueryClient()
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
 
-  const handleAccess = (subjectType: string, subjectId: string, subjectName: string, action: 'allow' | 'block') => {
+  const confirmAccess = (subjectType: string, subjectId: string, subjectName: string, action: 'allow' | 'block') => {
+    setPendingAction({ subjectType, subjectId, subjectName, action })
+  }
+
+  const executeAccess = async () => {
+    if (!pendingAction) return
+    const { subjectType, subjectId, subjectName, action } = pendingAction
     const label = action === 'allow' ? 'Allow' : 'Block'
-    api.accessDecision(lineName, subjectType, subjectId, action)
-      .then(() => toast.success(`${label}ed ${subjectName}`))
-      .catch(e => toast.error(`${label} failed: ${e.message}`))
+    try {
+      await api.accessDecision(lineName, subjectType, subjectId, action)
+      toast.success(`${label}ed ${subjectName}`)
+      queryClient.invalidateQueries({ queryKey: ['access', lineName] })
+    } catch (e) {
+      toast.error(`${label} failed: ${(e as Error).message}`)
+    } finally {
+      setPendingAction(null)
+    }
   }
   const allowed = access.filter(e => e.status === 'allowed')
   const blocked = access.filter(e => e.status === 'blocked')
@@ -78,14 +97,14 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       {showActions === 'pending' && (
         <div className="flex gap-1.5">
           <button
-            onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
+            onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
             className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
             style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
           >
             <UserCheck size={11} strokeWidth={1.75} /> Allow
           </button>
           <button
-            onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
+            onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
             className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
             style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
           >
@@ -95,7 +114,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       )}
       {showActions === 'allowed' && (
         <button
-          onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
+          onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
           className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
           style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
         >
@@ -104,7 +123,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       )}
       {showActions === 'blocked' && (
         <button
-          onClick={() => handleAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
+          onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
           className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
           style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
         >
@@ -130,7 +149,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       )}
 
       {/* Allowed + Blocked in two columns */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
         <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
           <div
             className="c-col-header text-t4"
@@ -156,6 +175,21 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!pendingAction}
+        title={`${pendingAction?.action === 'allow' ? 'Allow' : 'Block'} ${pendingAction?.subjectName ?? ''}?`}
+        confirmLabel={pendingAction?.action === 'allow' ? 'Allow' : 'Block'}
+        confirmVariant={pendingAction?.action === 'allow' ? 'primary' : 'danger'}
+        confirmIcon={pendingAction?.action === 'allow' ? <UserCheck size={14} /> : <Ban size={14} />}
+        onConfirm={executeAccess}
+        onCancel={() => setPendingAction(null)}
+      >
+        {pendingAction?.action === 'allow'
+          ? <>This will grant <strong>{pendingAction.subjectName}</strong> access to this instance.</>
+          : <>This will block <strong>{pendingAction?.subjectName}</strong> from contacting this instance.</>
+        }
+      </ConfirmDialog>
     </div>
   )
 }

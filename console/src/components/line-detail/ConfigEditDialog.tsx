@@ -354,6 +354,7 @@ export function ConfigEditDialog({
           </span>
           <button
             onClick={onClose}
+            aria-label="Close dialog"
             className="text-t4 hover:text-t2 cursor-pointer c-hover"
           >
             <X size={18} strokeWidth={1.75} />
