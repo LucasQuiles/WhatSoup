@@ -253,7 +253,8 @@ describe('SessionManager', () => {
     await sm.sendTurn('hello');
 
     mockChild._exitCb?.(1, null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // notifyUser is called via setImmediate — flush both microtasks and macrotasks
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
 
     expect(onCrash).toHaveBeenCalledWith({
       exitCode: 1,
