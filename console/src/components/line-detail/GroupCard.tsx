@@ -22,21 +22,14 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
   return (
     <button
       type="button"
-      className="c-card w-full flex items-center gap-3 c-hover text-left"
-      style={{
-        padding: 'var(--sp-3) var(--sp-4)',
-      }}
+      className="c-card w-full flex items-center gap-3 c-hover text-left py-[var(--sp-3)] px-[var(--sp-4)]"
       onClick={() => onSelect(group)}
     >
       {/* Avatar */}
       <div
-        className="flex-shrink-0 flex items-center justify-center font-sans font-semibold"
+        className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] rounded-full text-t1"
         style={{
-          width: 'var(--avatar-md)',
-          height: 'var(--avatar-md)',
-          borderRadius: 'var(--radius-circle)',
           background: color,
-          color: 'var(--color-t1)',
           fontSize: 'var(--font-size-data)',
         }}
       >
@@ -51,11 +44,9 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
           </span>
           {badge && (
             <span
-              className="inline-flex items-center gap-1 font-mono flex-shrink-0"
+              className="inline-flex items-center gap-1 font-mono flex-shrink-0 py-[var(--bw)] px-[var(--sp-1)] rounded-sm"
               style={{
                 fontSize: 'var(--font-size-xs)',
-                padding: 'var(--bw) var(--sp-1)',
-                borderRadius: 'var(--radius-sm)',
                 background: badge.bg,
                 color: badge.color,
               }}
@@ -66,7 +57,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
           )}
         </div>
         <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'calc(var(--sp-1) / 2)' }}>
-          <Users size={11} className="inline" style={{ marginRight: 'var(--sp-1)', verticalAlign: 'calc(var(--bw) * -1)' }} />
+          <Users size={11} className="inline mr-[var(--sp-1)]" style={{ verticalAlign: 'calc(var(--bw) * -1)' }} />
           {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
           {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}
         </div>

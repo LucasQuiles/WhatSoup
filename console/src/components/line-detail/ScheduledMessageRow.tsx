@@ -68,7 +68,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       className="c-card overflow-hidden"
     >
       {/* Main row */}
-      <div className="flex items-start gap-3" style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
+      <div className="flex items-start gap-3 py-[var(--sp-3)] px-[var(--sp-4)]">
         {/* Content type icon */}
         <div style={{ marginTop: 'calc(var(--sp-1) / 2)' }}>
           <ContentTypeIcon type={message.contentType} />
@@ -86,19 +86,15 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             </span>
             {/* Status badge */}
             <span
-              className="flex-shrink-0 font-mono inline-flex items-center"
+              className="flex-shrink-0 font-mono inline-flex items-center gap-[var(--sp-1)]"
               style={{
                 fontSize: 'var(--font-size-xs)',
                 color: statusColor(message.status),
-                gap: 'var(--sp-1)',
               }}
             >
               <span
-                className="inline-block shrink-0"
+                className="inline-block shrink-0 w-[var(--radius-md)] h-[var(--radius-md)] rounded-full"
                 style={{
-                  width: 'var(--radius-md)',
-                  height: 'var(--radius-md)',
-                  borderRadius: 'var(--radius-circle)',
                   background: statusColor(message.status),
                 }}
               />
@@ -107,7 +103,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           </div>
 
           {/* Second line: target + scheduled time */}
-          <div className="flex items-center gap-2 flex-wrap font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--sp-0h)' }}>
+          <div className="flex items-center gap-2 flex-wrap font-mono text-t4 mt-[var(--sp-0h)]" style={{ fontSize: 'var(--font-size-xs)' }}>
             <span>{message.chatName ?? message.chatJid}</span>
             <span style={metaDividerStyle}>·</span>
             <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
@@ -116,7 +112,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             {isRecurring && (
               <>
                 <span style={metaDividerStyle}>·</span>
-                <span className="flex items-center gap-1" style={{ color: 'var(--color-m-cht)' }}>
+                <span className="flex items-center gap-1 text-m-cht">
                   <RefreshCw size={10} strokeWidth={2} />
                   {cronToHuman(message.recurrence!)}
                 </span>
@@ -135,11 +131,9 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Error message if failed */}
           {message.status === 'failed' && message.error && (
             <div
-              className="font-mono"
+              className="font-mono text-s-crit mt-[var(--sp-0h)]"
               style={{
                 fontSize: 'var(--font-size-xs)',
-                color: 'var(--color-s-crit)',
-                marginTop: 'var(--sp-0h)',
               }}
             >
               {message.error}
@@ -203,15 +197,9 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Expanded details */}
       {expanded && (
         <div
-          className="font-mono text-t4 flex flex-wrap"
+          className="font-mono text-t4 flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
           style={{
             fontSize: 'var(--font-size-xs)',
-            padding: 'var(--sp-2) var(--sp-4)',
-            background: 'var(--color-d1)',
-            borderTopWidth: 'var(--bw)',
-            borderTopStyle: 'solid',
-            borderTopColor: 'var(--b1)',
-            gap: 'var(--sp-3)',
           }}
         >
           {message.nextRunAt && (

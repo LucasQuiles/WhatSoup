@@ -38,9 +38,9 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
 
   return (
     <>
-      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+      <div className="flex flex-col gap-[var(--sp-2)]">
         {/* Header bar */}
-        <div className="flex items-center justify-between" style={{ padding: 'var(--sp-2) var(--sp-4)' }}>
+        <div className="flex items-center justify-between py-[var(--sp-2)] px-[var(--sp-4)]">
           <span className="c-col-header text-t4 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
             {groups.length} group{groups.length !== 1 ? 's' : ''}
           </span>
@@ -62,7 +62,7 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
             description="Groups this instance participates in will appear here."
           />
         ) : (
-          <div className="flex flex-col" style={{ gap: 'var(--sp-2)', padding: '0 var(--sp-4)' }}>
+          <div className="flex flex-col gap-[var(--sp-2)] py-0 px-[var(--sp-4)]">
             {groups.map(group => (
               <GroupCard
                 key={group.id}

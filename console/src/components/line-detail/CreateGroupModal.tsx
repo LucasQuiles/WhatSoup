@@ -67,10 +67,8 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-group-dialog-title"
-        className="c-dialog flex flex-col"
+        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline)]"
         style={{
-          width: 'var(--panel-composer)',
-          maxWidth: 'var(--panel-max-inline)',
           maxHeight: 'var(--modal-max-h-sm)',
         }}
         onClick={e => e.stopPropagation()}
@@ -89,17 +87,17 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
-          <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex-1 overflow-y-auto py-[var(--sp-4)] px-[var(--sp-5)]">
+          <div className="flex flex-col gap-[var(--sp-4)]">
 
             {/* Subject */}
             <div>
               <label
                 htmlFor="create-group-subject"
-                className="font-mono text-t4 block"
-                style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
+                className="font-mono text-t4 block mb-[var(--sp-1)]"
+                style={{ fontSize: 'var(--font-size-xs)' }}
               >
-                Group subject <span style={{ color: 'var(--color-s-crit)' }}>*</span>
+                Group subject <span className="text-s-crit">*</span>
               </label>
               <input
                 id="create-group-subject"
@@ -115,12 +113,12 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             {/* Participants */}
             <div>
               <label
-                className="font-mono text-t4 block"
-                style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
+                className="font-mono text-t4 block mb-[var(--sp-1)]"
+                style={{ fontSize: 'var(--font-size-xs)' }}
               >
-                Participants <span style={{ color: 'var(--color-s-crit)' }}>*</span>
+                Participants <span className="text-s-crit">*</span>
                 {participants.length > 0 && (
-                  <span className="text-t4" style={{ marginLeft: 'var(--sp-2)' }}>
+                  <span className="text-t4 ml-[var(--sp-2)]">
                     ({participants.length} selected)
                   </span>
                 )}

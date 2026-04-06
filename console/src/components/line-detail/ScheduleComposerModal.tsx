@@ -176,10 +176,8 @@ export function ScheduleComposerModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="composer-dialog-title"
-        className="c-dialog flex flex-col"
+        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline-wide)]"
         style={{
-          width: 'var(--panel-composer)',
-          maxWidth: 'var(--panel-max-inline-wide)',
           maxHeight: 'var(--modal-max-h-lg)',
         }}
         onClick={e => e.stopPropagation()}
@@ -198,12 +196,12 @@ export function ScheduleComposerModal({
         </div>
 
         {/* Body — scrollable */}
-        <div className="flex-1 overflow-y-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
-          <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex-1 overflow-y-auto py-[var(--sp-4)] px-[var(--sp-5)]">
+          <div className="flex flex-col gap-[var(--sp-4)]">
 
             {/* Chat picker */}
             <div>
-              <label className="font-mono text-t4 block" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}>
+              <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
                 Target chat
               </label>
               <ChatPicker
@@ -217,7 +215,7 @@ export function ScheduleComposerModal({
 
             {/* Content type selector */}
             <div>
-              <label className="font-mono text-t4 block" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}>
+              <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
                 Content type
               </label>
               <div className="flex gap-2">
@@ -241,8 +239,7 @@ export function ScheduleComposerModal({
               <div>
                 <label
                   htmlFor="composer-text"
-                  className="font-mono text-t4 block"
-                  style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
+                  className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}
                 >
                   Message text
                 </label>
@@ -252,17 +249,16 @@ export function ScheduleComposerModal({
                   onChange={e => setText(e.target.value)}
                   placeholder="Type your message..."
                   rows={4}
-                  className="c-input font-mono text-t2 resize-vertical"
-                  style={{ height: 'auto', minHeight: 'var(--sp-16, calc(var(--sp-12) * 2))' }}
+                  className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)*2))]"
+                  style={{ height: 'auto' }}
                 />
               </div>
             ) : (
-              <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+              <div className="flex flex-col gap-[var(--sp-3)]">
                 <div>
                   <label
                     htmlFor="composer-path"
-                    className="font-mono text-t4 block"
-                    style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
+                    className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}
                   >
                     File path
                   </label>
@@ -278,8 +274,7 @@ export function ScheduleComposerModal({
                 <div>
                   <label
                     htmlFor="composer-caption"
-                    className="font-mono text-t4 block"
-                    style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
+                    className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}
                   >
                     Caption (optional)
                   </label>
@@ -300,8 +295,8 @@ export function ScheduleComposerModal({
             <div>
               <label
                 htmlFor="composer-datetime"
-                className="font-mono text-t4 block"
-                style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
+                className="font-mono text-t4 block mb-[var(--sp-1)]"
+                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 Scheduled time (local)
               </label>
@@ -335,7 +330,7 @@ export function ScheduleComposerModal({
               </div>
 
               {recurring && (
-                <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+                <div className="flex flex-col gap-[var(--sp-2)]">
                   {/* Preset buttons */}
                   <div className="flex gap-2 flex-wrap">
                     {RECURRENCE_PRESETS.map(preset => (
@@ -360,7 +355,7 @@ export function ScheduleComposerModal({
                   />
                   {/* Preview */}
                   {cronPreview && (
-                    <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-m-cht)' }}>
+                    <div className="font-mono text-t4 text-m-cht" style={{ fontSize: 'var(--font-size-xs)' }}>
                       {cronPreview}
                     </div>
                   )}
