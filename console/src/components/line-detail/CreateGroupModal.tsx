@@ -17,7 +17,6 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
   const toast = useToast()
   const queryClient = useQueryClient()
   const [subject, setSubject] = useState('')
-  const [desc, setDesc] = useState('')
   const [participants, setParticipants] = useState<ContactResult[]>([])
   const [submitting, setSubmitting] = useState(false)
 
@@ -25,7 +24,6 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
   useEffect(() => {
     if (open) {
       setSubject('')
-      setDesc('')
       setParticipants([])
     }
   }, [open])
@@ -137,26 +135,6 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
                 className="font-mono text-t2"
                 style={inputStyle}
                 autoFocus
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label
-                htmlFor="create-group-desc"
-                className="font-mono text-t4 block"
-                style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}
-              >
-                Description <span className="text-t4">(optional)</span>
-              </label>
-              <textarea
-                id="create-group-desc"
-                value={desc}
-                onChange={e => setDesc(e.target.value)}
-                placeholder="Group description..."
-                rows={2}
-                className="font-mono text-t2 resize-vertical"
-                style={{ ...inputStyle, minHeight: '56px' }}
               />
             </div>
 

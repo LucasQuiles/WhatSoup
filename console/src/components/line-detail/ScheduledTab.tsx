@@ -64,8 +64,8 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
   }
 
   const handleDuplicate = (message: ScheduledMessage) => {
-    // Open composer with message pre-filled but no ID (creates new)
-    setEditMessage({ ...message, id: 0 } as ScheduledMessage)
+    // Open composer with message pre-filled but negative ID signals "create new, not edit"
+    setEditMessage({ ...message, id: -1 } as ScheduledMessage)
     setComposerOpen(true)
   }
 

@@ -55,7 +55,7 @@ export function ScheduleComposerModal({
   editMessage,
 }: ScheduleComposerModalProps) {
   const toast = useToast()
-  const isEditing = !!editMessage
+  const isEditing = !!editMessage && editMessage.id > 0
 
   // --- State ---
   const [selectedChat, setSelectedChat] = useState<ChatItem | null>(null)
@@ -114,23 +114,31 @@ export function ScheduleComposerModal({
       return
     }
 
-    const payload: Record<string, unknown> = {}
     if (contentType === 'text') {
       if (!text.trim()) { toast.error('Message text is required'); return }
-      payload.text = text.trim()
     } else {
       if (!mediaPath.trim()) { toast.error('File path is required'); return }
-      payload.path = mediaPath.trim()
-      if (caption.trim()) payload.caption = caption.trim()
     }
 
+    // Validate scheduled time is in the future
+    if (scheduledAt <= Math.floor(Date.now() / 1000)) {
+      toast.error('Scheduled time must be in the future')
+      return
+    }
+
+    // Build the MCP schedule_message params — the backend infers content type from filePath extension
     const body: Record<string, unknown> = {
       chatJid: selectedChat.conversationKey,
       chatName: selectedChat.name,
-      contentType: contentType === 'text' ? 'text' : 'image',
-      payload,
       scheduled_at: scheduledAt,
     }
+    if (contentType === 'text') {
+      body.text = text.trim()
+    } else {
+      body.filePath = mediaPath.trim()
+      if (caption.trim()) body.caption = caption.trim()
+    }
+
     if (recurring && cronExpr.trim()) {
       body.recurrence = cronExpr.trim()
     }
