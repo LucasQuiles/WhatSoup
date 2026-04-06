@@ -1,6 +1,7 @@
 import { Users, Shield } from 'lucide-react'
 import type { GroupInfo } from '../../types.js'
-import { groupInitials, avatarColor, roleLabel, roleBadgeStyle } from './groups-utils.js'
+import { avatarColor, roleLabel, roleBadgeStyle } from './groups-utils.js'
+import { getInitials } from '../../lib/text-utils.js'
 
 interface GroupCardProps {
   group: GroupInfo
@@ -13,7 +14,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
     ? group.participants.find(p => p.id === myJid || p.id.startsWith(myJid.split('@')[0]))
     : undefined
   const badge = roleBadgeStyle(myParticipant?.admin)
-  const initials = groupInitials(group.subject)
+  const initials = getInitials(group.subject)
   const color = avatarColor(group.id)
 
   return (

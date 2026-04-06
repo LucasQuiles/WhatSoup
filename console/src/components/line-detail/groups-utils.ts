@@ -33,11 +33,6 @@ export function settingLabel(key: string): string {
   }
 }
 
-/** Generate initials for avatar placeholder */
-export function groupInitials(subject: string): string {
-  return subject.split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
-}
-
 /** Generate a deterministic color from JID */
 export function avatarColor(jid: string): string {
   let hash = 0;

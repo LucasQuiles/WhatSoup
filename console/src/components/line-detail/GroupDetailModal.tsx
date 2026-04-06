@@ -9,11 +9,11 @@ import { ContactSearchPicker } from '../shared/ContactSearchPicker.js'
 import {
   roleLabel,
   roleBadgeStyle,
-  groupInitials,
   avatarColor,
   EPHEMERAL_OPTIONS,
   ephemeralLabel,
 } from './groups-utils.js'
+import { getInitials, capitalize } from '../../lib/text-utils.js'
 import type { GroupInfo, GroupDetail, GroupParticipant } from '../../types.js'
 
 type TabId = 'info' | 'participants' | 'settings'
@@ -804,7 +804,7 @@ export function GroupDetailModal({ open, group, lineName, onClose }: GroupDetail
   const isAdmin = !!myParticipant
 
   const color = avatarColor(group.id)
-  const initials = groupInitials(group.subject)
+  const initials = getInitials(group.subject)
 
   return (
     <div
@@ -867,7 +867,7 @@ export function GroupDetailModal({ open, group, lineName, onClose }: GroupDetail
               className={`c-btn c-btn-sm ${activeTab === tab ? 'c-btn-primary' : 'c-btn-ghost'}`}
               style={{ fontSize: 'var(--font-size-label)' }}
             >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {capitalize(tab)}
             </button>
           ))}
         </div>
