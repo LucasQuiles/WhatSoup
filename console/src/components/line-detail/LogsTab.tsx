@@ -35,13 +35,13 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
 
       {/* Log viewer */}
       <div
-        className="rounded-lg overflow-hidden font-mono"
-        style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
+        className="c-card overflow-hidden font-mono"
+        style={{ background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
       >
         {filtered.map((log, i) => (
           <div
             key={`${log.timestamp}-${log.source}-${i}`}
-            className="flex gap-0 hover:bg-d3 c-hover leading-relaxed"
+            className="flex gap-0 c-row-hover leading-relaxed"
             style={{
               borderBottom: 'var(--bw) solid var(--b1)',
               background: levelLineBg[log.level],

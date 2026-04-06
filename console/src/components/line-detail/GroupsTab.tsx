@@ -46,14 +46,9 @@ export function GroupsTab({ lineName }: { lineName: string }) {
       {groups.map((group) => (
         <div
           key={group.jid}
-          className="flex items-start gap-3"
+          className="c-card flex items-start gap-3"
           style={{
             padding: 'var(--sp-3) var(--sp-4)',
-            background: 'var(--color-d2)',
-            borderWidth: 'var(--bw)',
-            borderStyle: 'solid',
-            borderColor: 'var(--b1)',
-            borderRadius: 'var(--radius-md)',
           }}
         >
           <Users size={16} strokeWidth={1.75} className="text-t4 flex-shrink-0" style={{ marginTop: '2px' }} />

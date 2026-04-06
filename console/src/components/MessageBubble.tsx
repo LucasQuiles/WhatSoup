@@ -74,9 +74,10 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
         <X size={12} strokeWidth={2.5} className="text-s-crit" />
         {onRetry && (
           <button
+            type="button"
             onClick={() => onRetry(msg)}
-            className="cursor-pointer hover:opacity-80"
-            style={{ padding: 0, background: 'none', border: 'none' }}
+            className="c-btn c-btn-ghost c-btn-sm"
+            aria-label="Retry send"
             title="Retry send"
           >
             <RotateCw size={10} strokeWidth={2.5} className="text-t1" />
@@ -122,9 +123,10 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
           <span className="c-label truncate">{resolveDisplayName(msg.senderName)}</span>
           {onCreateContact && isRawJid(msg.senderName ?? '') && (
             <button
+              type="button"
               onClick={() => onCreateContact(resolveDisplayName(msg.senderName))}
-              className="c-hover cursor-pointer text-t5 hover:text-m-cht"
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className="c-btn c-btn-ghost c-btn-sm"
+              aria-label="Save as contact"
               title="Save as contact"
             >
               <UserPlus size={10} strokeWidth={2} />
