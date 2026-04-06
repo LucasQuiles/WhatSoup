@@ -47,6 +47,7 @@ const { mockSession, mockQueue, callOrder } = vi.hoisted(() => {
     updateDeliveryJid: vi.fn(),
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
+    clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),

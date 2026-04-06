@@ -750,11 +750,11 @@ describe('AgentRuntime', () => {
 
   it('LEAK-02 structurally wires cleanup into crash/deletion sites without dropping replay text', async () => {
     const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
-    const chatJidCleanupMatches = source.match(/this\.cleanupPerChatState\(chatJid\);/g) ?? [];
+    const mapKeyCleanupMatches = source.match(/this\.cleanupPerChatState\(mapKey\);/g) ?? [];
     const workspaceCleanupMatches = source.match(/this\.cleanupPerChatState\(workspaceKey\);/g) ?? [];
     const crashMatch = source.match(/private cleanupPerChatCrashTurnState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
 
-    expect(chatJidCleanupMatches).toHaveLength(2);
+    expect(mapKeyCleanupMatches).toHaveLength(2);
     expect(workspaceCleanupMatches).toHaveLength(2);
     expect(source).toContain('this.cleanupPerChatState(lidKey);');
     expect(crashMatch).toBeTruthy();
@@ -2464,10 +2464,42 @@ describe('AgentRuntime', () => {
     expect(chatSessions.has('same@s.whatsapp.net')).toBe(true);
     expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
     expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
-    const userTurns = mockSession.sendTurn.mock.calls
+    const userTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)
       .map(([turnText]) => turnText as string)
       .filter((turnText) => turnText === 'first' || turnText === 'second');
     expect(userTurns).toEqual(['first', 'second']);
+  });
+
+  it('per_chat reuses the canonical session across JID variants in non-sandbox mode', async () => {
+    const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+    const canonicalJid = '15550100001@s.whatsapp.net';
+    const db = makeDb();
+    const lidLookup = { run: vi.fn(), get: vi.fn(() => ({ phone_jid: canonicalJid })) };
+    (db.raw.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => {
+      if (sql.includes('SELECT phone_jid FROM lid_mappings')) return lidLookup;
+      return { run: vi.fn(), get: vi.fn() };
+    });
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+
+    await sendAndDrain(runtime, makeMsg({ messageId: 'msg-1', chatJid: canonicalJid, content: 'hello' }));
+    await sendAndDrain(runtime, makeMsg({ messageId: 'msg-2', chatJid: '15550100001@lid', content: 'follow-up' }));
+
+    const chatSessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
+    const chatQueues = (runtime as unknown as { chatQueues: Map<string, unknown> }).chatQueues;
+
+    expect((MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    expect(chatSessions.size).toBe(1);
+    expect(chatSessions.has(canonicalJid)).toBe(true);
+    expect(chatQueues.has(canonicalJid)).toBe(true);
+    expect(mockQueue.updateDeliveryJid).toHaveBeenCalledWith('15550100001@lid');
+
+    const userTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)
+      .map(([turnText]) => turnText as string)
+      .filter((turnText) => turnText === 'hello' || turnText === 'follow-up');
+    expect(userTurns).toEqual(['hello', 'follow-up']);
   });
 
   // ─── sandboxPerChat workspace isolation ────────────────────────────────────
@@ -3165,7 +3197,11 @@ describe('AgentRuntime', () => {
         handleEventWithContext: (
           event: AgentEvent,
           queue: IOutboundQueue,
-          session: typeof session | null,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
           conversationKey?: string,
           inboundSeq?: number,
           mapKey?: string,

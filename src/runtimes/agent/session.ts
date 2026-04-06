@@ -129,7 +129,8 @@ export class SessionManager {
   private dbRowId: number | null = null;
   private sessionId: string | null = null;
   private active = false;
-  private stdoutBuffer = '';
+  private stdoutChunks: Buffer[] = [];
+  private stdoutBufferStr = '';
   private startedAt: string | null = null;
   private messageCount: number = 0;
   private lastMessageAt: string | null = null;
@@ -265,6 +266,46 @@ export class SessionManager {
       case 'claude-cli':
       default: return parseEvent;
     }
+  }
+
+  private resetStdoutBuffers(): void {
+    this.stdoutChunks = [];
+    this.stdoutBufferStr = '';
+  }
+
+  private materializeStdoutChunks(): void {
+    if (this.stdoutChunks.length === 0) return;
+    const bufferedChunk = this.stdoutChunks.length === 1
+      ? this.stdoutChunks[0]
+      : Buffer.concat(this.stdoutChunks);
+    this.stdoutBufferStr += bufferedChunk.toString('utf8');
+    this.stdoutChunks = [];
+  }
+
+  private extractCompleteStdoutLines(): string[] {
+    this.materializeStdoutChunks();
+    const lines = this.stdoutBufferStr.split('\n');
+    this.stdoutBufferStr = lines.pop() ?? '';
+    return lines;
+  }
+
+  private appendStdoutChunk(chunk: Buffer): string[] {
+    this.stdoutChunks.push(chunk);
+    return this.extractCompleteStdoutLines();
+  }
+
+  private drainBufferedStdoutLines(): string[] {
+    this.materializeStdoutChunks();
+    if (this.stdoutBufferStr.trim() === '') {
+      this.stdoutBufferStr = '';
+      return [];
+    }
+    const lines = this.stdoutBufferStr
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    this.stdoutBufferStr = '';
+    return lines;
   }
 
   private handleProviderEvent(event: AgentEvent): void {
@@ -530,7 +571,7 @@ export class SessionManager {
 
     this.child = child;
     this.active = true;
-    this.stdoutBuffer = '';
+    this.resetStdoutBuffers();
     this.startedAt = new Date().toISOString();
     this.messageCount = 0;
     this.lastMessageAt = null;
@@ -557,7 +598,7 @@ export class SessionManager {
       this.child = null;
       this.dbRowId = null;
       this.sessionId = null;
-      this.stdoutBuffer = '';
+      this.resetStdoutBuffers();
       this.startedAt = null;
       this.messageCount = 0;
       this.lastMessageAt = null;
@@ -654,10 +695,7 @@ export class SessionManager {
     // Pipe stdout through line parser — use provider-specific parser
     const parse = this.getParser();
     child.stdout.on('data', (chunk: Buffer) => {
-      this.stdoutBuffer += chunk.toString('utf8');
-      const lines = this.stdoutBuffer.split('\n');
-      // Keep the last (possibly incomplete) line in the buffer
-      this.stdoutBuffer = lines.pop() ?? '';
+      const lines = this.appendStdoutChunk(chunk);
       for (const line of lines) {
         // Codex app-server: intercept server-initiated requests (approval callbacks)
         // before they reach the parser. These have both 'id' and 'method'.
@@ -748,15 +786,12 @@ export class SessionManager {
 
       // Drain any buffered stdout lines before crash processing.
       // The process may have written final output that was not yet newline-terminated.
-      if (this.stdoutBuffer.trim() !== '') {
-        for (const line of this.stdoutBuffer.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed) {
-            const event = parse(trimmed);
-            if (event) this.handleProviderEvent(event);
-          }
+      const bufferedLines = this.drainBufferedStdoutLines();
+      if (bufferedLines.length > 0) {
+        for (const line of bufferedLines) {
+          const event = parse(line);
+          if (event) this.handleProviderEvent(event);
         }
-        this.stdoutBuffer = '';
       }
 
       // Detect resume failure: --resume was used, Claude exited code 1, and
@@ -926,7 +961,7 @@ export class SessionManager {
     if (this.isSpawnPerTurn) {
       // Clear any partial JSON from the previous turn before spawning a new process.
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
-      this.stdoutBuffer = '';
+      this.resetStdoutBuffers();
 
       // Reset provider-specific parser state so the next turn's first step_start
       // is correctly recognized as an init event.
@@ -982,9 +1017,7 @@ export class SessionManager {
       });
 
       child.stdout.on('data', (chunk: Buffer) => {
-        this.stdoutBuffer += chunk.toString('utf8');
-        const lines = this.stdoutBuffer.split('\n');
-        this.stdoutBuffer = lines.pop() ?? '';
+        const lines = this.appendStdoutChunk(chunk);
         for (const line of lines) {
           const event = parse(line);
           if (event === null) continue;
@@ -1014,20 +1047,17 @@ export class SessionManager {
         setImmediate(() => {
 
         // Drain buffered output
-        if (this.stdoutBuffer.trim() !== '') {
-          for (const line of this.stdoutBuffer.split('\n')) {
-            const trimmed = line.trim();
-            if (trimmed) {
-              const event = parse(trimmed);
-              if (event) {
-                if (this.provider !== 'claude-cli') {
-                  log.debug({ provider: this.provider, eventType: event.type }, 'spawn-per-turn exit drain');
-                }
-                this.handleProviderEvent(event);
+        const bufferedLines = this.drainBufferedStdoutLines();
+        if (bufferedLines.length > 0) {
+          for (const line of bufferedLines) {
+            const event = parse(line);
+            if (event) {
+              if (this.provider !== 'claude-cli') {
+                log.debug({ provider: this.provider, eventType: event.type }, 'spawn-per-turn exit drain');
               }
+              this.handleProviderEvent(event);
             }
           }
-          this.stdoutBuffer = '';
         }
 
         this.clearTurnWatchdog();

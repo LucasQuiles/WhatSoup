@@ -256,7 +256,7 @@ export class OutboundQueue implements IOutboundQueue {
   private turnHasVisibleText = false;
 
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
-  private streamBuffer = '';
+  private streamBufferParts: string[] = [];
   /** Timer for flushing aggregated streaming text after a pause. */
   private streamTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -289,7 +289,7 @@ export class OutboundQueue implements IOutboundQueue {
       this.clearMinimalHeartbeat();
     }
     this.turnHasVisibleText = true;
-    this.streamBuffer += text;
+    this.streamBufferParts.push(text);
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
       this.flushStreamBuffer();
@@ -302,8 +302,8 @@ export class OutboundQueue implements IOutboundQueue {
       clearTimeout(this.streamTimer);
       this.streamTimer = null;
     }
-    const text = this.streamBuffer;
-    this.streamBuffer = '';
+    const text = this.streamBufferParts.join('');
+    this.streamBufferParts = [];
     if (!text || text.trim() === '') return;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
     for (const chunk of chunks) {
@@ -415,7 +415,7 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
-    this.streamBuffer = '';
+    this.streamBufferParts = [];
     this.toolBuffer = [];
     this.minimalSentDetails.clear();
     this.minimalLastSentAt = Date.now();
@@ -430,7 +430,7 @@ export class OutboundQueue implements IOutboundQueue {
     return this.sending
       || this.sendQueue.length > 0
       || this.toolBuffer.length > 0
-      || this.streamBuffer.length > 0
+      || this.streamBufferParts.length > 0
       || this.isTyping
       || this.toolTimer !== null
       || this.toolMaxAgeTimer !== null
