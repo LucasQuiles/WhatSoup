@@ -18,7 +18,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
   return (
     <div
       className="fixed inset-0 flex items-center justify-center"
-      style={{ background: 'var(--overlay-bg)', zIndex: 100 }}
+      style={{ background: 'var(--overlay)', zIndex: 100 }}
       onClick={onClose}
     >
       <div
