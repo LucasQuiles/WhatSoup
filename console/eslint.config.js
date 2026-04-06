@@ -189,6 +189,17 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
+        // ═══ WHITESPACE / TEXT STYLING IN STYLE ═══
+        // These have direct Tailwind equivalents
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="whiteSpace"]',
+          message: '⛔ Inline whiteSpace in style. FIX: remove from style, add to className. nowrap→"whitespace-nowrap" normal→"whitespace-normal" pre→"whitespace-pre" pre-wrap→"whitespace-pre-wrap".',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="textTransform"]',
+          message: '⛔ Inline textTransform in style. FIX: remove from style, add to className. uppercase→"uppercase" lowercase→"lowercase" capitalize→"capitalize" none→"normal-case".',
+        },
+
         // ═══ GRID TEMPLATE HARDCODED PX ═══
         // gridTemplateColumns/Rows with hardcoded px should use tokens
         {
