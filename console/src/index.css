@@ -191,7 +191,9 @@
   /* --ease defined in @theme block: cubic-bezier(0.22, 1, 0.36, 1) */
 }
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+@layer base {
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+}
 
 /* Reset native form element styles — design system controls all visual treatment */
 input, select, textarea, button {
