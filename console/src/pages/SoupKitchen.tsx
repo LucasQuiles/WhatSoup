@@ -276,7 +276,7 @@ const SoupKitchen: FC = () => {
               <h2
                 className="c-heading-lg"
               >
-                Connections
+                Instances
               </h2>
 
               {/* Mode filter pills */}
@@ -471,7 +471,7 @@ const SoupKitchen: FC = () => {
                       className="text-center text-t5 font-mono py-12"
                       style={{ fontSize: 'var(--font-size-data)' }}
                     >
-                      No connections match the current filters
+                      No instances match the current filters
                     </td>
                   </tr>
                 )}

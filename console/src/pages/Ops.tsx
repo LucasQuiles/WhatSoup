@@ -107,7 +107,7 @@ export default function Ops() {
           style={{ borderBottom: 'var(--bw) solid var(--b2)' }}
         >
           <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
-            <span className="c-label">{lines.length} lines</span>
+            <span className="c-label">{lines.length} instances</span>
             <span className="c-label">{lines.filter(l => l.status === 'online').length} online</span>
             {alerts.length > 0 && (
               <span className="font-mono text-s-crit" style={{ fontSize: 'var(--font-size-label)' }}>
@@ -321,7 +321,7 @@ export default function Ops() {
             <div className="flex items-center justify-center py-20 text-t5 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
               {activeLine
                 ? `No ${logFilter === 'all' ? '' : logFilter + ' '}logs for ${activeLine}`
-                : 'Select a line to view logs'}
+                : 'Select an instance to view logs'}
             </div>
           )}
         </div>
