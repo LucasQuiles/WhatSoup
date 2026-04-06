@@ -1,10 +1,29 @@
+import React, { useState } from 'react'
 import type { Mode, LineInstance } from './types'
 
 /* Pipeline Node — compact inline pill */
-function PipelineNode({ label, value, color, active }: { label: string; value?: string; color: string; active?: boolean }) {
+function PipelineNode({
+  label,
+  value,
+  color,
+  active,
+  selected,
+  onClick,
+}: {
+  label: string
+  value?: string
+  color: string
+  active?: boolean
+  selected?: boolean
+  onClick?: () => void
+}) {
   const modeKey = color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt';
   return (
-    <span className="inline-flex items-center gap-1.5">
+    <span
+      className="inline-flex items-center gap-1.5"
+      onClick={onClick}
+      style={{ cursor: onClick ? 'pointer' : 'default' }}
+    >
       <span
         className="font-mono font-medium"
         style={{
@@ -13,7 +32,12 @@ function PipelineNode({ label, value, color, active }: { label: string; value?: 
           fontSize: 'var(--font-size-label)',
           background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
           color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
-          border: active ? `var(--bw) solid var(--m-${modeKey}-soft)` : 'var(--bw) solid transparent',
+          border: selected
+            ? `2px solid var(--color-m-${modeKey})`
+            : active
+              ? `var(--bw) solid var(--m-${modeKey}-soft)`
+              : 'var(--bw) solid transparent',
+
         }}
       >
         {label}
@@ -33,23 +57,145 @@ function PipelineArrow() {
 
 export { PipelineNode, PipelineArrow }
 
+function getNodeDetails(
+  nodeLabel: string,
+  _mode: Mode,
+  line: LineInstance,
+): { label: string; value: string }[] | null {
+  const details: { label: string; value: string }[] = []
+
+  switch (nodeLabel) {
+    case 'Inbound':
+      details.push({ label: 'Status', value: line.status })
+      if (line.messagesToday != null) details.push({ label: 'Messages today', value: String(line.messagesToday) })
+      if (line.messageStats) {
+        details.push({ label: 'Received', value: String(line.messageStats.received) })
+        details.push({ label: 'Sent', value: String(line.messageStats.sent) })
+      }
+      break
+    case 'Queue':
+      details.push({ label: 'Queue depth', value: String(line.queueDepth ?? 0) })
+      break
+    case 'Enrich':
+      details.push({ label: 'Unprocessed', value: String(line.enrichmentUnprocessed ?? 0) })
+      break
+    case 'Access':
+      details.push({ label: 'Access mode', value: line.accessMode })
+      break
+    case 'API':
+      if (line.models?.conversation) details.push({ label: 'Model', value: line.models.conversation })
+      if (line.tokenUsage) {
+        details.push({ label: 'Input tokens', value: line.tokenUsage.input.toLocaleString() })
+        details.push({ label: 'Output tokens', value: line.tokenUsage.output.toLocaleString() })
+      }
+      break
+    case 'SDK Loop':
+      details.push({ label: 'Active sessions', value: String(line.activeSessions ?? 0) })
+      if (line.lastSessionStatus) details.push({ label: 'Last session', value: line.lastSessionStatus })
+      if (line.totalSessions != null) details.push({ label: 'Total sessions', value: String(line.totalSessions) })
+      break
+    case 'Tools':
+      if (line.models?.conversation) details.push({ label: 'Model', value: line.models.conversation })
+      if (line.sandboxPerChat != null) details.push({ label: 'Sandbox per chat', value: String(line.sandboxPerChat) })
+      break
+    case 'Store':
+      if (line.health?.sqlite) {
+        details.push({ label: 'Messages stored', value: String(line.health.sqlite.messages_total) })
+        details.push({ label: 'Schema version', value: String(line.health.sqlite.schema_version) })
+      }
+      break
+    case 'Router':
+      details.push({ label: 'Access mode', value: line.accessMode })
+      if (line.chatCounts) {
+        details.push({ label: 'Chats', value: String(line.chatCounts.chats) })
+        details.push({ label: 'Groups', value: String(line.chatCounts.groups) })
+      }
+      break
+    case 'Outbound':
+      details.push({ label: 'Status', value: line.status })
+      break
+    default:
+      return null
+  }
+
+  return details.length > 0 ? details : null
+}
+
+function NodeDetailCard({
+  details,
+  modeColor,
+}: {
+  details: { label: string; value: string }[]
+  modeColor: string
+}) {
+  const modeKey = modeColor === 'pas' ? 'pas' : modeColor === 'cht' ? 'cht' : 'agt'
+  return (
+    <div
+      style={{
+        marginTop: 'var(--sp-3)',
+        padding: 'var(--sp-3) var(--sp-4)',
+        background: 'var(--color-d1)',
+        borderWidth: 'var(--bw)',
+        borderStyle: 'solid',
+        borderColor: `var(--m-${modeKey}-soft)`,
+        borderRadius: 'var(--radius-md)',
+      }}
+    >
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'auto 1fr',
+          gap: 'var(--sp-1) var(--sp-3)',
+        }}
+      >
+        {details.map((d) => (
+          <React.Fragment key={d.label}>
+            <span
+              className="font-mono text-t4"
+              style={{ fontSize: 'var(--font-size-data)' }}
+            >
+              {d.label}
+            </span>
+            <span
+              className="font-mono text-t2"
+              style={{ fontSize: 'var(--font-size-data)' }}
+            >
+              {d.value}
+            </span>
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineInstance; modeColor: string }) {
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const isOnline = line.status === 'online'
+
+  const toggleNode = (label: string) => {
+    setSelectedNode((prev) => (prev === label ? null : label))
+  }
+
+  const details = selectedNode ? getNodeDetails(selectedNode, mode, line) : null
+
   if (mode === 'passive') {
     return (
       <div
         style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12">
-          <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
+          <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
           <PipelineArrow />
-          <PipelineNode label="Store" color={modeColor} active={isOnline} />
+          <PipelineNode label="Store" color={modeColor} active={isOnline} selected={selectedNode === 'Store'} onClick={() => toggleNode('Store')} />
           <PipelineArrow />
           <PipelineNode label="Done" color={modeColor} active={isOnline && (line.unread ?? 0) === 0} />
         </div>
+        {details && <NodeDetailCard details={details} modeColor={modeColor} />}
       </div>
     )
   }
+
   if (mode === 'chat') {
     const queueDepth = line.queueDepth ?? 0
     const enrichUnproc = line.enrichmentUnprocessed ?? 0
@@ -58,37 +204,41 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
         style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
       >
         <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
-          <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
+          <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
           <PipelineArrow />
-          <PipelineNode label="Access" color={modeColor} active={isOnline && line.accessMode !== 'self_only'} />
+          <PipelineNode label="Access" color={modeColor} active={isOnline && line.accessMode !== 'self_only'} selected={selectedNode === 'Access'} onClick={() => toggleNode('Access')} />
           <PipelineArrow />
-          <PipelineNode label="Queue" value={`depth: ${queueDepth}`} color={modeColor} active={queueDepth > 0} />
+          <PipelineNode label="Queue" value={`depth: ${queueDepth}`} color={modeColor} active={queueDepth > 0} selected={selectedNode === 'Queue'} onClick={() => toggleNode('Queue')} />
           <PipelineArrow />
-          <PipelineNode label="Enrich" value={enrichUnproc > 0 ? `${enrichUnproc} pending` : undefined} color={modeColor} active={enrichUnproc > 0} />
+          <PipelineNode label="Enrich" value={enrichUnproc > 0 ? `${enrichUnproc} pending` : undefined} color={modeColor} active={enrichUnproc > 0} selected={selectedNode === 'Enrich'} onClick={() => toggleNode('Enrich')} />
           <PipelineArrow />
-          <PipelineNode label="API" color={modeColor} active={isOnline} />
+          <PipelineNode label="API" color={modeColor} active={isOnline} selected={selectedNode === 'API'} onClick={() => toggleNode('API')} />
           <PipelineArrow />
-          <PipelineNode label="Outbound" color={modeColor} active={queueDepth > 0} />
+          <PipelineNode label="Outbound" color={modeColor} active={queueDepth > 0} selected={selectedNode === 'Outbound'} onClick={() => toggleNode('Outbound')} />
         </div>
+        {details && <NodeDetailCard details={details} modeColor={modeColor} />}
       </div>
     )
   }
+
+  // Agent mode
   const sessions = line.activeSessions ?? 0
   return (
     <div
       style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
     >
       <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
-        <PipelineNode label="Inbound" color={modeColor} active={isOnline} />
+        <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
         <PipelineArrow />
-        <PipelineNode label="Router" color={modeColor} active={isOnline} />
+        <PipelineNode label="Router" color={modeColor} active={isOnline} selected={selectedNode === 'Router'} onClick={() => toggleNode('Router')} />
         <PipelineArrow />
-        <PipelineNode label="SDK Loop" value={`sessions: ${sessions}`} color={modeColor} active={sessions > 0} />
+        <PipelineNode label="SDK Loop" value={`sessions: ${sessions}`} color={modeColor} active={sessions > 0} selected={selectedNode === 'SDK Loop'} onClick={() => toggleNode('SDK Loop')} />
         <PipelineArrow />
-        <PipelineNode label="Tools" color={modeColor} active={sessions > 0} />
+        <PipelineNode label="Tools" color={modeColor} active={sessions > 0} selected={selectedNode === 'Tools'} onClick={() => toggleNode('Tools')} />
         <PipelineArrow />
-        <PipelineNode label="Outbound" color={modeColor} active={sessions > 0} />
+        <PipelineNode label="Outbound" color={modeColor} active={sessions > 0} selected={selectedNode === 'Outbound'} onClick={() => toggleNode('Outbound')} />
       </div>
+      {details && <NodeDetailCard details={details} modeColor={modeColor} />}
     </div>
   )
 }
