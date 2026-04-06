@@ -79,4 +79,24 @@ describe('design system compliance — Shannon slice', () => {
     expect(pipeline).toContain('className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5"')
     expect(pipeline).not.toContain('<span\n      className="inline-flex items-center gap-1.5"\n      onClick={onClick}')
   })
+
+  it('migrates Inbox panels and interaction affordances to design-system classes', () => {
+    const inbox = read('console/src/pages/Inbox.tsx')
+
+    expect((inbox.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    expect(inbox).toContain('className="c-btn c-btn-ghost"')
+    expect(inbox).toContain('className="c-btn c-btn-sm"')
+    expect(inbox).toContain("zIndex: 'var(--z-float)'")
+    expect(inbox).toContain('aria-label="Type a message"')
+    expect(inbox).toContain('aria-label="Clear search"')
+  })
+
+  it('migrates Ops and SoupKitchen page panels to c-card and labels search input', () => {
+    const ops = read('console/src/pages/Ops.tsx')
+    const soupKitchen = read('console/src/pages/SoupKitchen.tsx')
+
+    expect((ops.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    expect((soupKitchen.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
+    expect(soupKitchen).toContain('aria-label="Search lines"')
+  })
 })

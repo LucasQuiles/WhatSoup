@@ -176,14 +176,11 @@ const SoupKitchen: FC = () => {
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease }}
-        className="flex-shrink-0"
+        className="c-card flex-shrink-0"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(7, 1fr)",
           gap: "var(--sp-2)",
-          background: "var(--color-d1)",
-          borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)",
-          borderRadius: "var(--radius-lg)",
           padding: "var(--sp-2)",
         }}
       >
@@ -258,13 +255,9 @@ const SoupKitchen: FC = () => {
       >
         {/* Connection Table */}
         <div
-          className="flex flex-col min-h-0"
+          className="c-card flex flex-col min-h-0 overflow-hidden"
           style={{
             flex: 3,
-            background: "var(--color-d2)",
-            borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)",
-            borderRadius: 'var(--radius-lg)',
-            overflow: "hidden",
           }}
         >
           {/* Toolbar */}
@@ -311,6 +304,7 @@ const SoupKitchen: FC = () => {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search lines..."
+                aria-label="Search lines"
                 className="c-input c-input-search"
               />
             </div>
@@ -482,14 +476,10 @@ const SoupKitchen: FC = () => {
 
         {/* Activity Feed */}
         <div
-          className="flex flex-col min-h-0"
+          className="c-card flex flex-col min-h-0 overflow-hidden"
           style={{
             flex: 1,
             minWidth: "var(--feed-min-w)",
-            background: "var(--color-d1)",
-            borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)",
-            borderRadius: 'var(--radius-lg)',
-            overflow: "hidden",
           }}
         >
           <ActivityFeed events={feed} />
