@@ -939,6 +939,11 @@ export class AgentRuntime implements Runtime {
             this.pendingTurnText.delete(lidKey);
             this.pendingTurnText.set(canonical, pending);
           }
+          const crashCount = this.perChatCrashCount.get(lidKey);
+          if (crashCount !== undefined) {
+            this.perChatCrashCount.delete(lidKey);
+            this.perChatCrashCount.set(canonical, crashCount);
+          }
           const contentType = this.perChatTurnContentType.get(lidKey);
           if (contentType !== undefined) {
             this.perChatTurnContentType.delete(lidKey);
@@ -953,6 +958,10 @@ export class AgentRuntime implements Runtime {
           if (itemText) {
             this.perChatAssistantItemText.delete(lidKey);
             this.perChatAssistantItemText.set(canonical, itemText);
+          }
+          if (this.resumeFailedHandling.has(lidKey)) {
+            this.resumeFailedHandling.delete(lidKey);
+            this.resumeFailedHandling.add(canonical);
           }
           this.cleanupPerChatState(lidKey);
           log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
@@ -1095,32 +1104,47 @@ export class AgentRuntime implements Runtime {
           ? cp.conversation_key.replace('_at_', '@')
           : `${cp.conversation_key}@lid`;
 
-        const mapKey = this.resolvePerChatMapKey(chatJid);
-        if (this.chatSessions.has(mapKey)) continue; // already created by sweep or prior iteration
+        const initialMapKey = this.resolvePerChatMapKey(chatJid);
+        if (this.chatSessions.has(initialMapKey)) continue; // already created by sweep or prior iteration
 
-        log.info({ conversationKey: cp.conversation_key, sessionId: full.session_id, chatJid, mapKey }, 'proactive per_chat resume on startup');
+        log.info({ conversationKey: cp.conversation_key, sessionId: full.session_id, chatJid, mapKey: initialMapKey }, 'proactive per_chat resume on startup');
 
         // Create session + queue (same as ensureSessionAndQueueSync but with resume)
-        const toolScopeKey = this.createToolScopeKey(mapKey);
-        const session = this.createSessionManager({
+        const toolScopeKey = this.createToolScopeKey(initialMapKey);
+        let session!: SessionManager;
+        const resolveSessionMapKey = () => this.findMapKeyForSession(session, initialMapKey);
+        session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
-          onEvent: (event) => this.handleEventPerChat(mapKey, event, toolScopeKey),
-          onCrash: (info) => this.handlePerChatCrash(mapKey, chatJid, info),
+          onEvent: (event) => {
+            const mapKey = resolveSessionMapKey();
+            if (!mapKey) {
+              log.debug({ initialMapKey, chatJid, eventType: event.type }, 'event dropped — session key missing for per-chat callback');
+              return;
+            }
+            this.handleEventPerChat(mapKey, event, toolScopeKey);
+          },
+          onCrash: (info) => {
+            const mapKey = resolveSessionMapKey() ?? initialMapKey;
+            this.handlePerChatCrash(mapKey, chatJid, info);
+          },
           notifyUser: (msg) => {
-            const s = this.chatSessions.get(mapKey);
-            if (s && !s.getStatus().active) {
-              this.chatSessions.delete(mapKey);
-              this.chatQueues.get(mapKey)?.abortTurn();
-              this.chatQueues.delete(mapKey);
-              this.cleanupPerChatState(mapKey);
+            const mapKey = resolveSessionMapKey();
+            if (mapKey) {
+              const s = this.chatSessions.get(mapKey);
+              if (s && !s.getStatus().active) {
+                this.chatSessions.delete(mapKey);
+                this.chatQueues.get(mapKey)?.abortTurn();
+                this.chatQueues.delete(mapKey);
+                this.cleanupPerChatState(mapKey);
+              }
             }
             this.handleCrashNotify(msg, chatJid);
           },
         });
-        this.chatSessions.set(mapKey, session);
+        this.chatSessions.set(initialMapKey, session);
         const perChatQ = this.createOutboundQueue(chatJid, 'startup proactive per-chat resume');
-        this.chatQueues.set(mapKey, perChatQ);
+        this.chatQueues.set(initialMapKey, perChatQ);
 
         // Attempt resume, then send a continuation turn so the agent picks up
         // where it left off without requiring the user to send "proceed".
@@ -2266,6 +2290,18 @@ export class AgentRuntime implements Runtime {
     return canonicalizeChatJid(chatJid, this.db);
   }
 
+  private findMapKeyForSession(session: SessionManager | undefined, fallbackMapKey?: string): string | null {
+    if (session) {
+      for (const [mapKey, currentSession] of this.chatSessions) {
+        if (currentSession === session) return mapKey;
+      }
+    }
+    if (fallbackMapKey && this.chatSessions.has(fallbackMapKey)) {
+      return fallbackMapKey;
+    }
+    return null;
+  }
+
   /**
    * Get the outbound queue for a specific chatJid (shared mode).
    * Falls back to single queue (non-shared mode).
@@ -2497,36 +2533,51 @@ export class AgentRuntime implements Runtime {
    * Synchronous session/queue initialization for non-sandboxPerChat mode.
    * Kept synchronous to preserve microtask ordering in existing code paths.
    */
-  private ensureSessionAndQueueSync(chatJid: string, mapKey: string = this.resolvePerChatMapKey(chatJid)): void {
+  private ensureSessionAndQueueSync(chatJid: string, initialMapKey: string = this.resolvePerChatMapKey(chatJid)): void {
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per canonical chat key
-      if (!this.chatSessions.has(mapKey)) {
-        const toolScopeKey = this.createToolScopeKey(mapKey);
-        const session = this.createSessionManager({
+      if (!this.chatSessions.has(initialMapKey)) {
+        const toolScopeKey = this.createToolScopeKey(initialMapKey);
+        let session!: SessionManager;
+        const resolveSessionMapKey = () => this.findMapKeyForSession(session, initialMapKey);
+        session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
-          onEvent: (event) => this.handleEventPerChat(mapKey, event, toolScopeKey),
-          onCrash: (info) => this.handlePerChatCrash(mapKey, chatJid, info),
+          onEvent: (event) => {
+            const mapKey = resolveSessionMapKey();
+            if (!mapKey) {
+              log.debug({ initialMapKey, chatJid, eventType: event.type }, 'event dropped — session key missing for per-chat callback');
+              return;
+            }
+            this.handleEventPerChat(mapKey, event, toolScopeKey);
+          },
+          onCrash: (info) => {
+            const mapKey = resolveSessionMapKey() ?? initialMapKey;
+            this.handlePerChatCrash(mapKey, chatJid, info);
+          },
           notifyUser: (msg) => {
             // Only remove session from map if it's actually dead (crash/exit).
             // Watchdog warnings fire on ACTIVE sessions — removing those breaks
             // event routing and causes cascading false-idle notifications.
-            const s = this.chatSessions.get(mapKey);
-            if (s && !s.getStatus().active) {
-              this.chatSessions.delete(mapKey);
-              this.chatQueues.get(mapKey)?.abortTurn();
-              this.chatQueues.delete(mapKey);
-              this.cleanupPerChatState(mapKey);
+            const mapKey = resolveSessionMapKey();
+            if (mapKey) {
+              const s = this.chatSessions.get(mapKey);
+              if (s && !s.getStatus().active) {
+                this.chatSessions.delete(mapKey);
+                this.chatQueues.get(mapKey)?.abortTurn();
+                this.chatQueues.delete(mapKey);
+                this.cleanupPerChatState(mapKey);
+              }
             }
             this.handleCrashNotify(msg, chatJid);
           },
         });
-        log.info({ chatJid, mapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
-        this.chatSessions.set(mapKey, session);
+        log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
+        this.chatSessions.set(initialMapKey, session);
         const perChatQ = this.createOutboundQueue(chatJid, 'per-chat session init');
-        this.chatQueues.set(mapKey, perChatQ);
+        this.chatQueues.set(initialMapKey, perChatQ);
       }
-      this.chatQueues.get(mapKey)?.updateDeliveryJid(chatJid);
+      this.chatQueues.get(initialMapKey)?.updateDeliveryJid(chatJid);
       // per_chat mode: do NOT set this.session/this.queue shared fields.
       // /status, /new, and crash handlers look up from chatSessions/chatQueues maps directly.
       return;

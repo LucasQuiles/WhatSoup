@@ -910,6 +910,7 @@ describe('AgentRuntime', () => {
     state.perChatTurnText.set(lidKey, 'reply');
     state.perChatAssistantItemText.set(lidKey, new Map([['item-1', 'chunk']]));
     state.pendingTurnText.set(lidKey, 'pending');
+    state.perChatCrashCount.set(lidKey, 2);
     state.resumeFailedHandling.add(lidKey);
 
     expect(() => runtime.handleJidAliasChanged('15550004444', canonicalJid)).not.toThrow();
@@ -922,15 +923,91 @@ describe('AgentRuntime', () => {
     expect(state.perChatTurnText.get(canonicalJid)).toBe('reply');
     expect(state.perChatAssistantItemText.get(canonicalJid)?.get('item-1')).toBe('chunk');
     expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
+    expect(state.perChatCrashCount.get(canonicalJid)).toBe(2);
+    expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
 
     expect(state.chatSessions.has(lidKey)).toBe(false);
     expect(state.chatQueues.has(lidKey)).toBe(false);
+    expect(state.perChatCrashCount.has(lidKey)).toBe(false);
     expect(state.perChatInboundSeqQueue.has(lidKey)).toBe(false);
     expect(state.perChatTurnContentType.has(lidKey)).toBe(false);
     expect(state.perChatTurnText.has(lidKey)).toBe(false);
     expect(state.perChatAssistantItemText.has(lidKey)).toBe(false);
     expect(state.pendingTurnText.has(lidKey)).toBe(false);
     expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
+  });
+
+  it('per_chat active-session events keep delivering results after LID remap', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, typeof mockSession>;
+      chatQueues: Map<string, IOutboundQueue>;
+    };
+    const lidKey = '15550004444@lid';
+    const canonicalJid = '15550004444@s.whatsapp.net';
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: lidKey,
+      senderJid: lidKey,
+      content: 'hello',
+      inboundSeq: 41,
+    }));
+
+    expect(capturedOnEventRef.current).toBeTypeOf('function');
+
+    mockQueue.enqueueResultText.mockClear();
+    mockRuntimeLogger.debug.mockClear();
+
+    runtime.handleJidAliasChanged('15550004444', canonicalJid);
+    capturedOnEventRef.current!({ type: 'result', text: 'remapped result' });
+
+    expect(state.chatSessions.has(canonicalJid)).toBe(true);
+    expect(state.chatQueues.get(canonicalJid)).toBe(mockQueue);
+    expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('remapped result');
+    expect(state.perChatInboundSeqQueue.get(canonicalJid)).toEqual([]);
+    expect(state.pendingTurnText.has(canonicalJid)).toBe(false);
+    expect(mockRuntimeLogger.debug.mock.calls.some(
+      ([, message]) => message === 'event dropped — no queue for chat',
+    )).toBe(false);
+  });
+
+  it('per_chat mid-turn streaming survives LID remap without dropping remaining events', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      perChatTurnText: Map<string, string>;
+    };
+    const lidKey = '15550004444@lid';
+    const canonicalJid = '15550004444@s.whatsapp.net';
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({
+      chatJid: lidKey,
+      senderJid: lidKey,
+      content: 'hello',
+      inboundSeq: 42,
+    }));
+
+    expect(capturedOnEventRef.current).toBeTypeOf('function');
+
+    mockQueue.enqueueStreamingText.mockClear();
+    mockQueue.enqueueResultText.mockClear();
+
+    runtime.handleJidAliasChanged('15550004444', canonicalJid);
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello ' });
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'world' });
+
+    expect(state.perChatTurnText.get(canonicalJid)).toBe('Hello world');
+
+    capturedOnEventRef.current!({ type: 'result', text: '!' });
+
+    expect(mockQueue.enqueueStreamingText.mock.calls.map(([text]) => text)).toEqual(['Hello ', 'world']);
+    expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('!');
+    expect(state.perChatTurnText.has(canonicalJid)).toBe(false);
   });
 
   it('handleMessage /status sends status when inactive', async () => {
