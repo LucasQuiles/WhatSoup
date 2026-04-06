@@ -1,24 +1,24 @@
+# PERF-01 Output
+
 <!-- BEAD_OUTPUT_COMPLETE -->
-# LEAK-05 Bead Output
 
-- Bead: LEAK-05 — shared-mode outbound queue pruning
-- Implementation commit: `58000f7`
-- Branch: `fix/leak-05-shared-queue-pruning`
-
-## Verification
-- `npx vitest run tests/runtimes/agent/runtime.test.ts tests/runtimes/agent/outbound-queue.test.ts -t "sweepIdleQueues evicts idle|sweepIdleQueues preserves recently active|sweepIdleQueues preserves queues with pending work|ensureOutboundQueue recreates|queue sweep timer is started|queue sweep timer is unrefd|tracks lastActivity when text is enqueued|flush updates lastActivity and clears pending work state"` ✅ (8 targeted regressions)
-- `npx vitest run tests/runtimes/agent/runtime.test.ts tests/runtimes/agent/outbound-queue.test.ts` ✅ (125 tests)
-- `npm run typecheck` ✅
-- `npx vitest run` ✅ — 197 files, 3725 tests passed
+- Bead: PERF-01 — cache DurabilityEngine prepared statements
+- Branch: fix/perf-01-durability-prepared-stmts
+- Commit: pending (recorded in result message after commit)
+- Summary: Cached all fixed-SQL DurabilityEngine statements in the constructor, cached canonicalizeChatJid's LID lookup per database instance, and added regression coverage to prove statements are prepared once and reused.
 
 ## Files Changed
-- `src/runtimes/agent/outbound-queue.ts`
-- `src/runtimes/agent/runtime.ts`
-- `tests/runtimes/agent/outbound-queue.test.ts`
-- `tests/runtimes/agent/runtime.test.ts`
-- `bead-output.md`
+- src/core/durability.ts
+- src/core/jid-constants.ts
+- tests/core/perf-prepared-statements.test.ts
+- bead-output.md
 
-## Summary
-- Added shared-queue idle pruning with a 10-minute unref'd sweep timer, a 1-hour idle threshold, and shutdown cleanup for the sweep interval.
-- Outbound queues now expose `lastActivity` plus `hasPendingWork()` so eviction skips active buffers, typing state, and in-flight sends while pruning truly idle queues.
-- Added regressions covering idle eviction, recent/pending preservation, on-demand queue recreation, timer lifecycle, and queue activity tracking.
+## Verification
+- `npx vitest run tests/core/perf-prepared-statements.test.ts --pool=forks` ✅
+- `npm run typecheck` ✅
+- `npx vitest run` ✅
+
+## Notes
+- All 40 fixed SQL statements in `DurabilityEngine` are now prepared once in the constructor and reused across inbound, outbound, recovery, and health-stat code paths.
+- No dynamic SQL exceptions remain in `src/core/durability.ts`.
+- `canonicalizeChatJid` now invalidates and rebuilds its cached LID lookup statement when the database instance changes.
