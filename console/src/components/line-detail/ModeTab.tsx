@@ -1,12 +1,8 @@
+import React from 'react'
 import { SlidersHorizontal, GitBranch, Bot } from 'lucide-react'
 import EmptyState from '../EmptyState'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
-import type { ConfigEntryType } from './config-helpers'
 import type { Mode, LineInstance } from './types'
-
-function ConfigValue({ value, type }: { value: string; type: ConfigEntryType }) {
-  return <span style={{ color: TYPE_COLOR[type] }}>{value}</span>
-}
 
 export function ModeTab({
   mode,
@@ -73,30 +69,66 @@ export function ModeTab({
           </button>
         </div>
       </div>
-      {/* c-config block — syntax-highlighted JSON-like display */}
-      <div
-        className="font-mono overflow-x-auto whitespace-pre leading-relaxed"
-        style={{
-          background: 'var(--color-d1)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-md)',
-          padding: 'var(--msg-pad-h) var(--sp-4)',
-          fontSize: 'var(--font-size-data)',
-          color: 'var(--color-t2)',
-        }}
-      >
-        {'{\n'}
-        {config.map((entry, i) => (
-          <span key={entry.key}>
-            {'  '}<span style={{ color: 'var(--color-m-cht)' }}>{entry.key}</span>
-            <span style={{ color: 'var(--color-t5)' }}>: </span>
-            <ConfigValue value={entry.value} type={entry.type} />
-            {i < config.length - 1 ? ',' : ''}
-            {'\n'}
-          </span>
-        ))}
-        {'}'}
-      </div>
+      {/* Config entries — structured key-value grid */}
+      {config.length === 0 ? (
+        <div className="text-t4" style={{ fontSize: 'var(--font-size-data)' }}>
+          No configuration values.
+        </div>
+      ) : (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'minmax(140px, auto) 1fr',
+            gap: 'var(--sp-1) var(--sp-4)',
+            background: 'var(--color-d1)',
+            borderWidth: 'var(--bw)',
+            borderStyle: 'solid',
+            borderColor: 'var(--b1)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--sp-3) var(--sp-4)',
+          }}
+        >
+          {config.map((entry) => (
+            <React.Fragment key={entry.key}>
+              <span
+                className="font-mono"
+                style={{
+                  fontSize: 'var(--font-size-data)',
+                  color: 'var(--color-m-cht)',
+                  paddingTop: '2px',
+                }}
+              >
+                {entry.key}
+              </span>
+              <span
+                className="font-mono"
+                style={{
+                  fontSize: 'var(--font-size-data)',
+                  color: TYPE_COLOR[entry.type],
+                  wordBreak: 'break-word',
+                }}
+              >
+                {entry.type === 'boolean' ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        background: entry.value === 'true' ? 'var(--color-s-ok)' : 'var(--color-t5)',
+                        flexShrink: 0,
+                      }}
+                    />
+                    {entry.value}
+                  </span>
+                ) : (
+                  entry.value
+                )}
+              </span>
+            </React.Fragment>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
