@@ -29,8 +29,9 @@ describe('line-detail tab components', () => {
   it('exports exactly 10 named items', async () => {
     const mod = await import('../../console/src/components/line-detail/index.ts');
     const exportNames = Object.keys(mod);
-    expect(exportNames.length).toBe(10);
+    expect(exportNames.length).toBe(11);
     expect(mod).toHaveProperty('ScheduledTab');
+    expect(mod).toHaveProperty('GroupsTab');
   });
 });
 

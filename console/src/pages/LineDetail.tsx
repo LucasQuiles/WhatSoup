@@ -16,7 +16,7 @@ import Skeleton, { TableSkeleton } from '../components/Skeleton'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
-  MessageSquare, ScrollText, BarChart3, Clock,
+  MessageSquare, ScrollText, BarChart3, Clock, Users,
   RotateCw, Loader2, Trash2, Link2,
 } from 'lucide-react'
 
@@ -29,6 +29,7 @@ import {
   LogsTab,
   MetricsTab,
   ScheduledTab,
+  GroupsTab,
   ConfigEditDialog,
   ModeSwitchDialog,
 } from '../components/line-detail'
@@ -42,6 +43,7 @@ const TABS = [
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'metrics', label: 'Metrics', icon: BarChart3 },
   { id: 'scheduled', label: 'Scheduled', icon: Clock },
+  { id: 'groups', label: 'Groups', icon: Users },
 ] as const
 
 type TabId = typeof TABS[number]['id']
@@ -302,6 +304,7 @@ export default function LineDetail() {
             {activeTab === 'scheduled' && (
               <ScheduledTab lineName={name || ''} />
             )}
+            {activeTab === 'groups' && <GroupsTab lineName={name || ''} />}
           </motion.div>
         </AnimatePresence>
       </div>
