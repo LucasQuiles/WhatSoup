@@ -1,7 +1,11 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["vitest/globals", "node"]
+    "types": ["vitest/globals", "node"],
+    "moduleResolution": "Bundler",
+    "module": "ESNext",
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "console/src/**/*.ts", "console/src/**/*.tsx"]
 }

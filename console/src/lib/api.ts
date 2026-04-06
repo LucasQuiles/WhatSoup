@@ -15,7 +15,7 @@ import type {
   LogEntry,
   Message,
   MetricsRange,
-} from '../types';
+} from '../types.js';
 
 const API_BASE = '';
 

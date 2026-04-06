@@ -1,6 +1,6 @@
 import { replaceEqualDeep } from '@tanstack/react-query'
 
-import type { ChatItem, LineInstance, Message } from '../types'
+import type { ChatItem, LineInstance, Message } from '../types.js'
 
 type ItemKey = string | number | bigint
 

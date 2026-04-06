@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PROVIDERS, getProvider, getProviderConfigFields, type ProviderId } from '../../console/src/lib/providers.ts';
+import { PROVIDERS, getProvider, getProviderConfigFields, type ProviderDef } from '../../console/src/lib/providers.ts';
 
 describe('PROVIDERS', () => {
   it('has 6 providers', () => {

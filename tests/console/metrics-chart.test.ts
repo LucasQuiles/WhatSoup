@@ -41,7 +41,7 @@ describe('metrics query options', () => {
     const options = getMetricsQueryOptions('loops', '24h')
     expect(options.queryKey).toEqual(['metrics', 'loops', '24h'])
 
-    await expect(options.queryFn()).resolves.toEqual({
+    await expect(options.queryFn!({ queryKey: options.queryKey, signal: AbortSignal.timeout(5000), meta: undefined, client: {} as any })).resolves.toEqual({
       range: '24h',
       messageVolume: [{ bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 2 }],
       activeHours: Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0)),
@@ -75,7 +75,7 @@ describe('metrics query options', () => {
     const options = getFleetMetricsQueryOptions('7d')
     expect(options.queryKey).toEqual(['fleet-metrics', '7d'])
 
-    await expect(options.queryFn()).resolves.toEqual({
+    await expect(options.queryFn!({ queryKey: options.queryKey, signal: AbortSignal.timeout(5000), meta: undefined, client: {} as any })).resolves.toEqual({
       range: '7d',
       messageVolume: [{ bucket: '2026-04-05T18:00:00.000Z', inbound: 9, outbound: 7 }],
     })

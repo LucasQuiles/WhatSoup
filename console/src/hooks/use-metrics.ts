@@ -1,6 +1,6 @@
 import { queryOptions, useQuery } from '@tanstack/react-query';
-import { api } from '../lib/api';
-import type { FleetMetrics, LineMetrics, MetricsRange } from '../types';
+import { api } from '../lib/api.js';
+import type { FleetMetrics, LineMetrics, MetricsRange } from '../types.js';
 
 export function getMetricsQueryOptions(name: string, range: MetricsRange) {
   return queryOptions<LineMetrics, Error, LineMetrics, ['metrics', string, MetricsRange]>({

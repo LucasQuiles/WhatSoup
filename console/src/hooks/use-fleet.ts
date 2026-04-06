@@ -5,16 +5,16 @@
 // ---------------------------------------------------------------------------
 
 import { queryOptions, useQuery } from '@tanstack/react-query';
-import { api } from '../lib/api';
-import { computeKpis } from '../lib/compute-kpis';
+import { api } from '../lib/api.js';
+import { computeKpis } from '../lib/compute-kpis.js';
 import {
   shareChatsByConversationKey,
   shareLineByName,
   shareLinesByName,
   shareMessagesByPk,
-} from '../lib/structural-sharing';
-import type { ChatItem, LineInstance, Message } from '../types';
-import { useRealtime } from './use-websocket';
+} from '../lib/structural-sharing.js';
+import type { ChatItem, LineInstance, Message } from '../types.js';
+import { useRealtime } from './use-websocket.js';
 export { computeKpis };
 
 // ---------------------------------------------------------------------------

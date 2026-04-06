@@ -15,7 +15,7 @@ describe('ErrorBoundary', () => {
     }).getDerivedStateFromError(new Error('route exploded'))
 
     expect(derived.hasError).toBe(true)
-    expect(derived.error.message).toBe('route exploded')
+    expect(derived.error!.message).toBe('route exploded')
 
     const boundary = new (ErrorBoundary as unknown as new (props: { children: null }) => {
       state: { hasError: boolean; error: Error | null }

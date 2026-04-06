@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 
 describe('line-detail tab components', () => {
   it('barrel exports all expected tab components', async () => {
-    const mod = await import('../../console/src/components/line-detail');
+    const mod = await import('../../console/src/components/line-detail/index.ts');
     expect(mod.SummaryTab).toBeDefined();
     expect(mod.ModeTab).toBeDefined();
     expect(mod.PipelineTab).toBeDefined();
@@ -21,13 +21,13 @@ describe('line-detail tab components', () => {
   });
 
   it('barrel exports dialog components', async () => {
-    const mod = await import('../../console/src/components/line-detail');
+    const mod = await import('../../console/src/components/line-detail/index.ts');
     expect(mod.ConfigEditDialog).toBeDefined();
     expect(mod.ModeSwitchDialog).toBeDefined();
   });
 
   it('exports exactly 9 named items', async () => {
-    const mod = await import('../../console/src/components/line-detail');
+    const mod = await import('../../console/src/components/line-detail/index.ts');
     const exportNames = Object.keys(mod);
     expect(exportNames.length).toBe(9);
   });
@@ -39,7 +39,7 @@ describe('line-detail tab components', () => {
 
 describe('MetricsChart', () => {
   it('is exported from components/MetricsChart', async () => {
-    const mod = await import('../../console/src/components/MetricsChart');
+    const mod = await import('../../console/src/components/MetricsChart.tsx');
     expect(mod.MetricsChart).toBeDefined();
     expect(typeof mod.MetricsChart).toBe('function');
   });
@@ -51,7 +51,7 @@ describe('MetricsChart', () => {
 
 describe('ActiveHoursHeatmap', () => {
   it('is exported from components/ActiveHoursHeatmap', async () => {
-    const mod = await import('../../console/src/components/ActiveHoursHeatmap');
+    const mod = await import('../../console/src/components/ActiveHoursHeatmap.tsx');
     expect(mod.ActiveHoursHeatmap).toBeDefined();
     expect(typeof mod.ActiveHoursHeatmap).toBe('function');
   });
@@ -63,7 +63,7 @@ describe('ActiveHoursHeatmap', () => {
 
 describe('metrics hooks', () => {
   it('exports useMetrics and useFleetMetrics', async () => {
-    const mod = await import('../../console/src/hooks/use-metrics');
+    const mod = await import('../../console/src/hooks/use-metrics.ts');
     expect(mod.useMetrics).toBeDefined();
     expect(mod.useFleetMetrics).toBeDefined();
     expect(mod.getMetricsQueryOptions).toBeDefined();
@@ -77,7 +77,7 @@ describe('metrics hooks', () => {
 
 describe('LineDetail page structure', () => {
   it('is a default export', async () => {
-    const mod = await import('../../console/src/pages/LineDetail');
+    const mod = await import('../../console/src/pages/LineDetail.tsx');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
   });
@@ -89,7 +89,7 @@ describe('LineDetail page structure', () => {
 
 describe('virtual scrolling integration', () => {
   it('useVirtualMessages hook is exported', async () => {
-    const mod = await import('../../console/src/hooks/use-virtual-messages');
+    const mod = await import('../../console/src/hooks/use-virtual-messages.ts');
     expect(mod.useVirtualMessages).toBeDefined();
     expect(typeof mod.useVirtualMessages).toBe('function');
   });

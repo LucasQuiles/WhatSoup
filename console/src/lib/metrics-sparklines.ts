@@ -1,4 +1,4 @@
-import type { MessageVolumeBucket } from '../types';
+import type { MessageVolumeBucket } from '../types.js';
 
 function normalize(values: number[]): number[] {
   if (values.length === 0) return [];

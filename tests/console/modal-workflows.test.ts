@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 
 describe('AddLineWizard', () => {
   it('is a default export (lazy-loadable)', async () => {
-    const mod = await import('../../console/src/components/AddLineWizard');
+    const mod = await import('../../console/src/components/AddLineWizard.tsx');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
   });
@@ -22,7 +22,7 @@ describe('AddLineWizard', () => {
 
 describe('RelinkModal', () => {
   it('is a default export (lazy-loadable)', async () => {
-    const mod = await import('../../console/src/components/RelinkModal');
+    const mod = await import('../../console/src/components/RelinkModal.tsx');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
   });
