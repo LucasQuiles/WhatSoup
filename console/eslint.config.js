@@ -213,6 +213,13 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ FONT SIZE TOKEN IN STYLE ═══
+        // fontSize: 'var(--font-size-*)' in JSX style should be a text-[var(--font-size-*)] class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--font-size-/]',
+          message: '⛔ fontSize token in style. FIX: remove fontSize from style, add to className. fontSize: "var(--font-size-xs)"→"text-[var(--font-size-xs)]" etc. Pattern: text-[var(--font-size-{xs|label|sm|data|heading|body|lg|xl|2xl})].',
+        },
+
         // ═══ BORDER RADIUS TOKEN IN STYLE ═══
         // borderRadius: 'var(--radius-*)' should be a Tailwind rounded-* class
         {
