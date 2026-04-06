@@ -589,6 +589,28 @@ const scheduledGroupsDesignSystemRestrictions = [
     message: '⛔ Inline fontSize sm. FIX: remove fontSize from style. Use "c-section-label" if uppercase, otherwise keep with comment.',
   },
 
+  // ═══ HEIGHT AUTO IN STYLE ═══
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="height"][value.value="auto"]',
+    message: '⛔ Inline height: auto. FIX: remove from style, add "h-auto" to className.',
+  },
+
+  // ═══ MAX-HEIGHT TOKEN IN STYLE ═══
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="maxHeight"][value.value=/^var\\(--modal/]',
+    message: '⛔ Inline maxHeight modal token. FIX: remove from style, add max-h-[var(--modal-max-h)] to className. Variants: max-h-[var(--modal-max-h-sm)] or max-h-[var(--modal-max-h-lg)].',
+  },
+
+  // ═══ TOP/LEFT/RIGHT POSITIONING ═══
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="top"][value.value="100%"]',
+    message: '⛔ Inline top: 100%. FIX: remove from style, add "top-full" to className.',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name=/^(left|right)$/][value.value=/^var\\(--sp/]',
+    message: '⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.',
+  },
+
   // ═══ LAYOUT-IN-STYLE — move to className ═══
   {
     selector: 'JSXAttribute[name.name="style"] Property[key.name="display"]',
