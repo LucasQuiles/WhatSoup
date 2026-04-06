@@ -12,6 +12,8 @@ vi.mock('../../src/config.ts', () => ({
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
+    adminReplayMax: 5,
+    adminReplayDelayMs: 0, // zero delay for fast tests; throttle tests override
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
@@ -270,5 +272,111 @@ describe('sendApprovalRequest', () => {
 
     await sendApprovalRequest(db, messenger, '15554440003', 'Frank', 'First');
     await expect(sendApprovalRequest(db, messenger, '15554440003', 'Frank', 'Second')).resolves.not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SP4 — Admin replay hardening (dedup + throttle + cap)
+// ---------------------------------------------------------------------------
+
+describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
+  it('caps replayed messages to adminReplayMax', async () => {
+    const { config } = await import('../../src/config.ts');
+    config.adminReplayMax = 3;
+    config.adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    // Store 6 messages — only last 3 should replay
+    for (let i = 0; i < 6; i++) {
+      storeMessage(db, {
+        chatJid: '15559990001@s.whatsapp.net',
+        conversationKey: '15559990001',
+        senderJid: '15559990001@s.whatsapp.net',
+        senderName: 'CapUser',
+        messageId: `cap-msg-${i}`,
+        content: `msg ${i}`,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700000000 + i,
+      });
+    }
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15559990001', ADMIN_CHAT_JID, handleMessageFn);
+
+    expect(handleMessageFn).toHaveBeenCalledTimes(3);
+    // Should be the last 3 messages (most recent)
+    const replayedIds = handleMessageFn.mock.calls.map((c: any[]) => c[0].messageId);
+    expect(replayedIds).toContain('cap-msg-3');
+    expect(replayedIds).toContain('cap-msg-4');
+    expect(replayedIds).toContain('cap-msg-5');
+  });
+
+  it('deduplicates — same message is not replayed twice across allow calls', async () => {
+    const { config } = await import('../../src/config.ts');
+    config.adminReplayMax = 10;
+    config.adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    storeMessage(db, {
+      chatJid: '15559990002@s.whatsapp.net',
+      conversationKey: '15559990002',
+      senderJid: '15559990002@s.whatsapp.net',
+      senderName: 'DedupUser',
+      messageId: 'dedup-msg-1',
+      content: 'hello',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700000000,
+    });
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+
+    // First allow — should replay the message
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15559990002', ADMIN_CHAT_JID, handleMessageFn);
+    expect(handleMessageFn).toHaveBeenCalledTimes(1);
+
+    handleMessageFn.mockClear();
+
+    // Second allow — same message should NOT replay (dedup via replayedIds)
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15559990002', ADMIN_CHAT_JID, handleMessageFn);
+    expect(handleMessageFn).not.toHaveBeenCalled();
+  });
+
+  it('applies throttle delay between replayed messages', async () => {
+    const { config } = await import('../../src/config.ts');
+    config.adminReplayMax = 10;
+    config.adminReplayDelayMs = 50; // 50ms per message
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    for (let i = 0; i < 3; i++) {
+      storeMessage(db, {
+        chatJid: '15559990003@s.whatsapp.net',
+        conversationKey: '15559990003',
+        senderJid: '15559990003@s.whatsapp.net',
+        senderName: 'ThrottleUser',
+        messageId: `throttle-msg-${i}`,
+        content: `msg ${i}`,
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700000000 + i,
+      });
+    }
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    const start = Date.now();
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15559990003', ADMIN_CHAT_JID, handleMessageFn);
+    const elapsed = Date.now() - start;
+
+    expect(handleMessageFn).toHaveBeenCalledTimes(3);
+    // 3 messages with 50ms delay each = at least ~100ms total (delay after each except possibly last)
+    // Be lenient — just check it's noticeably above 0
+    expect(elapsed).toBeGreaterThanOrEqual(80);
   });
 });

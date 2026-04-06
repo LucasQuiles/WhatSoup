@@ -639,6 +639,71 @@ describe('advanced tools', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/not connected/);
     });
+
+    // SP5 guardrails --------------------------------------------------------
+
+    it('rejects when enableRelayMessage is false (config gate)', async () => {
+      const { config } = await import('../../../src/config.ts');
+      const original = config.advanced.enableRelayMessage;
+      config.advanced.enableRelayMessage = false;
+      try {
+        const result = await registry.call(
+          'relay_message',
+          { jid: '111@s.whatsapp.net', proto },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/disabled/i);
+      } finally {
+        config.advanced.enableRelayMessage = original;
+      }
+    });
+
+    it('rejects payload exceeding relayMaxPayloadBytes', async () => {
+      const { config } = await import('../../../src/config.ts');
+      const original = config.advanced.relayMaxPayloadBytes;
+      // Set a very small cap to trigger rejection
+      config.advanced.relayMaxPayloadBytes = 10;
+      try {
+        const result = await registry.call(
+          'relay_message',
+          { jid: '111@s.whatsapp.net', proto: { data: 'x'.repeat(100) } },
+          globalSession(),
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/too large/i);
+      } finally {
+        config.advanced.relayMaxPayloadBytes = original;
+      }
+    });
+
+    it('rejects invalid JID format', async () => {
+      const result = await registry.call(
+        'relay_message',
+        { jid: 'not-a-valid-jid', proto },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/invalid jid/i);
+    });
+
+    it('accepts @g.us JID format', async () => {
+      const result = await registry.call(
+        'relay_message',
+        { jid: '120363406689931730@g.us', proto },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('accepts @lid JID format', async () => {
+      const result = await registry.call(
+        'relay_message',
+        { jid: '12345@lid', proto },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+    });
   });
 });
 
