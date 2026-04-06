@@ -299,6 +299,7 @@ export default function LineDetail() {
                 metricsRange={metricsRange}
                 setMetricsRange={setMetricsRange}
                 lineName={name}
+                line={line}
               />
             )}
             {activeTab === 'scheduled' && (
