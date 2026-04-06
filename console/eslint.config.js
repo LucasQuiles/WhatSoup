@@ -5,308 +5,391 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  TOKEN CHEAT SHEET — reference for fixing lint errors           ║
+// ║  All tokens are defined in src/index.css                        ║
+// ╠══════════════════════════════════════════════════════════════════╣
+// ║  SPACING (4px grid):                                            ║
+// ║    0→0  1px→var(--bw)  2px→var(--bw-accent)  3px→var(--sp-0h)  ║
+// ║    4px→var(--sp-1)     6px→var(--sp-1h)       8px→var(--sp-2)   ║
+// ║    10px→var(--sp-2h)   12px→var(--sp-3)       14px→var(--msg-pad-h) ║
+// ║    16px→var(--sp-4)    20px→var(--sp-5)       24px→var(--sp-6)  ║
+// ║    28px→var(--sp-7)    32px→var(--sp-8)       40px→var(--sp-10) ║
+// ║    48px→var(--sp-12)                                            ║
+// ║                                                                 ║
+// ║  FONT SIZE:                                                     ║
+// ║    9.6px→var(--font-size-xs)      10.4px→var(--font-size-label) ║
+// ║    11.2px→var(--font-size-sm)     12.5px→var(--font-size-data)  ║
+// ║    13.1px→var(--font-size-heading) 13.6px→var(--font-size-body) ║
+// ║    16px→var(--font-size-lg)       22.4px→var(--font-size-xl)    ║
+// ║    27.2px→var(--font-size-2xl)                                  ║
+// ║                                                                 ║
+// ║  BORDER RADIUS:                                                 ║
+// ║    2px→var(--radius-xs)  4px→var(--radius-sm)                   ║
+// ║    6px→var(--radius-md)  10px→var(--radius-lg)                  ║
+// ║    50%→var(--radius-circle)                                     ║
+// ║                                                                 ║
+// ║  BORDER WIDTH:                                                  ║
+// ║    1px→var(--bw)  2px→var(--bw-accent)                          ║
+// ║                                                                 ║
+// ║  ELEMENT SIZES:                                                 ║
+// ║    5px→var(--dot-badge)   6px→var(--dot-feed)                   ║
+// ║    8px→var(--dot-table) or var(--stepper-dot)                   ║
+// ║    10px→var(--dot-header) 14px→var(--sep-h)                     ║
+// ║    16px→var(--feed-col-icon)                                    ║
+// ║    20px→var(--badge-unread) 28px→var(--input-btn)               ║
+// ║    32px→var(--avatar-sm) or var(--sparkline-h)                  ║
+// ║    36px→var(--avatar-md)  40px→var(--icon-empty)                ║
+// ║    64px→var(--avatar-lg)  256px→var(--qr-size)                  ║
+// ║                                                                 ║
+// ║  PANELS/WIDTHS:                                                 ║
+// ║    200px→var(--dropdown-min-w)  256px→var(--panel-contact)      ║
+// ║    260px→var(--panel-actions)   288px→var(--panel-chat-list)    ║
+// ║    320px→var(--empty-max-w)     340px→var(--panel-shortcuts)    ║
+// ║    420px→var(--panel-confirm)   540px→var(--panel-composer)     ║
+// ║    720px→var(--panel-wizard)                                    ║
+// ║                                                                 ║
+// ║  MODAL HEIGHTS:                                                 ║
+// ║    80vh→var(--modal-max-h-sm)   85vh→var(--modal-max-h)        ║
+// ║    90vh→var(--modal-max-h-lg)   90vw→var(--panel-max-inline-wide) ║
+// ║                                                                 ║
+// ║  OPACITY:                                                       ║
+// ║    0.3→var(--opacity-soft)      0.4→var(--opacity-faint)       ║
+// ║    0.45→var(--opacity-disabled) 0.6→var(--opacity-muted)       ║
+// ║                                                                 ║
+// ║  Z-INDEX (use Tailwind z-* class, NOT style):                   ║
+// ║    10→z-10 (--z-float)  50→z-50 (--z-dropdown)                 ║
+// ║    100→z-100 (--z-overlay)                                      ║
+// ║                                                                 ║
+// ║  SHADOWS:                                                       ║
+// ║    var(--card-shadow)  var(--shadow-inset)                      ║
+// ║    var(--shadow-md)    var(--shadow-lg)                         ║
+// ║                                                                 ║
+// ║  TRANSITIONS (use CSS class, NOT inline style):                 ║
+// ║    c-hover  c-row-hover  c-kpi-hover  c-nav-link  c-chat-item  ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
 const designSystemRestrictions = [
 
         // ═══ TYPOGRAPHY ═══
 
-        // Hardcoded font-size — use var(--font-size-xs/label/sm/data/heading/body/lg/xl/2xl)
         {
-          selector: 'Property[key.name="fontSize"][value.value=/^[0-9]+\\.?[0-9]*(rem|em)$/]',
-          message: '⛔ Hardcoded fontSize — use var(--font-size-*) token.',
+          selector: 'Property[key.name="fontSize"][value.value=/^[0-9]+\\.?[0-9]*(rem|em|px)$/]',
+          message: '⛔ Hardcoded fontSize. FIX: replace with var(--font-size-*) token. Scale: xs(9.6px) label(10.4px) sm(11.2px) data(12.5px) heading(13.1px) body(13.6px) lg(16px) xl(22.4px) 2xl(27.2px).',
         },
-        // Hardcoded letter-spacing — use var(--tracking-tight/label/caps)
+        {
+          selector: 'Property[key.name="fontSize"][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',
+          message: '⛔ Raw numeric fontSize (becomes px). FIX: replace with string var(--font-size-*) token. Scale: xs(9.6px) label(10.4px) sm(11.2px) data(12.5px) body(13.6px) lg(16px).',
+        },
         {
           selector: 'Property[key.name="letterSpacing"][value.value=/^-?[0-9]+\\.?[0-9]*(rem|em)$/]',
-          message: '⛔ Hardcoded letterSpacing — use var(--tracking-*) token.',
+          message: '⛔ Hardcoded letterSpacing. FIX: replace with var(--tracking-*) token. Options: tighter(-0.06em) tight(-0.04em) pill(0.02em) label(0.06em) caps(0.12em).',
         },
 
         // ═══ BORDER RADIUS ═══
 
-        // Hardcoded borderRadius — use var(--radius-sm/md/lg)
         {
           selector: 'Property[key.name="borderRadius"][value.value=/^[0-9]+px$/]',
-          message: '⛔ Hardcoded borderRadius — use var(--radius-sm/md/lg).',
+          message: '⛔ Hardcoded borderRadius px. FIX: replace with token. 2px→var(--radius-xs) 4px→var(--radius-sm) 6px→var(--radius-md) 10px→var(--radius-lg).',
         },
-        // Tailwind rounded-[Npx] arbitrary — use design token
+        {
+          selector: 'Property[key.name="borderRadius"][value.value=/^\\d+%$/]',
+          message: '⛔ Hardcoded borderRadius %. FIX: replace 50% with var(--radius-circle).',
+        },
         {
           selector: 'Literal[value=/\\brounded-\\[\\d+px\\]/]',
-          message: '⛔ Arbitrary rounded-[Npx] — use var(--radius-sm/md/lg) in style instead.',
+          message: '⛔ Arbitrary rounded-[Npx] in className. FIX: remove from className, add borderRadius: var(--radius-sm/md/lg) in style instead.',
         },
 
         // ═══ COLORS ═══
 
-        // Raw rgba() — use CSS custom property (--s-ok-wash, --m-cht-soft, etc.)
         {
           selector: 'Literal[value=/rgba\\(/]',
-          message: '⛔ Raw rgba() — use a CSS custom property from index.css.',
+          message: '⛔ Raw rgba() value. FIX: replace with a CSS custom property from index.css. Common: var(--b1..b4) for borders, var(--s-ok-wash) etc. for status, var(--overlay) for backdrops.',
         },
-        // Hardcoded hex color — use CSS custom property
         {
           selector: 'Literal[value=/^#[0-9a-fA-F]{3,8}$/]',
-          message: '⛔ Hardcoded hex color — use a CSS custom property.',
+          message: '⛔ Hardcoded hex color. FIX: replace with CSS custom property. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit). Modes: var(--color-m-pas/cht/agt).',
         },
 
         // ═══ TRANSITIONS & ANIMATIONS ═══
 
-        // Inline transition-colors — use c-hover, c-row-hover, c-nav-link, c-chat-item
         {
           selector: 'Literal[value=/\\btransition-colors\\b/]',
-          message: '⛔ Inline transition-colors — use c-hover, c-row-hover, c-nav-link, or c-chat-item.',
+          message: '⛔ Inline transition-colors class. FIX: replace with c-hover, c-row-hover, c-nav-link, or c-chat-item class.',
         },
-        // Inline transition-all — use c-hover or c-kpi-hover
         {
           selector: 'Literal[value=/\\btransition-all\\b/]',
-          message: '⛔ Inline transition-all — use c-hover or c-kpi-hover.',
+          message: '⛔ Inline transition-all class. FIX: replace with c-hover or c-kpi-hover class.',
         },
-        // Inline transition-opacity — use c-hover
         {
           selector: 'Literal[value=/\\btransition-opacity\\b/]',
-          message: '⛔ Inline transition-opacity — use c-hover.',
+          message: '⛔ Inline transition-opacity class. FIX: replace with c-hover class.',
         },
-        // Inline duration-* — transitions handled by design system classes
         {
           selector: 'Literal[value=/\\bduration-\\d/]',
-          message: '⛔ Inline duration — transitions are handled by design system classes.',
+          message: '⛔ Inline duration class. FIX: remove — transitions are handled by DS classes (c-hover, c-row-hover, etc.).',
         },
 
         // ═══ TAILWIND UTILITIES THAT BYPASS @THEME ═══
-        // In Tailwind v4, these utilities don't honor our @theme overrides.
-        // Use var(--font-size-*) or var(--tracking-*) in inline styles instead.
-        // Negative lookbehind (?<!-) avoids false positives on var(--font-size-xs).
 
         {
           selector: 'Literal[value=/(?<!-)\\btext-xs\\b/]',
-          message: '⛔ text-xs bypasses tokens in TW4 — use var(--font-size-xs) in style.',
+          message: '⛔ text-xs bypasses @theme tokens. FIX: remove from className, add style={{ fontSize: "var(--font-size-xs)" }}.',
         },
         {
           selector: 'Literal[value=/(?<!-)\\btext-sm\\b/]',
-          message: '⛔ text-sm bypasses tokens in TW4 — use var(--font-size-sm) in style.',
+          message: '⛔ text-sm bypasses @theme tokens. FIX: remove from className, add style={{ fontSize: "var(--font-size-sm)" }}.',
         },
         {
           selector: 'Literal[value=/(?<!-)\\btext-xl\\b/]',
-          message: '⛔ text-xl bypasses tokens in TW4 — use var(--font-size-xl) in style.',
+          message: '⛔ text-xl bypasses @theme tokens. FIX: remove from className, add style={{ fontSize: "var(--font-size-xl)" }}.',
         },
         {
           selector: 'Literal[value=/(?<!-)\\btracking-tight\\b/]',
-          message: '⛔ tracking-tight bypasses tokens in TW4 — use var(--tracking-tight) in style.',
+          message: '⛔ tracking-tight bypasses @theme tokens. FIX: remove from className, add style={{ letterSpacing: "var(--tracking-tight)" }}.',
         },
 
-        // ═══ SPACING ANTI-PATTERNS ═══
+        // ═══ SPACING — ALL HARDCODED PX ═══
 
-        // Hardcoded large padding/margin px — should use var(--sp-*) tokens
-        // Only flags values ≥ 10px to avoid false positives on structural 1px/2px
         {
-          selector: 'Property[key.name="padding"][value.value=/^\\d{2,}px$/]',
-          message: '⛔ Hardcoded padding px — use var(--sp-*) spacing token.',
-        },
-        // Compound padding with hardcoded px (e.g. '6px var(--sp-3)' or '8px 14px')
-        {
-          selector: 'Property[key.name="padding"][value.value=/\\d{2,}px /]',
-          message: '⛔ Compound padding with hardcoded px — use var(--sp-*) tokens for all values.',
+          selector: 'Property[key.name=/^padding/][value.value=/^\\d+px$/]',
+          message: '⛔ Hardcoded padding px. FIX: replace with var(--sp-*). Scale: 0→0 3px→var(--sp-0h) 4px→var(--sp-1) 6px→var(--sp-1h) 8px→var(--sp-2) 10px→var(--sp-2h) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5) 24px→var(--sp-6).',
         },
         {
-          selector: 'Property[key.name="padding"][value.value=/ \\d{2,}px/]',
-          message: '⛔ Compound padding with hardcoded px — use var(--sp-*) tokens for all values.',
+          selector: 'Property[key.name=/^padding/][value.value=/\\d+px /]',
+          message: '⛔ Compound padding with hardcoded px. FIX: replace each px value with var(--sp-*). Scale: 4px→var(--sp-1) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5) 24px→var(--sp-6).',
         },
         {
-          selector: 'Property[key.name="margin"][value.value=/^\\d{2,}px$/]',
-          message: '⛔ Hardcoded margin px — use var(--sp-*) spacing token.',
+          selector: 'Property[key.name=/^padding/][value.value=/ \\d+px/]',
+          message: '⛔ Compound padding with hardcoded px. FIX: replace each px value with var(--sp-*). Scale: 4px→var(--sp-1) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5) 24px→var(--sp-6).',
         },
         {
-          selector: 'Property[key.name="gap"][value.value=/^\\d{2,}px$/]',
-          message: '⛔ Hardcoded gap px — use var(--sp-*) spacing token.',
+          selector: 'Property[key.name=/^margin/][value.value=/^\\d+px$/]',
+          message: '⛔ Hardcoded margin px. FIX: replace with var(--sp-*). Scale: 3px→var(--sp-0h) 4px→var(--sp-1) 6px→var(--sp-1h) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5).',
+        },
+        {
+          selector: 'Property[key.name="gap"][value.value=/^\\d+px$/]',
+          message: '⛔ Hardcoded gap px. FIX: replace with var(--sp-*). Scale: 1px→var(--bw) 2px→var(--bw-accent) 4px→var(--sp-1) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4).',
+        },
+
+        // ═══ SIZING — ALL HARDCODED PX ═══
+
+        {
+          selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.value=/^\\d+px$/]',
+          message: '⛔ Hardcoded size px. FIX: replace with token from index.css. Check --avatar-*, --panel-*, --dot-*, --sp-*, --icon-empty, --input-h, --input-btn, etc. See cheat sheet at top of eslint.config.js.',
+        },
+        // Raw numeric literals (React converts to px) — excludes 0
+        {
+          selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',
+          message: '⛔ Raw numeric value (becomes px). FIX: replace N with string token. E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 16→"var(--sp-4)". For sizing: 10→"var(--dot-header)" 16→"var(--feed-col-icon)" 32→"var(--avatar-sm)". See cheat sheet at top of eslint.config.js.',
+        },
+        {
+          selector: 'Property[key.name=/^(padding|margin)(Top|Bottom|Left|Right)$/][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',
+          message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
+        },
+
+        // ═══ GRID TEMPLATE HARDCODED PX ═══
+        // gridTemplateColumns/Rows with hardcoded px should use tokens
+        {
+          selector: 'Property[key.name=/^gridTemplate/][value.value=/\\d{2,}px/]',
+          message: '⛔ Hardcoded px in grid template. FIX: replace px values with CSS variables. E.g. 32px→var(--avatar-sm) 120px→token 140px→token 280px→token. Define new tokens in index.css if needed.',
+        },
+
+        // ═══ VIEWPORT UNITS ═══
+
+        {
+          selector: 'Property[key.name=/^(maxHeight|maxWidth|minHeight|minWidth|height|width)$/][value.value=/^\\d+(vh|vw)$/]',
+          message: '⛔ Bare vh/vw unit. FIX: replace with CSS variable. 80vh→var(--modal-max-h-sm) 85vh→var(--modal-max-h) 90vh→var(--modal-max-h-lg) 90vw→var(--panel-max-inline-wide). Or use dvh for mobile safety.',
         },
 
         // ═══ INLINE TRANSITION ═══
-        // Inline transition style — use CSS classes or design system utilities
+
         {
           selector: 'Property[key.name="transition"][value.value=/\\d+\\.?\\d*(s|ms)/]',
-          message: '⛔ Inline transition with hardcoded duration — use a CSS class or design system utility.',
-        },
-
-        // ═══ SIZING ANTI-PATTERNS ═══
-
-        // Hardcoded width/height in style — flag large values that should use tokens
-        // (avatars, panels, columns should use --avatar-*, --panel-*, --log-col-*)
-        {
-          selector: 'Property[key.name="width"][value.value=/^\\d{3,}px$/]',
-          message: '⛔ Hardcoded width ≥100px — use a panel/column token (--panel-*, --log-col-*).',
-        },
-        {
-          selector: 'Property[key.name="minWidth"][value.value=/^\\d{3,}px$/]',
-          message: '⛔ Hardcoded minWidth ≥100px — use a sizing token.',
+          message: '⛔ Inline transition with hardcoded duration. FIX: remove style, add c-hover or c-row-hover class. If custom: use var(--dur-fast/norm/slow) var(--ease).',
         },
 
         // ═══ DOM MANIPULATION ═══
 
-        // Direct style mutation — use CSS :hover or React state
         {
           selector: 'MemberExpression[property.name="backgroundColor"][object.property.name="style"]',
-          message: '⛔ Direct style.backgroundColor mutation — use CSS :hover or React state.',
+          message: '⛔ Direct style.backgroundColor mutation. FIX: use CSS :hover rule or React state + className toggle.',
         },
         {
           selector: 'MemberExpression[property.name="color"][object.property.name="style"]',
-          message: '⛔ Direct style.color mutation — use CSS :hover or React state.',
+          message: '⛔ Direct style.color mutation. FIX: use CSS :hover rule or React state + className toggle.',
         },
 
         // ═══ LINE HEIGHT ═══
-        // Use Tailwind leading-* classes (leading-none/tight/snug/normal/relaxed/loose)
+
         {
           selector: 'Property[key.name="lineHeight"]',
-          message: '⛔ Inline lineHeight — use Tailwind leading-none/tight/snug/normal/relaxed/loose class.',
+          message: '⛔ Inline lineHeight. FIX: remove from style, add Tailwind class to className. Options: leading-none(1) leading-tight(1.25) leading-snug(1.375) leading-normal(1.5) leading-relaxed(1.625) leading-loose(2).',
         },
 
         // ═══ FONT WEIGHT ═══
-        // Use Tailwind font-* classes (font-normal/medium/semibold/bold/extrabold/black)
+
         {
           selector: 'Property[key.name="fontWeight"]',
-          message: '⛔ Inline fontWeight — use Tailwind font-normal/medium/semibold/bold/extrabold/black class.',
+          message: '⛔ Inline fontWeight. FIX: remove from style, add Tailwind class to className. Options: font-normal(400) font-medium(500) font-semibold(600) font-bold(700) font-extrabold(800).',
         },
 
-        // ═══ REACT ANTI-PATTERNS ═══
+        // ═══ BOX SHADOW ═══
 
-        // Inline objects in style that recreate on every render
-        // (This is advisory — some inline styles are unavoidable)
-
-        // Hardcoded box-shadow — use var(--card-shadow/--shadow-inset/--shadow-md/--shadow-lg)
         {
           selector: 'Property[key.name="boxShadow"][value.value=/^[0-9]/]',
-          message: '⛔ Hardcoded boxShadow — use var(--card-shadow), var(--shadow-inset/md/lg).',
+          message: '⛔ Hardcoded boxShadow. FIX: replace with token. Options: var(--card-shadow) var(--shadow-inset) var(--shadow-md) var(--shadow-lg). For glow: var(--s-ok-glow) var(--s-warn-glow) var(--s-crit-glow).',
         },
 
         // ═══ FOCUS RINGS ═══
 
-        // Inline outline styles — focus rings must use the global :focus-visible rule in index.css
         {
           selector: 'Property[key.name="outline"][value.value=/[0-9]+px/]',
-          message: '⛔ Inline outline — focus rings are set globally via :focus-visible in index.css.',
+          message: '⛔ Inline outline. FIX: remove — focus rings are set globally via :focus-visible in index.css. No per-element outline needed.',
         },
-        // Inline outlineWidth — same reason
         {
           selector: 'Property[key.name="outlineWidth"]',
-          message: '⛔ Inline outlineWidth — focus ring width is set globally in index.css (1px/1.5px).',
+          message: '⛔ Inline outlineWidth. FIX: remove — focus ring width is set globally in index.css (1px inner / 1.5px outer).',
         },
 
-        // ═══ BORDER WIDTH ═══
-
         // ═══ Z-INDEX ═══
-        // Use Tailwind z-* utilities (z-10, z-20, z-50) or design token
+
         {
           selector: 'Property[key.name="zIndex"][value.value=/^[0-9]+$/]',
-          message: '⛔ Hardcoded zIndex — use Tailwind z-10/z-20/z-50 class or var(--z-*).',
+          message: '⛔ Hardcoded zIndex string. FIX: remove from style, add Tailwind class to className. 10→z-10 (floating) 20→z-20 (secondary) 50→z-50 (dropdown) 100→z-100 (overlay/modal).',
+        },
+        {
+          selector: 'Property[key.name="zIndex"][value.type="Literal"][value.raw=/^\\d+$/]',
+          message: '⛔ Hardcoded numeric zIndex. FIX: remove from style, add Tailwind class to className. 10→z-10 (floating) 20→z-20 (secondary) 50→z-50 (dropdown) 100→z-100 (overlay/modal).',
         },
 
         // ═══ FONT FAMILY ═══
-        // Must use var(--font-sans) or var(--font-mono), never raw font stacks
+
         {
           selector: 'Property[key.name="fontFamily"]',
-          message: '⛔ Inline fontFamily — use var(--font-sans) or var(--font-mono), or font-sans/font-mono class.',
-        },
-
-        // ═══ MAX-WIDTH SIZING ═══
-        // Large maxWidth should use tokens
-        {
-          selector: 'Property[key.name="maxWidth"][value.value=/^\\d{3,}px$/]',
-          message: '⛔ Hardcoded maxWidth ≥100px — use a sizing token (--empty-max-w, --chat-name-max, etc.).',
+          message: '⛔ Inline fontFamily. FIX: remove from style, add font-sans or font-mono to className.',
         },
 
         // ═══ BORDER WIDTH ═══
 
-        // Hardcoded border with px width — use var(--bw) or var(--bw-accent)
         {
           selector: 'Property[key.name="border"][value.value=/^[0-9]+px solid/]',
-          message: '⛔ Hardcoded border width — use var(--bw) solid var(--b*) or var(--bw-accent).',
+          message: '⛔ Hardcoded border width. FIX: use longhands instead. borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)" (or --b2/--b3/--b4).',
         },
         {
           selector: 'Property[key.name="borderTop"][value.value=/^[0-9]+px solid/]',
-          message: '⛔ Hardcoded borderTop width — use var(--bw) solid var(--b*).',
+          message: '⛔ Hardcoded borderTop width. FIX: use longhands. borderTopWidth: "var(--bw)", borderTopStyle: "solid", borderTopColor: "var(--b1)".',
         },
         {
           selector: 'Property[key.name="borderBottom"][value.value=/^[0-9]+px solid/]',
-          message: '⛔ Hardcoded borderBottom width — use var(--bw) solid var(--b*).',
+          message: '⛔ Hardcoded borderBottom width. FIX: use longhands. borderBottomWidth: "var(--bw)", borderBottomStyle: "solid", borderBottomColor: "var(--b1)".',
         },
         {
           selector: 'Property[key.name="borderLeft"][value.value=/^[0-9]+px solid/]',
-          message: '⛔ Hardcoded borderLeft width — use var(--bw-accent) solid var(--color-*).',
+          message: '⛔ Hardcoded borderLeft width. FIX: use longhands. borderLeftWidth: "var(--bw-accent)", borderLeftStyle: "solid", borderLeftColor: "var(--color-*)".',
         },
         {
           selector: 'Property[key.name="borderRight"][value.value=/^[0-9]+px solid/]',
-          message: '⛔ Hardcoded borderRight width — use var(--bw) solid var(--b*).',
+          message: '⛔ Hardcoded borderRight width. FIX: use longhands. borderRightWidth: "var(--bw)", borderRightStyle: "solid", borderRightColor: "var(--b1)".',
         },
 
         // ═══ BORDER SHORTHAND ═══
-        // React inline styles drop border shorthand properties on spread.
-        // Use longhand (borderWidth, borderStyle, borderColor) instead.
+
         {
           selector: 'Property[key.name="border"][value.value=/var\\(--bw\\)/]',
-          message: '⛔ Border shorthand in inline style — React drops it on spread. Use borderWidth/borderStyle/borderColor longhands.',
+          message: '⛔ Border shorthand in inline style — React drops it on spread. FIX: replace border: "var(--bw) solid var(--b1)" with borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--b1)".',
         },
-        // Same bug in template literals: border: `var(--bw) solid ${...}`
         {
           selector: 'TemplateLiteral[parent.key.name="border"]',
-          message: '⛔ Border shorthand in template literal — React drops it on spread. Use borderWidth/borderStyle/borderColor longhands.',
+          message: '⛔ Border template literal in inline style — React drops it on spread. FIX: split into borderWidth, borderStyle, borderColor longhands.',
         },
 
-        // ═══ REGRESSION: borderColor: undefined ═══
-        // Ternary that falls back to undefined silently drops the border.
+        // ═══ REGRESSIONS ═══
+
         {
           selector: 'Property[key.name="borderColor"][value.type="ConditionalExpression"][value.alternate.type="Identifier"][value.alternate.name="undefined"]',
-          message: '⛔ borderColor: ... : undefined drops the border. Use getBorderColor() or var(--b2) as fallback.',
+          message: '⛔ borderColor ternary with undefined fallback silently drops the border. FIX: replace undefined with "var(--b2)" or "transparent".',
         },
-
-        // ═══ REGRESSION: inline accentColor ═══
-        // Checkbox/radio accent is set globally in index.css. Inline overrides drift.
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="accentColor"]',
-          message: '⛔ Inline accentColor in style — checkbox/radio accent is set globally in index.css.',
+          message: '⛔ Inline accentColor. FIX: remove — checkbox/radio accent is set globally in index.css to var(--color-s-ok).',
         },
 
-        // ═══ REGRESSION: fractional opacity ═══
-        // opacity < 1 on interactive elements looks disabled. Use filter: brightness().
+        // ═══ OPACITY ═══
+
         {
           selector: 'Property[key.name="opacity"][value.value=/^0\\.[0-9]/]',
-          message: '⛔ Fractional opacity on interactive elements looks disabled. Use filter: brightness() for hover effects.',
+          message: '⛔ Hardcoded string opacity. FIX: replace with token. 0.3→var(--opacity-soft) 0.4→var(--opacity-faint) 0.45→var(--opacity-disabled) 0.6→var(--opacity-muted). For hover dimming, use filter: brightness(0.85) instead.',
+        },
+        {
+          selector: 'Property[key.name="opacity"][value.type="Literal"][value.raw=/^0\\.\\d/]',
+          message: '⛔ Hardcoded numeric opacity. FIX: replace with string token. 0.3→"var(--opacity-soft)" 0.4→"var(--opacity-faint)" 0.45→"var(--opacity-disabled)" 0.6→"var(--opacity-muted)". For hover dimming, use filter: "brightness(0.85)" instead.',
+        },
+
+        // ═══ BUTTON TYPE ═══
+
+        {
+          selector: 'JSXOpeningElement[name.name="button"]:not(:has(JSXAttribute[name.name="type"]))',
+          message: '⛔ <button> missing type attribute — defaults to "submit" which causes accidental form submissions. FIX: add type="button" to the <button> tag. Only use type="submit" if the button is inside a <form> and should submit it.',
         },
 ]
 
 const scheduledGroupsDesignSystemRestrictions = [
-  // ═══ SCHEDULED/GROUP SURFACES ═══
-  // These newer flows still need stronger DS ratchets without breaking older files.
+  // ═══ SCHEDULED/GROUP SURFACES — STRICT RATCHET ═══
+  // Stricter rules for newer UI surfaces. These augment the global rules above.
+
   {
     selector: 'Literal[value=/#[0-9a-fA-F]{3,8}/]',
-    message: '⛔ Hardcoded hex color — use a CSS custom property.',
+    message: '⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).',
   },
-  {
-    selector: 'Property[key.name="minHeight"][value.value=/^\\d+px$/]',
-    message: '⛔ Hardcoded minHeight px — use a CSS variable.',
-  },
-  {
-    selector: 'Property[key.name="maxHeight"][value.value=/^\\d+px$/]',
-    message: '⛔ Hardcoded maxHeight px — use a CSS variable.',
-  },
-  {
-    selector: 'Property[key.name="maxHeight"][value.value=/^\\d+(vh|vw|%)$/]',
-    message: '⛔ Hardcoded maxHeight viewport unit — use a modal token.',
-  },
-  {
-    selector: 'Property[key.name="maxWidth"][value.value=/^\\d+(vh|vw|%)$/]',
-    message: '⛔ Hardcoded maxWidth viewport unit — use a panel token.',
-  },
-  {
-    selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.value=/^\\d+px$/]',
-    message: '⛔ Hardcoded size px — use a sizing token.',
-  },
-  {
-    selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.type="Literal"][value.raw=/^\\d+$/]',
-    message: '⛔ Hardcoded numeric size literal — use a sizing token.',
-  },
+
+  // Border edge shorthand — use longhands
   {
     selector: 'Property[key.name=/^border(Top|Bottom|Left|Right)$/][value.value=/var\\(--bw/]',
-    message: '⛔ Border edge shorthand in inline style — use border*Width/border*Style/border*Color longhands.',
+    message: '⛔ Border edge shorthand — React drops it on spread. FIX: split borderTop: "var(--bw) solid var(--b1)" into borderTopWidth: "var(--bw)", borderTopStyle: "solid", borderTopColor: "var(--b1)".',
   },
   {
     selector: 'TemplateLiteral[parent.key.name=/^border(Top|Bottom|Left|Right)$/]',
-    message: '⛔ Border edge shorthand in template literal — use border*Width/border*Style/border*Color longhands.',
+    message: '⛔ Border edge template literal — React drops it on spread. FIX: split into border*Width, border*Style, border*Color longhands.',
+  },
+
+  // ═══ LAYOUT-IN-STYLE — move to className ═══
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="display"]',
+    message: '⛔ Inline display in style. FIX: remove from style, add to className. flex→"flex" inline-flex→"inline-flex" block→"block" inline-block→"inline-block" grid→"grid" none→"hidden".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="alignItems"]',
+    message: '⛔ Inline alignItems in style. FIX: remove from style, add to className. center→"items-center" start/flex-start→"items-start" end/flex-end→"items-end" baseline→"items-baseline" stretch→"items-stretch".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="justifyContent"]',
+    message: '⛔ Inline justifyContent in style. FIX: remove from style, add to className. center→"justify-center" space-between→"justify-between" flex-start→"justify-start" flex-end→"justify-end".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="flexWrap"]',
+    message: '⛔ Inline flexWrap in style. FIX: remove from style, add to className. wrap→"flex-wrap" nowrap→"flex-nowrap".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="flexShrink"]',
+    message: '⛔ Inline flexShrink in style. FIX: remove from style, add to className. 0→"shrink-0" (or "flex-shrink-0").',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="flexGrow"]',
+    message: '⛔ Inline flexGrow in style. FIX: remove from style, add to className. 1→"grow" (or "flex-grow") 0→"grow-0".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="textAlign"]',
+    message: '⛔ Inline textAlign in style. FIX: remove from style, add to className. left→"text-left" center→"text-center" right→"text-right".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="overflow"][value.value=/^(hidden|auto|scroll)$/]',
+    message: '⛔ Inline overflow in style. FIX: remove from style, add to className. hidden→"overflow-hidden" auto→"overflow-auto" scroll→"overflow-scroll". For single axis: "overflow-y-auto" etc.',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="position"][value.value=/^(relative|absolute|fixed|sticky)$/]',
+    message: '⛔ Inline position in style. FIX: remove from style, add to className. relative→"relative" absolute→"absolute" fixed→"fixed" sticky→"sticky".',
   },
 ]
 
@@ -332,7 +415,9 @@ export default defineConfig([
       // defined in index.css. Every visual property should reference a
       // CSS custom property (var(--*)) or a design system utility class.
       //
-      // Severity: "warn" for ratcheting. Change to "error" to hard-block.
+      // Each error message is a self-contained fix recipe. A model can
+      // run `npx eslint src/` and fix errors one at a time using only
+      // the information in the error message + the cheat sheet above.
       // ═══════════════════════════════════════════════════════════════
 
       'no-restricted-syntax': ['error', ...designSystemRestrictions],
@@ -347,8 +432,11 @@ export default defineConfig([
       'src/components/line-detail/ScheduleComposerModal.tsx',
       'src/components/line-detail/GroupDetailModal.tsx',
       'src/components/line-detail/GroupCard.tsx',
+      'src/components/line-detail/GroupsTab.tsx',
+      'src/components/line-detail/ScheduledTab.tsx',
       'src/components/line-detail/ScheduledMessageRow.tsx',
       'src/components/line-detail/scheduled-utils.ts',
+      'src/components/line-detail/groups-utils.ts',
     ],
     rules: {
       'no-restricted-syntax': ['error', ...designSystemRestrictions, ...scheduledGroupsDesignSystemRestrictions],
