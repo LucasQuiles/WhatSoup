@@ -1,22 +1,22 @@
-# LEAK-01 Output
-
 <!-- BEAD_OUTPUT_COMPLETE -->
+# RACE-03 Bead Output
 
-- Bead: LEAK-01 — per-chat cleanup helper
-- Branch: fix/leak-01-cleanup-helper
-- Commit: 8e9f850
-- Summary: Added a private `cleanupPerChatState(mapKey)` helper that deletes all six auxiliary per-chat maps/sets and routed failed sandbox workspace cleanup through it so abandoned per-chat state does not linger.
-
-## Files Changed
-- src/runtimes/agent/runtime.ts
-- tests/runtimes/agent/runtime.test.ts
+- Bead: RACE-03 — SQLITE_BUSY orphaned child cleanup
+- Implementation commit: `c765928`
+- Branch: `fix/race-03-sqlite-busy-orphan`
 
 ## Verification
-- `grep -nE 'private .*Map<string|private .*Set<string' src/runtimes/agent/runtime.ts` ✅ verified the six auxiliary per-chat structures covered by the helper
-- `npx vitest run tests/runtimes/agent/runtime.test.ts --pool=forks` ✅ (74 tests passed)
+- `npx vitest run tests/runtimes/agent/session.test.ts -t "db failure during spawn kills the child and resets session state|db failure during spawn does not block a later successful retry"` ✅ (2 tests)
+- `npx vitest run tests/runtimes/agent/session.test.ts` ✅ (59 tests)
 - `npm run typecheck` ✅
-- `npx vitest run` ✅ on rerun (197 files, 3,709 tests passed)
-- `git push -u origin fix/leak-01-cleanup-helper` ✅
+- `npx vitest run` ✅ — 197 files, 3708 tests passed
 
-## Notes
-- The first full-suite run hit an unrelated transient failure in `tests/runtimes/agent/session.test.ts`; a targeted rerun passed immediately and the subsequent fresh full-suite rerun was fully green.
+## Files Changed
+- `src/runtimes/agent/session.ts`
+- `tests/runtimes/agent/session.test.ts`
+- `bead-output.md`
+
+## Summary
+- Wrapped the post-spawn session DB write in a failure boundary so `createSession`/`updateSessionStatus` errors no longer leave an untracked child running.
+- On DB persistence failure, the spawned child is force-killed, runtime/session state is reset, and the original error is re-thrown for caller handling.
+- Added regressions covering both immediate cleanup on SQLITE_BUSY and successful retry after the failed spawn.

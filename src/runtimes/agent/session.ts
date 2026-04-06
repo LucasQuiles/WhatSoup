@@ -530,11 +530,39 @@ export class SessionManager {
 
     // Record in DB — reuse existing row when provided (avoids duplicate rows on resume)
     const pid = child.pid ?? 0;
-    if (existingRowId !== undefined) {
-      this.dbRowId = existingRowId;
-      updateSessionStatus(this.db, existingRowId, 'active');
-    } else {
-      this.dbRowId = createSession(this.db, pid, cwd, this.chatJid, workspaceKey);
+    try {
+      if (existingRowId !== undefined) {
+        this.dbRowId = existingRowId;
+        updateSessionStatus(this.db, existingRowId, 'active');
+      } else {
+        this.dbRowId = createSession(this.db, pid, cwd, this.chatJid, workspaceKey);
+      }
+    } catch (err) {
+      log.error({ err, pid, chatJid: this.chatJid, existingRowId: existingRowId ?? null }, 'session: failed to persist spawned child');
+      this.clearTurnWatchdog();
+      try {
+        child.kill('SIGKILL');
+      } catch (killErr) {
+        log.warn({ err: killErr, pid, chatJid: this.chatJid }, 'session: failed to kill child after db persistence error');
+      }
+      this.active = false;
+      this.child = null;
+      this.dbRowId = null;
+      this.sessionId = null;
+      this.stdoutBuffer = '';
+      this.startedAt = null;
+      this.messageCount = 0;
+      this.lastMessageAt = null;
+      this.pendingToolIds.clear();
+      this.codexThreadId = null;
+      this.codexRequestSeq = 0;
+      this.geminiSessionId = null;
+      this.geminiRequestSeq = 0;
+      this.providerReadyPromise = null;
+      this.providerReadyResolve = null;
+      this.resumeAttemptId = null;
+      this.codexResumeThreadStartReqId = null;
+      throw err;
     }
 
     log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null, provider: this.provider, binary }, `spawned ${binary} process`);

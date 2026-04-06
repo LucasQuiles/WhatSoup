@@ -329,6 +329,60 @@ describe('SessionManager', () => {
     expect(createSession).toHaveBeenCalledWith(db, 12345, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID));
   });
 
+  it('db failure during spawn kills the child and resets session state', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const busyError = new Error('SQLITE_BUSY: database is locked');
+    (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw busyError;
+    });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+
+    await expect(sm.spawnSession()).rejects.toThrow('SQLITE_BUSY');
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect((sm as unknown as { child: MockChild | null }).child).toBeNull();
+    expect((sm as unknown as { active: boolean }).active).toBe(false);
+    expect((sm as unknown as { dbRowId: number | null }).dbRowId).toBeNull();
+    expect(sm.getStatus()).toEqual({
+      active: false,
+      pid: null,
+      sessionId: null,
+      startedAt: null,
+      messageCount: 0,
+      lastMessageAt: null,
+    });
+  });
+
+  it('db failure during spawn does not block a later successful retry', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('SQLITE_BUSY: database is locked');
+    });
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await expect(sm.spawnSession()).rejects.toThrow('SQLITE_BUSY');
+
+    const mockChild2 = makeMockChild(23456);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockChild2);
+
+    await sm.spawnSession();
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(createSession).toHaveBeenNthCalledWith(2, db, 23456, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID));
+    expect(mockChild2.kill).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toEqual({
+      active: true,
+      pid: 23456,
+      sessionId: null,
+      startedAt: expect.any(String),
+      messageCount: 0,
+      lastMessageAt: null,
+    });
+  });
+
   it('spawn-per-turn createSession uses cwd, chatJid, and workspaceKey', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
