@@ -189,6 +189,23 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
+        // ══��� SIMPLE TEXT COLOR IN STYLE ═���═
+        // color: 'var(--color-tN)' should be a Tailwind text-tN class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="color"][value.value=/^var\\(--color-t\\d\\)$/]',
+          message: '⛔ Simple text color in style. FIX: remove from style, add to className. var(--color-t1)→"text-t1" var(--color-t2)→"text-t2" var(--color-t3)→"text-t3" var(--color-t4)→"text-t4" var(--color-t5)→"text-t5".',
+        },
+        // color: 'var(--color-s-*)' should be a Tailwind text-s-* class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="color"][value.value=/^var\\(--color-s-/]',
+          message: '⛔ Simple status color in style. FIX: remove from style, add to className. var(--color-s-ok)→"text-s-ok" var(--color-s-warn)→"text-s-warn" var(--color-s-crit)→"text-s-crit".',
+        },
+        // color: 'var(--color-m-*)' should be a Tailwind text-m-* class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="color"][value.value=/^var\\(--color-m-/]',
+          message: '⛔ Simple mode color in style. FIX: remove from style, add to className. var(--color-m-pas)→"text-m-pas" var(--color-m-cht)→"text-m-cht" var(--color-m-agt)→"text-m-agt".',
+        },
+
         // ═══ SIMPLE BACKGROUND COLOR IN STYLE ═══
         // background: 'var(--color-dN)' should be a Tailwind bg-dN class
         {
