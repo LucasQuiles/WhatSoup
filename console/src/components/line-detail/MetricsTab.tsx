@@ -89,8 +89,8 @@ export function MetricsTab({
                 <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
                   <div
                     style={{
-                      width: 10,
-                      height: 10,
+                      width: 'var(--dot-header)',
+                      height: 'var(--dot-header)',
                       borderRadius: 'var(--radius-sm)',
                       background: 'var(--color-m-pas)',
                     }}
@@ -103,8 +103,8 @@ export function MetricsTab({
                 <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
                   <div
                     style={{
-                      width: 10,
-                      height: 10,
+                      width: 'var(--dot-header)',
+                      height: 'var(--dot-header)',
                       borderRadius: 'var(--radius-sm)',
                       background: 'var(--color-m-cht)',
                     }}
@@ -126,7 +126,7 @@ export function MetricsTab({
               <div
                 style={{
                   marginTop: 'var(--sp-3)',
-                  height: 6,
+                  height: 'var(--dot-feed)',
                   borderRadius: 'var(--radius-sm)',
                   background: 'var(--color-d4)',
                   overflow: 'hidden',

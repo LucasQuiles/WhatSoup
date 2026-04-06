@@ -35,7 +35,7 @@ export const selectStyle: React.CSSProperties = {
 
 export const numberInputStyle: React.CSSProperties = {
   ...inputStyle,
-  width: 120,
+  width: 'var(--input-number-w)',
   textAlign: 'right',
 }
 

@@ -21,8 +21,7 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: 'var(--overlay)' }}
+      className="c-dialog-backdrop"
       onClick={onClose}
     >
       <div

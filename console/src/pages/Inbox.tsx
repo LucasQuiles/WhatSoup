@@ -27,6 +27,7 @@ export default function Inbox() {
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [hasMore, setHasMore] = useState(true)
   const [searchInput, setSearchInput] = useState('')
+  const [actionBusy, setActionBusy] = useState(false)
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchScrollRef = useRef<HTMLDivElement>(null)
@@ -546,13 +547,17 @@ export default function Inbox() {
                 <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
                   <button
                     className="c-btn c-btn-success w-full justify-center"
+                    disabled={actionBusy}
                     onClick={async () => {
+                      setActionBusy(true)
                       try {
                         const subjectType = currentChat.isGroup ? 'group' : 'number'
                         await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'allow')
                         toast.success(`Allowed ${resolveDisplayName(currentChat.name)}`)
                       } catch (err) {
                         toast.error(`Failed to allow: ${err instanceof Error ? err.message : String(err)}`)
+                      } finally {
+                        setActionBusy(false)
                       }
                     }}
                   >
@@ -560,13 +565,17 @@ export default function Inbox() {
                   </button>
                   <button
                     className="c-btn c-btn-danger w-full justify-center"
+                    disabled={actionBusy}
                     onClick={async () => {
+                      setActionBusy(true)
                       try {
                         const subjectType = currentChat.isGroup ? 'group' : 'number'
                         await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'block')
                         toast.info(`Blocked ${resolveDisplayName(currentChat.name)}`)
                       } catch (err) {
                         toast.error(`Failed to block: ${err instanceof Error ? err.message : String(err)}`)
+                      } finally {
+                        setActionBusy(false)
                       }
                     }}
                   >
@@ -574,11 +583,12 @@ export default function Inbox() {
                   </button>
                   {!currentChat.isGroup && (
                     <button
-                      className="c-btn w-full justify-center"
-                      style={{ borderColor: 'var(--color-d3)', color: 'var(--color-t2)' }}
+                      className="c-btn w-full justify-center border-[var(--b2)] text-t2"
+                      disabled={actionBusy}
                       onClick={async () => {
                         const name = prompt('Contact name (first last):')
                         if (!name?.trim()) return
+                        setActionBusy(true)
                         const parts = name.trim().split(/\s+/)
                         const firstName = parts[0]
                         const lastName = parts.slice(1).join(' ') || undefined
@@ -590,6 +600,8 @@ export default function Inbox() {
                           toast.success(`Saved contact: ${name.trim()}`)
                         } catch (err) {
                           toast.error(`Failed to save: ${err instanceof Error ? err.message : String(err)}`)
+                        } finally {
+                          setActionBusy(false)
                         }
                       }}
                     >

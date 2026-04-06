@@ -130,7 +130,7 @@ export function ConfigEditDialog({
             checked={val as boolean}
             onChange={e => setField(key, e.target.checked)}
             className="accent-current"
-            style={{ width: 16, height: 16 }}
+            style={{ width: 'var(--feed-col-icon)', height: 'var(--feed-col-icon)' }}
           />
           <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
             {String(val)}
@@ -175,7 +175,7 @@ export function ConfigEditDialog({
           readOnly
           value={JSON.stringify(val, null, 2)}
           className="c-input font-mono"
-          style={{ color: 'var(--color-t3)', resize: 'vertical', minHeight: 60, filter: 'brightness(0.7)' }}
+          style={{ color: 'var(--color-t3)', resize: 'vertical', minHeight: 'calc(var(--sp-10) + var(--sp-5))', filter: 'brightness(0.7)' }}
         />
       )
     }
@@ -241,7 +241,7 @@ export function ConfigEditDialog({
           value={val as string}
           onChange={e => setField(key, e.target.value)}
           className="c-input font-mono"
-          style={{ color: 'var(--color-m-pas)', resize: 'vertical', minHeight: 80 }}
+          style={{ color: 'var(--color-m-pas)', resize: 'vertical', minHeight: 'calc(var(--sp-10) * 2)' }}
         />
       )
     }
@@ -266,8 +266,7 @@ export function ConfigEditDialog({
 
   return (
     <div
-      className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: 'var(--overlay)' }}
+      className="c-dialog-backdrop"
       onClick={onClose}
     >
       <div
@@ -275,7 +274,7 @@ export function ConfigEditDialog({
         aria-modal="true"
         aria-labelledby="config-edit-dialog-title"
         className="c-dialog flex flex-col"
-        style={{ width: 560, maxHeight: '80vh', maxWidth: '90vw' }}
+        style={{ width: 'var(--panel-config-edit)', maxHeight: 'var(--modal-max-h-sm)', maxWidth: 'var(--panel-max-inline)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

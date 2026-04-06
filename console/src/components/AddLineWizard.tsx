@@ -54,9 +54,9 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
             <div
               className="flex items-center justify-center"
               style={{
-                width: 20,
-                height: 20,
-                borderRadius: '50%',
+                width: 'var(--badge-unread)',
+                height: 'var(--badge-unread)',
+                borderRadius: 'var(--radius-circle)',
                 background: completed || active ? 'var(--color-s-ok)' : 'transparent',
                 borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: completed || active ? 'var(--color-s-ok)' : 'var(--color-t5)',
                 transition: 'all var(--dur-norm) var(--ease)',
@@ -69,7 +69,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
                   style={{
                     width: 'var(--stepper-dot)',
                     height: 'var(--stepper-dot)',
-                    borderRadius: '50%',
+                    borderRadius: 'var(--radius-circle)',
                     background: active ? 'var(--color-d0)' : 'var(--color-t5)',
                     opacity: active ? 1 : 0.5,
                   }}
@@ -256,8 +256,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: 'var(--overlay)' }}
+      className="c-dialog-backdrop"
       onClick={handleClose}
       role="dialog"
       aria-modal="true"
@@ -271,7 +270,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           width: 'var(--panel-wizard)',
           minWidth: 'var(--panel-wizard)',
           maxWidth: '90%',
-          minHeight: '500px',
+          minHeight: 'var(--modal-min-h)',
           height: 'var(--modal-max-h)',
           maxHeight: 'var(--modal-max-h)',
           background: 'var(--color-d2)',

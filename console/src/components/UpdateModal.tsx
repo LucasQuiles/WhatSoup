@@ -204,7 +204,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           if (!eventMatch || !dataMatch) continue
 
           const event = eventMatch[1]
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SSE stream JSON has no typed schema; expires 2026-07-01
           const data = JSON.parse(dataMatch[1]) as any
 
           if (event === 'progress') {
@@ -264,18 +264,17 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const stepIcon = (status: StepStatus) => {
     switch (status) {
-      case 'pending': return <span className="text-t5" style={{ width: 16, textAlign: 'center', display: 'inline-block' }}>○</span>
+      case 'pending': return <span className="text-t5 inline-block text-center" style={{ width: 'var(--feed-col-icon)' }}>○</span>
       case 'running': return <Loader2 size={16} className="text-m-cht animate-spin" />
       case 'done': return <Check size={16} className="text-s-ok" />
-      case 'skip': return <span className="text-t5" style={{ width: 16, textAlign: 'center', display: 'inline-block' }}>–</span>
+      case 'skip': return <span className="text-t5 inline-block text-center" style={{ width: 'var(--feed-col-icon)' }}>–</span>
       case 'error': return <AlertCircle size={16} className="text-s-crit" />
     }
   }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: 'var(--overlay)' }}
+      className="c-dialog-backdrop"
       onClick={handleClose}
     >
       <div
@@ -366,7 +365,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 background: 'var(--s-crit-soft)',
                 borderRadius: 'var(--radius-md)',
               }}>
-                <AlertCircle size={16} className="text-s-crit flex-shrink-0" style={{ marginTop: 2 }} />
+                <AlertCircle size={16} className="text-s-crit flex-shrink-0 mt-[var(--bw-accent)]" />
                 <span className="text-t2 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>{error}</span>
               </div>
               <div className="flex justify-end">

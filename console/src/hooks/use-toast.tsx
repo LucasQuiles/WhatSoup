@@ -30,7 +30,7 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
       {/* Toast stack — fixed bottom-right */}
       <div
-        className="fixed z-50 flex flex-col gap-2"
+        className="fixed z-[110] flex flex-col gap-2"
         style={{ bottom: 'var(--sp-5)', right: 'var(--sp-5)', pointerEvents: 'none' }}
       >
         <AnimatePresence>

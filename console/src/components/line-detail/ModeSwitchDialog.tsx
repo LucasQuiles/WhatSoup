@@ -83,9 +83,9 @@ export function ModeSwitchDialog({
               <span
                 className="flex-shrink-0 rounded-full"
                 style={{
-                  width: 16,
-                  height: 16,
-                  marginTop: 2,
+                  width: 'var(--feed-col-icon)',
+                  height: 'var(--feed-col-icon)',
+                  marginTop: 'var(--bw-accent)',
                   borderWidth: 'var(--bw-accent)', borderStyle: 'solid', borderColor: isSelected ? `var(--color-m-${mk})` : 'var(--b3)',
                   background: isSelected ? `var(--color-m-${mk})` : 'transparent',
                   boxShadow: isSelected ? `inset 0 0 0 3px var(--color-d2)` : 'none',
