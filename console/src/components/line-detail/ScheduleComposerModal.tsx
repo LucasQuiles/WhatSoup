@@ -47,6 +47,7 @@ function defaultDatetimeLocal(): string {
   return tsToDatetimeLocal(Math.floor(d.getTime() / 1000))
 }
 
+
 export function ScheduleComposerModal({
   open,
   onClose,
@@ -170,34 +171,21 @@ export function ScheduleComposerModal({
   const cronPreview = recurring ? cronToHuman(cronExpr) : ''
 
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: 'var(--overlay)' }}
-      onClick={onClose}
-    >
+    <div className="c-dialog-backdrop" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="composer-dialog-title"
-        className="flex flex-col overflow-hidden"
+        className="c-dialog flex flex-col"
         style={{
-          background: 'var(--color-d2)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-          borderRadius: 'var(--radius-lg)',
           width: 'var(--panel-composer)',
-          maxWidth: '95vw',
-          maxHeight: '90vh',
-          boxShadow: 'var(--shadow-lg)',
+          maxWidth: 'var(--panel-max-inline-wide)',
+          maxHeight: 'var(--modal-max-h-lg)',
         }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div
-          className="flex items-center justify-between flex-shrink-0"
-          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
-        >
+        <div className="c-dialog-header flex-shrink-0">
           <div className="flex items-center gap-2">
             <Clock size={16} strokeWidth={1.75} className="text-t4" />
             <span id="composer-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
@@ -264,17 +252,8 @@ export function ScheduleComposerModal({
                   onChange={e => setText(e.target.value)}
                   placeholder="Type your message..."
                   rows={4}
-                  className="w-full font-mono text-t2 bg-transparent outline-none resize-vertical"
-                  style={{
-                    fontSize: 'var(--font-size-data)',
-                    padding: 'var(--sp-2) var(--sp-3)',
-                    background: 'var(--color-d1)',
-                    borderWidth: 'var(--bw)',
-                    borderStyle: 'solid',
-                    borderColor: 'var(--b1)',
-                    borderRadius: 'var(--radius-md)',
-                    minHeight: '96px',
-                  }}
+                  className="c-input font-mono text-t2 resize-vertical"
+                  style={{ height: 'auto', minHeight: 'var(--sp-16, calc(var(--sp-12) * 2))' }}
                 />
               </div>
             ) : (
@@ -293,16 +272,7 @@ export function ScheduleComposerModal({
                     value={mediaPath}
                     onChange={e => setMediaPath(e.target.value)}
                     placeholder="/path/to/file.jpg"
-                    className="w-full font-mono text-t2 bg-transparent outline-none"
-                    style={{
-                      fontSize: 'var(--font-size-data)',
-                      padding: 'var(--sp-2) var(--sp-3)',
-                      background: 'var(--color-d1)',
-                      borderWidth: 'var(--bw)',
-                      borderStyle: 'solid',
-                      borderColor: 'var(--b1)',
-                      borderRadius: 'var(--radius-md)',
-                    }}
+                    className="c-input font-mono text-t2"
                   />
                 </div>
                 <div>
@@ -319,16 +289,8 @@ export function ScheduleComposerModal({
                     onChange={e => setCaption(e.target.value)}
                     placeholder="Optional caption..."
                     rows={2}
-                    className="w-full font-mono text-t2 bg-transparent outline-none resize-vertical"
-                    style={{
-                      fontSize: 'var(--font-size-data)',
-                      padding: 'var(--sp-2) var(--sp-3)',
-                      background: 'var(--color-d1)',
-                      borderWidth: 'var(--bw)',
-                      borderStyle: 'solid',
-                      borderColor: 'var(--b1)',
-                      borderRadius: 'var(--radius-md)',
-                    }}
+                    className="c-input font-mono text-t2 resize-vertical"
+                    style={{ height: 'auto' }}
                   />
                 </div>
               </div>
@@ -348,17 +310,8 @@ export function ScheduleComposerModal({
                 type="datetime-local"
                 value={datetimeLocal}
                 onChange={e => setDatetimeLocal(e.target.value)}
-                className="font-mono text-t2 bg-transparent outline-none"
-                style={{
-                  fontSize: 'var(--font-size-data)',
-                  padding: 'var(--sp-2) var(--sp-3)',
-                  background: 'var(--color-d1)',
-                  borderWidth: 'var(--bw)',
-                  borderStyle: 'solid',
-                  borderColor: 'var(--b1)',
-                  borderRadius: 'var(--radius-md)',
-                  colorScheme: 'dark',
-                }}
+                className="c-input font-mono text-t2"
+                style={{ colorScheme: 'dark' }}
               />
             </div>
 
@@ -403,20 +356,11 @@ export function ScheduleComposerModal({
                     value={cronExpr}
                     onChange={e => setCronExpr(e.target.value)}
                     placeholder="Cron expression (min hr dom mon dow)"
-                    className="font-mono text-t2 bg-transparent outline-none w-full"
-                    style={{
-                      fontSize: 'var(--font-size-data)',
-                      padding: 'var(--sp-2) var(--sp-3)',
-                      background: 'var(--color-d1)',
-                      borderWidth: 'var(--bw)',
-                      borderStyle: 'solid',
-                      borderColor: 'var(--b1)',
-                      borderRadius: 'var(--radius-md)',
-                    }}
+                    className="c-input font-mono text-t2"
                   />
                   {/* Preview */}
                   {cronPreview && (
-                    <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-info, #3b82f6)' }}>
+                    <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-m-cht)' }}>
                       {cronPreview}
                     </div>
                   )}
@@ -428,14 +372,7 @@ export function ScheduleComposerModal({
         </div>
 
         {/* Footer */}
-        <div
-          className="flex justify-end gap-2 flex-shrink-0"
-          style={{
-            padding: 'var(--sp-3) var(--sp-5)',
-            borderTop: 'var(--bw) solid var(--b1)',
-            background: 'var(--color-d1)',
-          }}
-        >
+        <div className="c-dialog-footer">
           <button type="button" onClick={onClose} className="c-btn c-btn-ghost" disabled={submitting}>
             Cancel
           </button>

@@ -61,47 +61,22 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
 
   if (!open) return null
 
-  const inputStyle: React.CSSProperties = {
-    fontSize: 'var(--font-size-data)',
-    padding: 'var(--sp-2) var(--sp-3)',
-    background: 'var(--color-d1)',
-    borderWidth: 'var(--bw)',
-    borderStyle: 'solid',
-    borderColor: 'var(--b1)',
-    borderRadius: 'var(--radius-md)',
-    width: '100%',
-    outline: 'none',
-  }
-
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: 'var(--overlay)' }}
-      onClick={onClose}
-    >
+    <div className="c-dialog-backdrop" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-group-dialog-title"
-        className="flex flex-col overflow-hidden"
+        className="c-dialog flex flex-col"
         style={{
-          background: 'var(--color-d2)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-          borderRadius: 'var(--radius-lg)',
           width: 'var(--panel-composer)',
-          maxWidth: '90%',
-          maxHeight: '80vh',
-          boxShadow: 'var(--shadow-lg)',
+          maxWidth: 'var(--panel-max-inline)',
+          maxHeight: 'var(--modal-max-h-sm)',
         }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div
-          className="flex items-center justify-between flex-shrink-0"
-          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
-        >
+        <div className="c-dialog-header flex-shrink-0">
           <div className="flex items-center gap-2">
             <Users size={16} strokeWidth={1.75} className="text-t4" />
             <span id="create-group-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
@@ -132,8 +107,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
                 value={subject}
                 onChange={e => setSubject(e.target.value)}
                 placeholder="Enter group name..."
-                className="font-mono text-t2"
-                style={inputStyle}
+                className="c-input font-mono text-t2"
                 autoFocus
               />
             </div>
@@ -164,14 +138,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
         </div>
 
         {/* Footer */}
-        <div
-          className="flex justify-end gap-2 flex-shrink-0"
-          style={{
-            padding: 'var(--sp-3) var(--sp-5)',
-            borderTop: 'var(--bw) solid var(--b1)',
-            background: 'var(--color-d1)',
-          }}
-        >
+        <div className="c-dialog-footer">
           <button type="button" onClick={onClose} className="c-btn c-btn-ghost" disabled={submitting}>
             Cancel
           </button>

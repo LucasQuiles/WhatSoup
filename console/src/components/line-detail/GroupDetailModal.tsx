@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { X, Copy, Link, LogOut, Search, UserMinus, ShieldCheck, ShieldOff, UserPlus } from 'lucide-react'
+import { X, Copy, Link, LogOut, UserMinus, ShieldCheck, ShieldOff, UserPlus } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import ConfirmDialog from '../ConfirmDialog.js'
 import EmptyState from '../EmptyState.js'
 import { ContactSearchPicker } from '../shared/ContactSearchPicker.js'
+import { SearchInput } from '../shared/SearchInput.js'
 import {
   roleLabel,
   roleBadgeStyle,
@@ -26,18 +27,9 @@ interface GroupDetailModalProps {
   onClose: () => void
 }
 
-// ── Input field style ─────────────────────────────────────────────────────────
-
-const inputStyle: React.CSSProperties = {
-  fontSize: 'var(--font-size-data)',
-  padding: 'var(--sp-2) var(--sp-3)',
-  background: 'var(--color-d1)',
-  borderWidth: 'var(--bw)',
-  borderStyle: 'solid',
-  borderColor: 'var(--b1)',
-  borderRadius: 'var(--radius-md)',
-  width: '100%',
-  outline: 'none',
+const metaLabelStyle: React.CSSProperties = {
+  fontSize: 'var(--font-size-xs)',
+  minWidth: 'calc(var(--sp-10) * 2)',
 }
 
 // ── Info Tab ──────────────────────────────────────────────────────────────────
@@ -140,8 +132,7 @@ function InfoTab({
             value={subject}
             onChange={e => setSubject(e.target.value)}
             onBlur={handleSubjectSave}
-            className="font-mono text-t2"
-            style={inputStyle}
+            className="c-input font-mono text-t2"
           />
         ) : (
           <div className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{detail.subject}</div>
@@ -160,8 +151,8 @@ function InfoTab({
             onBlur={handleDescSave}
             rows={3}
             placeholder="Group description..."
-            className="font-mono text-t2 resize-vertical"
-            style={{ ...inputStyle, minHeight: '72px' }}
+            className="c-input font-mono text-t2 resize-vertical"
+            style={{ height: 'auto', minHeight: 'var(--sp-16, calc(var(--sp-12) + var(--sp-6)))' }}
           />
         ) : (
           <div className="font-mono text-t3" style={{ fontSize: 'var(--font-size-data)' }}>
@@ -174,18 +165,18 @@ function InfoTab({
       <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
         {createdDate && (
           <div className="flex items-center gap-2">
-            <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', minWidth: 80 }}>Created</span>
+            <span className="font-mono text-t4" style={metaLabelStyle}>Created</span>
             <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{createdDate}</span>
           </div>
         )}
         {owner && (
           <div className="flex items-center gap-2">
-            <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', minWidth: 80 }}>Owner</span>
+            <span className="font-mono text-t4" style={metaLabelStyle}>Owner</span>
             <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{owner.id}</span>
           </div>
         )}
         <div className="flex items-center gap-2">
-          <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', minWidth: 80 }}>Group JID</span>
+          <span className="font-mono text-t4" style={metaLabelStyle}>Group JID</span>
           <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs) ' }}>{detail.id}</span>
         </div>
       </div>
@@ -398,27 +389,12 @@ function ParticipantsTab({
       )}
 
       {/* Search */}
-      <div
-        className="flex items-center gap-2"
-        style={{
-          padding: 'var(--sp-2) var(--sp-3)',
-          background: 'var(--color-d1)',
-          borderRadius: 'var(--radius-md)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b1)',
-        }}
-      >
-        <Search size={14} className="text-t4 flex-shrink-0" />
-        <input
-          type="text"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder={`Search ${detail.participants.length} participants...`}
-          className="flex-1 bg-transparent border-none outline-none font-mono text-t2"
-          style={{ fontSize: 'var(--font-size-data)' }}
-        />
-      </div>
+      <SearchInput
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        placeholder={`Search ${detail.participants.length} participants...`}
+        aria-label={`Search ${detail.participants.length} participants`}
+      />
 
       {/* Participant list */}
       <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
@@ -441,7 +417,7 @@ function ParticipantsTab({
                   className="font-mono flex-shrink-0"
                   style={{
                     fontSize: 'var(--font-size-xs)',
-                    padding: '1px var(--sp-1)',
+                    padding: 'var(--bw) var(--sp-1)',
                     borderRadius: 'var(--radius-sm)',
                     background: badge.bg,
                     color: badge.color,
@@ -811,40 +787,27 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
   const initials = getInitials(group.subject)
 
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: 'var(--overlay)' }}
-      onClick={onClose}
-    >
+    <div className="c-dialog-backdrop" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="group-detail-dialog-title"
-        className="flex flex-col overflow-hidden"
+        className="c-dialog flex flex-col"
         style={{
-          background: 'var(--color-d2)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-          borderRadius: 'var(--radius-lg)',
           width: 'var(--panel-wizard)',
-          maxWidth: '90%',
-          maxHeight: '80vh',
-          boxShadow: 'var(--shadow-lg)',
+          maxWidth: 'var(--panel-max-inline)',
+          maxHeight: 'var(--modal-max-h)',
         }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
+        <div className="c-dialog-header gap-3 flex-shrink-0">
         <div
-          className="flex items-center gap-3 flex-shrink-0"
-          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
+          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold"
+          style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', borderRadius: 'var(--radius-circle)', background: color, color: 'var(--color-t1)', fontSize: 'var(--font-size-data)' }}
         >
-          <div
-            className="flex-shrink-0 flex items-center justify-center font-sans font-semibold"
-            style={{ width: 32, height: 32, borderRadius: '50%', background: color, color: 'var(--color-t1)', fontSize: 'var(--font-size-data)' }}
-          >
-            {initials}
-          </div>
+          {initials}
+        </div>
           <div className="flex-1 min-w-0">
             <div id="group-detail-dialog-title" className="font-sans font-semibold truncate" style={{ fontSize: 'var(--font-size-lg)' }}>
               {group.subject}
@@ -868,8 +831,8 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
               key={tab}
               type="button"
               onClick={() => setActiveTab(tab)}
-              className={`c-btn c-btn-sm ${activeTab === tab ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-label)' }}
+              className="c-tab"
+              aria-selected={activeTab === tab}
             >
               {capitalize(tab)}
             </button>
