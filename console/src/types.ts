@@ -150,20 +150,44 @@ export interface FeedEvent {
 // ---------------------------------------------------------------------------
 
 export interface ScheduledMessage {
-  id: string;
+  id: number;
   chatJid: string;
   chatName?: string;
-  text: string;
-  scheduledAt: string;
-  createdAt?: string;
+  contentType: string;
+  payload: Record<string, unknown>;
+  scheduledAt: number;
+  recurrence?: string;
+  nextRunAt?: number;
+  runCount: number;
+  status: 'pending' | 'processing' | 'sent' | 'failed' | 'cancelled';
+  createdAt: number;
+  sentAt?: number;
+  error?: string;
+  retryCount: number;
 }
 
 export interface GroupInfo {
-  jid: string;
+  id: string;
   subject: string;
-  participants: number;
+  participants: GroupParticipant[];
   creation?: number;
   desc?: string;
+  owner?: string;
+  announce?: boolean;
+  locked?: boolean;
+  ephemeralDuration?: number;
+}
+
+export interface GroupParticipant {
+  id: string;
+  admin?: 'admin' | 'superadmin';
+}
+
+export interface GroupDetail extends GroupInfo {
+  inviteLink?: string;
+  memberAddMode?: 'all_member_add' | 'admin_add';
+  joinApprovalMode?: 'on' | 'off';
+  pendingRequests?: { jid: string }[];
 }
 
 export interface ContactResult {

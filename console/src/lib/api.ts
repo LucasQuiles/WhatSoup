@@ -11,6 +11,7 @@ import type {
   ContactResult,
   FeedEvent,
   FleetMetrics,
+  GroupDetail,
   GroupInfo,
   LineInstance,
   LineMetrics,
@@ -133,15 +134,106 @@ export const api = {
 
   // ── MCP proxy operations ──
 
-  getScheduled: (name: string) =>
-    apiFetch<{ scheduled: ScheduledMessage[] }>(`/api/lines/${encodeURIComponent(name)}/scheduled`, { signal: AbortSignal.timeout(15000) }),
+  getScheduled: (name: string, status?: string) =>
+    apiFetch<{ count: number; messages: ScheduledMessage[] }>(
+      `/api/lines/${encodeURIComponent(name)}/scheduled${status ? `?status=${status}` : ''}`,
+      { signal: AbortSignal.timeout(15000) },
+    ),
 
-  cancelScheduled: (name: string, messageId: string) =>
-    apiFetch<{ cancelled: boolean; messageId: string }>(`/api/lines/${encodeURIComponent(name)}/scheduled?id=${encodeURIComponent(messageId)}`, { method: 'DELETE' }),
+  cancelScheduled: (name: string, id: number) =>
+    apiFetch<{ cancelled: boolean; id: number }>(
+      `/api/lines/${encodeURIComponent(name)}/scheduled/${id}`,
+      { method: 'DELETE' },
+    ),
 
   getGroups: (name: string) =>
     apiFetch<{ groups: GroupInfo[] }>(`/api/lines/${encodeURIComponent(name)}/groups`, { signal: AbortSignal.timeout(15000) }),
 
   searchContacts: (name: string, query: string) =>
     apiFetch<{ contacts: ContactResult[] }>(`/api/lines/${encodeURIComponent(name)}/contacts/search?q=${encodeURIComponent(query)}`),
+
+  // ── Scheduled messages (new) ──
+
+  createScheduled: (name: string, data: Record<string, unknown>) =>
+    apiFetch<ScheduledMessage>(`/api/lines/${encodeURIComponent(name)}/scheduled`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  updateScheduled: (name: string, id: number, data: Record<string, unknown>) =>
+    apiFetch<ScheduledMessage>(`/api/lines/${encodeURIComponent(name)}/scheduled/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  getScheduledById: (name: string, id: number) =>
+    apiFetch<ScheduledMessage>(`/api/lines/${encodeURIComponent(name)}/scheduled/${id}`),
+
+  // ── Groups (new) ──
+
+  getGroupDetail: (name: string, jid: string) =>
+    apiFetch<GroupDetail>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}`, {
+      signal: AbortSignal.timeout(15000),
+    }),
+
+  createGroup: (name: string, subject: string, participants: string[]) =>
+    apiFetch<{ id: string }>(`/api/lines/${encodeURIComponent(name)}/groups`, {
+      method: 'POST',
+      body: JSON.stringify({ subject, participants }),
+    }),
+
+  leaveGroup: (name: string, jid: string) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}`, {
+      method: 'DELETE',
+    }),
+
+  updateGroupSubject: (name: string, jid: string, subject: string) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/subject`, {
+      method: 'PUT',
+      body: JSON.stringify({ subject }),
+    }),
+
+  updateGroupDescription: (name: string, jid: string, description?: string) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/description`, {
+      method: 'PUT',
+      body: JSON.stringify({ description }),
+    }),
+
+  updateGroupParticipants: (name: string, jid: string, participants: string[], action: 'add' | 'remove' | 'promote' | 'demote') =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/participants`, {
+      method: 'POST',
+      body: JSON.stringify({ participants, action }),
+    }),
+
+  updateGroupSettings: (name: string, jid: string, setting: string) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ setting }),
+    }),
+
+  getGroupInviteLink: (name: string, jid: string) =>
+    apiFetch<{ jid: string; inviteCode: string; inviteLink: string }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/invite`),
+
+  revokeGroupInvite: (name: string, jid: string) =>
+    apiFetch<{ inviteCode: string }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/invite/revoke`, {
+      method: 'POST',
+    }),
+
+  updateGroupEphemeral: (name: string, jid: string, expiration: number) =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/ephemeral`, {
+      method: 'PUT',
+      body: JSON.stringify({ expiration }),
+    }),
+
+  updateGroupMemberAddMode: (name: string, jid: string, mode: 'all_member_add' | 'admin_add') =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/member-add-mode`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
+
+  updateGroupJoinApproval: (name: string, jid: string, mode: 'on' | 'off') =>
+    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}/join-approval`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
 };
