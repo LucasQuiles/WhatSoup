@@ -1,0 +1,153 @@
+
+> whatsoup@0.1.0 typecheck:all
+> tsc --noEmit -p tsconfig.test.json
+
+tests/core/access-policy.test.ts(102,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/core/command-router.test.ts(65,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/core/command-router.test.ts(202,12): error TS2554: Expected 2 arguments, but got 1.
+tests/core/command-router.test.ts(206,12): error TS2554: Expected 2 arguments, but got 1.
+tests/core/heal-endpoint.test.ts(123,3): error TS2322: Type '{ db: Database; connectionManager: any; startedAt: number; getEnrichmentStats: (() => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean; }) | Mock<Procedure>; ... 6 more ...; handleAccessDecision?: ((subjectType: string, subjectId: string, action: "allow" | "block") => Promise<void>) | undefin...' is not assignable to type 'HealthDeps'.
+  Types of property 'instanceName' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+tests/core/health.test.ts(120,5): error TS2740: Type '{ botJid: string; botLid: null; sendMessage: Mock<Procedure>; sendMedia: Mock<Procedure>; connect: Mock<Procedure>; disconnect: Mock<...>; }' is missing the following properties from type 'ConnectionManager': on, emit, off, once, and 55 more.
+tests/core/health.test.ts(170,7): error TS2740: Type '{ botJid: null; botLid: null; sendMessage: Mock<Procedure>; sendMedia: Mock<Procedure>; connect: Mock<Procedure>; disconnect: Mock<Procedure>; }' is missing the following properties from type 'ConnectionManager': on, emit, off, once, and 55 more.
+tests/core/ingest-control.test.ts(105,3): error TS2741: Property 'setDurability' is missing in type '{ start: Mock<Procedure>; handleMessage: Mock<Procedure>; getHealthSnapshot: Mock<Procedure>; shutdown: Mock<Procedure>; }' but required in type 'Runtime'.
+tests/core/ingest-control.test.ts(114,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/core/ingest.test.ts(112,3): error TS2741: Property 'setDurability' is missing in type '{ start: Mock<Procedure>; handleMessage: Mock<Procedure>; getHealthSnapshot: Mock<Procedure>; shutdown: Mock<Procedure>; }' but required in type 'Runtime'.
+tests/core/ingest.test.ts(121,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/core/lid-phone-resolution.test.ts(129,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/core/lid-phone-resolution.test.ts(1162,25): error TS2871: This expression is always nullish.
+tests/fleet/ops-config-patch.test.ts(205,37): error TS2554: Expected 1 arguments, but got 2.
+tests/integration/contracts.test.ts(210,9): error TS2739: Type '{ db: Database; connectionManager: ConnectionManager; startedAt: number; getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; }; }' is missing the following properties from type 'HealthDeps': instanceName, instanceType, accessMode
+tests/integration/contracts.test.ts(299,11): error TS2739: Type '{ db: Database; connectionManager: ConnectionManager; startedAt: number; getEnrichmentStats: () => never; }' is missing the following properties from type 'HealthDeps': instanceName, instanceType, accessMode
+tests/integration/heal-flow.test.ts(125,3): error TS2741: Property 'setDurability' is missing in type '{ start: Mock<Procedure>; handleMessage: Mock<Procedure>; getHealthSnapshot: Mock<Procedure>; shutdown: Mock<Procedure>; }' but required in type 'Runtime'.
+tests/integration/heal-flow.test.ts(134,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/mcp/tool-registration.test.ts(53,34): error TS2345: Argument of type '{ connection: ConnectionManager; }' is not assignable to parameter of type 'MediaDeps'.
+  Property 'db' is missing in type '{ connection: ConnectionManager; }' but required in type 'MediaDeps'.
+tests/mcp/tools/heal.test.ts(233,7): error TS2739: Type '{ enqueueText: Mock<Procedure>; enqueueStreamingText: Mock<Procedure>; enqueueResultText: Mock<Procedure>; enqueueToolUpdate: Mock<...>; ... 7 more ...; setToolUpdateMode: Mock<...>; }' is missing the following properties from type 'IOutboundQueue': targetChatJid, getLastOpId, setDurability
+tests/mcp/tools/heal.test.ts(249,5): error TS2322: Type 'Mock<() => Promise<void>>' is not assignable to type '(chatJid: string, text: string) => Promise<SubmissionReceipt>'.
+  Type 'Promise<void>' is not assignable to type 'Promise<SubmissionReceipt>'.
+    Type 'void' is not assignable to type 'SubmissionReceipt'.
+tests/mcp/tools/heal.test.ts(382,44): error TS2352: Conversion of type '[]' to type '[string, string, Record<string, unknown>]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Source has 0 element(s) but target requires 3.
+tests/mcp/tools/heal.test.ts(423,44): error TS2352: Conversion of type '[]' to type '[string, string, Record<string, unknown>]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Source has 0 element(s) but target requires 3.
+tests/mcp/tools/heal.test.ts(430,36): error TS2352: Conversion of type '[]' to type '[unknown, string, string]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Source has 0 element(s) but target requires 3.
+tests/mcp/tools/media.test.ts(545,7): error TS2322: Type 'null' is not assignable to type 'string | undefined'.
+tests/mcp/tools/retention.test.ts(36,12): error TS2540: Cannot assign to 'mediaDir' because it is a read-only property.
+tests/mcp/tools/retention.test.ts(45,12): error TS2540: Cannot assign to 'mediaDir' because it is a read-only property.
+tests/runtimes/agent/codex-turn-lifecycle.test.ts(275,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/runtimes/agent/control-timeout.test.ts(189,7): error TS2739: Type '{ enqueueText: Mock<Procedure>; enqueueStreamingText: Mock<Procedure>; enqueueResultText: Mock<Procedure>; enqueueToolUpdate: Mock<...>; ... 7 more ...; setToolUpdateMode: Mock<...>; }' is missing the following properties from type 'IOutboundQueue': targetChatJid, getLastOpId, setDurability
+tests/runtimes/agent/control-timeout.test.ts(208,12): error TS2322: Type 'Mock<() => Promise<void>>' is not assignable to type '(chatJid: string, text: string) => Promise<SubmissionReceipt>'.
+  Type 'Promise<void>' is not assignable to type 'Promise<SubmissionReceipt>'.
+    Type 'void' is not assignable to type 'SubmissionReceipt'.
+tests/runtimes/agent/control-timeout.test.ts(301,47): error TS2345: Argument of type '{ report_id: string; error_class: string; error_type: string; state: string; attempt_count: number; cooldown_until: null; context: null; created_at: string; }' is not assignable to parameter of type 'null'.
+tests/runtimes/agent/health-snapshot.test.ts(202,3): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<Procedure>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(28,9): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<(_jid: string, text: string) => Promise<{ waMessageId: null; }>>; setTyping: Mock<(_jid: string, typing: boolean) => Promise<void>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(242,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(518,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<(_jid: string, text: string) => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(546,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<(_jid: string, _text: string) => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(570,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<never>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(580,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<(_jid: string, text: string) => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(643,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<never>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(697,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<(_jid: string, text: string) => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(722,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/outbound-queue.test.ts(749,11): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/prepare-content.test.ts(158,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/runtimes/agent/providers/conformance.test.ts(111,3): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/runtime.test.ts(223,7): error TS2739: Type '{ enqueueText: Mock<Procedure>; enqueueStreamingText: Mock<Procedure>; enqueueResultText: Mock<Procedure>; enqueueToolUpdate: Mock<...>; ... 7 more ...; setToolUpdateMode: Mock<...>; }' is missing the following properties from type 'IOutboundQueue': targetChatJid, getLastOpId, setDurability
+tests/runtimes/agent/runtime.test.ts(246,5): error TS2322: Type 'Mock<(jid: string, text: string) => Promise<void>>' is not assignable to type '(chatJid: string, text: string) => Promise<SubmissionReceipt>'.
+  Type 'Promise<void>' is not assignable to type 'Promise<SubmissionReceipt>'.
+    Type 'void' is not assignable to type 'SubmissionReceipt'.
+tests/runtimes/agent/runtime.test.ts(249,5): error TS2322: Type 'Mock<() => Promise<void>>' is not assignable to type '((chatJid: string, media: OutboundMedia) => Promise<SubmissionReceipt>) & Mock<Procedure>'.
+  Type 'Mock<() => Promise<void>>' is not assignable to type '(chatJid: string, media: OutboundMedia) => Promise<SubmissionReceipt>'.
+    Type 'Promise<void>' is not assignable to type 'Promise<SubmissionReceipt>'.
+      Type 'void' is not assignable to type 'SubmissionReceipt'.
+tests/runtimes/agent/runtime.test.ts(255,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/runtimes/agent/runtime.test.ts(971,7): error TS2739: Type '{ pk: number; chatJid: string; senderJid: string; senderName: string; messageId: string; content: string; contentType: "text"; isFromMe: false; timestamp: number; quotedMessageId: null; enrichmentProcessedAt: null; enrichmentRetries: number; createdAt: string; }' is missing the following properties from type 'StoredMessage': conversationKey, mediaPath, contentText
+tests/runtimes/agent/runtime.test.ts(1589,32): error TS2345: Argument of type '{ spawnSession: Mock<() => Promise<void>>; sendTurn: Mock<() => Promise<void>>; handleNew: Mock<() => Promise<void>>; getStatus: Mock<() => { active: boolean; ... 4 more ...; lastMessageAt: string; }>; ... 4 more ...; trackToolEnd: Mock<...>; }' is not assignable to parameter of type 'Mock<Procedure>'.
+  Type '{ spawnSession: Mock<() => Promise<void>>; sendTurn: Mock<() => Promise<void>>; handleNew: Mock<() => Promise<void>>; getStatus: Mock<() => { active: boolean; ... 4 more ...; lastMessageAt: string; }>; ... 4 more ...; trackToolEnd: Mock<...>; }' is missing the following properties from type 'Mock<Procedure>': getMockName, mockName, mock, mockClear, and 14 more.
+tests/runtimes/agent/runtime.test.ts(1621,15): error TS2339: Property 'getStatus' does not exist on type 'Mock<Procedure>'.
+tests/runtimes/agent/runtime.test.ts(1622,15): error TS2339: Property 'getStatus' does not exist on type 'Mock<Procedure>'.
+tests/runtimes/agent/runtime.test.ts(1632,22): error TS2339: Property 'getStatus' does not exist on type 'Mock<Procedure>'.
+tests/runtimes/agent/runtime.test.ts(1633,22): error TS2339: Property 'getStatus' does not exist on type 'Mock<Procedure>'.
+tests/runtimes/agent/session-budget.test.ts(88,3): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/session-checkpoints.test.ts(50,3): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<() => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/session.test.ts(85,9): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<(jid: string, text: string) => Promise<{ waMessageId: null; }>>; }' but required in type 'Messenger'.
+tests/runtimes/agent/zombie-sessions.test.ts(161,7): error TS2739: Type '{ enqueueText: Mock<Procedure>; enqueueStreamingText: Mock<Procedure>; enqueueResultText: Mock<Procedure>; enqueueToolUpdate: Mock<...>; ... 7 more ...; setToolUpdateMode: Mock<...>; }' is missing the following properties from type 'IOutboundQueue': targetChatJid, getLastOpId, setDurability
+tests/runtimes/agent/zombie-sessions.test.ts(180,12): error TS2322: Type 'Mock<() => Promise<void>>' is not assignable to type '(chatJid: string, text: string) => Promise<SubmissionReceipt>'.
+  Type 'Promise<void>' is not assignable to type 'Promise<SubmissionReceipt>'.
+    Type 'void' is not assignable to type 'SubmissionReceipt'.
+tests/runtimes/agent/zombie-sessions.test.ts(184,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/runtimes/chat/enrichment/extractor.test.ts(43,3): error TS2322: Type '{ pk: number; chatJid: string; conversationKey?: string | undefined; senderJid: string; senderName: string | null; messageId: string; content: string | null; contentType: ContentType; ... 7 more ...; contentText?: string | ... 1 more ... | undefined; }' is not assignable to type 'StoredMessage'.
+  Types of property 'conversationKey' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+tests/runtimes/chat/enrichment/poller.test.ts(84,3): error TS2322: Type '{ pk: number; chatJid: string; conversationKey?: string | undefined; senderJid: string; senderName: string | null; messageId: string; content: string | null; contentType: ContentType; ... 7 more ...; contentText?: string | ... 1 more ... | undefined; }' is not assignable to type 'StoredMessage'.
+  Types of property 'conversationKey' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+tests/runtimes/chat/enrichment/poller.test.ts(129,29): error TS2307: Cannot find module '../../src/core/database.ts' or its corresponding type declarations.
+tests/runtimes/chat/enrichment/validator.test.ts(43,3): error TS2322: Type '{ pk: number; chatJid: string; conversationKey?: string | undefined; senderJid: string; senderName: string | null; messageId: string; content: string | null; contentType: ContentType; ... 7 more ...; contentText?: string | ... 1 more ... | undefined; }' is not assignable to type 'StoredMessage'.
+  Types of property 'conversationKey' are incompatible.
+    Type 'string | undefined' is not assignable to type 'string'.
+      Type 'undefined' is not assignable to type 'string'.
+tests/runtimes/chat/health-snapshot.test.ts(96,3): error TS2741: Property 'sendMedia' is missing in type '{ sendMessage: Mock<Procedure>; }' but required in type 'Messenger'.
+tests/runtimes/chat/media/processor.test.ts(59,81): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/runtimes/chat/providers/anthropic.test.ts(61,38): error TS2345: Argument of type '(this: Anthropic) => void' is not assignable to parameter of type 'NormalizedProcedure<(args_0?: ClientOptions | undefined) => Anthropic>'.
+  Type 'void' is not assignable to type 'Anthropic'.
+tests/runtimes/chat/providers/anthropic.test.ts(146,70): error TS2322: Type '{ type: "text"; text: string; }' is not assignable to type 'ContentBlock'.
+  Property 'citations' is missing in type '{ type: "text"; text: string; }' but required in type 'TextBlock'.
+tests/runtimes/chat/providers/openai.test.ts(67,35): error TS2345: Argument of type '(this: OpenAI) => void' is not assignable to parameter of type 'NormalizedProcedure<(args_0?: ClientOptions | undefined) => OpenAI>'.
+  Type 'void' is not assignable to type 'OpenAI'.
+tests/runtimes/chat/providers/pinecone.test.ts(83,37): error TS2345: Argument of type '(this: InstanceType<typeof Pinecone>) => void' is not assignable to parameter of type 'NormalizedProcedure<(options?: PineconeConfiguration | undefined) => Pinecone>'.
+  Type 'void' is not assignable to type 'Pinecone'.
+tests/runtimes/chat/providers/pinecone.test.ts(330,37): error TS2345: Argument of type '(this: InstanceType<typeof Pinecone>) => void' is not assignable to parameter of type 'NormalizedProcedure<(options?: PineconeConfiguration | undefined) => Pinecone>'.
+  Type 'void' is not assignable to type 'Pinecone'.
+tests/runtimes/chat/providers/whisper.test.ts(37,42): error TS2345: Argument of type '(this: OpenAI) => void' is not assignable to parameter of type 'NormalizedProcedure<(args_0?: ClientOptions | undefined) => OpenAI>'.
+  Type 'void' is not assignable to type 'OpenAI'.
+tests/runtimes/chat/queue.test.ts(113,35): error TS2322: Type 'Promise<number | void>' is not assignable to type 'Promise<void>'.
+  Type 'number | void' is not assignable to type 'void'.
+    Type 'number' is not assignable to type 'void'.
+tests/runtimes/chat/runtime.test.ts(144,3): error TS2322: Type '{ sendMessage: Mock<Procedure>; }' is not assignable to type 'Messenger & { sendMessage: Mock<Procedure>; }'.
+  Property 'sendMedia' is missing in type '{ sendMessage: Mock<Procedure>; }' but required in type 'Messenger'.
+tests/runtimes/chat/runtime.test.ts(191,3): error TS2322: Type '{ messageId: string; chatJid: string; senderJid: string; senderName: string | null; content: string | null; contentText?: string | null | undefined; contentType: ContentType; ... 7 more ...; inboundSeq?: number | undefined; }' is not assignable to type 'IncomingMessage'.
+  Types of property 'contentText' are incompatible.
+    Type 'string | null | undefined' is not assignable to type 'string | null'.
+      Type 'undefined' is not assignable to type 'string | null'.
+tests/runtimes/chat/runtime.test.ts(237,12): error TS2749: 'ConversationHandler' refers to a value, but is being used as a type here. Did you mean 'typeof ConversationHandler'?

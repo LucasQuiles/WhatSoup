@@ -1,0 +1,9 @@
+Task 039 external artifacts
+
+Updated outside the repo worktree:
+- /home/q/.claude/scripts/whatsapp-alert.sh
+- /home/q/.claude/tests/test-whatsapp-alert.sh
+
+Verification run against those files:
+- bash -n /home/q/.claude/scripts/whatsapp-alert.sh
+- bash /home/q/.claude/tests/test-whatsapp-alert.sh

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "Task",
+      "WebFetch",
+      "WebSearch",
+      "NotebookEdit",
+      "mcp__whatsoup__*",
+      "mcp__pinecone__*",
+      "mcp__playwright__*",
+      "mcp__render__*",
+      "mcp__plugin_*",
+      "mcp__claude_ai_*",
+      "mcp__google-workspace__*"
+    ],
+    "deny": [],
+    "defaultMode": "bypassPermissions"
+  }
+}

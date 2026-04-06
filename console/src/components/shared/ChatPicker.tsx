@@ -40,9 +40,19 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
 
   if (selected) {
     return (
-      <div className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md border-[var(--bw)_solid_var(--b1)]">
+      <div
+        className="flex items-center gap-2"
+        style={{
+          padding: 'var(--sp-2) var(--sp-3)',
+          background: 'var(--color-d1)',
+          borderRadius: 'var(--radius-md)',
+          borderWidth: 'var(--bw)',
+          borderStyle: 'solid',
+          borderColor: 'var(--b1)',
+        }}
+      >
         {selected.isGroup ? <Users size={14} className="text-t4" /> : <MessageSquare size={14} className="text-t4" />}
-        <span className="font-mono text-t2 flex-1 truncate text-[var(--font-size-data)]">{selected.name}</span>
+        <span className="font-mono text-t2 flex-1 truncate" style={{ fontSize: 'var(--font-size-data)' }}>{selected.name}</span>
         <button type="button" onClick={onClear} className="c-btn c-btn-ghost c-btn-sm" aria-label="Clear selection">
           <X size={14} />
         </button>
@@ -60,16 +70,20 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
         aria-label={placeholder}
       />
       {open && filtered.length > 0 && (
-        <div className="c-card absolute left-0 right-0 z-50 overflow-y-auto top-[100%] mt-[var(--sp-1)] max-h-[calc(var(--sp-12)*5)]">
+        <div
+          className="c-card absolute left-0 right-0 z-50 overflow-y-auto"
+          style={{ top: '100%', marginTop: 'var(--sp-1)', maxHeight: 'calc(var(--sp-12) * 5)' }}
+        >
           {filtered.map((chat) => (
             <button
               key={chat.conversationKey}
               type="button"
-              className="w-full flex items-center gap-2 c-hover text-left py-[var(--sp-2)] px-[var(--sp-3)]"
+              className="w-full flex items-center gap-2 c-hover text-left"
+              style={{ padding: 'var(--sp-2) var(--sp-3)' }}
               onClick={() => { onSelect(chat); setOpen(false); setQuery('') }}
             >
               {chat.isGroup ? <Users size={14} className="text-t4" /> : <MessageSquare size={14} className="text-t4" />}
-              <span className="font-mono text-t2 truncate text-[var(--font-size-data)]">{chat.name}</span>
+              <span className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)' }}>{chat.name}</span>
             </button>
           ))}
         </div>

@@ -98,7 +98,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   }, [name])
 
   return (
-    <div className="flex flex-col gap-[var(--sp-4)]">
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Type — first so it drives the rest of the wizard */}
       <div>
         <label className="c-heading" style={labelStyle}>
@@ -117,7 +117,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
         <label className="c-heading" style={labelStyle}>
           Name
         </label>
-        <div className="flex items-center gap-[var(--sp-2)]">
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
           <input
             type="text"
             value={name}
@@ -128,18 +128,17 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             style={{
               ...inputStyle,
               borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' || nameLocked ? 'var(--wizard-accent)' : 'var(--b2)',
-              ...(nameLocked ? { opacity: 'var(--opacity-disabled)' } : {}),
+              ...(nameLocked ? { opacity: 0.7, cursor: 'not-allowed' } : {}),
             }}
-            className={nameLocked ? 'cursor-not-allowed' : ''}
           />
           {!nameLocked && nameStatus === 'checking' && (
-            <Loader2 size={16} className="animate-spin text-t4 flex-shrink-0" />
+            <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
           )}
           {(nameStatus === 'available' || nameLocked) && (
             <Check size={16} className="wizard-check" style={confirmCheckStyle} />
           )}
           {!nameLocked && nameStatus === 'taken' && (
-            <X size={16} className="text-s-crit flex-shrink-0" />
+            <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
           )}
         </div>
         {nameLocked && (
@@ -156,9 +155,9 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
       {/* Description */}
       <div>
         <label className="c-heading" style={labelStyle}>
-          Description <span className="text-t5">(optional)</span>
+          Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
         </label>
-        <div className="flex items-center gap-[var(--sp-2)]">
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
         <input
           type="text"
           value={description}
@@ -177,7 +176,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
 
       {/* Admin Phones */}
       <div>
-        <label className="c-heading block mb-[var(--sp-1)]">Admin Phones</label>
+        <label className="c-heading" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>Admin Phones</label>
         <div style={helperStyle}>{
           adminPhones.length === 0
             ? 'Phone numbers with full admin access to this line. Use international format without the +.'
@@ -185,8 +184,8 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
               ? 'Add another number for shared admin access, or continue with one.'
               : `${adminPhones.length} admin numbers configured.`
         }</div>
-        <div className="flex items-start gap-[var(--sp-2)] mt-[var(--sp-2)]">
-          <div className="flex-1 min-w-0">
+        <div className="flex items-start" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <TagInput
               values={adminPhones}
               onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
@@ -196,7 +195,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             />
           </div>
           {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} className="wizard-check mt-[var(--sp-2)]" style={confirmCheckStyle} />
+            <Check size={16} className="wizard-check" style={{ ...confirmCheckStyle, marginTop: 'var(--sp-2)' }} />
           )}
         </div>
         {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}

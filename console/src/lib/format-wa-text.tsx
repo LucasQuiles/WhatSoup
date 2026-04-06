@@ -18,9 +18,11 @@ function renderHighlightedText(text: string, query: string | undefined, keyRef: 
     return (
       <mark
         key={`mark-${keyRef.value++}`}
-        className="bg-[var(--m-cht-soft)] text-t1 rounded-xs"
         style={{
-          padding: '0 var(--bw)',
+          background: 'var(--m-cht-soft)',
+          color: 'var(--color-t1)',
+          padding: '0 1px',
+          borderRadius: 'var(--radius-xs)',
         }}
       >
         {segment.text}
@@ -50,13 +52,23 @@ export function formatWhatsAppText(text: string, highlightQuery?: string): React
 
       if (match[1] !== undefined) {
         parts.push(
-          <code key={keyRef.value++} className="font-mono block py-[var(--sp-1)] px-[var(--sp-2)] bg-d1 rounded-sm my-[var(--sp-1)] whitespace-pre-wrap overflow-x-auto" style={{
+          <code key={keyRef.value++} className="font-mono" style={{
+            display: 'block',
+            padding: 'var(--sp-1) var(--sp-2)',
+            background: 'var(--color-d1)',
+            borderRadius: 'var(--radius-sm)',
             fontSize: 'inherit',
+            margin: 'var(--sp-1) 0',
+            whiteSpace: 'pre-wrap',
+            overflowX: 'auto',
           }}>{renderHighlightedText(match[1], highlightQuery, keyRef)}</code>
         );
       } else if (match[2] !== undefined) {
         parts.push(
-          <code key={keyRef.value++} className="font-mono py-[var(--bw)] px-[var(--sp-1)] bg-d1 rounded-sm" style={{
+          <code key={keyRef.value++} className="font-mono" style={{
+            padding: 'var(--bw) var(--sp-1)',
+            background: 'var(--color-d1)',
+            borderRadius: 'var(--radius-sm)',
             fontSize: 'inherit',
           }}>{renderHighlightedText(match[2], highlightQuery, keyRef)}</code>
         );

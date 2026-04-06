@@ -58,10 +58,16 @@ const Tag: FC<{ tag: TagDef }> = ({ tag }) => {
   const Icon = tag.icon
   return (
     <span
-      className="inline-flex items-center font-mono font-medium text-[var(--font-size-xs)] tracking-[var(--tracking-pill)] py-[var(--bw)] px-[var(--sp-1h)] rounded-sm gap-[var(--sp-0h)] whitespace-nowrap"
+      className="inline-flex items-center font-mono font-medium"
       style={{
+        fontSize: 'var(--font-size-xs)',
+        letterSpacing: 'var(--tracking-pill)',
+        padding: '1px var(--sp-1h)',
+        borderRadius: 'var(--radius-sm)',
         color: tag.color,
         backgroundColor: tag.bg,
+        gap: 'var(--sp-0h)',
+        whiteSpace: 'nowrap',
       }}
     >
       <Icon size={9} strokeWidth={2} />
@@ -95,7 +101,7 @@ const LineTags: FC<LineTagsProps> = ({ line }) => {
   if (tags.length === 0) return null
 
   return (
-    <div className="flex flex-wrap items-center gap-[var(--sp-0h)]">
+    <div className="flex flex-wrap items-center" style={{ gap: 'var(--sp-0h)' }}>
       {tags.map(tag => <Tag key={tag.label} tag={tag} />)}
     </div>
   )

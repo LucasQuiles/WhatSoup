@@ -16,14 +16,13 @@ const QrDisplay: FC<QrDisplayProps> = ({ value, size = 256 }) => {
       const light = styles.getPropertyValue('--color-d1').trim()
       QRCode.toCanvas(canvasRef.current, value, {
         width: size,
-        // eslint-disable-next-line no-restricted-syntax -- QRCode library option, not CSS margin
         margin: 2,
         color: { dark, light },
       })
     }
   }, [value, size])
 
-  return <canvas ref={canvasRef} className="rounded-md" />
+  return <canvas ref={canvasRef} style={{ borderRadius: 'var(--radius-md)' }} />
 }
 
 export default QrDisplay

@@ -32,13 +32,18 @@ const ModeBadge: FC<ModeBadgeProps> = ({ mode }) => {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 font-mono font-medium text-[var(--font-size-label)] tracking-[var(--tracking-pill)] py-[var(--sp-0h)] px-[var(--sp-2h)] rounded-sm ${textClass}`}
+      className={`inline-flex items-center gap-1.5 font-mono font-medium ${textClass}`}
       style={{
+        fontSize: "var(--font-size-label)",
+        letterSpacing: "var(--tracking-pill)",
+        padding: "var(--sp-0h) var(--sp-2h) var(--sp-0h) var(--sp-2)",
+        borderRadius: "var(--radius-sm)",
         backgroundColor: washVar,
       }}
     >
       <span
-        className={`inline-block rounded-full flex-shrink-0 w-[var(--dot-badge)] h-[var(--dot-badge)] ${dotClass}`}
+        className={`inline-block rounded-full flex-shrink-0 ${dotClass}`}
+        style={{ width: "var(--dot-badge)", height: "var(--dot-badge)" }}
       />
       {label}
     </span>

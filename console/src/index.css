@@ -114,10 +114,7 @@
   --avatar-lg: 64px;         /* contact detail panel */
   --icon-empty: 40px;        /* empty state icon */
   --sparkline-h: 32px;       /* KPI sparkline height */
-  --chart-min-h: 220px;      /* chart minimum height */
   --badge-unread: 20px;      /* chat unread count badge */
-  --heatmap-cell-h: 18px;    /* heatmap grid cell height */
-  --search-results-max-h: 200px; /* search results dropdown max height */
   /* ═══ Panel widths ═══ */
   --panel-chat-list: 288px;  /* inbox left panel */
   --panel-contact: 256px;    /* inbox right panel */

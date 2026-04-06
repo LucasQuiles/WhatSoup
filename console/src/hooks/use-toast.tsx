@@ -30,8 +30,8 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
       {/* Toast stack — fixed bottom-right */}
       <div
-        className="fixed z-[110] flex flex-col gap-2 pointer-events-none"
-        style={{ bottom: 'var(--sp-5)', right: 'var(--sp-5)' }}
+        className="fixed z-[110] flex flex-col gap-2"
+        style={{ bottom: 'var(--sp-5)', right: 'var(--sp-5)', pointerEvents: 'none' }}
       >
         <AnimatePresence>
           {toasts.map(t => (
@@ -41,7 +41,7 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -8, scale: 0.96 }}
               transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-              className="pointer-events-auto"
+              style={{ pointerEvents: 'auto' }}
             >
               <Toast
                 variant={t.variant}

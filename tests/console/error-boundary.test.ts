@@ -44,7 +44,7 @@ describe('ErrorBoundary', () => {
     expect(app).toContain('element={<ErrorBoundary><Inbox /></ErrorBoundary>}')
     expect(app).toContain('element={<ErrorBoundary><Ops /></ErrorBoundary>}')
 
-    expect(boundary).toMatch(/className="c-card[\s"]/)
+    expect(boundary).toContain('className="c-card"')
     expect(boundary).toContain('variant="error"')
     expect(boundary).toContain('onRetry={this.handleRetry}')
   })

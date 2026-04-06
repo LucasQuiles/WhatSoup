@@ -332,11 +332,8 @@ const designSystemRestrictions = [
         },
 
         // ═══ FONT SIZE TOKEN IN STYLE ═══
-        // fontSize: 'var(--font-size-*)' in JSX style should be a text-[var(--font-size-*)] class
-        {
-          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--font-size-/]',
-          message: '⛔ fontSize token in style. FIX: remove fontSize from style, add to className. fontSize: "var(--font-size-xs)"→"text-[var(--font-size-xs)]" etc. Pattern: text-[var(--font-size-{xs|label|sm|data|heading|body|lg|xl|2xl})].',
-        },
+        // NOTE: fontSize CANNOT be moved to className. TW4 interprets text-[var(--font-size-*)]
+        // as COLOR, not font-size. Keep fontSize in inline style — this is correct.
 
         // ═══ BORDER RADIUS TOKEN IN STYLE ═══
         // borderRadius: 'var(--radius-*)' should be a Tailwind rounded-* class

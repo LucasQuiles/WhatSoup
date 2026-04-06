@@ -9,15 +9,12 @@ describe('design system compliance — Shannon slice', () => {
   it('uses design tokens for Nav hardcoded pixel values', () => {
     const source = read('console/src/components/Nav.tsx')
 
-    // Inline style tokens (still present for active-indicator left/right)
     expect(source).toMatch(/left:\s*["']var\(--sp-3\)["']/)
     expect(source).toMatch(/right:\s*["']var\(--sp-3\)["']/)
-    // Tailwind class equivalents (refactored from inline styles)
-    expect(source).toContain('h-[var(--bw-accent)]')
-    expect(source).toContain('min-w-[var(--sp-4)]')
-    expect(source).toContain('px-[var(--sp-1)]')
-    expect(source).toContain('px-[var(--sp-1h)]')
-    // Hardcoded values must not remain
+    expect(source).toMatch(/height:\s*["']var\(--bw-accent\)["']/)
+    expect(source).toMatch(/minWidth:\s*["']var\(--sp-4\)["']/)
+    expect(source).toMatch(/padding:\s*["']1px var\(--sp-1\)["']/)
+    expect(source).toMatch(/padding:\s*["']2px var\(--sp-1h\)["']/)
     expect(source).not.toContain('left: "12px"')
     expect(source).not.toContain('right: "12px"')
     expect(source).not.toContain('height: "2px"')
@@ -32,12 +29,10 @@ describe('design system compliance — Shannon slice', () => {
     const content = read('console/src/components/MessageContent.tsx')
 
     expect(heatmap).not.toContain("fontSize: '9px'")
-    // Refactored to Tailwind class
-    expect(heatmap).toContain('text-[var(--font-size-xs)]')
+    expect(heatmap).toContain("fontSize: 'var(--font-size-xs)'")
 
     expect(tags).not.toContain("gap: '3px'")
-    // Refactored to Tailwind class
-    expect(tags).toContain('gap-[var(--sp-0h)]')
+    expect(tags).toContain("gap: 'var(--sp-0h)'")
 
     expect(content).not.toContain("maxHeight: '48px'")
     expect(content).toContain("maxHeight: 'var(--sp-12)'")
@@ -89,9 +84,8 @@ describe('design system compliance — Shannon slice', () => {
     const inbox = read('console/src/pages/Inbox.tsx')
 
     expect((inbox.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
-    // Ghost and sm buttons may carry additional utility classes
-    expect(inbox).toMatch(/c-btn c-btn-ghost/)
-    expect(inbox).toMatch(/c-btn c-btn-sm/)
+    expect(inbox).toContain('className="c-btn c-btn-ghost"')
+    expect(inbox).toContain('className="c-btn c-btn-sm"')
     expect(inbox).toContain("zIndex: 'var(--z-float)'")
     expect(inbox).toContain('aria-label="Type a message"')
     expect(inbox).toContain('aria-label="Clear search"')

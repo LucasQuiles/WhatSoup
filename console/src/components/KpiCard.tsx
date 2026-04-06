@@ -27,28 +27,42 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
     <button
       type="button"
       onClick={onClick}
-      className="cursor-pointer select-none relative overflow-hidden c-kpi-pad c-kpi-hover rounded-md"
+      className={`
+        cursor-pointer select-none
+        relative overflow-hidden
+        c-kpi-pad c-kpi-hover
+      `}
       style={{
         background: active ? "var(--color-d3)" : "var(--color-d2)",
         border: active ? `var(--bw) solid ${strokeColor}` : "var(--bw) solid var(--b1)",
-        boxShadow: active ? `var(--shadow-inset)` : "none",
+        borderRadius: "var(--radius-md)",
+        boxShadow: active
+          ? `var(--shadow-inset)`
+          : "none",
       }}
     >
-      <div className={`c-kpi-value ${color}`}>
+      <div
+        className={`c-kpi-value ${color}`}
+      >
         {value}
         {suffix && (
-          <span className="font-normal text-[var(--font-size-data)] ml-[var(--bw-accent)]">
+          <span className="font-normal" style={{ fontSize: "var(--font-size-data)", marginLeft: "2px" }}>
             {suffix}
           </span>
         )}
       </div>
-      <div className="c-label uppercase mt-[var(--bw-accent)]">
+      <div
+        className="c-label uppercase"
+        style={{
+          marginTop: "6px",
+        }}
+      >
         {label}
       </div>
       {sparkData && sparkData.length > 1 && (
         <svg
-          className="absolute bottom-0 left-0 w-full h-[var(--sparkline-h)]"
-          style={{ opacity: "var(--opacity-soft)" }}
+          className="absolute bottom-0 left-0 w-full"
+          style={{ height: "var(--sparkline-h)", opacity: 0.3 }}
           preserveAspectRatio="none"
           viewBox={`0 0 ${sparkData.length - 1} 1`}
         >

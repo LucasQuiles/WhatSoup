@@ -41,17 +41,23 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="overflow-hidden bg-d2 border border-[var(--b2)] rounded-lg w-[var(--panel-confirm)] shadow-[var(--shadow-lg)]"
+        className="overflow-hidden"
         style={{
+          background: 'var(--color-d2)',
+          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+          borderRadius: 'var(--radius-lg)',
+          width: 'var(--panel-confirm)',
           maxWidth: '90%',
+          boxShadow: 'var(--shadow-lg)',
         }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div
-          className="flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)] c-border-b"
+          className="flex items-center justify-between"
+          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
         >
-          <span id="confirm-dialog-title" className="font-sans font-semibold text-[var(--font-size-lg)]">
+          <span id="confirm-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
             {title}
           </span>
           <button
@@ -65,25 +71,28 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-[var(--sp-5)]">
-          <div className="text-t2 leading-relaxed text-[var(--font-size-body)]">
+        <div style={{ padding: 'var(--sp-5)' }}>
+          <div className="text-t2 leading-relaxed" style={{ fontSize: 'var(--font-size-body)' }}>
             {children}
           </div>
         </div>
 
         {/* Footer */}
         <div
-          className="flex justify-end gap-2 py-[var(--sp-3)] px-[var(--sp-5)] c-border-t bg-d1"
+          className="flex justify-end gap-2"
+          style={{
+            padding: 'var(--sp-3) var(--sp-5)',
+            borderTop: 'var(--bw) solid var(--b1)',
+            background: 'var(--color-d1)',
+          }}
         >
           <button
-            type="button"
             onClick={onCancel}
             className="c-btn c-btn-ghost"
           >
             Cancel
           </button>
           <button
-            type="button"
             onClick={onConfirm}
             className={`c-btn ${
               confirmVariant === 'danger' ? 'c-btn-danger'

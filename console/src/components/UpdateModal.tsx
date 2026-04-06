@@ -264,10 +264,10 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const stepIcon = (status: StepStatus) => {
     switch (status) {
-      case 'pending': return <span className="text-t5 inline-block text-center w-[var(--feed-col-icon)]">○</span>
+      case 'pending': return <span className="text-t5 inline-block text-center" style={{ width: 'var(--feed-col-icon)' }}>○</span>
       case 'running': return <Loader2 size={16} className="text-m-cht animate-spin" />
       case 'done': return <Check size={16} className="text-s-ok" />
-      case 'skip': return <span className="text-t5 inline-block text-center w-[var(--feed-col-icon)]">–</span>
+      case 'skip': return <span className="text-t5 inline-block text-center" style={{ width: 'var(--feed-col-icon)' }}>–</span>
       case 'error': return <AlertCircle size={16} className="text-s-crit" />
     }
   }
@@ -282,37 +282,45 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         aria-modal="true"
         aria-labelledby="update-dialog-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-[var(--panel-confirm)] bg-d2 rounded-lg shadow-[var(--shadow-lg)] overflow-hidden border border-solid border-b2"
         style={{
+          width: 'var(--panel-confirm)',
           maxWidth: '90%',
+          background: 'var(--color-d2)',
+          borderWidth: 'var(--bw)',
+          borderStyle: 'solid',
+          borderColor: 'var(--b2)',
+          borderRadius: 'var(--radius-lg)',
+          boxShadow: 'var(--shadow-lg)',
+          overflow: 'hidden',
         }}
       >
         {/* Header */}
         <div
-          className="flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)] c-border-b"
+          className="flex items-center justify-between"
+          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
         >
-          <div className="flex items-center gap-[var(--sp-2)]">
+          <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
             <Download size={16} className="text-m-cht" />
-            <span id="update-dialog-title" className="font-sans font-semibold text-[var(--font-size-lg)]">
+            <span id="update-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
               {phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
             </span>
           </div>
-          <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">
+          <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">
             <X size={16} />
           </button>
         </div>
 
         {/* Body */}
-        <div className="py-[var(--sp-4)] px-[var(--sp-5)]">
+        <div style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
           {/* Phase: confirm */}
           {phase === 'confirm' && (
-            <div className="flex flex-col gap-[var(--sp-4)]">
-              <p className="text-t3 text-[var(--font-size-body)]">
+            <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+              <p className="text-t3" style={{ fontSize: 'var(--font-size-body)' }}>
                 Pull latest code, rebuild, and restart the fleet server?
               </p>
-              <div className="flex justify-end gap-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Cancel</button>
-                <button type="button" onClick={startUpdate} className="c-btn c-btn-primary">
+              <div className="flex justify-end" style={{ gap: 'var(--sp-2)' }}>
+                <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Cancel</button>
+                <button onClick={startUpdate} className="c-btn c-btn-primary">
                   <Download size={14} />
                   Update
                 </button>
@@ -322,24 +330,25 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
           {/* Phase: updating / restarting-fleet */}
           {(phase === 'updating' || phase === 'restarting-fleet') && (
-            <div className="flex flex-col gap-[var(--sp-2)]">
+            <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
               {steps.map(s => (
-                <div key={s.step} className="flex items-center gap-[var(--sp-2)] py-[var(--sp-1)] px-0">
+                <div key={s.step} className="flex items-center" style={{ gap: 'var(--sp-2)', padding: 'var(--sp-1) 0' }}>
                   {stepIcon(s.status)}
-                  <span className={`font-mono ${s.status === 'skip' ? 'text-t5' : 'text-t2'} text-[var(--font-size-data)]`}>
+                  <span className={`font-mono ${s.status === 'skip' ? 'text-t5' : 'text-t2'}`}
+                    style={{ fontSize: 'var(--font-size-data)' }}>
                     {STEP_LABELS[s.step] ?? s.step}
                   </span>
                   {s.message && s.status !== 'error' && (
-                    <span className="text-t5 font-mono text-[var(--font-size-xs)]">
+                    <span className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
                       {s.message}
                     </span>
                   )}
                 </div>
               ))}
               {phase === 'restarting-fleet' && (
-                <div className="flex items-center gap-[var(--sp-2)] py-[var(--sp-2)] px-0">
+                <div className="flex items-center" style={{ gap: 'var(--sp-2)', padding: 'var(--sp-2) 0' }}>
                   <Loader2 size={16} className="text-m-cht animate-spin" />
-                  <span className="text-t3 font-mono text-[var(--font-size-data)]">
+                  <span className="text-t3 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
                     Waiting for fleet server...
                   </span>
                 </div>
@@ -349,24 +358,29 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
           {/* Phase: error */}
           {phase === 'error' && error && (
-            <div className="flex flex-col gap-[var(--sp-3)]">
-              <div className="flex items-start gap-[var(--sp-2)] p-[var(--sp-3)] bg-[var(--s-crit-soft)] rounded-md">
+            <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+              <div className="flex items-start" style={{
+                gap: 'var(--sp-2)',
+                padding: 'var(--sp-3)',
+                background: 'var(--s-crit-soft)',
+                borderRadius: 'var(--radius-md)',
+              }}>
                 <AlertCircle size={16} className="text-s-crit flex-shrink-0 mt-[var(--bw-accent)]" />
-                <span className="text-t2 font-mono text-[var(--font-size-data)]">{error}</span>
+                <span className="text-t2 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>{error}</span>
               </div>
               <div className="flex justify-end">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Close</button>
+                <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Close</button>
               </div>
             </div>
           )}
 
           {/* Phase: restart-instances */}
           {phase === 'restart-instances' && (
-            <div className="flex flex-col gap-[var(--sp-3)]">
-              <p className="text-t3 font-medium text-[var(--font-size-body)]">
+            <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+              <p className="text-t3 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>
                 Restart instances with update?
               </p>
-              <div className="flex flex-col gap-[var(--sp-1)]">
+              <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
                 {lines.map(line => {
                   const isRestarting = instanceStatus[line.name] === 'restarting'
                   const isDone = instanceStatus[line.name] === 'done'
@@ -375,7 +389,12 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                   return (
                     <label
                       key={line.name}
-                      className={`flex items-center cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm${disabled && !isDone ? ' opacity-50' : ''}`}
+                      className={`flex items-center cursor-pointer${disabled && !isDone ? ' opacity-50' : ''}`}
+                      style={{
+                        gap: 'var(--sp-2)',
+                        padding: 'var(--sp-1h) var(--sp-2)',
+                        borderRadius: 'var(--radius-sm)',
+                      }}
                     >
                       <input
                         type="checkbox"
@@ -384,10 +403,10 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                         onChange={(e) => dispatch({ type: 'toggleInstance', name: line.name, on: e.target.checked })}
                         className="accent-[var(--color-m-cht)]"
                       />
-                      <span className="font-mono text-t2 text-[var(--font-size-data)] flex-1">
+                      <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)', flex: 1 }}>
                         {line.name}
                       </span>
-                      <span className="font-mono text-t5 text-[var(--font-size-xs)]">
+                      <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
                         {isRestarting ? (
                           <Loader2 size={12} className="text-m-cht animate-spin" />
                         ) : isDone ? (
@@ -402,10 +421,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                   )
                 })}
               </div>
-              <div className="flex justify-end gap-[var(--sp-2)] pt-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Skip</button>
+              <div className="flex justify-end" style={{ gap: 'var(--sp-2)', paddingTop: 'var(--sp-2)' }}>
+                <button onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Skip</button>
                 <button
-                  type="button"
                   onClick={restartSelectedInstances}
                   className="c-btn c-btn-primary"
                   disabled={!Object.values(instanceToggles).some(Boolean)}
@@ -419,9 +437,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
           {/* Phase: done */}
           {phase === 'done' && (
-            <div className="flex items-center justify-center gap-[var(--sp-2)] py-[var(--sp-4)] px-0">
+            <div className="flex items-center justify-center" style={{ gap: 'var(--sp-2)', padding: 'var(--sp-4) 0' }}>
               <Check size={20} className="text-s-ok" />
-              <span className="text-t2 font-medium text-[var(--font-size-body)]">
+              <span className="text-t2 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>
                 All instances restarted
               </span>
             </div>

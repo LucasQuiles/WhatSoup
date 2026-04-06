@@ -17,8 +17,8 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, childre
   return (
     <div>
       <label htmlFor={id} className="c-heading" style={labelStyle}>{label}</label>
-      <div className="flex items-center gap-[var(--sp-2)]">
-        <div className="flex-1 min-w-0">{children(id)}</div>
+      <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>{children(id)}</div>
         {!error && confirmed && (
           <Check size={16} className="wizard-check" style={confirmCheckStyle} />
         )}
@@ -86,7 +86,7 @@ export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, class
     style={{
       ...inputStyle,
       minHeight: minHeight ?? 80,
-      resizeProperty: 'vertical',
+      resize: 'vertical',
       borderColor: getBorderColor(error, confirmed),
     }}
   />
@@ -108,8 +108,8 @@ export const CheckboxField: FC<CheckboxFieldProps> = ({ label, checked, onChange
         onChange={e => onChange(e.target.checked)}
         /* accentColor set globally in index.css */
       />
-      <span className="text-[var(--font-size-data)] text-t2">{label}</span>
+      <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t2)' }}>{label}</span>
     </label>
-    {helper && <div className="ml-[var(--sp-5)]" style={helperStyle}>{helper}</div>}
+    {helper && <div style={{ ...helperStyle, marginLeft: 'var(--sp-5)' }}>{helper}</div>}
   </div>
 )

@@ -39,13 +39,13 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
   }
 
   return (
-    <div className="flex items-center gap-[var(--sp-2)]">
+    <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
       {icons[type] ?? <HelpCircle size={16} strokeWidth={1.75} className="text-t4" />}
-      <span className="text-t3 italic text-[var(--font-size-data)]">
+      <span className="text-t3 italic" style={{ fontSize: 'var(--font-size-data)' }}>
         {labels[type] ?? type}
       </span>
       {caption && (
-        <span className="text-t2 text-[var(--font-size-data)] ml-[var(--sp-1)]">
+        <span className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginLeft: 'var(--sp-1)' }}>
           {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
         </span>
       )}
@@ -67,14 +67,14 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               src={`data:image/jpeg;base64,${thumb}`}
               alt={msg.content || 'Photo'}
               style={{
-                maxHeight: 'var(--sp-12)',
+                maxHeight: '200px',
                 maxWidth: '100%',
+                borderRadius: 'var(--radius-md)',
                 display: 'block',
               }}
-              className="rounded-md"
             />
             {msg.content && (
-              <div className="text-t2 text-[var(--font-size-data)] mt-[var(--sp-1)]">
+              <div className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginTop: 'var(--sp-1)' }}>
                 {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
@@ -94,9 +94,9 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       const label = isPtt ? 'Voice note' : 'Audio'
       const duration = seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : ''
       return (
-        <div className="flex items-center gap-[var(--sp-2)]">
+        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
           <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />
-          <span className="text-t3 italic text-[var(--font-size-data)]">
+          <span className="text-t3 italic" style={{ fontSize: 'var(--font-size-data)' }}>
             {label}{duration ? ` \u00b7 ${duration}` : ''}
           </span>
         </div>
@@ -114,11 +114,11 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
         const fileSize = doc.fileLength ? formatBytes(Number(doc.fileLength)) : ''
         const ext = fileName.includes('.') ? fileName.split('.').pop()?.toUpperCase() : ''
         return (
-          <div className="flex items-center gap-[var(--sp-3)] py-[var(--sp-1)] px-0">
+          <div className="flex items-center" style={{ gap: 'var(--sp-3)', padding: 'var(--sp-1) 0' }}>
             <FileText size={20} strokeWidth={1.5} className="text-s-warn flex-shrink-0" />
-            <div className="min-w-0">
-              <div className="text-t1 truncate text-[var(--font-size-data)]">{fileName}</div>
-              <div className="text-t4 font-mono text-[var(--font-size-xs)]">
+            <div style={{ minWidth: 0 }}>
+              <div className="text-t1 truncate" style={{ fontSize: 'var(--font-size-data)' }}>{fileName}</div>
+              <div className="text-t4 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
                 {[ext, fileSize].filter(Boolean).join(' \u00b7 ')}
               </div>
             </div>
@@ -145,21 +145,27 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               src={`data:image/jpeg;base64,${thumb}`}
               alt={msg.content || (isGif ? 'GIF' : 'Video')}
               style={{
-                maxHeight: 'var(--sp-12)',
+                maxHeight: '200px',
                 maxWidth: '100%',
+                borderRadius: 'var(--radius-md)',
                 display: 'block',
               }}
-              className="rounded-md"
             />
             {/* Duration badge + play icon overlay */}
-            <div className="font-mono absolute bg-[var(--overlay-badge)] text-white py-px px-[var(--sp-2)] rounded-sm text-[var(--font-size-xs)]" style={{
+            <div className="font-mono" style={{
+              position: 'absolute',
               bottom: 'var(--sp-2)',
               right: 'var(--sp-2)',
+              background: 'var(--overlay-badge)',
+              color: 'white',
+              padding: '2px var(--sp-2)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--font-size-xs)',
             }}>
               {isGif ? 'GIF' : duration || 'Video'}
             </div>
             {msg.content && (
-              <div className="text-t2 text-[var(--font-size-data)] mt-[var(--sp-1)]">
+              <div className="text-t2" style={{ fontSize: 'var(--font-size-data)', marginTop: 'var(--sp-1)' }}>
                 {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
@@ -205,18 +211,21 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
 /** Quoted message reply bar. */
 const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participant, text }) => (
   <div
-    className="py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-d4 text-[var(--font-size-sm)]"
     style={{
       borderLeftWidth: 'var(--bw-accent, 3px)',
       borderLeftStyle: 'solid',
       borderLeftColor: 'var(--color-m-cht)',
+      padding: 'var(--sp-1) var(--sp-2)',
+      marginBottom: 'var(--sp-2)',
+      background: 'var(--color-d4)',
       borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
+      fontSize: 'var(--font-size-sm)',
       maxHeight: 'var(--sp-12)',
       overflow: 'hidden',
     }}
   >
     {participant && (
-      <div className="font-sans font-medium text-m-cht truncate text-[var(--font-size-xs)]">
+      <div className="font-sans font-medium text-m-cht truncate" style={{ fontSize: 'var(--font-size-xs)' }}>
         {participant.replace(/@.*/, '')}
       </div>
     )}

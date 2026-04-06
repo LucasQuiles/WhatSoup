@@ -306,7 +306,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
   actions.push(
     <button
       key="copy"
-      type="button"
       className="fc-action"
       aria-label="Copy to clipboard"
       onClick={(e) => {
@@ -328,7 +327,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
     actions.push(
       <button
         key="jump"
-        type="button"
         className="fc-action"
         aria-label="Open conversation"
         onClick={(e) => {
@@ -350,7 +348,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       actions.push(
         <button
           key="restart"
-          type="button"
           className="fc-action"
           aria-label={`Restart ${inst}`}
           onClick={(e) => { e.stopPropagation(); onRestart(inst); }}
@@ -370,7 +367,6 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       actions.push(
         <button
           key="stop"
-          type="button"
           className="fc-action fc-action--danger"
           aria-label={`Stop ${inst} instance`}
           onClick={(e) => { e.stopPropagation(); onStop(inst); }}

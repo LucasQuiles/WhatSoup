@@ -119,11 +119,11 @@ function InfoTab({
   const owner = detail.participants.find(p => p.admin === 'superadmin')
 
   return (
-    <div className="flex flex-col gap-[var(--sp-4)] py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex flex-col" style={{ gap: 'var(--sp-4)', padding: 'var(--sp-4) var(--sp-5)' }}>
 
       {/* Subject */}
       <div>
-        <label className="font-mono text-t4 block text-[var(--font-size-xs)] mb-[var(--sp-1)]">
+        <label className="font-mono text-t4 block" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}>
           Subject
         </label>
         {isAdmin ? (
@@ -135,13 +135,13 @@ function InfoTab({
             className="c-input font-mono text-t2"
           />
         ) : (
-          <div className="font-mono text-t2 text-[var(--font-size-data)]">{detail.subject}</div>
+          <div className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{detail.subject}</div>
         )}
       </div>
 
       {/* Description */}
       <div>
-        <label className="font-mono text-t4 block text-[var(--font-size-xs)] mb-[var(--sp-1)]">
+        <label className="font-mono text-t4 block" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}>
           Description
         </label>
         {isAdmin ? (
@@ -152,44 +152,53 @@ function InfoTab({
             rows={3}
             placeholder="Group description..."
             className="c-input font-mono text-t2 resize-vertical"
-            style={{ height: 'auto' }}
+            style={{ height: 'auto', minHeight: 'var(--sp-16, calc(var(--sp-12) + var(--sp-6)))' }}
           />
         ) : (
-          <div className="font-mono text-t3 text-[var(--font-size-data)]">
+          <div className="font-mono text-t3" style={{ fontSize: 'var(--font-size-data)' }}>
             {detail.desc || <span className="text-t4">No description</span>}
           </div>
         )}
       </div>
 
       {/* Meta */}
-      <div className="flex flex-col gap-[var(--sp-2)]">
+      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
         {createdDate && (
           <div className="flex items-center gap-2">
             <span className="font-mono text-t4" style={metaLabelStyle}>Created</span>
-            <span className="font-mono text-t2 text-[var(--font-size-data)]">{createdDate}</span>
+            <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{createdDate}</span>
           </div>
         )}
         {owner && (
           <div className="flex items-center gap-2">
             <span className="font-mono text-t4" style={metaLabelStyle}>Owner</span>
-            <span className="font-mono text-t2 text-[var(--font-size-data)]">{owner.id}</span>
+            <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{owner.id}</span>
           </div>
         )}
         <div className="flex items-center gap-2">
           <span className="font-mono text-t4" style={metaLabelStyle}>Group JID</span>
-          <span className="font-mono text-t4 text-[var(--font-size-xs)]">{detail.id}</span>
+          <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs) ' }}>{detail.id}</span>
         </div>
       </div>
 
       {/* Invite link */}
       <div>
-        <label className="font-mono text-t4 block text-[var(--font-size-xs)] mb-[var(--sp-1)]">
+        <label className="font-mono text-t4 block" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}>
           Invite link
         </label>
         {inviteLink ? (
-          <div className="flex flex-col gap-[var(--sp-2)]">
+          <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
             <div
-              className="font-mono text-t3 truncate text-[var(--font-size-xs)] py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md border border-solid border-[var(--b1)]"
+              className="font-mono text-t3 truncate"
+              style={{
+                fontSize: 'var(--font-size-xs)',
+                padding: 'var(--sp-2) var(--sp-3)',
+                background: 'var(--color-d1)',
+                borderRadius: 'var(--radius-md)',
+                borderWidth: 'var(--bw)',
+                borderStyle: 'solid',
+                borderColor: 'var(--b1)',
+              }}
             >
               {inviteLink}
             </div>
@@ -197,7 +206,8 @@ function InfoTab({
               <button
                 type="button"
                 onClick={handleCopyLink}
-                className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1 text-[var(--font-size-xs)]"
+                className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1"
+                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 <Copy size={11} /> Copy
               </button>
@@ -205,7 +215,8 @@ function InfoTab({
                 <button
                   type="button"
                   onClick={() => setConfirmRevoke(true)}
-                  className="c-btn c-btn-sm c-btn-danger font-mono flex items-center gap-1 text-[var(--font-size-xs)]"
+                  className="c-btn c-btn-sm c-btn-danger font-mono flex items-center gap-1"
+                  style={{ fontSize: 'var(--font-size-xs)' }}
                 >
                   <X size={11} /> Revoke
                 </button>
@@ -217,7 +228,8 @@ function InfoTab({
             type="button"
             onClick={handleFetchInviteLink}
             disabled={loadingLink}
-            className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1 text-[var(--font-size-xs)]"
+            className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1"
+            style={{ fontSize: 'var(--font-size-xs)' }}
           >
             <Link size={11} /> {loadingLink ? 'Fetching...' : 'Fetch invite link'}
           </button>
@@ -315,12 +327,12 @@ function ParticipantsTab({
   }
 
   return (
-    <div className="flex flex-col gap-[var(--sp-3)] py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex flex-col" style={{ gap: 'var(--sp-3)', padding: 'var(--sp-4) var(--sp-5)' }}>
 
       {/* Add participants (admin only) */}
       {isAdmin && (
         <div>
-          <label className="font-mono text-t4 block text-[var(--font-size-xs)] mb-[var(--sp-1)]">
+          <label className="font-mono text-t4 block" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-1)' }}>
             Add participants
           </label>
           <ContactSearchPicker
@@ -335,7 +347,8 @@ function ParticipantsTab({
               type="button"
               onClick={handleAdd}
               disabled={adding}
-              className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1 text-[var(--font-size-xs)] mt-[var(--sp-2)]"
+              className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1"
+              style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--sp-2)' }}
             >
               <UserPlus size={11} /> {adding ? 'Adding...' : `Add ${addContacts.length}`}
             </button>
@@ -346,24 +359,26 @@ function ParticipantsTab({
       {/* Pending requests (admin only) */}
       {isAdmin && pendingRequests.length > 0 && (
         <div>
-          <div className="font-mono text-t4 c-col-header text-[var(--font-size-xs)] mb-[var(--sp-2)]">
+          <div className="font-mono text-t4 c-col-header" style={{ fontSize: 'var(--font-size-xs)', marginBottom: 'var(--sp-2)' }}>
             Join requests ({pendingRequests.length})
           </div>
-          <div className="flex flex-col gap-[var(--sp-1)]">
+          <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
             {pendingRequests.map(req => (
-              <div key={req.jid} className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-[var(--s-warn-wash)] rounded-md">
-                <span className="font-mono text-t2 flex-1 truncate text-[var(--font-size-data)]">{req.jid}</span>
+              <div key={req.jid} className="flex items-center gap-2" style={{ padding: 'var(--sp-2) var(--sp-3)', background: 'var(--s-warn-wash)', borderRadius: 'var(--radius-md)' }}>
+                <span className="font-mono text-t2 flex-1 truncate" style={{ fontSize: 'var(--font-size-data)' }}>{req.jid}</span>
                 <button
                   type="button"
                   onClick={() => handleRequestAction(req.jid, 'add')}
-                  className="c-btn c-btn-sm c-btn-primary font-mono text-[var(--font-size-xs)]"
+                  className="c-btn c-btn-sm c-btn-primary font-mono"
+                  style={{ fontSize: 'var(--font-size-xs)' }}
                 >
                   Approve
                 </button>
                 <button
                   type="button"
                   onClick={() => handleRequestAction(req.jid, 'remove')}
-                  className="c-btn c-btn-sm c-btn-danger font-mono text-[var(--font-size-xs)]"
+                  className="c-btn c-btn-sm c-btn-danger font-mono"
+                  style={{ fontSize: 'var(--font-size-xs)' }}
                 >
                   Reject
                 </button>
@@ -382,7 +397,7 @@ function ParticipantsTab({
       />
 
       {/* Participant list */}
-      <div className="flex flex-col gap-[var(--sp-1)]">
+      <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
         {filtered.map(p => {
           const badge = roleBadgeStyle(p.admin)
           const myPhoneNum = myJid?.split('@')[0]
@@ -390,16 +405,20 @@ function ParticipantsTab({
           return (
             <div
               key={p.id}
-              className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] rounded-md"
+              className="flex items-center gap-2"
+              style={{ padding: 'var(--sp-2) var(--sp-3)', borderRadius: 'var(--radius-md)' }}
             >
-              <span className="font-mono text-t2 flex-1 truncate text-[var(--font-size-data)]">
+              <span className="font-mono text-t2 flex-1 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
                 {p.id}
-                {isMe && <span className="text-t4 ml-[var(--sp-1)]">(you)</span>}
+                {isMe && <span className="text-t4" style={{ marginLeft: 'var(--sp-1)' }}>(you)</span>}
               </span>
               {badge && (
                 <span
-                  className="font-mono flex-shrink-0 text-[var(--font-size-xs)] py-[var(--bw)] px-[var(--sp-1)] rounded-sm"
+                  className="font-mono flex-shrink-0"
                   style={{
+                    fontSize: 'var(--font-size-xs)',
+                    padding: 'var(--bw) var(--sp-1)',
+                    borderRadius: 'var(--radius-sm)',
                     background: badge.bg,
                     color: badge.color,
                   }}
@@ -412,7 +431,8 @@ function ParticipantsTab({
                   <button
                     type="button"
                     onClick={() => handleToggleAdmin(p)}
-                    className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1 text-[var(--font-size-xs)]"
+                    className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1"
+                    style={{ fontSize: 'var(--font-size-xs)' }}
                     title={p.admin ? 'Demote' : 'Promote to admin'}
                   >
                     {p.admin ? <ShieldOff size={11} /> : <ShieldCheck size={11} />}
@@ -420,7 +440,8 @@ function ParticipantsTab({
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(p)}
-                    className="c-btn c-btn-sm c-btn-danger font-mono flex items-center gap-1 text-[var(--font-size-xs)]"
+                    className="c-btn c-btn-sm c-btn-danger font-mono flex items-center gap-1"
+                    style={{ fontSize: 'var(--font-size-xs)' }}
                     title="Remove participant"
                   >
                     <UserMinus size={11} />
@@ -547,13 +568,13 @@ function SettingsTab({
   }
 
   return (
-    <div className="flex flex-col py-[var(--sp-4)] px-[var(--sp-5)] gap-[var(--sp-1)]">
+    <div className="flex flex-col" style={{ padding: 'var(--sp-4) var(--sp-5)', gap: 'var(--sp-1)' }}>
 
       {/* Messaging — announce */}
       <div style={rowStyle}>
         <div>
           <div className="font-mono text-t2" style={labelStyle}>Messaging</div>
-          <div className="font-mono text-t4 text-[var(--font-size-xs)]">
+          <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
             {detail.announce ? 'Only admins can send' : 'All participants can send'}
           </div>
         </div>
@@ -563,7 +584,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'announce'}
               onClick={() => handleSetting('not_announcement', 'announce')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${!detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${!detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               All
             </button>
@@ -571,7 +593,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'announce'}
               onClick={() => handleSetting('announcement', 'announce')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               Admins only
             </button>
@@ -583,7 +606,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="font-mono text-t2" style={labelStyle}>Edit group info</div>
-          <div className="font-mono text-t4 text-[var(--font-size-xs)]">
+          <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
             {detail.locked ? 'Only admins can edit info' : 'All participants can edit info'}
           </div>
         </div>
@@ -593,7 +616,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'locked'}
               onClick={() => handleSetting('unlocked', 'locked')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${!detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${!detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               All
             </button>
@@ -601,7 +625,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'locked'}
               onClick={() => handleSetting('locked', 'locked')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               Admins only
             </button>
@@ -614,7 +639,7 @@ function SettingsTab({
         <div style={rowStyle}>
           <div>
             <div className="font-mono text-t2" style={labelStyle}>Who can add members</div>
-            <div className="font-mono text-t4 text-[var(--font-size-xs)]">
+            <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
               {detail.memberAddMode === 'admin_add' ? 'Admins only' : 'All members'}
             </div>
           </div>
@@ -623,7 +648,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'memberAddMode'}
               onClick={() => handleMemberAddMode('all_member_add')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${detail.memberAddMode !== 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${detail.memberAddMode !== 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               All
             </button>
@@ -631,7 +657,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'memberAddMode'}
               onClick={() => handleMemberAddMode('admin_add')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${detail.memberAddMode === 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${detail.memberAddMode === 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               Admins only
             </button>
@@ -644,7 +671,7 @@ function SettingsTab({
         <div style={rowStyle}>
           <div>
             <div className="font-mono text-t2" style={labelStyle}>Join approval</div>
-            <div className="font-mono text-t4 text-[var(--font-size-xs)]">
+            <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
               {detail.joinApprovalMode === 'on' ? 'Admin approval required' : 'No approval required'}
             </div>
           </div>
@@ -653,7 +680,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'joinApproval'}
               onClick={() => handleJoinApproval('off')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${detail.joinApprovalMode !== 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${detail.joinApprovalMode !== 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               Off
             </button>
@@ -661,7 +689,8 @@ function SettingsTab({
               type="button"
               disabled={saving === 'joinApproval'}
               onClick={() => handleJoinApproval('on')}
-              className={`c-btn c-btn-sm font-mono text-[var(--font-size-xs)] ${detail.joinApprovalMode === 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              className={`c-btn c-btn-sm font-mono ${detail.joinApprovalMode === 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+              style={{ fontSize: 'var(--font-size-xs)' }}
             >
               On
             </button>
@@ -673,7 +702,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="font-mono text-t2" style={labelStyle}>Disappearing messages</div>
-          <div className="font-mono text-t4 text-[var(--font-size-xs)]">
+          <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
             {ephemeralLabel(detail.ephemeralDuration)}
           </div>
         </div>
@@ -682,7 +711,8 @@ function SettingsTab({
             value={detail.ephemeralDuration ?? 0}
             disabled={saving === 'ephemeral'}
             onChange={e => handleEphemeral(Number(e.target.value))}
-            className="font-mono text-t2 c-btn c-btn-sm c-btn-ghost text-[var(--font-size-xs)] bg-d1"
+            className="font-mono text-t2 c-btn c-btn-sm c-btn-ghost"
+            style={{ fontSize: 'var(--font-size-xs)', background: 'var(--color-d1)' }}
           >
             {EPHEMERAL_OPTIONS.map(opt => (
               <option key={opt.seconds} value={opt.seconds}>{opt.label}</option>
@@ -692,11 +722,12 @@ function SettingsTab({
       </div>
 
       {/* Leave group */}
-      <div className="mt-[var(--sp-4)]">
+      <div style={{ marginTop: 'var(--sp-4)' }}>
         <button
           type="button"
           onClick={() => setConfirmLeave(true)}
-          className="c-btn c-btn-danger font-mono flex items-center gap-1 text-[var(--font-size-data)]"
+          className="c-btn c-btn-danger font-mono flex items-center gap-1"
+          style={{ fontSize: 'var(--font-size-data)' }}
         >
           <LogOut size={14} /> Leave group
         </button>
@@ -763,22 +794,27 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
         role="dialog"
         aria-modal="true"
         aria-labelledby="group-detail-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-wizard)] max-w-[var(--panel-max-inline)] max-h-[var(--modal-max-h)]"
+        className="c-dialog flex flex-col"
+        style={{
+          width: 'var(--panel-wizard)',
+          maxWidth: 'var(--panel-max-inline)',
+          maxHeight: 'var(--modal-max-h)',
+        }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div className="c-dialog-header gap-3 flex-shrink-0">
         <div
-          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-[var(--font-size-data)] text-t1"
-          style={{ background: color }}
+          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold"
+          style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', borderRadius: 'var(--radius-circle)', background: color, color: 'var(--color-t1)', fontSize: 'var(--font-size-data)' }}
         >
           {initials}
         </div>
           <div className="flex-1 min-w-0">
-            <div id="group-detail-dialog-title" className="font-sans font-semibold truncate text-[var(--font-size-lg)]">
+            <div id="group-detail-dialog-title" className="font-sans font-semibold truncate" style={{ fontSize: 'var(--font-size-lg)' }}>
               {group.subject}
             </div>
-            <div className="font-mono text-t4 text-[var(--font-size-xs)]">
+            <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
               {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
             </div>
           </div>
@@ -789,8 +825,14 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
 
         {/* Tab bar */}
         <div
-          className="flex gap-1 flex-shrink-0 py-[var(--sp-2)] px-[var(--sp-4)] c-border-b"
+          className="flex gap-1 flex-shrink-0"
           role="tablist"
+          style={{
+            padding: 'var(--sp-2) var(--sp-4)',
+            borderBottomWidth: 'var(--bw)',
+            borderBottomStyle: 'solid',
+            borderBottomColor: 'var(--b1)',
+          }}
         >
           {(['info', 'participants', 'settings'] as const).map(tab => (
             <button

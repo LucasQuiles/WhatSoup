@@ -24,14 +24,13 @@ export function MetricsTab({
   line?: LineInstance
 }) {
   return (
-    <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex-1 overflow-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
       {/* Range selector */}
-      <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-4)]">
+      <div className="flex items-center" style={{ gap: 'var(--sp-2)', marginBottom: 'var(--sp-4)' }}>
         <span className="c-section-label">Range</span>
         {(['24h', '7d', '30d'] as const).map((r) => (
           <button
             key={r}
-            type="button"
             className={`c-btn c-btn-sm ${metricsRange === r ? 'c-btn-primary' : 'c-btn-ghost'}`}
             onClick={() => setMetricsRange(r)}
           >
@@ -40,7 +39,6 @@ export function MetricsTab({
         ))}
         {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
           <button
-            type="button"
             className="c-btn c-btn-sm c-btn-ghost"
             onClick={() => {
               const csv = metricsToCSV(metrics.messageVolume);
@@ -64,7 +62,7 @@ export function MetricsTab({
           onRetry={() => setMetricsRange(metricsRange)}
         />
       ) : metrics?.messageVolume && metrics.messageVolume.length > 0 ? (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <MetricsChart data={metrics.messageVolume} />
           {metrics.activeHours && (
             <ActiveHoursHeatmap data={metrics.activeHours} range={metricsRange} />
@@ -73,52 +71,81 @@ export function MetricsTab({
           {/* Token Usage Card */}
           {line?.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0) && (
             <section
-              className="c-card font-mono p-[var(--sp-4)] bg-d2"
+              className="c-card font-mono"
+              style={{ padding: 'var(--sp-4)', background: 'var(--color-d2)' }}
             >
               <div
-                className="font-mono text-t4 text-[var(--font-size-xs)] mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
+                className="font-mono text-t4"
+                style={{
+                  fontSize: 'var(--font-size-xs)',
+                  marginBottom: 'var(--sp-3)',
+                  textTransform: 'uppercase',
+                  letterSpacing: 'var(--tracking-label)',
+                }}
               >
                 Token Usage
               </div>
-              <div className="flex items-center gap-[var(--sp-5)]">
-                <div className="flex items-center gap-[var(--sp-2)]">
+              <div className="flex items-center" style={{ gap: 'var(--sp-5)' }}>
+                <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
                   <div
-                    className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-m-pas"
+                    style={{
+                      width: 'var(--dot-header)',
+                      height: 'var(--dot-header)',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'var(--color-m-pas)',
+                    }}
                   />
-                  <span className="text-[var(--font-size-data)] text-t3">Input</span>
-                  <span className="font-medium text-[var(--font-size-data)] text-t1">
+                  <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t3)' }}>Input</span>
+                  <span className="font-medium" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t1)' }}>
                     {line.tokenUsage.input.toLocaleString()}
                   </span>
                 </div>
-                <div className="flex items-center gap-[var(--sp-2)]">
+                <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
                   <div
-                    className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-m-cht"
+                    style={{
+                      width: 'var(--dot-header)',
+                      height: 'var(--dot-header)',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'var(--color-m-cht)',
+                    }}
                   />
-                  <span className="text-[var(--font-size-data)] text-t3">Output</span>
-                  <span className="font-medium text-[var(--font-size-data)] text-t1">
+                  <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t3)' }}>Output</span>
+                  <span className="font-medium" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t1)' }}>
                     {line.tokenUsage.output.toLocaleString()}
                   </span>
                 </div>
-                <div className="flex items-center gap-[var(--sp-2)]">
+                <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
                   <Cpu size={13} strokeWidth={1.5} className="text-t4" />
-                  <span className="text-[var(--font-size-data)] text-t4">Total</span>
-                  <span className="text-[var(--font-size-data)] text-t2">
+                  <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t4)' }}>Total</span>
+                  <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t2)' }}>
                     {(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}
                   </span>
                 </div>
               </div>
               {/* Proportional bar */}
               <div
-                className="mt-[var(--sp-3)] h-[var(--dot-feed)] rounded-sm bg-d4 overflow-hidden flex"
+                style={{
+                  marginTop: 'var(--sp-3)',
+                  height: 'var(--dot-feed)',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--color-d4)',
+                  overflow: 'hidden',
+                  display: 'flex',
+                }}
               >
                 <div
                   style={{
                     width: `${(line.tokenUsage.input / (line.tokenUsage.input + line.tokenUsage.output)) * 100}%`,
+                    background: 'var(--color-m-pas)',
+                    height: '100%',
                   }}
-                  className="bg-m-pas h-full"
                 />
                 <div
-                  className="flex-1 bg-m-cht h-full"
+                  style={{
+                    flex: 1,
+                    background: 'var(--color-m-cht)',
+                    height: '100%',
+                  }}
                 />
               </div>
             </section>
@@ -127,10 +154,17 @@ export function MetricsTab({
           {/* Model Configuration Card */}
           {line?.models && (
             <section
-              className="c-card font-mono p-[var(--sp-4)] bg-d2"
+              className="c-card font-mono"
+              style={{ padding: 'var(--sp-4)', background: 'var(--color-d2)' }}
             >
               <div
-                className="font-mono text-t4 text-[var(--font-size-xs)] mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
+                className="font-mono text-t4"
+                style={{
+                  fontSize: 'var(--font-size-xs)',
+                  marginBottom: 'var(--sp-3)',
+                  textTransform: 'uppercase',
+                  letterSpacing: 'var(--tracking-label)',
+                }}
               >
                 Model Configuration
               </div>
@@ -138,17 +172,16 @@ export function MetricsTab({
                 style={{
                   display: 'grid',
                   gridTemplateColumns: 'auto 1fr',
-                  rowGap: 'var(--sp-1)',
-                  columnGap: 'var(--sp-3)',
+                  gap: 'var(--sp-1) var(--sp-3)',
                 }}
               >
                 {Object.entries(line.models).map(([role, model]) =>
                   model ? (
                     <React.Fragment key={role}>
-                      <span className="text-[var(--font-size-data)] text-t4 capitalize">
+                      <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t4)', textTransform: 'capitalize' }}>
                         {role}
                       </span>
-                      <span className="text-[var(--font-size-data)] text-m-pas">
+                      <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-pas)' }}>
                         {model}
                       </span>
                     </React.Fragment>

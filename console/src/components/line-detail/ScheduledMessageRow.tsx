@@ -68,7 +68,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       className="c-card overflow-hidden"
     >
       {/* Main row */}
-      <div className="flex items-start gap-3 py-[var(--sp-3)] px-[var(--sp-4)]">
+      <div className="flex items-start gap-3" style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
         {/* Content type icon */}
         <div style={{ marginTop: 'calc(var(--sp-1) / 2)' }}>
           <ContentTypeIcon type={message.contentType} />
@@ -79,20 +79,26 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Top line: preview + status badge */}
           <div className="flex items-center gap-2 flex-wrap">
             <span
-              className="font-mono text-t2 truncate flex-1 min-w-0 text-[var(--font-size-data)]"
+              className="font-mono text-t2 truncate flex-1 min-w-0"
+              style={{ fontSize: 'var(--font-size-data)' }}
             >
               {preview || <span className="text-t4 italic">(no preview)</span>}
             </span>
             {/* Status badge */}
             <span
-              className="flex-shrink-0 font-mono inline-flex items-center text-[var(--font-size-xs)] gap-[var(--sp-1)]"
+              className="flex-shrink-0 font-mono inline-flex items-center"
               style={{
+                fontSize: 'var(--font-size-xs)',
                 color: statusColor(message.status),
+                gap: 'var(--sp-1)',
               }}
             >
               <span
-                className="inline-block shrink-0 w-[var(--radius-md)] h-[var(--radius-md)] rounded-full"
+                className="inline-block shrink-0"
                 style={{
+                  width: 'var(--radius-md)',
+                  height: 'var(--radius-md)',
+                  borderRadius: 'var(--radius-circle)',
                   background: statusColor(message.status),
                 }}
               />
@@ -101,7 +107,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           </div>
 
           {/* Second line: target + scheduled time */}
-          <div className="flex items-center gap-2 flex-wrap font-mono text-t4 text-[var(--font-size-xs)] mt-[var(--sp-0h)]">
+          <div className="flex items-center gap-2 flex-wrap font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--sp-0h)' }}>
             <span>{message.chatName ?? message.chatJid}</span>
             <span style={metaDividerStyle}>·</span>
             <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
@@ -110,7 +116,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             {isRecurring && (
               <>
                 <span style={metaDividerStyle}>·</span>
-                <span className="flex items-center gap-1 text-m-cht">
+                <span className="flex items-center gap-1" style={{ color: 'var(--color-m-cht)' }}>
                   <RefreshCw size={10} strokeWidth={2} />
                   {cronToHuman(message.recurrence!)}
                 </span>
@@ -129,7 +135,12 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Error message if failed */}
           {message.status === 'failed' && message.error && (
             <div
-              className="font-mono text-[var(--font-size-xs)] text-s-crit mt-[var(--sp-0h)]"
+              className="font-mono"
+              style={{
+                fontSize: 'var(--font-size-xs)',
+                color: 'var(--color-s-crit)',
+                marginTop: 'var(--sp-0h)',
+              }}
             >
               {message.error}
             </div>
@@ -144,7 +155,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 type="button"
                 onClick={() => onEdit(message)}
                 aria-label="Edit scheduled message"
-                className="c-btn c-btn-sm c-btn-ghost font-mono text-[var(--font-size-xs)]"
+                className="c-btn c-btn-sm c-btn-ghost font-mono"
+                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 <Pencil size={11} strokeWidth={1.75} />
               </button>
@@ -153,7 +165,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 onClick={() => onCancel(message.id)}
                 disabled={cancelling === message.id}
                 aria-label={`Cancel scheduled message to ${message.chatName ?? message.chatJid}`}
-                className="c-btn c-btn-sm c-btn-danger font-mono text-[var(--font-size-xs)]"
+                className="c-btn c-btn-sm c-btn-danger font-mono"
+                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 {cancelling === message.id
                   ? <Loader2 size={11} className="animate-spin" />
@@ -165,7 +178,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             type="button"
             onClick={() => onDuplicate(message)}
             aria-label="Duplicate as new scheduled message"
-            className="c-btn c-btn-sm c-btn-ghost font-mono text-[var(--font-size-xs)]"
+            className="c-btn c-btn-sm c-btn-ghost font-mono"
+            style={{ fontSize: 'var(--font-size-xs)' }}
             title="Duplicate"
           >
             <Copy size={11} strokeWidth={1.75} />
@@ -189,7 +203,16 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Expanded details */}
       {expanded && (
         <div
-          className="font-mono text-t4 flex flex-wrap text-[var(--font-size-xs)] py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 gap-[var(--sp-3)] c-border-b"
+          className="font-mono text-t4 flex flex-wrap"
+          style={{
+            fontSize: 'var(--font-size-xs)',
+            padding: 'var(--sp-2) var(--sp-4)',
+            background: 'var(--color-d1)',
+            borderTopWidth: 'var(--bw)',
+            borderTopStyle: 'solid',
+            borderTopColor: 'var(--b1)',
+            gap: 'var(--sp-3)',
+          }}
         >
           {message.nextRunAt && (
             <span>Next run: {new Date(message.nextRunAt * 1000).toLocaleString()}</span>
