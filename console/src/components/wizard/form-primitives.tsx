@@ -1,4 +1,4 @@
-import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode } from 'react'
+import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode, useId } from 'react'
 import { Check } from 'lucide-react'
 import { inputStyle, selectStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle, getBorderColor, confirmCheckStyle } from './form-styles'
 
@@ -9,22 +9,25 @@ interface FieldProps {
   error?: string
   helper?: string
   confirmed?: boolean
-  children: ReactNode
+  children: (id: string) => ReactNode
 }
 
-export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, children }) => (
-  <div>
-    <label className="c-heading" style={labelStyle}>{label}</label>
-    <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
-      {!error && confirmed && (
-        <Check size={16} className="wizard-check" style={confirmCheckStyle} />
-      )}
+export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, children }) => {
+  const id = useId()
+  return (
+    <div>
+      <label htmlFor={id} className="c-heading" style={labelStyle}>{label}</label>
+      <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>{children(id)}</div>
+        {!error && confirmed && (
+          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+        )}
+      </div>
+      {error && <div style={errorStyle}>{error}</div>}
+      {!error && helper && <div style={helperStyle}>{helper}</div>}
     </div>
-    {error && <div style={errorStyle}>{error}</div>}
-    {!error && helper && <div style={helperStyle}>{helper}</div>}
-  </div>
-)
+  )
+}
 
 // ── Typed input components ──
 

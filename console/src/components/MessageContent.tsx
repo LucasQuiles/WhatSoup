@@ -220,7 +220,7 @@ const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participa
       background: 'var(--color-d4)',
       borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
       fontSize: 'var(--font-size-sm)',
-      maxHeight: '48px',
+      maxHeight: 'var(--sp-12)',
       overflow: 'hidden',
     }}
   >

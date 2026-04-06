@@ -392,14 +392,17 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           {/* System Prompt — hidden for passive lines */}
           {type !== 'passive' && (
             <Field label="System Prompt" error={errors.systemPrompt} confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}>
-              <TextArea
-                value={systemPrompt}
-                onChange={(e) => onChange({ systemPrompt: e.target.value })}
-                placeholder="You are a helpful assistant..."
-                error={!!errors.systemPrompt}
-                confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}
-                minHeight={120}
-              />
+              {(id) => (
+                <TextArea
+                  id={id}
+                  value={systemPrompt}
+                  onChange={(e) => onChange({ systemPrompt: e.target.value })}
+                  placeholder="You are a helpful assistant..."
+                  error={!!errors.systemPrompt}
+                  confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}
+                  minHeight={120}
+                />
+              )}
             </Field>
           )}
 
@@ -450,36 +453,45 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {activeTab === 'permissions' && type === 'agent' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}>
-            <TextInput
-              value={agentOptions.cwd ?? ''}
-              onChange={(e) => handleAgentOption('cwd', e.target.value)}
-              placeholder="/home/q/LAB/your-project"
-              error={!!errors.cwd}
-              confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}
-            />
+            {(id) => (
+              <TextInput
+                id={id}
+                value={agentOptions.cwd ?? ''}
+                onChange={(e) => handleAgentOption('cwd', e.target.value)}
+                placeholder="/home/q/LAB/your-project"
+                error={!!errors.cwd}
+                confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}
+              />
+            )}
           </Field>
           <Field label="Session Scope" helper={SESSION_SCOPE_DESCRIPTIONS[agentOptions.sessionScope ?? 'per_chat']} confirmed>
-            <SelectInput
-              value={agentOptions.sessionScope ?? 'per_chat'}
-              onChange={(e) => handleAgentOption('sessionScope', e.target.value)}
-              confirmed
-            >
-              <option value="single">single</option>
-              <option value="shared">shared</option>
-              <option value="per_chat">per_chat</option>
-            </SelectInput>
+            {(id) => (
+              <SelectInput
+                id={id}
+                value={agentOptions.sessionScope ?? 'per_chat'}
+                onChange={(e) => handleAgentOption('sessionScope', e.target.value)}
+                confirmed
+              >
+                <option value="single">single</option>
+                <option value="shared">shared</option>
+                <option value="per_chat">per_chat</option>
+              </SelectInput>
+            )}
           </Field>
 
           <Field label="Provider" helper="AI backend for this agent instance" confirmed>
-            <SelectInput
-              value={agentOptions.provider ?? DEFAULT_PROVIDER_ID}
-              onChange={(e) => handleProviderChange(e.target.value)}
-              confirmed
-            >
-              {PROVIDERS.map(p => (
-                <option key={p.id} value={p.id}>{p.displayName}</option>
-              ))}
-            </SelectInput>
+            {(id) => (
+              <SelectInput
+                id={id}
+                value={agentOptions.provider ?? DEFAULT_PROVIDER_ID}
+                onChange={(e) => handleProviderChange(e.target.value)}
+                confirmed
+              >
+                {PROVIDERS.map(p => (
+                  <option key={p.id} value={p.id}>{p.displayName}</option>
+                ))}
+              </SelectInput>
+            )}
           </Field>
 
           {providerConfigFields.map(field => {
@@ -491,8 +503,9 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 label={field.label}
                 confirmed={hasValue}
               >
-                {field.inputType === 'number' ? (
+                {(id) => (field.inputType === 'number' ? (
                   <NumberInput
+                    id={id}
                     value={(fieldValue as number) ?? ''}
                     onChange={(e) => {
                       const raw = e.target.value
@@ -505,12 +518,13 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                   />
                 ) : (
                   <TextInput
+                    id={id}
                     value={(fieldValue as string) ?? ''}
                     onChange={(e) => handleProviderConfigOption(field.key, e.target.value || undefined)}
                     placeholder={field.placeholder}
                     confirmed={hasValue}
                   />
-                )}
+                ))}
               </Field>
             )
           })}
@@ -531,12 +545,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           />
           {(agentOptions.perUserDirs?.enabled ?? false) && (
             <Field label="Base path" helper="Create separate workspace folders per contact" confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}>
-              <TextInput
-                value={agentOptions.perUserDirs?.basePath ?? 'users'}
-                onChange={(e) => handlePerUserDirs('basePath', e.target.value)}
-                placeholder="users"
-                confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}
-              />
+              {(id) => (
+                <TextInput
+                  id={id}
+                  value={agentOptions.perUserDirs?.basePath ?? 'users'}
+                  onChange={(e) => handlePerUserDirs('basePath', e.target.value)}
+                  placeholder="users"
+                  confirmed={(agentOptions.perUserDirs?.basePath ?? 'users').trim().length > 0}
+                />
+              )}
             </Field>
           )}
 
@@ -669,20 +686,23 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               Controls which tools Claude Code is allowed to use. Default grants full bypass with standard MCP wildcards.
             </div>
             <Field label="Template" confirmed>
-              <SelectInput
-                value={(data.settingsJsonMode as string) ?? 'default'}
-                onChange={(e) => {
-                  const mode = e.target.value
-                  onChange({ settingsJsonMode: mode })
-                  if (mode === 'default') {
-                    onChange({ settingsJson: undefined, settingsJsonMode: mode })
-                  }
-                }}
-                confirmed
-              >
-                <option value="default">Default (bypassPermissions + standard tools)</option>
-                <option value="custom">Custom</option>
-              </SelectInput>
+              {(id) => (
+                <SelectInput
+                  id={id}
+                  value={(data.settingsJsonMode as string) ?? 'default'}
+                  onChange={(e) => {
+                    const mode = e.target.value
+                    onChange({ settingsJsonMode: mode })
+                    if (mode === 'default') {
+                      onChange({ settingsJson: undefined, settingsJsonMode: mode })
+                    }
+                  }}
+                  confirmed
+                >
+                  <option value="default">Default (bypassPermissions + standard tools)</option>
+                  <option value="custom">Custom</option>
+                </SelectInput>
+              )}
             </Field>
             {(data.settingsJsonMode as string) === 'custom' && (
               <>
@@ -753,40 +773,52 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {activeTab === 'limits' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <Field label="Messages per hour" confirmed>
-            <NumberInput
-              value={rateLimitPerHour}
-              onChange={(e) => onChange({ rateLimitPerHour: Number(e.target.value) })}
-              min={1}
-              confirmed
-            />
+            {(id) => (
+              <NumberInput
+                id={id}
+                value={rateLimitPerHour}
+                onChange={(e) => onChange({ rateLimitPerHour: Number(e.target.value) })}
+                min={1}
+                confirmed
+              />
+            )}
           </Field>
           <Field label="Max tokens per response" confirmed>
-            <NumberInput
-              value={maxTokens}
-              onChange={(e) => onChange({ maxTokens: Number(e.target.value) })}
-              min={1}
-              confirmed
-            />
+            {(id) => (
+              <NumberInput
+                id={id}
+                value={maxTokens}
+                onChange={(e) => onChange({ maxTokens: Number(e.target.value) })}
+                min={1}
+                confirmed
+              />
+            )}
           </Field>
           <Field label="Token budget per session" confirmed>
-            <NumberInput
-              value={tokenBudget}
-              onChange={(e) => onChange({ tokenBudget: Number(e.target.value) })}
-              min={1}
-              confirmed
-            />
+            {(id) => (
+              <NumberInput
+                id={id}
+                value={tokenBudget}
+                onChange={(e) => onChange({ tokenBudget: Number(e.target.value) })}
+                min={1}
+                confirmed
+              />
+            )}
           </Field>
 
           {/* Tool update verbosity */}
           <Field label="Tool update verbosity" helper="Minimal suppresses technical agent lifecycle messages" confirmed>
-            <SelectInput
-              value={toolUpdateMode}
-              onChange={(e) => onChange({ toolUpdateMode: e.target.value })}
-              confirmed
-            >
-              <option value="full">Full</option>
-              <option value="minimal">Minimal</option>
-            </SelectInput>
+            {(id) => (
+              <SelectInput
+                id={id}
+                value={toolUpdateMode}
+                onChange={(e) => onChange({ toolUpdateMode: e.target.value })}
+                confirmed
+              >
+                <option value="full">Full</option>
+                <option value="minimal">Minimal</option>
+              </SelectInput>
+            )}
           </Field>
         </div>
       )}
@@ -795,12 +827,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {activeTab === 'rag' && (
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <Field label="Pinecone Index Name" confirmed={pineconeIndex.trim().length > 0}>
-            <TextInput
-              value={pineconeIndex}
-              onChange={(e) => onChange({ pineconeIndex: e.target.value })}
-              placeholder="my-index"
-              confirmed={pineconeIndex.trim().length > 0}
-            />
+            {(id) => (
+              <TextInput
+                id={id}
+                value={pineconeIndex}
+                onChange={(e) => onChange({ pineconeIndex: e.target.value })}
+                placeholder="my-index"
+                confirmed={pineconeIndex.trim().length > 0}
+              />
+            )}
           </Field>
           <div>
             <label className="c-label" style={labelStyle}>
@@ -842,22 +877,27 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             checked={pineconeRerank}
             onChange={(v) => onChange({ pineconeRerank: v })}
           />
-          <Field label="TopK" confirmed>
-            <NumberInput
-              value={pineconeTopK}
-              onChange={(e) => onChange({ pineconeTopK: Number(e.target.value) })}
-              min={1}
-              confirmed
-            />
-          </Field>
-          <Field label="Allowed indexes" helper="Restrict which Pinecone indexes this instance can query" confirmed={pineconeAllowedIndexes.length > 0}>
-            <TagInput
-              values={pineconeAllowedIndexes}
-              onChange={(values) => onChange({ pineconeAllowedIndexes: values })}
-              placeholder="Index name"
-              accentColor={pineconeAllowedIndexes.length > 0 ? 'var(--wizard-accent)' : undefined}
-            />
-          </Field>
+            <Field label="TopK" confirmed>
+              {(id) => (
+                <NumberInput
+                  id={id}
+                  value={pineconeTopK}
+                  onChange={(e) => onChange({ pineconeTopK: Number(e.target.value) })}
+                  min={1}
+                  confirmed
+                />
+              )}
+            </Field>
+            <Field label="Allowed indexes" helper="Restrict which Pinecone indexes this instance can query" confirmed={pineconeAllowedIndexes.length > 0}>
+              {() => (
+                <TagInput
+                  values={pineconeAllowedIndexes}
+                  onChange={(values) => onChange({ pineconeAllowedIndexes: values })}
+                  placeholder="Index name"
+                  accentColor={pineconeAllowedIndexes.length > 0 ? 'var(--wizard-accent)' : undefined}
+                />
+              )}
+            </Field>
         </div>
       )}
       {/* Skip — sticky at bottom, right-aligned */}

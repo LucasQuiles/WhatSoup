@@ -184,8 +184,9 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
       {/* Jump to newest */}
       {showJumpToBottom && (
-        <div
-          className="absolute flex items-center justify-center cursor-pointer hover:text-t2 c-hover text-t5"
+        <button
+          type="button"
+          className="c-btn c-btn-sm absolute flex items-center justify-center hover:text-t2 c-hover text-t5"
           style={{
             left: '50%',
             transform: 'translateX(-50%)',
@@ -195,13 +196,14 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
             borderRadius: 'var(--radius-md)',
             backdropFilter: 'blur(4px)',
-            zIndex: 10,
+            zIndex: 'var(--z-float)',
           }}
           onClick={jumpToBottom}
+          aria-label="Jump to newest"
         >
           <ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />
           <span style={{ fontSize: 'var(--font-size-sm)' }}>Jump to newest</span>
-        </div>
+        </button>
       )}
       </div>
 
@@ -225,6 +227,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             overflow: 'hidden',
           }}
           placeholder="Type a reply..."
+          aria-label="Type a reply"
           value={msgText}
           onChange={e => {
             setMsgText(e.target.value)

@@ -66,9 +66,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                   className="absolute"
                   style={{
                     bottom: "-1px",
-                    left: "12px",
-                    right: "12px",
-                    height: "2px",
+                    left: "var(--sp-3)",
+                    right: "var(--sp-3)",
+                    height: "var(--bw-accent)",
                     background: "var(--color-s-ok)",
                     borderRadius: "var(--radius-sm)",
                   }}
@@ -100,11 +100,11 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                     fontSize: "var(--font-size-xs)",
                     background: "var(--color-s-warn)",
                     color: "var(--color-d0)",
-                    padding: "1px 5px",
+                    padding: "1px var(--sp-1)",
                     borderRadius: 'var(--radius-md)',
-                    minWidth: "16px",
+                    minWidth: "var(--sp-4)",
                     textAlign: "center",
-                    marginLeft: "2px",
+                    marginLeft: "var(--sp-0h)",
                   }}
                 >
                   {unreadCount > 99 ? "99+" : unreadCount}
@@ -115,9 +115,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                   className="absolute"
                   style={{
                     bottom: "-1px",
-                    left: "12px",
-                    right: "12px",
-                    height: "2px",
+                    left: "var(--sp-3)",
+                    right: "var(--sp-3)",
+                    height: "var(--bw-accent)",
                     background: "var(--color-s-ok)",
                     borderRadius: "var(--radius-sm)",
                   }}
@@ -147,9 +147,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                   className="absolute"
                   style={{
                     bottom: "-1px",
-                    left: "12px",
-                    right: "12px",
-                    height: "2px",
+                    left: "var(--sp-3)",
+                    right: "var(--sp-3)",
+                    height: "var(--bw-accent)",
                     background: "var(--color-s-ok)",
                     borderRadius: "var(--radius-sm)",
                   }}
@@ -194,7 +194,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               className="flex items-center gap-1 c-hover cursor-pointer"
               style={{
                 color: 'var(--color-m-cht)',
-                padding: '2px 6px',
+                padding: '2px var(--sp-1h)',
                 borderRadius: 'var(--radius-sm)',
                 background: 'var(--m-cht-soft)',
               }}
