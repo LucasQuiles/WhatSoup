@@ -109,12 +109,12 @@ describe('SoupKitchen loading state', () => {
     expect(kpis.totalMedia).toBe(0);
   });
 
-  it('shows "No connections match" when filtered list is empty', () => {
+  it('shows "No instances match" when filtered list is empty', () => {
     const filtered = filterLines([], null, 'all', '');
     expect(filtered).toHaveLength(0);
-    // The component renders "No connections match the current filters" for empty filtered list
+    // The component renders "No instances match the current filters" for empty filtered list
     const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain('No connections match the current filters');
+    expect(source).toContain('No instances match the current filters');
   });
 
   it('defaults fleet metrics sparklines to undefined when no data', () => {
@@ -479,8 +479,8 @@ describe('SoupKitchen structural composition', () => {
     expect(source).toContain("import LineTags from");
   });
 
-  it('renders the Connections heading', () => {
-    expect(source).toContain('Connections');
+  it('renders the Instances heading', () => {
+    expect(source).toContain('Instances');
   });
 
   it('renders a search input for lines', () => {
