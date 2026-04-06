@@ -115,7 +115,7 @@ function makeMessenger(): Messenger {
 
 function makeConnection() {
   return {
-    contactsDir: { contacts: new Map() },
+    contactsDir: { contacts: new Map(), getLidMappings: () => undefined },
     presenceCache: new PresenceCache(),
     getSocket: () => null,
     sendRaw: async () => ({ waMessageId: null }),

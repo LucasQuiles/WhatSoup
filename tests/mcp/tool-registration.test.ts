@@ -31,7 +31,7 @@ import type { ConnectionManager } from '../../src/transport/connection.ts';
 
 function makeConnection(): ConnectionManager {
   return {
-    contactsDir: { contacts: new Map() },
+    contactsDir: { contacts: new Map(), getLidMappings: () => undefined },
     presenceCache: new PresenceCache(),
     getSocket: () => null,
     sendRaw: async () => ({ waMessageId: null }),

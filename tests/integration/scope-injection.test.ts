@@ -73,7 +73,7 @@ function makeMockSock(captured: CapturedCall[] = []): WhatsAppSocket {
 
 function makeMockConnection(): ConnectionManager {
   return {
-    contactsDir: { contacts: new Map<string, string>() },
+    contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
     sendRaw: async (_jid: string, _content: unknown) => ({ waMessageId: null }),
     sendMedia: async (_jid: string, _media: unknown) => ({ waMessageId: null }),
     botJid: null,
@@ -381,7 +381,7 @@ describe('D. cross-conversation guard', () => {
 
   it('chat-scoped session: send_message uses session deliveryJid even if caller supplies different chatJid', async () => {
     const conn = {
-      contactsDir: { contacts: new Map<string, string>() },
+      contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
       sendRaw: async (jid: string, _content: unknown) => {
         captured.push({ method: 'sendRaw', jid, args: [_content] });
         return { waMessageId: null };

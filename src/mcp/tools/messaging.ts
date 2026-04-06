@@ -110,6 +110,7 @@ export function registerMessagingTools(
       const { text: formatted, jids: mentions, hasMentions } = formatMentions(
         text,
         connection.contactsDir.contacts,
+        connection.contactsDir.getLidMappings(),
       );
 
       try {

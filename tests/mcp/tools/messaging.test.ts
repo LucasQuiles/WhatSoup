@@ -67,6 +67,7 @@ function makeConnection(calls: string[]) {
   return {
     contactsDir: {
       contacts: new Map<string, string>([['alice', '15555550001']]),
+      getLidMappings: () => undefined,
     },
     sendRaw: async (jid: string, content: unknown) => {
       calls.push(JSON.stringify({ jid, content }));

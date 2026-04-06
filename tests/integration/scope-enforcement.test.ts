@@ -66,6 +66,7 @@ function makeMockConnection(): ConnectionManager {
   return {
     contactsDir: {
       contacts: new Map<string, string>(),
+      getLidMappings: () => undefined,
     },
     sendRaw: async (_jid: string, _content: unknown) => ({ waMessageId: null }),
     sendMedia: async (_jid: string, _media: unknown) => ({ waMessageId: null }),
@@ -250,7 +251,7 @@ describe('chat-scoped session', () => {
   it('send_message auto-injects deliveryJid from session — caller chatJid is overridden', async () => {
     const capturedCalls: Array<{ jid: string; content: unknown }> = [];
     const conn = {
-      contactsDir: { contacts: new Map<string, string>() },
+      contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
       sendRaw: async (jid: string, content: unknown) => {
         capturedCalls.push({ jid, content });
       },

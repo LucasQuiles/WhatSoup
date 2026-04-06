@@ -45,7 +45,7 @@ function makeNullSock(): () => WhatsAppSocket | null {
 
 function makeMockConnection(): ConnectionManager {
   return {
-    contactsDir: { contacts: new Map<string, string>() },
+    contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
     sendRaw: vi.fn().mockResolvedValue({ waMessageId: null }),
     sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
     botJid: null,
@@ -148,7 +148,7 @@ describe('Tool handlers with disconnected WhatsApp socket', () => {
 
   it('send_message fails gracefully when connection.sendRaw throws', async () => {
     const throwingConn = {
-      contactsDir: { contacts: new Map<string, string>() },
+      contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
       sendRaw: vi.fn().mockRejectedValue(new Error('WhatsApp not connected')),
     } as unknown as ConnectionManager;
 

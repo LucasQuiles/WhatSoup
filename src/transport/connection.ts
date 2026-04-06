@@ -23,7 +23,7 @@ import { WhatSoupError } from '../errors.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
-import { formatMentions, ContactsDirectory } from '../core/mentions.ts';
+import { formatMentions, buildLidMappings, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 
@@ -294,9 +294,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     // Resolve @name and @number patterns → rewritten text + Baileys mentions array
+    // Pass LID mappings so mentions work in LID-addressed groups
     const { text: formatted, jids: mentions, hasMentions } = formatMentions(
       cleaned,
       this.contactsDir.contacts,
+      this.contactsDir.getLidMappings(),
     );
 
     const autoTyping = config.autoTyping;
