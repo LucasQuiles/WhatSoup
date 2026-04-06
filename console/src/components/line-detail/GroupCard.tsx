@@ -54,7 +54,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
             </span>
           )}
         </div>
-        <div className="c-meta mt-[calc(var(--sp-1)/2)]">
+        <div className="c-label mt-[calc(var(--sp-1)/2)]">
           <Users size={11} className="inline mr-[var(--sp-1)]" style={{ verticalAlign: 'calc(var(--bw) * -1)' }} />
           {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
           {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}

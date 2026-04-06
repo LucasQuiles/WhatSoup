@@ -101,7 +101,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           </div>
 
           {/* Second line: target + scheduled time */}
-          <div className="flex items-center gap-2 flex-wrap c-meta mt-[var(--sp-0h)]">
+          <div className="flex items-center gap-2 flex-wrap c-label mt-[var(--sp-0h)]">
             <span>{message.chatName ?? message.chatJid}</span>
             <span style={metaDividerStyle}>·</span>
             <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
@@ -189,7 +189,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Expanded details */}
       {expanded && (
         <div
-          className="c-meta flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
+          className="c-label flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
         >
           {message.nextRunAt && (
             <span>Next run: {new Date(message.nextRunAt * 1000).toLocaleString()}</span>

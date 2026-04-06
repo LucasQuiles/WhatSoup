@@ -164,18 +164,18 @@ function InfoTab({
       <div className="flex flex-col gap-[var(--sp-2)]">
         {createdDate && (
           <div className="flex items-center gap-2">
-            <span className="c-meta" style={metaLabelStyle}>Created</span>
+            <span className="c-label" style={metaLabelStyle}>Created</span>
             <span className="c-data">{createdDate}</span>
           </div>
         )}
         {owner && (
           <div className="flex items-center gap-2">
-            <span className="c-meta" style={metaLabelStyle}>Owner</span>
+            <span className="c-label" style={metaLabelStyle}>Owner</span>
             <span className="c-data">{owner.id}</span>
           </div>
         )}
         <div className="flex items-center gap-2">
-          <span className="c-meta" style={metaLabelStyle}>Group JID</span>
+          <span className="c-label" style={metaLabelStyle}>Group JID</span>
           <span className="c-meta">{detail.id}</span>
         </div>
       </div>
@@ -549,7 +549,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="c-data">Messaging</div>
-          <div className="c-meta">
+          <div className="c-data text-t4">
             {detail.announce ? 'Only admins can send' : 'All participants can send'}
           </div>
         </div>
@@ -579,7 +579,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="c-data">Edit group info</div>
-          <div className="c-meta">
+          <div className="c-data text-t4">
             {detail.locked ? 'Only admins can edit info' : 'All participants can edit info'}
           </div>
         </div>
@@ -610,7 +610,7 @@ function SettingsTab({
         <div style={rowStyle}>
           <div>
             <div className="c-data">Who can add members</div>
-            <div className="c-meta">
+            <div className="c-data text-t4">
               {detail.memberAddMode === 'admin_add' ? 'Admins only' : 'All members'}
             </div>
           </div>
@@ -640,7 +640,7 @@ function SettingsTab({
         <div style={rowStyle}>
           <div>
             <div className="c-data">Join approval</div>
-            <div className="c-meta">
+            <div className="c-data text-t4">
               {detail.joinApprovalMode === 'on' ? 'Admin approval required' : 'No approval required'}
             </div>
           </div>
@@ -669,7 +669,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="c-data">Disappearing messages</div>
-          <div className="c-meta">
+          <div className="c-data text-t4">
             {ephemeralLabel(detail.ephemeralDuration)}
           </div>
         </div>
