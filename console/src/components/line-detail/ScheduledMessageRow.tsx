@@ -210,8 +210,10 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           style={{
             fontSize: 'var(--font-size-xs)',
             padding: 'var(--sp-2) var(--sp-4)',
-            borderTop: 'var(--bw) solid var(--b1)',
             background: 'var(--color-d1)',
+            borderTopWidth: 'var(--bw)',
+            borderTopStyle: 'solid',
+            borderTopColor: 'var(--b1)',
             display: 'flex',
             flexWrap: 'wrap',
             gap: 'var(--sp-3)',

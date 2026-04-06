@@ -559,7 +559,9 @@ function SettingsTab({
     justifyContent: 'space-between',
     gap: 'var(--sp-3)',
     padding: 'var(--sp-3) 0',
-    borderBottom: 'var(--bw) solid var(--b1)',
+    borderBottomWidth: 'var(--bw)',
+    borderBottomStyle: 'solid',
+    borderBottomColor: 'var(--b1)',
   }
   const labelStyle: React.CSSProperties = {
     fontSize: 'var(--font-size-data)',
@@ -824,12 +826,19 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
         {/* Tab bar */}
         <div
           className="flex gap-1 flex-shrink-0"
-          style={{ padding: 'var(--sp-2) var(--sp-4)', borderBottom: 'var(--bw) solid var(--b1)' }}
+          role="tablist"
+          style={{
+            padding: 'var(--sp-2) var(--sp-4)',
+            borderBottomWidth: 'var(--bw)',
+            borderBottomStyle: 'solid',
+            borderBottomColor: 'var(--b1)',
+          }}
         >
           {(['info', 'participants', 'settings'] as const).map(tab => (
             <button
               key={tab}
               type="button"
+              role="tab"
               onClick={() => setActiveTab(tab)}
               className="c-tab"
               aria-selected={activeTab === tab}

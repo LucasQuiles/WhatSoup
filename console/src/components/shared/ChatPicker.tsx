@@ -41,9 +41,11 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
   if (selected) {
     return (
       <div
-        className="flex items-center gap-2 bg-d1 rounded-md"
+        className="flex items-center gap-2"
         style={{
           padding: 'var(--sp-2) var(--sp-3)',
+          background: 'var(--color-d1)',
+          borderRadius: 'var(--radius-md)',
           borderWidth: 'var(--bw)',
           borderStyle: 'solid',
           borderColor: 'var(--b1)',

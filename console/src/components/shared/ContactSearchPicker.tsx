@@ -44,10 +44,12 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
           {selected.map((c) => (
             <span
               key={c.jid}
-              className="inline-flex items-center gap-1 font-mono bg-d1 rounded-sm"
+              className="inline-flex items-center gap-1 font-mono"
               style={{
                 fontSize: 'var(--font-size-xs)',
                 padding: 'var(--bw) var(--sp-2)',
+                background: 'var(--color-d1)',
+                borderRadius: 'var(--radius-sm)',
                 borderWidth: 'var(--bw)',
                 borderStyle: 'solid',
                 borderColor: 'var(--b1)',

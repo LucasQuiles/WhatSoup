@@ -300,6 +300,14 @@ const scheduledGroupsDesignSystemRestrictions = [
     selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.type="Literal"][value.raw=/^\\d+$/]',
     message: '⛔ Hardcoded numeric size literal — use a sizing token.',
   },
+  {
+    selector: 'Property[key.name=/^border(Top|Bottom|Left|Right)$/][value.value=/var\\(--bw/]',
+    message: '⛔ Border edge shorthand in inline style — use border*Width/border*Style/border*Color longhands.',
+  },
+  {
+    selector: 'TemplateLiteral[parent.key.name=/^border(Top|Bottom|Left|Right)$/]',
+    message: '⛔ Border edge shorthand in template literal — use border*Width/border*Style/border*Color longhands.',
+  },
 ]
 
 export default defineConfig([
