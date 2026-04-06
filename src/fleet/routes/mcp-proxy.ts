@@ -43,6 +43,20 @@ function socketCheck(instance: { socketPath?: string | null }, res: ServerRespon
   return true;
 }
 
+/** Unwrap MCP tool result envelope — extracts JSON from content[0].text if present. */
+function unwrapMcpResult(raw: unknown): unknown {
+  if (raw && typeof raw === 'object' && 'content' in raw) {
+    const content = (raw as { content: unknown[] }).content;
+    if (Array.isArray(content) && content.length > 0) {
+      const first = content[0] as { type?: string; text?: string };
+      if (first.type === 'text' && typeof first.text === 'string') {
+        try { return JSON.parse(first.text); } catch { return first.text; }
+      }
+    }
+  }
+  return raw;
+}
+
 /** Factory for body-less handlers (GET, DELETE, POST without payload). Args derived from path params only. */
 function mcpProxy<P extends { name: string }>(
   toolName: string,
@@ -55,7 +69,7 @@ function mcpProxy<P extends { name: string }>(
     if (!socketCheck(instance, res)) return;
     const args = buildArgs ? buildArgs(params) : {};
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
-    if (result.success) jsonResponse(res, options?.successCode ?? 200, result.result);
+    if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
     else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
   };
 }
@@ -75,7 +89,7 @@ function mcpWithBody<P extends { name: string }>(
     try { parsed = JSON.parse(raw); } catch { jsonResponse(res, 400, { error: 'Invalid JSON body' }); return; }
     const args = buildArgs ? buildArgs(parsed, params) : parsed;
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
-    if (result.success) jsonResponse(res, options?.successCode ?? 200, result.result);
+    if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
     else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
   };
 }

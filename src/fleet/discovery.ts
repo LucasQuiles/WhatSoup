@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { VALID_ACCESS_MODES, VALID_SESSION_SCOPES, VALID_TYPES } from '../instance-loader.ts';
 import { createChildLogger } from '../logger.ts';
@@ -104,7 +105,12 @@ export class FleetDiscovery {
         if (raw.type === 'passive') {
           socketPath = typeof raw.socketPath === 'string' && raw.socketPath ? raw.socketPath : path.join(instStateRoot, 'whatsoup.sock');
         } else if (raw.type === 'agent') {
-          socketPath = path.join(instStateRoot, 'whatsoup.sock');
+          // Agent runtime creates socket at <cwd>/.claude/whatsoup.sock (for Claude Code IDE integration),
+          // NOT in the XDG state directory. Resolve from agentOptions.cwd or homedir fallback.
+          const agentOpts = typeof raw.agentOptions === 'object' && raw.agentOptions !== null && !Array.isArray(raw.agentOptions)
+            ? raw.agentOptions as Record<string, unknown> : {};
+          const agentCwd = typeof agentOpts.cwd === 'string' ? agentOpts.cwd : os.homedir();
+          socketPath = path.join(agentCwd, '.claude', 'whatsoup.sock');
         }
 
         this.instances.set(name, {

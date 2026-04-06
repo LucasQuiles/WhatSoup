@@ -34,7 +34,7 @@ import {
   ModeSwitchDialog,
 } from '../components/line-detail'
 
-const TABS = [
+const BASE_TABS = [
   { id: 'summary', label: 'Summary', icon: Info },
   { id: 'mode', label: 'Mode', icon: SlidersHorizontal },
   { id: 'pipeline', label: 'Pipeline', icon: GitBranch },
@@ -42,11 +42,15 @@ const TABS = [
   { id: 'history', label: 'History', icon: MessageSquare },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'metrics', label: 'Metrics', icon: BarChart3 },
+] as const
+
+/** MCP-dependent tabs — only shown when instance has a global MCP socket (not sandbox-per-chat). */
+const MCP_TABS = [
   { id: 'scheduled', label: 'Scheduled', icon: Clock },
   { id: 'groups', label: 'Groups', icon: Users },
 ] as const
 
-type TabId = typeof TABS[number]['id']
+type TabId = typeof BASE_TABS[number]['id'] | typeof MCP_TABS[number]['id']
 
 /* ═══ Main Component ═══ */
 export default function LineDetail() {
@@ -111,6 +115,10 @@ export default function LineDetail() {
   }
 
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
+
+  // Show MCP-dependent tabs only when instance has a global socket (not sandbox-per-chat)
+  const hasMcpSocket = !line.sandboxPerChat
+  const tabs = hasMcpSocket ? [...BASE_TABS, ...MCP_TABS] : BASE_TABS
 
   const ease = [0.22, 1, 0.36, 1] as const
 
@@ -214,7 +222,7 @@ export default function LineDetail() {
         aria-label="Line detail tabs"
         style={{ padding: '0 var(--sp-4)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d2)' }}
       >
-        {TABS.map(tab => {
+        {tabs.map(tab => {
           const Icon = tab.icon
           const isActive = activeTab === tab.id
           return (

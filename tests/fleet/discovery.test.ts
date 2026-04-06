@@ -312,15 +312,29 @@ describe('FleetDiscovery.scan — socket path resolution', () => {
     expect(inst!.socketPath).toBe('/tmp/custom.sock');
   });
 
-  it('agent instances get a socket path', () => {
+  it('agent instances get a socket path from cwd or homedir', () => {
     writeInstanceConfig('q-agent', agentInstance);
 
     const discovery = new FleetDiscovery(configRoot);
     discovery.scan();
     const inst = discovery.getInstance('q-agent');
 
-    const stateRoot = path.join(tmpDir, 'state', 'whatsoup', 'instances', 'q-agent');
-    expect(inst!.socketPath).toBe(path.join(stateRoot, 'whatsoup.sock'));
+    // Agent without agentOptions.cwd falls back to os.homedir()
+    expect(inst!.socketPath).toBe(path.join(os.homedir(), '.claude', 'whatsoup.sock'));
+  });
+
+  it('agent instances with explicit cwd use that path', () => {
+    writeInstanceConfig('q-agent-cwd', {
+      ...agentInstance,
+      name: 'q-agent-cwd',
+      agentOptions: { sessionScope: 'per_chat', cwd: '/opt/myagent' },
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    discovery.scan();
+    const inst = discovery.getInstance('q-agent-cwd');
+
+    expect(inst!.socketPath).toBe(path.join('/opt/myagent', '.claude', 'whatsoup.sock'));
   });
 
   it('chat instances have no socket path', () => {
