@@ -129,7 +129,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Error message if failed */}
           {message.status === 'failed' && message.error && (
             <div
-              className="c-meta text-s-crit mt-[var(--sp-0h)]"
+              className="c-label text-s-crit mt-[var(--sp-0h)]"
             >
               {message.error}
             </div>

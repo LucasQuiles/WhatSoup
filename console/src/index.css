@@ -711,7 +711,7 @@ body::before {
 @utility c-field-label {
   display: block;
   font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
   color: var(--color-t4);
   margin-bottom: var(--sp-1);
 }
