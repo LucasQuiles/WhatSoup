@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# WhatSoup Fleet Server — wrapper for systemd
+# WhatSoup Fleet Server — wrapper for systemd / launchd
 # Usage: whatsoup-fleet [port]
 
 PORT="${1:-9099}"
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
+_resolve_symlinks() {
+  local p="$1"
+  while [ -L "$p" ]; do
+    local dir="$(cd "$(dirname "$p")" && pwd)"
+    p="$(readlink "$p")"
+    [[ "$p" != /* ]] && p="$dir/$p"
+  done
+  echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+}
+
+SCRIPT_DIR="$(cd "$(dirname "$(_resolve_symlinks "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_NODE="$HOME/.nvm/versions/node/v24.13.0/bin/node"
 NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"

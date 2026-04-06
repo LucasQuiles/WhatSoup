@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../../../logger.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
+import { lookupCredential } from '../../../lib/keyring.ts';
 
 const log = createChildLogger('elevenlabs');
 const ELEVENLABS_TIMEOUT_MS = 30_000;
@@ -12,22 +12,17 @@ const API_BASE = 'https://api.elevenlabs.io';
 
 const breaker = new CircuitBreaker('elevenlabs', 5, 60_000, log);
 
-// Lazy-init API key from GNOME Keyring
+// Lazy-init API key from env var or system keyring
 let apiKey: string | null = null;
 function getApiKey(): string {
   if (!apiKey) {
-    try {
-      const raw = execFileSync('secret-tool', ['lookup', 'service', 'elevenlabs'], {
-        timeout: 5_000,
-      });
-      apiKey = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
-    } catch (err) {
-      throw new Error(
-        'ElevenLabs API key not found in keyring. Run: secret-tool store --label="ElevenLabs" service elevenlabs',
-      );
-    }
+    apiKey = lookupCredential('elevenlabs');
     if (!apiKey) {
-      throw new Error('ElevenLabs API key is empty in keyring.');
+      throw new Error(
+        'ElevenLabs API key not found. Set ELEVENLABS_API_KEY env var, or:\n' +
+        '  Linux: secret-tool store --label="ElevenLabs" service elevenlabs\n' +
+        '  macOS: security add-generic-password -s elevenlabs -a $USER -w YOUR_KEY',
+      );
     }
   }
   return apiKey;

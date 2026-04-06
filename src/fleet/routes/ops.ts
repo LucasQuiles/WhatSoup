@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
@@ -33,9 +33,13 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
   return true;
 }
 
+import type { ServiceManager } from '../platform.ts';
+import { lookupCredential } from '../../lib/keyring.ts';
+
 export interface OpsDeps {
   discovery: FleetDiscovery;
   realtime: FleetRealtimePublisher;
+  serviceManager: ServiceManager;
 }
 
 /** POST /api/lines/:name/send — route a message to the instance. */
@@ -188,8 +192,8 @@ export async function handleSaveContact(
   jsonResponse(res, 503, { error: 'MCP socket not available — contact management requires a running instance with MCP' });
 }
 
-/** Shared systemctl action handler for restart/stop. */
-async function handleSystemctlAction(
+/** Shared service action handler for restart/stop. */
+async function handleServiceAction(
   verb: 'restart' | 'stop',
   res: ServerResponse,
   deps: OpsDeps,
@@ -200,7 +204,11 @@ async function handleSystemctlAction(
   if (!instance) return;
 
   try {
-    await execFileAsync('systemctl', ['--user', verb, `whatsoup@${params.name}`]);
+    if (verb === 'restart') {
+      await deps.serviceManager.restart(params.name);
+    } else {
+      await deps.serviceManager.stop(params.name);
+    }
     publishInstanceStatus(deps.realtime, params.name);
     publishFeedEvent(deps.realtime, params.name);
     jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
@@ -212,24 +220,24 @@ async function handleSystemctlAction(
   }
 }
 
-/** POST /api/lines/:name/restart — restart the systemd user unit. */
+/** POST /api/lines/:name/restart — restart the service. */
 export async function handleRestart(
   _req: IncomingMessage,
   res: ServerResponse,
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  return handleSystemctlAction('restart', res, deps, params);
+  return handleServiceAction('restart', res, deps, params);
 }
 
-/** POST /api/lines/:name/stop — stop the systemd user unit. */
+/** POST /api/lines/:name/stop — stop the service. */
 export async function handleStop(
   _req: IncomingMessage,
   res: ServerResponse,
   deps: OpsDeps,
   params: { name: string },
 ): Promise<void> {
-  return handleSystemctlAction('stop', res, deps, params);
+  return handleServiceAction('stop', res, deps, params);
 }
 
 /** PATCH /api/lines/:name/config — merge fields into instance config. */
@@ -401,11 +409,11 @@ export async function handleDeleteLine(
 ): Promise<void> {
   if (!validateInstanceName(params.name, res)) return;
 
-  // 1. Stop the systemd unit (ignore failure — may already be stopped/gone)
-  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* ok */ }
+  // 1. Stop the service (ignore failure — may already be stopped/gone)
+  try { await deps.serviceManager.stop(params.name); } catch { /* ok */ }
 
-  // 2. Disable the systemd unit (ignore failure — may not be enabled)
-  try { await execFileAsync('systemctl', ['--user', 'disable', `whatsoup@${params.name}`]); } catch { /* ok */ }
+  // 2. Disable the service (ignore failure — may not be enabled)
+  try { await deps.serviceManager.disable(params.name); } catch { /* ok */ }
 
   // 3. Remove config, data, and state directories
   cleanupPartial(params.name);
@@ -499,14 +507,6 @@ function usedHealthPorts(): number[] {
   return ports;
 }
 
-function execFileAsync(cmd: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout.trim());
-    });
-  });
-}
 
 /** Remove directories/files created during a partial instance creation. */
 function cleanupPartial(name: string, extraPaths?: string[]): void {
@@ -676,7 +676,7 @@ export async function handleCreateLine(
 
     // --- Copy shared health token ---
     try {
-      const token = await execFileAsync('secret-tool', ['lookup', 'service', 'whatsoup_health']);
+      const token = lookupCredential('whatsoup_health');
       if (token) {
         fs.writeFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { mode: 0o600 });
       }
@@ -710,8 +710,8 @@ export async function handleCreateLine(
       }
     }
 
-    // --- Enable systemd unit ---
-    await execFileAsync('systemctl', ['--user', 'enable', `whatsoup@${name}`]);
+    // --- Enable service ---
+    await deps.serviceManager.enable(name);
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -768,7 +768,7 @@ export async function handleAuth(
   });
 
   // Stop the running instance so the lock file is released for auth
-  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* may not be running */ }
+  try { await deps.serviceManager.stop(params.name); } catch { /* may not be running */ }
 
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
@@ -817,7 +817,7 @@ export async function handleAuth(
             fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
             fs.renameSync(tmpPath, cfgPath);
           } catch { /* config write failed — intro won't re-fire but not critical */ }
-          execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], (err) => {
+          deps.serviceManager.startFire(params.name, (err: Error | null) => {
             if (err) log.error({ err, instance: params.name }, 'post-auth start failed');
           });
           deps.discovery.scan();

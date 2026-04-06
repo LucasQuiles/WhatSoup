@@ -79,7 +79,7 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
     return { alive: false, owned: false };
   }
 
-  // Step 2: Verify ownership via /proc
+  // Step 2: Verify ownership via /proc (Linux) or ps fallback (macOS/other)
   const myPid = process.pid;
   try {
     const statusContent = readFileSync(`/proc/${pid}/status`, 'utf8');
@@ -99,8 +99,25 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
 
     return { alive: true, owned: true };
   } catch {
-    // /proc not available (non-Linux) or permission denied
-    // Conservative: alive but ownership unverified
+    // /proc not available (macOS, FreeBSD) or permission denied — try ps
+  }
+
+  // Fallback: use ps for platforms without /proc (macOS, FreeBSD)
+  try {
+    const { execFileSync } = require('node:child_process');
+    const psOut = execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], {
+      timeout: 2_000,
+    });
+    const line = (typeof psOut === 'string' ? psOut : psOut.toString('utf-8')).trim();
+    const [ppidStr, ...commParts] = line.split(/\s+/);
+    const ppid = parseInt(ppidStr, 10);
+    const comm = commParts.join(' ');
+    if (ppid === myPid && comm.includes('claude')) {
+      return { alive: true, owned: true };
+    }
+    return { alive: true, owned: false };
+  } catch {
+    // ps unavailable or failed — conservative: alive but ownership unverified
     return { alive: true, owned: false };
   }
 }

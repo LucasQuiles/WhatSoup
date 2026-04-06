@@ -26,6 +26,20 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
+// Mock platform.ts so fleet server gets a controllable service manager
+const mockSvcManager = {
+  enable: vi.fn().mockResolvedValue(undefined),
+  disable: vi.fn().mockResolvedValue(undefined),
+  start: vi.fn().mockResolvedValue(undefined),
+  stop: vi.fn().mockResolvedValue(undefined),
+  restart: vi.fn().mockResolvedValue(undefined),
+  startFire: vi.fn(),
+};
+vi.mock('../../src/fleet/platform.ts', () => ({
+  createServiceManager: vi.fn(() => mockSvcManager),
+  detectPlatform: vi.fn(() => 'linux-systemd'),
+}));
+
 // Mock mcp-client and http-proxy to avoid real socket/HTTP calls from ops routes
 vi.mock('../../src/fleet/mcp-client.ts', () => ({
   mcpCall: vi.fn(async () => ({ success: true, result: { status: 'sent' } })),
@@ -493,10 +507,8 @@ describe('fleet integration -- config update', () => {
 // ---------------------------------------------------------------------------
 
 describe('fleet integration -- restart', () => {
-  it('POST restart returns 202 and calls systemctl', async () => {
-    (execFile as unknown as Mock).mockImplementation(
-      (_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => cb(null, ''),
-    );
+  it('POST restart returns 202 and calls serviceManager.restart', async () => {
+    mockSvcManager.restart.mockResolvedValueOnce(undefined);
 
     const { status, body } = await fetchJson(`/api/lines/${INST_A}/restart`, {
       method: 'POST',
@@ -504,18 +516,11 @@ describe('fleet integration -- restart', () => {
     expect(status).toBe(202);
     expect(body.status).toBe('restart_requested');
     expect(body.instance).toBe(INST_A);
-    expect(execFile).toHaveBeenCalledWith(
-      'systemctl',
-      ['--user', 'restart', `whatsoup@${INST_A}`],
-      expect.any(Function),
-    );
+    expect(mockSvcManager.restart).toHaveBeenCalledWith(INST_A);
   });
 
-  it('POST restart returns 500 when systemctl fails', async () => {
-    (execFile as unknown as Mock).mockImplementation(
-      (_cmd: string, _args: string[], cb: (err: Error | null) => void) =>
-        cb(new Error('unit not found')),
-    );
+  it('POST restart returns 500 when serviceManager fails', async () => {
+    mockSvcManager.restart.mockRejectedValueOnce(new Error('unit not found'));
 
     const { status, body } = await fetchJson(`/api/lines/${INST_A}/restart`, {
       method: 'POST',

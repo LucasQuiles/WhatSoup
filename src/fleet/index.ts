@@ -16,6 +16,7 @@ import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
+import { createServiceManager, type ServiceManager } from './platform.ts';
 import {
   handleGetScheduled, handleCancelScheduled, handleGetGroups, handleSearchContacts,
   handleCreateScheduled, handleGetScheduledById, handleUpdateScheduled, handleCancelScheduledById,
@@ -48,6 +49,7 @@ export interface RouteDeps {
   healthPoller: HealthPoller;
   dbReader: FleetDbReader;
   realtime: FleetRealtimePublisher;
+  serviceManager: ServiceManager;
   log: typeof log;
   updateChecker: UpdateChecker;
 }
@@ -419,7 +421,8 @@ export function createFleetServer(deps: FleetDeps) {
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
-  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, log, updateChecker };
+  const serviceManager = createServiceManager();
+  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, serviceManager, log, updateChecker };
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';

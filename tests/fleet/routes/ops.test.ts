@@ -89,6 +89,17 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   };
 }
 
+function mockServiceManager() {
+  return {
+    enable: vi.fn().mockResolvedValue(undefined),
+    disable: vi.fn().mockResolvedValue(undefined),
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    restart: vi.fn().mockResolvedValue(undefined),
+    startFire: vi.fn(),
+  };
+}
+
 function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
   return {
     discovery: {
@@ -96,6 +107,7 @@ function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
       getInstances: vi.fn(() => new Map()),
     } as any,
     realtime: { publish: vi.fn() },
+    serviceManager: mockServiceManager(),
     ...overrides,
   };
 }
@@ -235,33 +247,23 @@ describe('handleRestart', () => {
     expect(res._status).toBe(404);
   });
 
-  it('calls systemctl and returns 202 on success', async () => {
+  it('calls serviceManager.restart and returns 202 on success', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
-
-    vi.mocked(execFile).mockImplementation((_cmd: any, _args: any, cb: any) => {
-      cb(null, '');
-      return undefined as any;
-    });
+    const svc = mockServiceManager();
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
 
     const res = mockRes();
     await handleRestart(mockReq(), res, deps, { name: 'test-line' });
-    expect(execFile).toHaveBeenCalledWith(
-      'systemctl', ['--user', 'restart', 'whatsoup@test-line'],
-      expect.any(Function),
-    );
+    expect(svc.restart).toHaveBeenCalledWith('test-line');
     expect(res._status).toBe(202);
     expect(JSON.parse(res._body).status).toBe('restart_requested');
   });
 
-  it('returns 500 when systemctl fails', async () => {
+  it('returns 500 when serviceManager.restart fails', async () => {
     const inst = fakeInstance();
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
-
-    vi.mocked(execFile).mockImplementation((_cmd: any, _args: any, cb: any) => {
-      cb(new Error('unit not found'));
-      return undefined as any;
-    });
+    const svc = mockServiceManager();
+    svc.restart.mockRejectedValueOnce(new Error('unit not found'));
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any, serviceManager: svc });
 
     const res = mockRes();
     await handleRestart(mockReq(), res, deps, { name: 'test-line' });
