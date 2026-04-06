@@ -51,17 +51,7 @@ const passwordInputStyle: React.CSSProperties = {
 
 /* -- Tabbed model/key section -- */
 
-const tabStyle = (active: boolean): React.CSSProperties => ({
-  padding: 'var(--sp-2) var(--sp-4)',
-  fontSize: 'var(--font-size-data)',
-  cursor: 'pointer',
-  borderBottomWidth: '2px',
-  borderBottomStyle: 'solid',
-  borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
-  color: active ? 'var(--color-t1)' : 'var(--color-t4)',
-  background: 'none',
-  transition: 'border-color var(--dur-norm) var(--ease), color var(--dur-norm) var(--ease)',
-})
+/* tabStyle removed — using .c-tab CSS class */
 
 const ModelAndKeyTabs: FC<{
   models: Record<ModelRole, string>
@@ -78,19 +68,14 @@ const ModelAndKeyTabs: FC<{
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Tab bar */}
-      <div className="flex" style={{ borderBottomWidth: 'var(--bw)', borderBottomStyle: 'solid', borderBottomColor: 'var(--b1)' }}>
-        <button type="button" style={tabStyle(activeTab === 'anthropic')} onClick={() => setActiveTab('anthropic')}>
+      <div className="flex c-border-b" role="tablist">
+        <button type="button" className={`c-tab ${activeTab === 'anthropic' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'anthropic'} onClick={() => setActiveTab('anthropic')}>
           Anthropic
         </button>
-        <button type="button" style={tabStyle(activeTab === 'openai')} onClick={() => setActiveTab('openai')}>
+        <button type="button" className={`c-tab ${activeTab === 'openai' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'openai'} onClick={() => setActiveTab('openai')}>
           OpenAI
         </button>
-        <button
-          type="button"
-          style={{ ...tabStyle(false), opacity: 0.4, cursor: 'not-allowed' }}
-          title="Coming soon"
-          disabled
-        >
+        <button type="button" className="c-tab" title="Coming soon" disabled>
           Local
         </button>
       </div>

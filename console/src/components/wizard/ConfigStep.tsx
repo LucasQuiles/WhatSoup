@@ -114,17 +114,7 @@ const SESSION_SCOPE_DESCRIPTIONS: Record<string, string> = {
   per_chat: 'Separate session per conversation \u2014 recommended',
 }
 
-const tabStyle = (active: boolean): React.CSSProperties => ({
-  padding: 'var(--sp-2) var(--sp-4)',
-  fontSize: 'var(--font-size-data)',
-  cursor: 'pointer',
-  borderBottomWidth: '2px',
-  borderBottomStyle: 'solid',
-  borderBottomColor: active ? 'var(--wizard-accent)' : 'transparent',
-  color: active ? 'var(--color-t1)' : 'var(--color-t4)',
-  background: 'none',
-  transition: 'border-color var(--dur-norm) var(--ease), color var(--dur-norm) var(--ease)',
-})
+/* tabStyle removed — using .c-tab CSS class */
 
 /** Generate a sensible default system prompt based on instance type. */
 function defaultSystemPrompt(name: string, type: string): string {
@@ -316,15 +306,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   return (
     <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
       {/* Tab bar */}
-      <div className="flex" style={{ borderBottomWidth: 'var(--bw)', borderBottomStyle: 'solid', borderBottomColor: 'var(--b1)' }}>
-        <button type="button" style={tabStyle(activeTab === 'access')} onClick={() => setActiveTab('access')}>Access</button>
-        <button type="button" style={tabStyle(activeTab === 'behavior')} onClick={() => setActiveTab('behavior')}>Behavior</button>
+      <div className="flex c-border-b" role="tablist">
+        <button type="button" className={`c-tab ${activeTab === 'access' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'access'} onClick={() => setActiveTab('access')}>Access</button>
+        <button type="button" className={`c-tab ${activeTab === 'behavior' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'behavior'} onClick={() => setActiveTab('behavior')}>Behavior</button>
         {type === 'agent' && (
-          <button type="button" style={tabStyle(activeTab === 'permissions')} onClick={() => setActiveTab('permissions')}>Permissions</button>
+          <button type="button" className={`c-tab ${activeTab === 'permissions' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'permissions'} onClick={() => setActiveTab('permissions')}>Permissions</button>
         )}
-        <button type="button" style={tabStyle(activeTab === 'limits')} onClick={() => setActiveTab('limits')}>Limits</button>
-        <button type="button" style={tabStyle(activeTab === 'rag')} onClick={() => setActiveTab('rag')}>
-          RAG <span style={{ color: 'var(--color-t5)', fontSize: 'var(--font-size-xs)' }}>(optional)</span>
+        <button type="button" className={`c-tab ${activeTab === 'limits' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'limits'} onClick={() => setActiveTab('limits')}>Limits</button>
+        <button type="button" className={`c-tab ${activeTab === 'rag' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'rag'} onClick={() => setActiveTab('rag')}>
+          RAG <span className="text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>(optional)</span>
         </button>
       </div>
 
