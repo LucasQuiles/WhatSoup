@@ -502,6 +502,14 @@ export class SessionManager {
       } else {
         this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey);
       }
+      log.info({
+        provider: this.provider,
+        chatJid: this.chatJid,
+        cwd,
+        rowId: this.dbRowId,
+        existingRowId: existingRowId ?? null,
+        resumeSessionId: resumeSessionId ?? null,
+      }, 'spawn-per-turn session armed');
       // Emit a synthetic init event so the runtime knows the session is ready
       this.onEvent({ type: 'init', sessionId: `${this.provider}-${Date.now()}` });
       return;
@@ -714,7 +722,14 @@ export class SessionManager {
 
     // Log stderr but don't act on it
     child.stderr.on('data', (chunk: Buffer) => {
-      log.debug({ stderr: chunk.toString('utf8').trim() }, 'claude stderr');
+      const stderr = chunk.toString('utf8').trim();
+      if (!stderr) return;
+      log.warn({
+        provider: this.provider,
+        chatJid: this.chatJid,
+        pid: child.pid ?? null,
+        stderrPreview: stderr.slice(0, 500),
+      }, 'claude stderr');
     });
 
     // Handle unexpected exit
@@ -978,7 +993,14 @@ export class SessionManager {
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
-        log.debug({ stderr: chunk.toString('utf8').trim(), provider: this.provider }, 'provider stderr');
+        const stderr = chunk.toString('utf8').trim();
+        if (!stderr) return;
+        log.warn({
+          provider: this.provider,
+          chatJid: this.chatJid,
+          pid: child.pid ?? null,
+          stderrPreview: stderr.slice(0, 500),
+        }, 'provider stderr');
       });
 
       // For spawn-per-turn, process exit is normal (one turn = one process).
