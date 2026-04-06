@@ -1,11 +1,11 @@
-# LEAK-04 Output
+# SILENT-03 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: LEAK-04 — workspace resource idle eviction
-- Branch: fix/leak-04-workspace-eviction
-- Commit: 2ed7364
-- Summary: Added idle eviction for sandbox-per-chat workspace socket/media resources with `lastActivity` tracking, a 30m sweep window, shutdown timer cleanup, and regression coverage for eviction, active-session protection, re-creation, result touches, and timer lifecycle.
+- Bead: SILENT-03 — per-chat crash count instead of global
+- Branch: fix/silent-03-global-crash-count
+- Commit: pending (reported in result message after commit)
+- Summary: Replaced the global crash counter with per-chat crash tracking, kept single/shared mode on a global crash scope, decayed only the spawning chat on successful restart, and extended runtime regressions for cross-chat isolation plus cleanup coverage.
 
 ## Files Changed
 - src/runtimes/agent/runtime.ts
@@ -15,10 +15,9 @@
 ## Verification
 - `npx vitest run tests/runtimes/agent/runtime.test.ts` ✅
 - `npm run typecheck` ✅
-- `npx vitest run tests/console/line-detail-history-metrics.test.ts tests/console/modal-workflows.test.ts tests/console/nav-status.test.ts tests/console/ops-actions.test.ts tests/console/soup-kitchen.test.tsx` ✅
-- `npx vitest run` ⚠️ fails on pre-existing `tests/console/design-system-scheduled-groups-primitives.test.ts` (`ContactSearchPicker` still contains `bg-d1`), reproduced on the repo main checkout at `/home/q/LAB/WhatSoup` too.
+- `npx vitest run` ✅ (199 files, 3746 tests)
 
 ## Notes
-- `workspaceResources` now carry `lastActivity`, refreshed on workspace provisioning, delivery-JID/media-bridge updates, active-session sweeps, and per-chat result completion.
-- The workspace sweep timer is sandbox-per-chat only, unref'd, and cleared during shutdown.
-- Full-suite verification needed corrected worktree dependency links (`node_modules` and `console/node_modules`) before reproducing the unrelated console failure.
+- `perChatCrashCount` is keyed by runtime mapKey for per-chat mode and by `__global__` for single/shared mode.
+- `cleanupPerChatState()` now prunes crash counts alongside the existing auxiliary per-chat state maps.
+- Health stats and per-chat health snapshots now report aggregate recent crash totals derived from the per-chat map.
