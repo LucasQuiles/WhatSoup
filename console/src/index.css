@@ -802,8 +802,6 @@ body::before {
   z-index: 50;
 }
 .c-dialog {
-  width: min(100%, var(--panel-confirm));
-  max-height: var(--modal-max-h);
   overflow: hidden;
   background: var(--color-d1);
   border: var(--bw) solid var(--b2);
@@ -817,9 +815,10 @@ body::before {
   padding: var(--sp-5);
 }
 
+/* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */
 .c-card {
   background: var(--color-d2);
-  border: var(--bw) solid var(--b2);
+  border: var(--bw) solid var(--b1);
   border-radius: var(--radius-lg);
   box-shadow: var(--card-shadow);
 }

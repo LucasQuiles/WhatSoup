@@ -35,4 +35,14 @@ describe('design token component classes', () => {
 
     expect(messageBubble).toContain('c-card c-card--detail')
   })
+
+  it('keeps c-dialog visual-only and documents the canonical panel border token', () => {
+    const css = read('console/src/index.css')
+
+    expect(css).not.toContain('width: min(100%, var(--panel-confirm));')
+    expect(css).not.toContain('max-height: var(--modal-max-h);')
+    expect(css).toContain('/* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */')
+    expect(css).toContain('.c-card {\n  background: var(--color-d2);\n  border: var(--bw) solid var(--b1);')
+    expect(css).toContain('.c-section {\n  background: var(--color-d2);\n  border: var(--bw) solid var(--b1);')
+  })
 })
