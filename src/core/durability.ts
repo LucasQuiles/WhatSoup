@@ -79,50 +79,223 @@ export interface OutboundOpParams {
   isTerminal?: boolean;
 }
 
+type PreparedStatement = ReturnType<Database['raw']['prepare']>;
+
+type DurabilityStatements = {
+  journalInbound: PreparedStatement;
+  markTurnDone: PreparedStatement;
+  markInboundComplete: PreparedStatement;
+  markInboundFailed: PreparedStatement;
+  markInboundSkipped: PreparedStatement;
+  selectInboundStatus: PreparedStatement;
+  createOutboundOp: PreparedStatement;
+  markSending: PreparedStatement;
+  markSubmitted: PreparedStatement;
+  markEchoed: PreparedStatement;
+  selectEchoedOutboundInbound: PreparedStatement;
+  markMaybeSent: PreparedStatement;
+  markFailedPermanent: PreparedStatement;
+  markQuarantined: PreparedStatement;
+  markTerminal: PreparedStatement;
+  selectOutboundForEchoMatch: PreparedStatement;
+  recordToolCall: PreparedStatement;
+  markToolExecuting: PreparedStatement;
+  markToolComplete: PreparedStatement;
+  upsertSessionCheckpoint: PreparedStatement;
+  getSessionCheckpoint: PreparedStatement;
+  getAllActiveCheckpoints: PreparedStatement;
+  getResumableCheckpoints: PreparedStatement;
+  markSessionOrphaned: PreparedStatement;
+  getPendingInbound: PreparedStatement;
+  getOutboundByStatus: PreparedStatement;
+  getRecoverableToolCalls: PreparedStatement;
+  markToolReplayed: PreparedStatement;
+  markRecoveredToolQuarantined: PreparedStatement;
+  getProcessingInboundEvents: PreparedStatement;
+  getTerminalOutboundForInbound: PreparedStatement;
+  getStaleSubmitted: PreparedStatement;
+  getMessageByWaMessageId: PreparedStatement;
+  resetMaybeSentWithWaToPending: PreparedStatement;
+  resetMaybeSentWithoutWaToPending: PreparedStatement;
+  sweepStaleSubmitted: PreparedStatement;
+  getPendingOutboundCount: PreparedStatement;
+  getQuarantinedOutboundCount: PreparedStatement;
+  getLastRecoveryRunCompletedAt: PreparedStatement;
+  insertRecoveryRun: PreparedStatement;
+};
+
 export class DurabilityEngine {
   private db: Database;
+  private readonly statements: DurabilityStatements;
   constructor(db: Database) {
     this.db = db;
+    const prepare = db.raw.prepare.bind(db.raw);
+    this.statements = {
+      journalInbound: prepare(
+        `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
+         VALUES (?, ?, ?, ?, 'processing')`,
+      ),
+      markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
+      markInboundComplete: prepare(
+        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
+      ),
+      markInboundFailed: prepare(
+        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error' WHERE seq = ?`,
+      ),
+      markInboundSkipped: prepare(
+        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
+      ),
+      selectInboundStatus: prepare(
+        `SELECT processing_status FROM inbound_events WHERE seq = ?`,
+      ),
+      createOutboundOp: prepare(
+        `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      ),
+      markSending: prepare(`UPDATE outbound_ops SET status = 'sending' WHERE id = ?`),
+      markSubmitted: prepare(
+        `UPDATE outbound_ops SET status = 'submitted', wa_message_id = ?, submitted_at = datetime('now') WHERE id = ?`,
+      ),
+      markEchoed: prepare(
+        `UPDATE outbound_ops SET status = 'echoed', echoed_at = datetime('now') WHERE id = ?`,
+      ),
+      selectEchoedOutboundInbound: prepare(
+        `SELECT source_inbound_seq, is_terminal FROM outbound_ops WHERE id = ?`,
+      ),
+      markMaybeSent: prepare(
+        `UPDATE outbound_ops SET status = 'maybe_sent', error = ? WHERE id = ?`,
+      ),
+      markFailedPermanent: prepare(
+        `UPDATE outbound_ops SET status = 'failed_permanent', error = ? WHERE id = ?`,
+      ),
+      markQuarantined: prepare(`UPDATE outbound_ops SET status = 'quarantined' WHERE id = ?`),
+      markTerminal: prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`),
+      selectOutboundForEchoMatch: prepare(
+        `SELECT id FROM outbound_ops WHERE wa_message_id = ? AND status = 'submitted'`,
+      ),
+      recordToolCall: prepare(
+        `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
+         VALUES (?, ?, ?, ?, 'pending', ?)`,
+      ),
+      markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
+      markToolComplete: prepare(
+        `UPDATE tool_calls SET status = 'complete', result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
+      ),
+      upsertSessionCheckpoint: prepare(`
+        INSERT INTO session_checkpoints (conversation_key, session_id, transcript_path, active_turn_id,
+          last_inbound_seq, last_flushed_outbound_id, watchdog_state, workspace_path, claude_pid, session_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(conversation_key) DO UPDATE SET
+          session_id = COALESCE(excluded.session_id, session_id),
+          transcript_path = COALESCE(excluded.transcript_path, transcript_path),
+          active_turn_id = excluded.active_turn_id,
+          last_inbound_seq = COALESCE(excluded.last_inbound_seq, last_inbound_seq),
+          last_flushed_outbound_id = COALESCE(excluded.last_flushed_outbound_id, last_flushed_outbound_id),
+          watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
+          workspace_path = COALESCE(excluded.workspace_path, workspace_path),
+          claude_pid = COALESCE(excluded.claude_pid, claude_pid),
+          session_status = COALESCE(excluded.session_status, session_status),
+          checkpoint_version = checkpoint_version + 1,
+          updated_at = datetime('now')
+      `),
+      getSessionCheckpoint: prepare(
+        `SELECT * FROM session_checkpoints WHERE conversation_key = ?`,
+      ),
+      getAllActiveCheckpoints: prepare(
+        `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status = 'active'`,
+      ),
+      getResumableCheckpoints: prepare(
+        `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status IN ('active', 'suspended') AND session_id IS NOT NULL`,
+      ),
+      markSessionOrphaned: prepare(
+        `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,
+      ),
+      getPendingInbound: prepare(
+        `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
+      ),
+      getOutboundByStatus: prepare(
+        `SELECT id, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
+      ),
+      getRecoverableToolCalls: prepare(
+        `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
+         FROM tool_calls WHERE status IN ('executing', 'pending')`,
+      ),
+      markToolReplayed: prepare(
+        `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
+      ),
+      markRecoveredToolQuarantined: prepare(
+        `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
+      ),
+      getProcessingInboundEvents: prepare(
+        `SELECT seq FROM inbound_events WHERE processing_status = 'processing'`,
+      ),
+      getTerminalOutboundForInbound: prepare(
+        `SELECT id FROM outbound_ops
+         WHERE source_inbound_seq = ? AND is_terminal = 1
+           AND status NOT IN ('quarantined', 'failed_permanent')`,
+      ),
+      getStaleSubmitted: prepare(
+        `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
+      ),
+      getMessageByWaMessageId: prepare(
+        `SELECT pk FROM messages WHERE message_id = ?`,
+      ),
+      resetMaybeSentWithWaToPending: prepare(
+        `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
+      ),
+      resetMaybeSentWithoutWaToPending: prepare(
+        `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
+      ),
+      sweepStaleSubmitted: prepare(
+        `UPDATE outbound_ops SET status = 'maybe_sent', error = 'echo_timeout'
+         WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
+      ),
+      getPendingOutboundCount: prepare(
+        `SELECT COUNT(*) as count FROM outbound_ops WHERE status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
+      ),
+      getQuarantinedOutboundCount: prepare(
+        `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
+      ),
+      getLastRecoveryRunCompletedAt: prepare(
+        `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
+      ),
+      insertRecoveryRun: prepare(`
+        INSERT INTO recovery_runs
+          (trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
+           outbound_quarantined, tool_calls_recovered, tool_calls_replayed,
+           tool_calls_quarantined, sessions_restored, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      `),
+    };
   }
 
   // ── Inbound events ──
   journalInbound(messageId: string, conversationKey: string, chatJid: string, routedTo: string): number {
-    const result = this.db.raw.prepare(
-      `INSERT INTO inbound_events (message_id, conversation_key, chat_jid, routed_to, processing_status)
-       VALUES (?, ?, ?, ?, 'processing')`,
-    ).run(messageId, conversationKey, chatJid, routedTo);
+    const result = this.statements.journalInbound.run(messageId, conversationKey, chatJid, routedTo);
     const seq = Number(result.lastInsertRowid);
     log.debug({ seq, messageId, routedTo }, 'journalInbound');
     return seq;
   }
 
   markTurnDone(seq: number): void {
-    this.db.raw.prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`).run(seq);
+    this.statements.markTurnDone.run(seq);
   }
 
   markInboundComplete(seq: number, terminalReason: string): void {
-    this.db.raw.prepare(
-      `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
-    ).run(terminalReason, seq);
+    this.statements.markInboundComplete.run(terminalReason, seq);
   }
 
   markInboundFailed(seq: number): void {
-    this.db.raw.prepare(
-      `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error' WHERE seq = ?`,
-    ).run(seq);
+    this.statements.markInboundFailed.run(seq);
   }
 
   markInboundSkipped(seq: number, reason: string): void {
-    this.db.raw.prepare(
-      `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
-    ).run(reason, seq);
+    this.statements.markInboundSkipped.run(reason, seq);
   }
 
   /** Transition inbound event: processing → turn_done → complete. */
   completeInbound(seq: number, reason: string): void {
-    const row = this.db.raw.prepare(
-      `SELECT processing_status FROM inbound_events WHERE seq = ?`,
-    ).get(seq) as { processing_status: string } | undefined;
+    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
     if (row?.processing_status === 'processing') {
       this.markTurnDone(seq);
     }
@@ -132,10 +305,7 @@ export class DurabilityEngine {
   // ── Outbound ops ──
   createOutboundOp(params: OutboundOpParams): number {
     const hash = createHash('sha256').update(params.payload).digest('hex');
-    const result = this.db.raw.prepare(
-      `INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, payload_hash, status, source_inbound_seq, is_terminal, replay_policy)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-    ).run(
+    const result = this.statements.createOutboundOp.run(
       params.conversationKey, params.chatJid, params.opType, params.payload, hash,
       params.sourceInboundSeq ?? null, params.isTerminal ? 1 : 0, params.replayPolicy,
     );
@@ -145,53 +315,42 @@ export class DurabilityEngine {
   }
 
   markSending(id: number): void {
-    this.db.raw.prepare(`UPDATE outbound_ops SET status = 'sending' WHERE id = ?`).run(id);
+    this.statements.markSending.run(id);
   }
 
   markSubmitted(id: number, waMessageId: string | null): void {
-    this.db.raw.prepare(
-      `UPDATE outbound_ops SET status = 'submitted', wa_message_id = ?, submitted_at = datetime('now') WHERE id = ?`,
-    ).run(waMessageId, id);
+    this.statements.markSubmitted.run(waMessageId, id);
   }
 
   markEchoed(id: number): void {
-    this.db.raw.prepare(
-      `UPDATE outbound_ops SET status = 'echoed', echoed_at = datetime('now') WHERE id = ?`,
-    ).run(id);
+    this.statements.markEchoed.run(id);
     // If this is a terminal op, complete the linked inbound event
-    const row = this.db.raw.prepare(
-      `SELECT source_inbound_seq, is_terminal FROM outbound_ops WHERE id = ?`,
-    ).get(id) as { source_inbound_seq: number | null; is_terminal: number } | undefined;
+    const row = this.statements.selectEchoedOutboundInbound.get(id) as
+      { source_inbound_seq: number | null; is_terminal: number } | undefined;
     if (row?.is_terminal && row.source_inbound_seq) {
       this.completeInbound(row.source_inbound_seq, 'response_sent');
     }
   }
 
   markMaybeSent(id: number, error?: string): void {
-    this.db.raw.prepare(
-      `UPDATE outbound_ops SET status = 'maybe_sent', error = ? WHERE id = ?`,
-    ).run(error ?? null, id);
+    this.statements.markMaybeSent.run(error ?? null, id);
   }
 
   markFailedPermanent(id: number, error: string): void {
-    this.db.raw.prepare(
-      `UPDATE outbound_ops SET status = 'failed_permanent', error = ? WHERE id = ?`,
-    ).run(error, id);
+    this.statements.markFailedPermanent.run(error, id);
   }
 
   markQuarantined(id: number): void {
-    this.db.raw.prepare(`UPDATE outbound_ops SET status = 'quarantined' WHERE id = ?`).run(id);
+    this.statements.markQuarantined.run(id);
   }
 
   markTerminal(id: number): void {
-    this.db.raw.prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`).run(id);
+    this.statements.markTerminal.run(id);
   }
 
   // ── Echo matching ──
   matchEcho(waMessageId: string): boolean {
-    const row = this.db.raw.prepare(
-      `SELECT id FROM outbound_ops WHERE wa_message_id = ? AND status = 'submitted'`,
-    ).get(waMessageId) as { id: number } | undefined;
+    const row = this.statements.selectOutboundForEchoMatch.get(waMessageId) as { id: number } | undefined;
     if (row) {
       this.markEchoed(row.id);
       return true;
@@ -201,23 +360,20 @@ export class DurabilityEngine {
 
   // ── Tool calls ──
   recordToolCall(conversationKey: string, toolName: string, toolInput: string, replayPolicy: string, checkpointId?: number): number {
-    const result = this.db.raw.prepare(
-      `INSERT INTO tool_calls (conversation_key, session_checkpoint_id, tool_name, tool_input, status, replay_policy)
-       VALUES (?, ?, ?, ?, 'pending', ?)`,
-    ).run(conversationKey, checkpointId ?? null, toolName, toolInput, replayPolicy);
+    const result = this.statements.recordToolCall.run(
+      conversationKey, checkpointId ?? null, toolName, toolInput, replayPolicy,
+    );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');
     return id;
   }
 
   markToolExecuting(id: number): void {
-    this.db.raw.prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`).run(id);
+    this.statements.markToolExecuting.run(id);
   }
 
   markToolComplete(id: number, result: string, outboundOpId?: number): void {
-    this.db.raw.prepare(
-      `UPDATE tool_calls SET status = 'complete', result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
-    ).run(result, outboundOpId ?? null, id);
+    this.statements.markToolComplete.run(result, outboundOpId ?? null, id);
   }
 
   // ── Session checkpoints ──
@@ -227,23 +383,7 @@ export class DurabilityEngine {
     watchdogState?: string; workspacePath?: string;
     claudePid?: number; sessionStatus?: string;
   }): void {
-    this.db.raw.prepare(`
-      INSERT INTO session_checkpoints (conversation_key, session_id, transcript_path, active_turn_id,
-        last_inbound_seq, last_flushed_outbound_id, watchdog_state, workspace_path, claude_pid, session_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(conversation_key) DO UPDATE SET
-        session_id = COALESCE(excluded.session_id, session_id),
-        transcript_path = COALESCE(excluded.transcript_path, transcript_path),
-        active_turn_id = excluded.active_turn_id,
-        last_inbound_seq = COALESCE(excluded.last_inbound_seq, last_inbound_seq),
-        last_flushed_outbound_id = COALESCE(excluded.last_flushed_outbound_id, last_flushed_outbound_id),
-        watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
-        workspace_path = COALESCE(excluded.workspace_path, workspace_path),
-        claude_pid = COALESCE(excluded.claude_pid, claude_pid),
-        session_status = COALESCE(excluded.session_status, session_status),
-        checkpoint_version = checkpoint_version + 1,
-        updated_at = datetime('now')
-    `).run(
+    this.statements.upsertSessionCheckpoint.run(
       conversationKey, fields.sessionId ?? null, fields.transcriptPath ?? null,
       fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
       fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
@@ -253,41 +393,29 @@ export class DurabilityEngine {
   }
 
   getSessionCheckpoint(conversationKey: string): SessionCheckpointRow | undefined {
-    return this.db.raw.prepare(
-      `SELECT * FROM session_checkpoints WHERE conversation_key = ?`,
-    ).get(conversationKey) as SessionCheckpointRow | undefined;
+    return this.statements.getSessionCheckpoint.get(conversationKey) as SessionCheckpointRow | undefined;
   }
 
   getAllActiveCheckpoints(): ActiveSessionCheckpointRow[] {
-    return this.db.raw.prepare(
-      `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status = 'active'`,
-    ).all() as unknown as ActiveSessionCheckpointRow[];
+    return this.statements.getAllActiveCheckpoints.all() as unknown as ActiveSessionCheckpointRow[];
   }
 
   /** Return checkpoints that are active or suspended — candidates for proactive resume on startup. */
   getResumableCheckpoints(): ActiveSessionCheckpointRow[] {
-    return this.db.raw.prepare(
-      `SELECT id, conversation_key, claude_pid, session_status FROM session_checkpoints WHERE session_status IN ('active', 'suspended') AND session_id IS NOT NULL`,
-    ).all() as unknown as ActiveSessionCheckpointRow[];
+    return this.statements.getResumableCheckpoints.all() as unknown as ActiveSessionCheckpointRow[];
   }
 
   markSessionOrphaned(conversationKey: string): void {
-    this.db.raw.prepare(
-      `UPDATE session_checkpoints SET session_status = 'orphaned', updated_at = datetime('now') WHERE conversation_key = ?`,
-    ).run(conversationKey);
+    this.statements.markSessionOrphaned.run(conversationKey);
   }
 
   // ── Getters for recovery ──
   getPendingInbound(): InboundEventRow[] {
-    return this.db.raw.prepare(
-      `SELECT seq, message_id, processing_status, routed_to FROM inbound_events WHERE processing_status IN ('pending', 'processing', 'turn_done')`,
-    ).all() as unknown as InboundEventRow[];
+    return this.statements.getPendingInbound.all() as unknown as InboundEventRow[];
   }
 
   getOutboundByStatus(status: string): OutboundOpRow[] {
-    return this.db.raw.prepare(
-      `SELECT id, wa_message_id, replay_policy, submitted_at, source_inbound_seq, is_terminal FROM outbound_ops WHERE status = ?`,
-    ).all(status) as unknown as OutboundOpRow[];
+    return this.statements.getOutboundByStatus.all(status) as unknown as OutboundOpRow[];
   }
 
   // ── Recovery engine ──
@@ -356,10 +484,7 @@ export class DurabilityEngine {
 
     // Step 3: Recover executing and pending tool calls
     try {
-      const executingCalls = this.db.raw.prepare(
-        `SELECT id, conversation_key, tool_name, replay_policy, outbound_op_id
-         FROM tool_calls WHERE status IN ('executing', 'pending')`,
-      ).all() as Array<{
+      const executingCalls = this.statements.getRecoverableToolCalls.all() as Array<{
         id: number;
         conversation_key: string;
         tool_name: string;
@@ -378,9 +503,7 @@ export class DurabilityEngine {
             'preConnectRecovery: executing tool call has outbound_op_id, delegating to outbound reconciliation',
           );
         } else if (tc.replay_policy === 'safe' || tc.replay_policy === 'read_only') {
-          this.db.raw.prepare(
-            `UPDATE tool_calls SET status = 'replayed', completed_at = datetime('now') WHERE id = ?`,
-          ).run(tc.id);
+          this.statements.markToolReplayed.run(tc.id);
           stats.toolCallsReplayed += 1;
           log.info(
             { toolCallId: tc.id, toolName: tc.tool_name },
@@ -388,9 +511,7 @@ export class DurabilityEngine {
           );
         } else {
           // unsafe without an outbound op: quarantine
-          this.db.raw.prepare(
-            `UPDATE tool_calls SET status = 'quarantined', completed_at = datetime('now') WHERE id = ?`,
-          ).run(tc.id);
+          this.statements.markRecoveredToolQuarantined.run(tc.id);
           stats.toolCallsQuarantined += 1;
           log.warn(
             { toolCallId: tc.id, toolName: tc.tool_name, replayPolicy: tc.replay_policy },
@@ -404,17 +525,11 @@ export class DurabilityEngine {
 
     // Step 4: Mark inbound `processing` events with no terminal outbound ops as failed
     try {
-      const processingEvents = this.db.raw.prepare(
-        `SELECT seq FROM inbound_events WHERE processing_status = 'processing'`,
-      ).all() as Array<{ seq: number }>;
+      const processingEvents = this.statements.getProcessingInboundEvents.all() as Array<{ seq: number }>;
 
       for (const ev of processingEvents) {
         // Check if there's any terminal outbound op linked to this inbound
-        const terminalOp = this.db.raw.prepare(
-          `SELECT id FROM outbound_ops
-           WHERE source_inbound_seq = ? AND is_terminal = 1
-             AND status NOT IN ('quarantined', 'failed_permanent')`,
-        ).get(ev.seq) as { id: number } | undefined;
+        const terminalOp = this.statements.getTerminalOutboundForInbound.get(ev.seq) as { id: number } | undefined;
 
         if (!terminalOp) {
           this.markInboundFailed(ev.seq);
@@ -466,9 +581,7 @@ export class DurabilityEngine {
     // racing with echoes from messages sent in the current reconnect attempt.
     // Done first so newly-promoted ops are reconciled in the same pass (Step 2).
     try {
-      const staleSubmitted = this.db.raw.prepare(
-        `SELECT id FROM outbound_ops WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
-      ).all() as Array<{ id: number }>;
+      const staleSubmitted = this.statements.getStaleSubmitted.all() as Array<{ id: number }>;
       for (const op of staleSubmitted) {
         this.markMaybeSent(op.id, 'stale-submitted-no-echo');
         stats.outboundReconciled += 1;
@@ -489,9 +602,9 @@ export class DurabilityEngine {
 
         if (op.wa_message_id) {
           // Check if message was received via normal ingest (echo confirmation)
-          const found = this.db.raw.prepare(
-            `SELECT pk FROM messages WHERE message_id = ?`,
-          ).get(op.wa_message_id) as { pk: number } | undefined;
+          const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
+            | { pk: number }
+            | undefined;
 
           if (found) {
             this.markEchoed(op.id);
@@ -501,9 +614,7 @@ export class DurabilityEngine {
             );
           } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
             // Re-enqueue for replay: reset to pending
-            this.db.raw.prepare(
-              `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
-            ).run(op.id);
+            this.statements.resetMaybeSentWithWaToPending.run(op.id);
             stats.outboundReplayed += 1;
             log.info(
               { opId: op.id },
@@ -520,9 +631,7 @@ export class DurabilityEngine {
         } else {
           // No wa_message_id: definitely not delivered; apply replay policy
           if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
-            this.db.raw.prepare(
-              `UPDATE outbound_ops SET status = 'pending', error = NULL WHERE id = ?`,
-            ).run(op.id);
+            this.statements.resetMaybeSentWithoutWaToPending.run(op.id);
             stats.outboundReplayed += 1;
             log.info(
               { opId: op.id },
@@ -557,10 +666,7 @@ export class DurabilityEngine {
    * Returns the number of ops promoted.
    */
   sweepStaleSubmitted(): number {
-    const result = this.db.raw.prepare(
-      `UPDATE outbound_ops SET status = 'maybe_sent', error = 'echo_timeout'
-       WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
-    ).run();
+    const result = this.statements.sweepStaleSubmitted.run();
     const count = Number(result.changes);
     if (count > 0) {
       log.warn({ count }, 'sweepStaleSubmitted: promoted stale submitted ops');
@@ -569,15 +675,11 @@ export class DurabilityEngine {
   }
 
   getHealthStats(): { pendingOutbound: number; quarantinedOutbound: number; lastRecoveryAt: string | null } {
-    const pending = this.db.raw.prepare(
-      `SELECT COUNT(*) as count FROM outbound_ops WHERE status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
-    ).get() as { count: number };
-    const quarantined = this.db.raw.prepare(
-      `SELECT COUNT(*) as count FROM outbound_ops WHERE status = 'quarantined'`,
-    ).get() as { count: number };
-    const lastRecovery = this.db.raw.prepare(
-      `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
-    ).get() as { completed_at: string } | undefined;
+    const pending = this.statements.getPendingOutboundCount.get() as { count: number };
+    const quarantined = this.statements.getQuarantinedOutboundCount.get() as { count: number };
+    const lastRecovery = this.statements.getLastRecoveryRunCompletedAt.get() as
+      | { completed_at: string }
+      | undefined;
     return {
       pendingOutbound: pending.count,
       quarantinedOutbound: quarantined.count,
@@ -590,13 +692,7 @@ export class DurabilityEngine {
    */
   logRecoveryRun(trigger: string, stats: RecoveryStats): void {
     try {
-      this.db.raw.prepare(`
-        INSERT INTO recovery_runs
-          (trigger, inbound_replayed, outbound_reconciled, outbound_replayed,
-           outbound_quarantined, tool_calls_recovered, tool_calls_replayed,
-           tool_calls_quarantined, sessions_restored, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-      `).run(
+      this.statements.insertRecoveryRun.run(
         trigger,
         stats.inboundReplayed,
         stats.outboundReconciled,
