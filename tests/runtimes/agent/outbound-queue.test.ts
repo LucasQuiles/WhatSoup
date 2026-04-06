@@ -89,6 +89,22 @@ describe('OutboundQueue', () => {
     await queue.flush();
   });
 
+  it('buffers streaming fragments in parts and clears them after flush', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    const queueState = queue as unknown as { streamBufferParts?: string[] };
+
+    queue.enqueueStreamingText('Hel');
+    queue.enqueueStreamingText('lo');
+
+    expect(queueState.streamBufferParts).toEqual(['Hel', 'lo']);
+
+    await queue.flush();
+
+    expect(calls).toEqual(['Hello']);
+    expect(queueState.streamBufferParts).toEqual([]);
+  });
+
   it('flush updates lastActivity and clears pending work state', async () => {
     const { messenger } = makeMessenger();
     vi.setSystemTime(new Date('2026-04-06T01:00:00Z'));

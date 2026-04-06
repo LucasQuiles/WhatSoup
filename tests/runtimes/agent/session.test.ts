@@ -308,6 +308,29 @@ describe('SessionManager', () => {
     expect(events.some((e) => e.type === 'init')).toBe(true);
   });
 
+  it('buffers stdout chunks separately from the parsed line remainder', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: (event) => events.push(event) });
+    await sm.spawnSession();
+
+    const state = sm as unknown as { stdoutChunks?: Buffer[]; stdoutBufferStr?: string };
+
+    mockChild.stdout.emit('data', Buffer.from('{"type":"system","subtype":"init",'));
+
+    expect(state.stdoutChunks).toEqual([]);
+    expect(state.stdoutBufferStr).toBe('{"type":"system","subtype":"init",');
+
+    mockChild.stdout.emit('data', Buffer.from('"session_id":"ses_buffered"}\n'));
+
+    expect(state.stdoutChunks).toEqual([]);
+    expect(state.stdoutBufferStr).toBe('');
+    expect(updateSessionId).toHaveBeenCalledWith(db, 42, 'ses_buffered');
+    expect(events.some((event) => event.type === 'init')).toBe(true);
+  });
+
   it('spawnSession is a no-op if already active', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

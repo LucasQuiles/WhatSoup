@@ -1,24 +1,34 @@
-# LEAK-04 Output
+# PERF-02 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: LEAK-04 — workspace resource idle eviction
-- Branch: fix/leak-04-workspace-eviction
-- Commit: 2ed7364
-- Summary: Added idle eviction for sandbox-per-chat workspace socket/media resources with `lastActivity` tracking, a 30m sweep window, shutdown timer cleanup, and regression coverage for eviction, active-session protection, re-creation, result touches, and timer lifecycle.
+- Bead: PERF-02 — streaming buffer + stdout buffer + canonical map-key dedup
+- Branch: fix/perf-02-streaming-buffer-optimization
+- Commit: b17761f
+- Summary: Replaced hot-path string concatenation in outbound streaming and session stdout handling, normalized non-sandbox per-chat session/queue lookups around a single per-message canonical map key, and added regressions for the new buffering/canonical reuse paths.
 
 ## Files Changed
+- src/runtimes/agent/outbound-queue.ts
 - src/runtimes/agent/runtime.ts
+- src/runtimes/agent/session.ts
+- tests/mcp/tools/heal.test.ts
+- tests/runtimes/agent/control-timeout.test.ts
+- tests/runtimes/agent/outbound-queue.test.ts
 - tests/runtimes/agent/runtime.test.ts
+- tests/runtimes/agent/session.test.ts
+- tests/runtimes/agent/zombie-sessions.test.ts
 - bead-output.md
 
 ## Verification
-- `npx vitest run tests/runtimes/agent/runtime.test.ts` ✅
+- `npx vitest run --pool=forks tests/runtimes/agent/outbound-queue.test.ts` ✅
+- `npx vitest run --pool=forks tests/runtimes/agent/session.test.ts` ✅
+- `npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts` ✅
+- `npx vitest run --pool=forks tests/core/perf-prepared-statements.test.ts` ✅
 - `npm run typecheck` ✅
-- `npx vitest run tests/console/line-detail-history-metrics.test.ts tests/console/modal-workflows.test.ts tests/console/nav-status.test.ts tests/console/ops-actions.test.ts tests/console/soup-kitchen.test.tsx` ✅
-- `npx vitest run` ⚠️ fails on pre-existing `tests/console/design-system-scheduled-groups-primitives.test.ts` (`ContactSearchPicker` still contains `bg-d1`), reproduced on the repo main checkout at `/home/q/LAB/WhatSoup` too.
+- `npm run typecheck:all` ✅
+- `npx vitest run --pool=forks` ✅ (199 files, 3,747 tests)
 
 ## Notes
-- `workspaceResources` now carry `lastActivity`, refreshed on workspace provisioning, delivery-JID/media-bridge updates, active-session sweeps, and per-chat result completion.
-- The workspace sweep timer is sandbox-per-chat only, unref'd, and cleared during shutdown.
-- Full-suite verification needed corrected worktree dependency links (`node_modules` and `console/node_modules`) before reproducing the unrelated console failure.
+- `OutboundQueue` now accumulates streaming fragments in `streamBufferParts` and joins once per flush/abort path.
+- `SessionManager` now batches stdout chunks through `stdoutChunks`/`stdoutBufferStr`, draining complete lines and final crash/exit tails without repeated `chunk.toString()` concatenation.
+- Non-sandbox `per_chat` now resolves one canonical map key per inbound message and threads it through queue/session reuse, while continuing to rely on the existing prepared-statement cache already present in `canonicalizeChatJid`.
