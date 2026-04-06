@@ -63,14 +63,14 @@ Harden the WhatsApp agent layer across stability, safety, correctness, and obser
 | SP7-message-types | implement | **merged** | L | 2b81a94 |
 | SP8-media-hardening | implement | **merged** | L | 2b81a94 |
 | SP9-scheduler-media | implement | pending | — | BLOB storage deferred |
-| SP10-fleet-hardening | implement | pending | — | Config validation deferred |
+| SP10-fleet-hardening | implement | **merged** | Q | 732674b — validateConfig in discovery |
 | SP11-socket-isolation | implement | pending | — | Per-connection context deferred |
 
 ### Phase 6B-security — Net-New Security Findings (from L's audit)
 | Bead | Type | Status | Runner | Commit |
 |------|------|--------|--------|--------|
 | SEC1-path-traversal | implement | **merged** | L | dfb2e47 |
-| SEC2-fts-injection | implement | pending | — | FTS5 sanitization |
+| SEC2-fts-injection | implement | **merged** | Q | e2543e4 — buildSafeFtsMatchQuery |
 | SEC3-ssrf-dns | implement | **merged** | L | 2b81a94 |
 | SEC4-reconnect-backoff | implement | **merged** | L | via SP2 exhaustion logic |
 | SEC5-exhausted-race | implement | **merged** | L | via SP2 exhaustion logic |
@@ -81,13 +81,11 @@ Harden the WhatsApp agent layer across stability, safety, correctness, and obser
 | SP12-observability-pack | implement | **merged** | L | dfb2e47 (LRU, error sanitize) |
 | SP13-test-coverage | implement | partial | L | 3454 tests passing |
 
-## Remaining Items (5 of 23 beads)
+## Remaining Items (3 of 23 beads)
 | Bead | Priority | Effort | Notes |
 |------|----------|--------|-------|
 | SP9-scheduler-media | Medium | Medium | BLOB storage + size cap + retention |
-| SP10-fleet-hardening | Medium | Small | Config validation in discovery |
 | SP11-socket-isolation | Medium | Medium | Per-connection session context |
-| SEC2-fts-injection | Medium | Small | FTS5 MATCH sanitization |
 | SP13-test-coverage | Low | Small | Tests for relay, admin replay, control-plane |
 
 ## Workers
