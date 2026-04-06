@@ -65,3 +65,38 @@ export function normalizeLid(raw: string): string {
   const colon = raw.indexOf(':');
   return colon >= 0 ? raw.slice(0, colon) : raw;
 }
+
+// ── Canonical JID normalization ────────────────────────────────────────────
+
+/**
+ * Normalize a chat JID to its canonical form for use as a map key.
+ *
+ * Canonical form:
+ *   - Groups:   unchanged (e.g. `120363406689931730@g.us`)
+ *   - Phone DMs: unchanged (e.g. `18459780919@s.whatsapp.net`)
+ *   - LID DMs:  resolved to `phone@s.whatsapp.net` via lid_mappings if known;
+ *               returned unchanged if unmapped (graceful degradation)
+ *
+ * NEVER throws. If the DB lookup fails or JID is unrecognized, returns input
+ * unchanged — worst case is old drift behavior, never message loss.
+ */
+export function canonicalizeChatJid(chatJid: string, db?: { raw: any } | null): string {
+  if (chatJid.endsWith(`@${DOMAIN_GROUP}`)) return chatJid;
+  if (chatJid.endsWith(`@${DOMAIN_PERSONAL}`)) return chatJid;
+
+  if (chatJid.endsWith(`@${DOMAIN_LID}`)) {
+    if (!db) return chatJid;
+    try {
+      const lid = normalizeLid(bareNumber(chatJid));
+      const row = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(lid) as
+        | { phone_jid: string }
+        | undefined;
+      if (row?.phone_jid) return row.phone_jid;
+    } catch {
+      // DB error — graceful degradation
+    }
+    return chatJid;
+  }
+
+  return chatJid;
+}

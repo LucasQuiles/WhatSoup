@@ -33,7 +33,7 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
-import { toPersonalJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, canonicalizeChatJid } from '../../core/jid-constants.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -670,11 +670,18 @@ export class AgentRuntime implements Runtime {
       log.info({ conversationKey, newJid }, 'updated delivery JID on socket server');
     }
 
-    // Shared-mode outbound queues (keyed by raw chatJid)
+    // Shared-mode outbound queues (keyed by canonical JID — may need re-key)
     for (const [key, q] of this.outboundQueues) {
       try {
         if (toConversationKey(key) === conversationKey) {
           q.updateDeliveryJid(newJid);
+          // Re-key from old LID-based key to canonical phone JID
+          const canonical = canonicalizeChatJid(newJid, this.db);
+          if (key !== canonical) {
+            this.outboundQueues.delete(key);
+            this.outboundQueues.set(canonical, q);
+            log.info({ oldKey: key, newKey: canonical }, 'shared-mode: re-keyed outbound queue after LID resolution');
+          }
         }
       } catch (err) {
         log.debug({ err, key }, 'JID parsing failed during session resume — skipping');
@@ -684,6 +691,59 @@ export class AgentRuntime implements Runtime {
     // Single-mode queue
     if (this.queue) {
       this.queue.updateDeliveryJid(newJid);
+    }
+
+    // Re-key per_chat maps: if a session is stored under a LID-based key,
+    // migrate it to the canonical phone JID now that the mapping is known.
+    // All co-keyed maps must be migrated atomically.
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat) {
+      const lidKey = `${conversationKey}@lid`;
+      if (this.chatSessions.has(lidKey)) {
+        const canonical = canonicalizeChatJid(newJid, this.db);
+        if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
+          // Migrate session
+          const session = this.chatSessions.get(lidKey)!;
+          this.chatSessions.delete(lidKey);
+          this.chatSessions.set(canonical, session);
+
+          // Migrate queue
+          const chatQueue = this.chatQueues.get(lidKey);
+          if (chatQueue) {
+            chatQueue.updateDeliveryJid(newJid);
+            this.chatQueues.delete(lidKey);
+            this.chatQueues.set(canonical, chatQueue);
+          }
+
+          // Migrate all co-keyed per-chat maps
+          const seqQueue = this.perChatInboundSeqQueue.get(lidKey);
+          if (seqQueue) {
+            this.perChatInboundSeqQueue.delete(lidKey);
+            this.perChatInboundSeqQueue.set(canonical, seqQueue);
+          }
+          const pending = this.pendingTurnText.get(lidKey);
+          if (pending !== undefined) {
+            this.pendingTurnText.delete(lidKey);
+            this.pendingTurnText.set(canonical, pending);
+          }
+          const contentType = this.perChatTurnContentType.get(lidKey);
+          if (contentType !== undefined) {
+            this.perChatTurnContentType.delete(lidKey);
+            this.perChatTurnContentType.set(canonical, contentType);
+          }
+          const turnText = this.perChatTurnText.get(lidKey);
+          if (turnText !== undefined) {
+            this.perChatTurnText.delete(lidKey);
+            this.perChatTurnText.set(canonical, turnText);
+          }
+          const itemText = this.perChatAssistantItemText.get(lidKey);
+          if (itemText) {
+            this.perChatAssistantItemText.delete(lidKey);
+            this.perChatAssistantItemText.set(canonical, itemText);
+          }
+
+          log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
+        }
+      }
     }
   }
 
@@ -882,7 +942,7 @@ export class AgentRuntime implements Runtime {
 
       if (this.shared) {
         const q = this.createOutboundQueue(resumeChatJid);
-        this.outboundQueues.set(resumeChatJid, q);
+        this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
       } else {
         const q = this.createOutboundQueue(resumeChatJid);
         this.queue = q;
@@ -1173,7 +1233,7 @@ export class AgentRuntime implements Runtime {
       // per_chat: enqueue inbound seq keyed by chat before sending turn
       const mapKey = this.sandboxPerChat
         ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
-        : chatJid;
+        : canonicalizeChatJid(chatJid, this.db);
       const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
       if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
       this.perChatInboundSeqQueue.set(mapKey, seqQueue);
