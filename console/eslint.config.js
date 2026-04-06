@@ -218,6 +218,14 @@ const designSystemRestrictions = [
           message: '⛔ background token in style. FIX: remove from style, add to className. background: "var(--s-warn-wash)"→"bg-[var(--s-warn-wash)]" background: "var(--overlay)"→"bg-[var(--overlay)]". Pattern: bg-[var(--TOKEN)].',
         },
 
+        // ═══ TAILWIND ARBITRARY PX VALUES ═══
+        // Tailwind arbitrary values like w-[60px] bypass the token system.
+        // Use w-[var(--*)] with a CSS variable instead.
+        {
+          selector: 'Literal[value=/\\b(w|h|min-w|min-h|max-w|max-h|p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|top|bottom|left|right)-\\[\\d+px\\]/]',
+          message: '⛔ Tailwind arbitrary px value bypasses tokens. FIX: replace [Npx] with [var(--sp-*)] or [var(--size-token)]. E.g. w-[60px]→w-[var(--token)] gap-[8px]→gap-[var(--sp-2)]. Define new tokens in index.css if needed.',
+        },
+
         // ═══ BORDER EDGE SHORTHAND IN STYLE ═══
         // borderBottom/Top/Left/Right: 'var(--bw) solid var(--b1)' — use c-border-b class or longhands
         {
