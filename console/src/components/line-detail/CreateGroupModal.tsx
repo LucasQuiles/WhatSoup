@@ -77,7 +77,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
         <div className="c-dialog-header flex-shrink-0">
           <div className="flex items-center gap-2">
             <Users size={16} strokeWidth={1.75} className="text-t4" />
-            <span id="create-group-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            <span id="create-group-dialog-title" className="c-heading-lg">
               Create Group
             </span>
           </div>
@@ -94,8 +94,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             <div>
               <label
                 htmlFor="create-group-subject"
-                className="font-mono text-t4 block mb-[var(--sp-1)]"
-                style={{ fontSize: 'var(--font-size-xs)' }}
+                className="c-meta block mb-[var(--sp-1)]"
               >
                 Group subject <span className="text-s-crit">*</span>
               </label>
@@ -113,8 +112,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             {/* Participants */}
             <div>
               <label
-                className="font-mono text-t4 block mb-[var(--sp-1)]"
-                style={{ fontSize: 'var(--font-size-xs)' }}
+                className="c-meta block mb-[var(--sp-1)]"
               >
                 Participants <span className="text-s-crit">*</span>
                 {participants.length > 0 && (
@@ -145,7 +143,6 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             onClick={handleCreate}
             disabled={submitting || !subject.trim() || participants.length === 0}
             className="c-btn c-btn-primary font-mono"
-            style={{ fontSize: 'var(--font-size-data)' }}
           >
             <Users size={13} strokeWidth={1.75} />
             {submitting ? 'Creating...' : 'Create Group'}

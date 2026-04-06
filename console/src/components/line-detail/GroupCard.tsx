@@ -30,7 +30,6 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
         className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] rounded-full text-t1"
         style={{
           background: color,
-          fontSize: 'var(--font-size-data)',
         }}
       >
         {initials}
@@ -39,14 +38,13 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
+          <span className="c-data truncate">
             {group.subject}
           </span>
           {badge && (
             <span
-              className="inline-flex items-center gap-1 font-mono flex-shrink-0 py-[var(--bw)] px-[var(--sp-1)] rounded-sm"
+              className="inline-flex items-center gap-1 c-meta flex-shrink-0 py-[var(--bw)] px-[var(--sp-1)] rounded-sm"
               style={{
-                fontSize: 'var(--font-size-xs)',
                 background: badge.bg,
                 color: badge.color,
               }}
@@ -56,7 +54,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
             </span>
           )}
         </div>
-        <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'calc(var(--sp-1) / 2)' }}>
+        <div className="c-meta mt-[calc(var(--sp-1)/2)]">
           <Users size={11} className="inline mr-[var(--sp-1)]" style={{ verticalAlign: 'calc(var(--bw) * -1)' }} />
           {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
           {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}

@@ -186,7 +186,7 @@ export function ScheduleComposerModal({
         <div className="c-dialog-header flex-shrink-0">
           <div className="flex items-center gap-2">
             <Clock size={16} strokeWidth={1.75} className="text-t4" />
-            <span id="composer-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            <span id="composer-dialog-title" className="c-heading-lg">
               {isEditing ? 'Edit Scheduled Message' : 'Schedule Message'}
             </span>
           </div>
@@ -320,7 +320,7 @@ export function ScheduleComposerModal({
                   Recurring
                 </button>
                 {!recurring && (
-                  <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
+                  <span className="c-meta">
                     One-shot
                   </span>
                 )}
@@ -351,7 +351,7 @@ export function ScheduleComposerModal({
                   />
                   {/* Preview */}
                   {cronPreview && (
-                    <div className="font-mono text-t4 mt-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+                    <div className="c-meta mt-[var(--sp-1)]">
                       {cronPreview}
                     </div>
                   )}
@@ -372,7 +372,6 @@ export function ScheduleComposerModal({
             onClick={handleSubmit}
             disabled={submitting || !selectedChat}
             className="c-btn c-btn-primary font-mono"
-            style={{ fontSize: 'var(--font-size-data)' }}
           >
             <Clock size={13} strokeWidth={1.75} />
             {submitting ? 'Saving...' : isEditing ? 'Update' : 'Schedule'}

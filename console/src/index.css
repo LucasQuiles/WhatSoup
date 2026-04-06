@@ -743,6 +743,14 @@ body::before {
   color: var(--color-t2);
 }
 
+/* Metadata text: mono 400 xs --t4 (timestamps, IDs, secondary info) */
+@utility c-meta {
+  font-family: var(--font-mono);
+  font-weight: var(--fw-normal);
+  font-size: var(--font-size-xs);
+  color: var(--color-t4);
+}
+
 /* Section heading: sans 600 heading --t1 */
 @utility c-heading {
   font-family: var(--font-sans);

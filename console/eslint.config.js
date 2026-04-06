@@ -565,6 +565,30 @@ const scheduledGroupsDesignSystemRestrictions = [
 
   // Border edge shorthand rules are now in the global set — no duplicate needed here.
 
+  // ═══ FONT SIZE → UTILITY CLASS ═══
+  // TW4 text-[var()] generates COLOR not font-size — cannot use arbitrary values.
+  // These rules enforce @utility class usage on newer modal surfaces.
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-data)"]',
+    message: '⛔ Inline fontSize data. FIX: remove fontSize from style. Replace font-mono+text-t2 with "c-data". If color differs (e.g. text-t3), use "c-data text-t3".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--font-size-xs\\)/]',
+    message: '⛔ Inline fontSize xs. FIX: remove fontSize from style. Replace font-mono+text-t4 with "c-meta". For labels use "c-field-label". For column headers, c-col-header already sets size.',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-lg)"]',
+    message: '⛔ Inline fontSize lg. FIX: remove fontSize from style. Replace font-sans+font-semibold with "c-heading-lg".',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-label)"]',
+    message: '⛔ Inline fontSize label. FIX: remove fontSize from style. Use "c-label" (mono 500 label tracking-label t4).',
+  },
+  {
+    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-sm)"]',
+    message: '⛔ Inline fontSize sm. FIX: remove fontSize from style. Use "c-section-label" if uppercase, otherwise keep with comment.',
+  },
+
   // ═══ LAYOUT-IN-STYLE — move to className ═══
   {
     selector: 'JSXAttribute[name.name="style"] Property[key.name="display"]',

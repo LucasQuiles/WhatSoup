@@ -79,16 +79,14 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Top line: preview + status badge */}
           <div className="flex items-center gap-2 flex-wrap">
             <span
-              className="font-mono text-t2 truncate flex-1 min-w-0"
-              style={{ fontSize: 'var(--font-size-data)' }}
+              className="c-data truncate flex-1 min-w-0"
             >
               {preview || <span className="text-t4 italic">(no preview)</span>}
             </span>
             {/* Status badge */}
             <span
-              className="flex-shrink-0 font-mono inline-flex items-center gap-[var(--sp-1)]"
+              className="flex-shrink-0 c-meta inline-flex items-center gap-[var(--sp-1)]"
               style={{
-                fontSize: 'var(--font-size-xs)',
                 color: statusColor(message.status),
               }}
             >
@@ -103,7 +101,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           </div>
 
           {/* Second line: target + scheduled time */}
-          <div className="flex items-center gap-2 flex-wrap font-mono text-t4 mt-[var(--sp-0h)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+          <div className="flex items-center gap-2 flex-wrap c-meta mt-[var(--sp-0h)]">
             <span>{message.chatName ?? message.chatJid}</span>
             <span style={metaDividerStyle}>·</span>
             <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
@@ -131,10 +129,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Error message if failed */}
           {message.status === 'failed' && message.error && (
             <div
-              className="font-mono text-s-crit mt-[var(--sp-0h)]"
-              style={{
-                fontSize: 'var(--font-size-xs)',
-              }}
+              className="c-meta text-s-crit mt-[var(--sp-0h)]"
             >
               {message.error}
             </div>
@@ -150,7 +145,6 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 onClick={() => onEdit(message)}
                 aria-label="Edit scheduled message"
                 className="c-btn c-btn-sm c-btn-ghost font-mono"
-                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 <Pencil size={11} strokeWidth={1.75} />
               </button>
@@ -160,7 +154,6 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 disabled={cancelling === message.id}
                 aria-label={`Cancel scheduled message to ${message.chatName ?? message.chatJid}`}
                 className="c-btn c-btn-sm c-btn-danger font-mono"
-                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 {cancelling === message.id
                   ? <Loader2 size={11} className="animate-spin" />
@@ -173,7 +166,6 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             onClick={() => onDuplicate(message)}
             aria-label="Duplicate as new scheduled message"
             className="c-btn c-btn-sm c-btn-ghost font-mono"
-            style={{ fontSize: 'var(--font-size-xs)' }}
             title="Duplicate"
           >
             <Copy size={11} strokeWidth={1.75} />
@@ -197,10 +189,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Expanded details */}
       {expanded && (
         <div
-          className="font-mono text-t4 flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
-          style={{
-            fontSize: 'var(--font-size-xs)',
-          }}
+          className="c-meta flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
         >
           {message.nextRunAt && (
             <span>Next run: {new Date(message.nextRunAt * 1000).toLocaleString()}</span>
