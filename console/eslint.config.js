@@ -5,32 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      js.configs.recommended,
-      tseslint.configs.recommended,
-      reactHooks.configs.flat.recommended,
-      reactRefresh.configs.vite,
-    ],
-    languageOptions: {
-      ecmaVersion: 2020,
-      globals: globals.browser,
-    },
-    rules: {
-      // ═══════════════════════════════════════════════════════════════
-      // DESIGN SYSTEM ENFORCEMENT
-      //
-      // These rules prevent hardcoded styles that bypass the token system
-      // defined in index.css. Every visual property should reference a
-      // CSS custom property (var(--*)) or a design system utility class.
-      //
-      // Severity: "warn" for ratcheting. Change to "error" to hard-block.
-      // ═══════════════════════════════════════════════════════════════
-
-      'no-restricted-syntax': ['error',
+const designSystemRestrictions = [
 
         // ═══ TYPOGRAPHY ═══
 
@@ -292,7 +267,83 @@ export default defineConfig([
           selector: 'Property[key.name="opacity"][value.value=/^0\\.[0-9]/]',
           message: '⛔ Fractional opacity on interactive elements looks disabled. Use filter: brightness() for hover effects.',
         },
-      ],
+]
+
+const scheduledGroupsDesignSystemRestrictions = [
+  // ═══ SCHEDULED/GROUP SURFACES ═══
+  // These newer flows still need stronger DS ratchets without breaking older files.
+  {
+    selector: 'Literal[value=/#[0-9a-fA-F]{3,8}/]',
+    message: '⛔ Hardcoded hex color — use a CSS custom property.',
+  },
+  {
+    selector: 'Property[key.name="minHeight"][value.value=/^\\d+px$/]',
+    message: '⛔ Hardcoded minHeight px — use a CSS variable.',
+  },
+  {
+    selector: 'Property[key.name="maxHeight"][value.value=/^\\d+px$/]',
+    message: '⛔ Hardcoded maxHeight px — use a CSS variable.',
+  },
+  {
+    selector: 'Property[key.name="maxHeight"][value.value=/^\\d+(vh|vw|%)$/]',
+    message: '⛔ Hardcoded maxHeight viewport unit — use a modal token.',
+  },
+  {
+    selector: 'Property[key.name="maxWidth"][value.value=/^\\d+(vh|vw|%)$/]',
+    message: '⛔ Hardcoded maxWidth viewport unit — use a panel token.',
+  },
+  {
+    selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.value=/^\\d+px$/]',
+    message: '⛔ Hardcoded size px — use a sizing token.',
+  },
+  {
+    selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.type="Literal"][value.raw=/^\\d+$/]',
+    message: '⛔ Hardcoded numeric size literal — use a sizing token.',
+  },
+]
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+    },
+    rules: {
+      // ═══════════════════════════════════════════════════════════════
+      // DESIGN SYSTEM ENFORCEMENT
+      //
+      // These rules prevent hardcoded styles that bypass the token system
+      // defined in index.css. Every visual property should reference a
+      // CSS custom property (var(--*)) or a design system utility class.
+      //
+      // Severity: "warn" for ratcheting. Change to "error" to hard-block.
+      // ═══════════════════════════════════════════════════════════════
+
+      'no-restricted-syntax': ['error', ...designSystemRestrictions],
+    },
+  },
+  {
+    files: [
+      'src/components/shared/SearchInput.tsx',
+      'src/components/shared/ContactSearchPicker.tsx',
+      'src/components/shared/ChatPicker.tsx',
+      'src/components/line-detail/CreateGroupModal.tsx',
+      'src/components/line-detail/ScheduleComposerModal.tsx',
+      'src/components/line-detail/GroupDetailModal.tsx',
+      'src/components/line-detail/GroupCard.tsx',
+      'src/components/line-detail/ScheduledMessageRow.tsx',
+      'src/components/line-detail/scheduled-utils.ts',
+    ],
+    rules: {
+      'no-restricted-syntax': ['error', ...designSystemRestrictions, ...scheduledGroupsDesignSystemRestrictions],
     },
   },
 ])

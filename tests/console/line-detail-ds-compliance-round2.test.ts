@@ -31,6 +31,29 @@ describe('design system compliance — round 2 shared search inputs', () => {
     expect(contactPicker).not.toContain('Search size={14}')
     expect(chatPicker).not.toContain('Search size={14}')
   })
+
+  it('uses shared dialog, card, tab, and input primitives across the scheduled/group surfaces', () => {
+    const createGroup = read('console/src/components/line-detail/CreateGroupModal.tsx')
+    const scheduleComposer = read('console/src/components/line-detail/ScheduleComposerModal.tsx')
+    const groupDetail = read('console/src/components/line-detail/GroupDetailModal.tsx')
+    const groupCard = read('console/src/components/line-detail/GroupCard.tsx')
+    const scheduledRow = read('console/src/components/line-detail/ScheduledMessageRow.tsx')
+
+    for (const modal of [createGroup, scheduleComposer, groupDetail]) {
+      expect(modal).toContain('c-dialog-backdrop')
+      expect(modal).toContain('c-dialog')
+      expect(modal).toContain('c-dialog-header')
+    }
+
+    expect(createGroup).toContain('c-dialog-footer')
+    expect(scheduleComposer).toContain('c-dialog-footer')
+    expect(createGroup).toContain('className="c-input font-mono text-t2"')
+    expect(scheduleComposer).toContain('className="c-input font-mono text-t2')
+    expect(groupDetail).toContain('className="c-tab"')
+    expect(groupDetail).toContain('<SearchInput')
+    expect(groupCard).toContain('className="c-card')
+    expect(scheduledRow).toContain('className="c-card')
+  })
 })
 
 describe('design system compliance — round 2 token cleanup', () => {
