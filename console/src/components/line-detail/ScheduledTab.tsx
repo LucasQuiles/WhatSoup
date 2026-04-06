@@ -85,11 +85,12 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
             </div>
           </div>
           <button
+            type="button"
             onClick={() => handleCancel(msg.id)}
             disabled={cancelling === msg.id}
             aria-label={`Cancel scheduled message to ${msg.chatName ?? msg.chatJid}`}
-            className="flex items-center gap-1 px-2 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover flex-shrink-0"
-            style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
+            className="c-btn c-btn-sm c-btn-danger font-mono flex-shrink-0"
+            style={{ fontSize: 'var(--font-size-label)' }}
           >
             {cancelling === msg.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} strokeWidth={1.75} />}
             Cancel
