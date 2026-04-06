@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ModeTab } from '../../console/src/pages/LineDetail.tsx'
+import { ModeTab } from '../../console/src/components/line-detail/index.ts'
 
 /**
  * Structural tests for the ModeTab component export.
