@@ -67,6 +67,7 @@ vi.mock('node:fs', () => ({
 // Import after mocks are registered
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -283,14 +284,37 @@ describe('SessionManager', () => {
     expect(spawn).toHaveBeenCalledTimes(1);
   });
 
-  it('createSession is called with pid, cwd, and chatJid', async () => {
+  it('createSession is called with pid, cwd, chatJid, and workspaceKey', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await sm.spawnSession();
 
-    expect(createSession).toHaveBeenCalledWith(db, 12345, '/mock/home', CHAT_JID);
+    expect(createSession).toHaveBeenCalledWith(db, 12345, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID));
+  });
+
+  it('spawn-per-turn createSession uses cwd, chatJid, and workspaceKey', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      cwd: '/agent/dir',
+    });
+    await sm.spawnSession();
+
+    expect(createSession).toHaveBeenCalledWith(
+      db,
+      0,
+      '/agent/dir',
+      CHAT_JID,
+      toConversationKey(CHAT_JID),
+    );
   });
 
   it('spawnSession with resumeSessionId includes --resume flag', async () => {

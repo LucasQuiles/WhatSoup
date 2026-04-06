@@ -464,6 +464,7 @@ export class SessionManager {
     }
 
     const cwd = this.configuredCwd ?? homedir();
+    const workspaceKey = toConversationKey(this.chatJid);
 
     const displayName = PROVIDER_DISPLAY_NAMES[this.provider] ?? this.provider;
 
@@ -499,7 +500,7 @@ export class SessionManager {
       if (existingRowId !== undefined) {
         this.dbRowId = existingRowId;
       } else {
-        this.dbRowId = createSession(this.db, 0, this.instanceName);
+        this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey);
       }
       // Emit a synthetic init event so the runtime knows the session is ready
       this.onEvent({ type: 'init', sessionId: `${this.provider}-${Date.now()}` });
@@ -533,7 +534,7 @@ export class SessionManager {
       this.dbRowId = existingRowId;
       updateSessionStatus(this.db, existingRowId, 'active');
     } else {
-      this.dbRowId = createSession(this.db, pid, cwd, this.chatJid);
+      this.dbRowId = createSession(this.db, pid, cwd, this.chatJid, workspaceKey);
     }
 
     log.info({ pid, rowId: this.dbRowId, wasResume: resumeSessionId !== undefined, resumeSessionId: resumeSessionId ?? null, provider: this.provider, binary }, `spawned ${binary} process`);
