@@ -52,15 +52,20 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, c
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
-// ─── Module mocks ─────────────────────────────────────────────────────────────
-
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
+const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
+  mockRuntimeLogger: {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
-  }),
+  },
+  mockReaddirSync: vi.fn(() => ['0', '1', '2']),
+}));
+
+// ─── Module mocks ─────────────────────────────────────────────────────────────
+
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => mockRuntimeLogger,
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -248,6 +253,7 @@ vi.mock('node:fs', async (importOriginal) => {
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
     readFileSync: vi.fn().mockReturnValue(Buffer.from('fake-audio-data')),
+    readdirSync: mockReaddirSync,
   };
 });
 
@@ -384,6 +390,7 @@ describe('AgentRuntime', () => {
     mockProvisionWorkspace.mockImplementation(() => '/tmp/workspace/.claude/whatsoup.sock');
     mockStartMediaBridge.mockImplementation(() => mockMediaBridgeHandle);
     mockMediaBridgeHandle._currentChatJid = null;
+    mockReaddirSync.mockReturnValue(['0', '1', '2']);
     // Reset SessionManager mock to the default hoisted implementation.
     // Some tests (per_chat /status, per_chat /new) override it; reset so voice reply
     // tests (and others) see the default mock that captures capturedOnEventRef.
@@ -406,6 +413,10 @@ describe('AgentRuntime', () => {
     mockConfig.voiceReply = 'never';
     mockSynthesizeSpeech.mockClear();
     mockWriteTempFile.mockClear();
+    mockRuntimeLogger.info.mockClear();
+    mockRuntimeLogger.warn.mockClear();
+    mockRuntimeLogger.error.mockClear();
+    mockRuntimeLogger.debug.mockClear();
     // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
     mockQueue.flush.mockResolvedValue(undefined);
   });
@@ -1317,6 +1328,79 @@ describe('AgentRuntime', () => {
       expect(runtimeState.perChatAssistantItemText.size).toBe(0);
       expect(runtimeState.pendingTurnText.size).toBe(0);
       expect(runtimeState.resumeFailedHandling.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits periodic health stats every 60s and stops after shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test');
+      await runtime.start();
+
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, unknown>;
+        chatQueues: Map<string, unknown>;
+        outboundQueues: Map<string, unknown>;
+        workspaceResources: Map<string, {
+          socketPath: string;
+          workspacePath: string;
+          socketServer: { stop: () => void } | null;
+          mediaBridge: (() => void) | null;
+        }>;
+        healthStatsTimer: ReturnType<typeof setInterval> | null;
+      };
+
+      runtimeState.chatSessions.set('chat-a', mockSession);
+      runtimeState.chatSessions.set('chat-b', mockSession);
+      runtimeState.chatQueues.set('chat-a', makeQueueMock('chat-a@s.whatsapp.net'));
+      runtimeState.outboundQueues.set('shared-a', makeQueueMock('shared-a@s.whatsapp.net'));
+      runtimeState.workspaceResources.set('workspace-a', {
+        socketPath: '/tmp/a.sock',
+        workspacePath: '/tmp/a',
+        socketServer: null,
+        mediaBridge: null,
+      });
+
+      mockRuntimeLogger.info.mockClear();
+
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(mockRuntimeLogger.info).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          instanceName: 'test',
+          sessionScope: 'single',
+          chatSessions: 2,
+          chatQueues: 1,
+          outboundQueues: 1,
+          workspaceResources: 1,
+          fdCount: 3,
+          memoryUsage: expect.objectContaining({
+            rss: expect.any(Number),
+            heapTotal: expect.any(Number),
+            heapUsed: expect.any(Number),
+            external: expect.any(Number),
+            arrayBuffers: expect.any(Number),
+          }),
+        }),
+        'agent runtime health stats',
+      );
+
+      mockRuntimeLogger.info.mockClear();
+      await runtime.shutdown();
+
+      expect(runtimeState.healthStatsTimer).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(
+        mockRuntimeLogger.info.mock.calls.some((call) => call[1] === 'agent runtime health stats'),
+      ).toBe(false);
     } finally {
       vi.useRealTimers();
     }

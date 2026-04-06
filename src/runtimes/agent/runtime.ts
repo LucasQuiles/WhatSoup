@@ -38,7 +38,7 @@ import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
-import { writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { ToolRegistry } from '../../mcp/registry.ts';
@@ -67,6 +67,8 @@ const AUTO_RESPAWN_MAX_CRASHES = 3;
 const AUTO_RESPAWN_BASE_MS = 2_000;
 /** Maximum respawn delay (ms) — caps the exponential backoff. */
 const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
+/** Periodic runtime health stats emission interval. */
+const HEALTH_STATS_INTERVAL_MS = 60_000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 
 /**
@@ -522,6 +524,7 @@ export class AgentRuntime implements Runtime {
   // use this flag. The "(no response)" fallback only exists in handleEvent.
   private turnHadVisibleOutput = false;
   private turnChain: Promise<void> = Promise.resolve();
+  private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
 
   // Crash tracking — survives session map deletions for accurate health reporting.
   // Incremented on every crash, decremented on successful session spawn (capped at 0).
@@ -554,6 +557,46 @@ export class AgentRuntime implements Runtime {
 
   private clearToolNames(toolScopeKey: string): void {
     this.activeToolNames.delete(toolScopeKey);
+  }
+
+  private getOpenFileDescriptorCount(): number | null {
+    try {
+      return readdirSync('/proc/self/fd').length;
+    } catch (err) {
+      log.debug({ err }, 'failed to count open file descriptors');
+      return null;
+    }
+  }
+
+  private logHealthStats(): void {
+    const memoryUsage = process.memoryUsage();
+
+    log.info({
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      chatSessions: this.chatSessions.size,
+      chatQueues: this.chatQueues.size,
+      outboundQueues: this.outboundQueues.size,
+      workspaceResources: this.workspaceResources.size,
+      fdCount: this.getOpenFileDescriptorCount(),
+      memoryUsage: {
+        rss: memoryUsage.rss,
+        heapTotal: memoryUsage.heapTotal,
+        heapUsed: memoryUsage.heapUsed,
+        external: memoryUsage.external,
+        arrayBuffers: memoryUsage.arrayBuffers,
+      },
+      recentCrashCount: this.recentCrashCount,
+      lastCrashAt: this.lastCrashAt,
+    }, 'agent runtime health stats');
+  }
+
+  private startHealthStatsTimer(): void {
+    if (this.healthStatsTimer) return;
+    this.healthStatsTimer = setInterval(() => this.logHealthStats(), HEALTH_STATS_INTERVAL_MS);
+    this.healthStatsTimer.unref?.();
   }
 
   // Tracks inbound seq for the current turn (single/shared mode)
@@ -1113,6 +1156,8 @@ export class AgentRuntime implements Runtime {
         },
       });
     }
+
+    this.startHealthStatsTimer();
 
     log.info('AgentRuntime started');
   }
@@ -1862,6 +1907,11 @@ export class AgentRuntime implements Runtime {
     if (this.controlSessionTimeout) {
       clearTimeout(this.controlSessionTimeout);
       this.controlSessionTimeout = null;
+    }
+
+    if (this.healthStatsTimer) {
+      clearInterval(this.healthStatsTimer);
+      this.healthStatsTimer = null;
     }
 
     // Shutdown per_chat sessions
