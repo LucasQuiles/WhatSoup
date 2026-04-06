@@ -245,6 +245,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     listTools = vi.fn(() => []);
     call = vi.fn();
     getChatScopedToolNames = vi.fn(() => []);
+    setDurability = vi.fn();
   },
 }));
 
@@ -2259,11 +2260,25 @@ describe('AgentRuntime', () => {
       sandbox,
       cwd: tmpdir(),
     });
+    runtime.setDurability({} as any);
     await runtime.start();
 
     expect(mockBackfillWorkspaceKeys).toHaveBeenCalledWith(db, tmpdir());
     const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
     expect(classifyActiveSessions).toHaveBeenCalled();
+  });
+
+  it('start() with per_chat session scope and null durability logs warning and skips classification', async () => {
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+    await expect(runtime.start()).resolves.toBeUndefined();
+
+    expect(classifyActiveSessions).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith('durability engine not set — skipping active session classification');
   });
 
   it('sandboxPerChat: stale_dead sessions are marked orphaned during start()', async () => {
@@ -2286,6 +2301,7 @@ describe('AgentRuntime', () => {
       sandbox,
       cwd: tmpdir(),
     });
+    runtime.setDurability({} as any);
     await runtime.start();
 
     expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 42);
