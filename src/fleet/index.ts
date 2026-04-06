@@ -16,7 +16,15 @@ import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
-import { handleGetScheduled, handleCancelScheduled, handleGetGroups, handleSearchContacts } from './routes/mcp-proxy.ts';
+import {
+  handleGetScheduled, handleCancelScheduled, handleGetGroups, handleSearchContacts,
+  handleCreateScheduled, handleGetScheduledById, handleUpdateScheduled, handleCancelScheduledById,
+  handleGetGroupDetail, handleCreateGroup, handleLeaveGroup,
+  handleUpdateGroupSubject, handleUpdateGroupDescription, handleGroupParticipants,
+  handleGroupSettings, handleGetGroupInvite, handleRevokeGroupInvite,
+  handleGroupEphemeral, handleGroupMemberAddMode, handleGroupJoinApproval,
+  handleGetGroupRequests, handleGroupRequestsUpdate,
+} from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
 import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -50,6 +58,8 @@ export interface RouteDeps {
 
 type EmptyRouteParams = Record<string, never>;
 type NameRouteParams = { name: string };
+type NameIdRouteParams = { name: string; id: string };
+type NameJidRouteParams = { name: string; jid: string };
 
 type RouteParamsByHandler = {
   getLines: EmptyRouteParams;
@@ -82,6 +92,24 @@ type RouteParamsByHandler = {
   cancelScheduled: NameRouteParams;
   getGroups: NameRouteParams;
   searchContacts: NameRouteParams;
+  createScheduled: NameRouteParams;
+  getScheduledById: NameIdRouteParams;
+  updateScheduled: NameIdRouteParams;
+  cancelScheduledById: NameIdRouteParams;
+  getGroupDetail: NameJidRouteParams;
+  createGroup: NameRouteParams;
+  leaveGroup: NameJidRouteParams;
+  updateGroupSubject: NameJidRouteParams;
+  updateGroupDescription: NameJidRouteParams;
+  groupParticipants: NameJidRouteParams;
+  groupSettings: NameJidRouteParams;
+  getGroupInvite: NameJidRouteParams;
+  revokeGroupInvite: NameJidRouteParams;
+  groupEphemeral: NameJidRouteParams;
+  groupMemberAddMode: NameJidRouteParams;
+  groupJoinApproval: NameJidRouteParams;
+  getGroupRequests: NameJidRouteParams;
+  groupRequestsUpdate: NameJidRouteParams;
 };
 
 type RouteKey = keyof RouteParamsByHandler;
@@ -117,6 +145,24 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'cancelScheduled',
   'getGroups',
   'searchContacts',
+  'createScheduled',
+  'getScheduledById',
+  'updateScheduled',
+  'cancelScheduledById',
+  'getGroupDetail',
+  'createGroup',
+  'leaveGroup',
+  'updateGroupSubject',
+  'updateGroupDescription',
+  'groupParticipants',
+  'groupSettings',
+  'getGroupInvite',
+  'revokeGroupInvite',
+  'groupEphemeral',
+  'groupMemberAddMode',
+  'groupJoinApproval',
+  'getGroupRequests',
+  'groupRequestsUpdate',
 ]);
 
 function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
@@ -150,10 +196,28 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   update:       (req, res, deps, _params) => handleUpdate(req, res, deps.updateChecker, repoRoot),
   getLidMappings:  (_req, res, deps, _params) => handleGetLidMappings(_req, res, deps),
   syncLidMappings: (req, res, deps, _params) => handleSyncLidMappings(req, res, deps),
-  getScheduled:    (_req, res, deps, params) => handleGetScheduled(_req, res, deps, params),
-  cancelScheduled: (req, res, deps, params) => handleCancelScheduled(req, res, deps, params),
-  getGroups:       (_req, res, deps, params) => handleGetGroups(_req, res, deps, params),
-  searchContacts:  (req, res, deps, params) => handleSearchContacts(req, res, deps, params),
+  getScheduled:          (_req, res, deps, params) => handleGetScheduled(_req, res, deps, params),
+  cancelScheduled:       (req, res, deps, params) => handleCancelScheduled(req, res, deps, params),
+  getGroups:             (_req, res, deps, params) => handleGetGroups(_req, res, deps, params),
+  searchContacts:        (req, res, deps, params) => handleSearchContacts(req, res, deps, params),
+  createScheduled:       (req, res, deps, params) => handleCreateScheduled(req, res, deps, params),
+  getScheduledById:      (_req, res, deps, params) => handleGetScheduledById(_req, res, deps, params),
+  updateScheduled:       (req, res, deps, params) => handleUpdateScheduled(req, res, deps, params),
+  cancelScheduledById:   (_req, res, deps, params) => handleCancelScheduledById(_req, res, deps, params),
+  getGroupDetail:        (_req, res, deps, params) => handleGetGroupDetail(_req, res, deps, params),
+  createGroup:           (req, res, deps, params) => handleCreateGroup(req, res, deps, params),
+  leaveGroup:            (_req, res, deps, params) => handleLeaveGroup(_req, res, deps, params),
+  updateGroupSubject:    (req, res, deps, params) => handleUpdateGroupSubject(req, res, deps, params),
+  updateGroupDescription:(req, res, deps, params) => handleUpdateGroupDescription(req, res, deps, params),
+  groupParticipants:     (req, res, deps, params) => handleGroupParticipants(req, res, deps, params),
+  groupSettings:         (req, res, deps, params) => handleGroupSettings(req, res, deps, params),
+  getGroupInvite:        (_req, res, deps, params) => handleGetGroupInvite(_req, res, deps, params),
+  revokeGroupInvite:     (req, res, deps, params) => handleRevokeGroupInvite(req, res, deps, params),
+  groupEphemeral:        (req, res, deps, params) => handleGroupEphemeral(req, res, deps, params),
+  groupMemberAddMode:    (req, res, deps, params) => handleGroupMemberAddMode(req, res, deps, params),
+  groupJoinApproval:     (req, res, deps, params) => handleGroupJoinApproval(req, res, deps, params),
+  getGroupRequests:      (_req, res, deps, params) => handleGetGroupRequests(_req, res, deps, params),
+  groupRequestsUpdate:   (req, res, deps, params) => handleGroupRequestsUpdate(req, res, deps, params),
 };
 
 // ---------------------------------------------------------------------------
@@ -208,10 +272,28 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/auth$/, handler: 'auth' },
-  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'getScheduled' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'getScheduled' },
+  { method: 'POST',   path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'createScheduled' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'cancelScheduled' },
-  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/groups$/, handler: 'getGroups' },
-  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/contacts\/search$/, handler: 'searchContacts' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled\/(?<id>\d+)$/, handler: 'getScheduledById' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled\/(?<id>\d+)$/, handler: 'updateScheduled' },
+  { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled\/(?<id>\d+)$/, handler: 'cancelScheduledById' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups$/, handler: 'getGroups' },
+  { method: 'POST',   path: /^\/api\/lines\/(?<name>[^/]+)\/groups$/, handler: 'createGroup' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/subject$/, handler: 'updateGroupSubject' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/description$/, handler: 'updateGroupDescription' },
+  { method: 'POST',   path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/participants$/, handler: 'groupParticipants' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/settings$/, handler: 'groupSettings' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/invite$/, handler: 'getGroupInvite' },
+  { method: 'POST',   path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/invite\/revoke$/, handler: 'revokeGroupInvite' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/ephemeral$/, handler: 'groupEphemeral' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/member-add-mode$/, handler: 'groupMemberAddMode' },
+  { method: 'PUT',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/join-approval$/, handler: 'groupJoinApproval' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/requests$/, handler: 'getGroupRequests' },
+  { method: 'POST',   path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)\/requests$/, handler: 'groupRequestsUpdate' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)$/, handler: 'getGroupDetail' },
+  { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)\/groups\/(?<jid>[^/]+)$/, handler: 'leaveGroup' },
+  { method: 'GET',    path: /^\/api\/lines\/(?<name>[^/]+)\/contacts\/search$/, handler: 'searchContacts' },
   { method: 'GET',   path: /^\/api\/version$/, handler: 'getVersion' },
   { method: 'POST',  path: /^\/api\/update$/,  handler: 'update' },
   { method: 'GET',   path: /^\/api\/lid-mappings$/, handler: 'getLidMappings' },
@@ -360,7 +442,7 @@ export function createFleetServer(deps: FleetDeps) {
         if (params) {
           if (hasNameParam(route.handler)) {
             if (typeof params.name !== 'string') continue;
-            await handlers[route.handler](req, res, routeDeps, { name: params.name });
+            await handlers[route.handler](req, res, routeDeps, params as any);
             return;
           }
 
