@@ -252,6 +252,10 @@ export function createServiceManager(): ServiceManager {
     case 'linux-no-systemd':
       _cachedManager = new NoSystemdServiceManager();
       break;
+    default: {
+      const _exhaustive: never = platform;
+      throw new Error(`Unknown platform: ${_exhaustive}`);
+    }
   }
   return _cachedManager;
 }

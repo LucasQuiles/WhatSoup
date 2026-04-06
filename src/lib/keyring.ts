@@ -31,9 +31,9 @@ export function detectKeyringBackend(): KeyringBackend {
     return _cachedBackend;
   }
 
-  // Linux / WSL: check if secret-tool is available
+  // Linux / WSL: probe secret-tool directly (avoids dependency on 'which')
   try {
-    execFileSync('which', ['secret-tool'], { timeout: 2_000, stdio: 'ignore' });
+    execFileSync('secret-tool', ['--version'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
   } catch {
     _cachedBackend = 'env-only';

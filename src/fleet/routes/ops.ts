@@ -20,6 +20,8 @@ import { isGroupConversationKey, conversationKeyToJid } from '../../core/convers
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
+import type { ServiceManager } from '../platform.ts';
+import { lookupCredential } from '../../lib/keyring.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -32,9 +34,6 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
   }
   return true;
 }
-
-import type { ServiceManager } from '../platform.ts';
-import { lookupCredential } from '../../lib/keyring.ts';
 
 export interface OpsDeps {
   discovery: FleetDiscovery;

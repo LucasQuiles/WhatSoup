@@ -13,6 +13,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -104,7 +105,6 @@ export function defaultPidOwnershipChecker(pid: number): PidCheckResult {
 
   // Fallback: use ps for platforms without /proc (macOS, FreeBSD)
   try {
-    const { execFileSync } = require('node:child_process');
     const psOut = execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], {
       timeout: 2_000,
     });
