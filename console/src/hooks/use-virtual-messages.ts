@@ -24,7 +24,7 @@ export interface VirtualMessagesOptions {
 }
 
 export function estimateMessageRowHeight(message: VirtualMessage): number {
-  const contentLength = Math.max(message.content.trim().length, 1)
+  const contentLength = Math.max((message.content ?? '').trim().length, 1)
   const estimatedLines = Math.max(1, Math.ceil(contentLength / MESSAGE_CHARS_PER_LINE))
 
   return (

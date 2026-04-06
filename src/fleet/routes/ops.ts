@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
+import { enableService, startService, stopService, disableService, restartService, startServiceFire } from '../platform.ts';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
@@ -200,7 +201,7 @@ async function handleSystemctlAction(
   if (!instance) return;
 
   try {
-    await execFileAsync('systemctl', ['--user', verb, `whatsoup@${params.name}`]);
+    if (verb === 'restart') { await restartService(params.name); } else { await stopService(params.name); }
     publishInstanceStatus(deps.realtime, params.name);
     publishFeedEvent(deps.realtime, params.name);
     jsonResponse(res, 202, { status: `${verb}_requested`, instance: params.name });
@@ -402,10 +403,10 @@ export async function handleDeleteLine(
   if (!validateInstanceName(params.name, res)) return;
 
   // 1. Stop the systemd unit (ignore failure — may already be stopped/gone)
-  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* ok */ }
+  try { await stopService(params.name); } catch { /* ok */ }
 
-  // 2. Disable the systemd unit (ignore failure — may not be enabled)
-  try { await execFileAsync('systemctl', ['--user', 'disable', `whatsoup@${params.name}`]); } catch { /* ok */ }
+  // 2. Disable the service (ignore failure — may not be enabled)
+  try { await disableService(params.name); } catch { /* ok */ }
 
   // 3. Remove config, data, and state directories
   cleanupPartial(params.name);
@@ -710,8 +711,8 @@ export async function handleCreateLine(
       }
     }
 
-    // --- Enable systemd unit ---
-    await execFileAsync('systemctl', ['--user', 'enable', `whatsoup@${name}`]);
+    // --- Enable service ---
+    await enableService(name);
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -768,7 +769,7 @@ export async function handleAuth(
   });
 
   // Stop the running instance so the lock file is released for auth
-  try { await execFileAsync('systemctl', ['--user', 'stop', `whatsoup@${params.name}`]); } catch { /* may not be running */ }
+  try { await stopService(params.name); } catch { /* may not be running */ }
 
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
@@ -782,6 +783,7 @@ export async function handleAuth(
 
   // Guard against double res.end() — declared before any event handlers
   let authTimer: ReturnType<typeof setTimeout> | null = null;
+  let authConnected = false; // set when 'connected' fires — prevents killing mid-saveCreds
   const { writeSSE, endOnce } = createSSEWriter(res, () => {
     activeAuthProcesses.delete(params.name);
     authInFlight.delete(params.name);
@@ -808,6 +810,7 @@ export async function handleAuth(
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
         writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
+          authConnected = true;
           // Reset introSent so the instance sends an introduction on next boot
           try {
             const cfgPath = instance.configPath;
@@ -817,7 +820,7 @@ export async function handleAuth(
             fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
             fs.renameSync(tmpPath, cfgPath);
           } catch { /* config write failed — intro won't re-fire but not critical */ }
-          execFile('systemctl', ['--user', 'start', `whatsoup@${params.name}`], (err) => {
+          startServiceFire(params.name, (err) => {
             if (err) log.error({ err, instance: params.name }, 'post-auth start failed');
           });
           deps.discovery.scan();
@@ -845,10 +848,13 @@ export async function handleAuth(
     endOnce();
   });
 
-  // Cleanup on client disconnect
+  // Cleanup on client disconnect — but don't kill after 'connected' fires,
+  // the auth process needs to finish saveCreds() before it exits naturally.
   req.on('close', () => {
-    child.kill('SIGTERM');
-    setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);
+    if (!authConnected) {
+      child.kill('SIGTERM');
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already exited */ } }, 5000);
+    }
     endOnce();
   });
 }

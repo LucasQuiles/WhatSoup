@@ -12,22 +12,31 @@ const API_BASE = 'https://api.elevenlabs.io';
 
 const breaker = new CircuitBreaker('elevenlabs', 5, 60_000, log);
 
-// Lazy-init API key from GNOME Keyring
+// Lazy-init API key from env var or system keyring
 let apiKey: string | null = null;
 function getApiKey(): string {
   if (!apiKey) {
-    try {
-      const raw = execFileSync('secret-tool', ['lookup', 'service', 'elevenlabs'], {
-        timeout: 5_000,
-      });
-      apiKey = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
-    } catch (err) {
-      throw new Error(
-        'ElevenLabs API key not found in keyring. Run: secret-tool store --label="ElevenLabs" service elevenlabs',
-      );
+    // Prefer environment variable
+    if (process.env.ELEVENLABS_API_KEY) {
+      apiKey = process.env.ELEVENLABS_API_KEY.trim();
+    } else {
+      // Fall back to system keyring (GNOME Keyring on Linux, Keychain on macOS)
+      const cmd = process.platform === 'darwin'
+        ? ['security', 'find-generic-password', '-s', 'elevenlabs', '-w']
+        : ['secret-tool', 'lookup', 'service', 'elevenlabs'];
+      try {
+        const raw = execFileSync(cmd[0], cmd.slice(1), { timeout: 5_000 });
+        apiKey = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
+      } catch {
+        throw new Error(
+          'ElevenLabs API key not found. Set ELEVENLABS_API_KEY env var, or:\n' +
+          '  Linux: secret-tool store --label="ElevenLabs" service elevenlabs\n' +
+          '  macOS: security add-generic-password -s elevenlabs -a $USER -w YOUR_KEY',
+        );
+      }
     }
     if (!apiKey) {
-      throw new Error('ElevenLabs API key is empty in keyring.');
+      throw new Error('ElevenLabs API key is empty.');
     }
   }
   return apiKey;
