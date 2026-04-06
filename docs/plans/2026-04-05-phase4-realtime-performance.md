@@ -161,6 +161,35 @@ type WsPayloadEvent =
 - **Sequencing adjustment (BES Bot):** Merge `useInfiniteQuery` into M3 with virtual scrolling, not M4
 - **Effort revised:** WS = medium-high (3-4 sessions), not medium (2-3)
 
+## M2 WebSocket — Implementation Status (2026-04-05)
+
+**Status: COMPLETE**
+
+### Commits
+| Task | Commit | Description |
+|------|--------|-------------|
+| 1 | `1d1faea` | Realtime publisher + ops mutation broadcasts |
+| 2 | `1db0ae1` | Snapshot-diff event poller (messages/access/typing) |
+| 3 | `611dd05` | Console WS client + RealtimeProvider |
+| 4 | `c1786ba` | Conditional polling (disabled while WS connected) |
+| 6 | `bebe70a` | Nav WS connection indicator (Live/Polling) |
+
+### Verification Evidence
+- **Focused WS tests:** `websocket-server` + `realtime-event-poller` + `websocket-events` = 22/22
+- **Ops/realtime tests:** `ops` + `ops-config-patch` + `ops-settings-json` = 45/45
+- **Full regression:** 182 files, 3,553 tests passing
+- **Typecheck:** clean
+- **Console build:** clean, split chunks preserved
+
+### Task 5/7 Coverage Map
+- Task 5 (verification): covered by green WS + poller + console event suites above
+- Task 7 (close gate): all gate steps satisfied — focused tests, full regression, typecheck, build
+
+### Residual Gaps
+- Feed/log invalidations are coarse-grained (per-instance, not per-entry)
+- No per-conversation message granularity in v1 (invalidates all messages for instance)
+- `typecheck:all` has 76 pre-existing strict-mode errors in runtime/core test files (not M2-related)
+
 ## RAG Context
 
 RAG_DEGRADED: Plan authored from direct codebase analysis by 3 agents (Q, Shannon, BES Bot) with full file access. No Pinecone retrieval needed — all data sourced from live code reads of `console/src/hooks/use-fleet.ts`, `src/fleet/index.ts`, `src/fleet/health-poller.ts`, `console/src/lib/api.ts`, and `npm --prefix console run build` output. Team consensus captured in WHATSOUP group chat.
