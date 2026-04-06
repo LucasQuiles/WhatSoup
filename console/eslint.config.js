@@ -213,6 +213,17 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ BORDER EDGE SHORTHAND IN STYLE ═══
+        // borderBottom/Top/Left/Right: 'var(--bw) solid var(--b1)' — use c-border-b class or longhands
+        {
+          selector: 'Property[key.name=/^border(Top|Bottom|Left|Right)$/][value.value=/var\\(--bw/]',
+          message: '⛔ Border edge shorthand in style — React drops it on spread. FIX: best option: use className "c-border-b" (for --b1) or "c-border-b-b2" (for --b2). If not bottom or needs --b3/b4: split into border*Width: "var(--bw)", border*Style: "solid", border*Color: "var(--bN)".',
+        },
+        {
+          selector: 'TemplateLiteral[parent.key.name=/^border(Top|Bottom|Left|Right)$/]',
+          message: '⛔ Border edge template literal — React drops it on spread. FIX: split into border*Width, border*Style, border*Color longhands.',
+        },
+
         // ═══ LETTER SPACING TOKEN IN STYLE ═══
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="letterSpacing"][value.value=/^var\\(--tracking-/]',
@@ -527,15 +538,7 @@ const scheduledGroupsDesignSystemRestrictions = [
     message: '⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).',
   },
 
-  // Border edge shorthand — use longhands
-  {
-    selector: 'Property[key.name=/^border(Top|Bottom|Left|Right)$/][value.value=/var\\(--bw/]',
-    message: '⛔ Border edge shorthand — React drops it on spread. FIX: split borderTop: "var(--bw) solid var(--b1)" into borderTopWidth: "var(--bw)", borderTopStyle: "solid", borderTopColor: "var(--b1)".',
-  },
-  {
-    selector: 'TemplateLiteral[parent.key.name=/^border(Top|Bottom|Left|Right)$/]',
-    message: '⛔ Border edge template literal — React drops it on spread. FIX: split into border*Width, border*Style, border*Color longhands.',
-  },
+  // Border edge shorthand rules are now in the global set — no duplicate needed here.
 
   // ═══ LAYOUT-IN-STYLE — move to className ═══
   {
