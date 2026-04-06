@@ -61,6 +61,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
   const isPending = message.status === 'pending'
   const isRecurring = !!message.recurrence
   const preview = messagePreview(message)
+  const metaDividerStyle = { opacity: 'var(--opacity-faint)' }
 
   return (
     <div
@@ -69,7 +70,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Main row */}
       <div className="flex items-start gap-3" style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
         {/* Content type icon */}
-        <div style={{ marginTop: '2px' }}>
+        <div style={{ marginTop: 'calc(var(--sp-1) / 2)' }}>
           <ContentTypeIcon type={message.contentType} />
         </div>
 
@@ -78,8 +79,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Top line: preview + status badge */}
           <div className="flex items-center gap-2 flex-wrap">
             <span
-              className="font-mono text-t2 truncate flex-1"
-              style={{ fontSize: 'var(--font-size-data)', minWidth: 0 }}
+              className="font-mono text-t2 truncate flex-1 min-w-0"
+              style={{ fontSize: 'var(--font-size-data)' }}
             >
               {preview || <span className="text-t4 italic">(no preview)</span>}
             </span>
@@ -91,14 +92,14 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 color: statusColor(message.status),
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: '4px',
+                gap: 'var(--sp-1)',
               }}
             >
               <span
                 style={{
                   display: 'inline-block',
-                  width: '6px',
-                  height: '6px',
+                  width: 'var(--radius-md)',
+                  height: 'var(--radius-md)',
                   borderRadius: '50%',
                   background: statusColor(message.status),
                   flexShrink: 0,
@@ -109,16 +110,16 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           </div>
 
           {/* Second line: target + scheduled time */}
-          <div className="flex items-center gap-2 flex-wrap font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: '3px' }}>
+          <div className="flex items-center gap-2 flex-wrap font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'var(--sp-0h)' }}>
             <span>{message.chatName ?? message.chatJid}</span>
-            <span style={{ opacity: 0.4 }}>·</span>
+            <span style={metaDividerStyle}>·</span>
             <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
 
             {/* Recurrence indicator */}
             {isRecurring && (
               <>
-                <span style={{ opacity: 0.4 }}>·</span>
-                <span className="flex items-center gap-1" style={{ color: 'var(--color-info, #3b82f6)' }}>
+                <span style={metaDividerStyle}>·</span>
+                <span className="flex items-center gap-1" style={{ color: 'var(--color-m-cht)' }}>
                   <RefreshCw size={10} strokeWidth={2} />
                   {cronToHuman(message.recurrence!)}
                 </span>
@@ -128,7 +129,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             {/* Run count */}
             {isRecurring && message.runCount > 0 && (
               <>
-                <span style={{ opacity: 0.4 }}>·</span>
+                <span style={metaDividerStyle}>·</span>
                 <span>Sent {message.runCount}×</span>
               </>
             )}
@@ -140,8 +141,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
               className="font-mono"
               style={{
                 fontSize: 'var(--font-size-xs)',
-                color: 'var(--color-error, #ef4444)',
-                marginTop: '3px',
+                color: 'var(--color-s-crit)',
+                marginTop: 'var(--sp-0h)',
               }}
             >
               {message.error}

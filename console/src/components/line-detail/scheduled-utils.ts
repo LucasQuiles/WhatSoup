@@ -5,12 +5,12 @@ import { capitalize } from '../../lib/text-utils.js';
 
 export function statusColor(status: string): string {
   switch (status) {
-    case 'pending':    return 'var(--color-warning, #f59e0b)';
-    case 'processing': return 'var(--color-info, #3b82f6)';
-    case 'sent':       return 'var(--color-success, #22c55e)';
-    case 'failed':     return 'var(--color-error, #ef4444)';
-    case 'cancelled':  return 'var(--color-muted, #6b7280)';
-    default:           return 'var(--color-muted, #6b7280)';
+    case 'pending':    return 'var(--color-s-warn)';
+    case 'processing': return 'var(--color-m-cht)';
+    case 'sent':       return 'var(--color-s-ok)';
+    case 'failed':     return 'var(--color-s-crit)';
+    case 'cancelled':  return 'var(--color-t4)';
+    default:           return 'var(--color-t4)';
   }
 }
 

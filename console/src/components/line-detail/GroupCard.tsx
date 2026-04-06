@@ -32,9 +32,9 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
       <div
         className="flex-shrink-0 flex items-center justify-center font-sans font-semibold"
         style={{
-          width: 36,
-          height: 36,
-          borderRadius: '50%',
+          width: 'var(--avatar-md)',
+          height: 'var(--avatar-md)',
+          borderRadius: 'var(--radius-circle)',
           background: color,
           color: 'var(--color-t1)',
           fontSize: 'var(--font-size-data)',
@@ -54,7 +54,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
               className="inline-flex items-center gap-1 font-mono flex-shrink-0"
               style={{
                 fontSize: 'var(--font-size-xs)',
-                padding: '1px var(--sp-1)',
+                padding: 'var(--bw) var(--sp-1)',
                 borderRadius: 'var(--radius-sm)',
                 background: badge.bg,
                 color: badge.color,
@@ -65,8 +65,8 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
             </span>
           )}
         </div>
-        <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px' }}>
-          <Users size={11} className="inline" style={{ marginRight: '4px', verticalAlign: '-1px' }} />
+        <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: 'calc(var(--sp-1) / 2)' }}>
+          <Users size={11} className="inline" style={{ marginRight: 'var(--sp-1)', verticalAlign: 'calc(var(--bw) * -1)' }} />
           {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
           {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}
         </div>

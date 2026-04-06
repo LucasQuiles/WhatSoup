@@ -47,6 +47,7 @@
   --radius-sm: 4px;   /* badges, pills, inputs, tags */
   --radius-md: 6px;   /* buttons, alert banners */
   --radius-lg: 10px;  /* cards, panels, table containers */
+  --radius-circle: 50%; /* circular avatars, dots */
 
   /* ═══ Border width ═══ */
   --bw: 1px;            /* default border width */
@@ -131,6 +132,8 @@
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */
   --panel-composer: 540px;   /* schedule composer modal width */
+  --panel-max-inline: 90%;   /* standard dialog max inline size */
+  --panel-max-inline-wide: 95vw; /* wide dialog max inline size */
   --tooltip-min-w: 220px;    /* message tooltip min width */
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
@@ -149,6 +152,8 @@
   --stepper-dot: 8px;        /* wizard stepper dot size */
   --qr-size: 256px;          /* QR code display size */
   --modal-max-h: 85vh;       /* modal maximum height */
+  --modal-max-h-sm: 80vh;    /* compact modal maximum height */
+  --modal-max-h-lg: 90vh;    /* expanded modal maximum height */
   /* ═══ Z-index scale ═══ */
   --z-float: 10;             /* floating buttons, scroll indicators */
   --z-dropdown: 50;          /* dropdown menus, popovers */
@@ -157,6 +162,7 @@
   --opacity-disabled: 0.45;  /* disabled buttons, locked fields */
   --opacity-muted: 0.6;      /* blocked/dimmed entries */
   --opacity-soft: 0.3;       /* background decorations, sparklines */
+  --opacity-faint: 0.4;      /* separators, subdued inline markers */
   /* ═══ Off-grid half-steps ═══ */
   --sp-0h: 3px;              /* 0.75 × 4px — pill vertical padding */
   --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */
@@ -164,6 +170,7 @@
   --msg-pad-h: 14px;         /* message bubble horizontal padding */
   --btn-pad-v: 7px;          /* button vertical padding (spec §2.2) */
   /* ═══ Spacing — 4px grid from design spec ═══ */
+  --sp-0:  0px;
   --sp-1:  4px;
   --sp-2:  8px;
   --sp-3:  12px;
@@ -800,7 +807,7 @@ body::before {
   justify-content: center;
   padding: var(--sp-5);
   background: var(--overlay);
-  z-index: 50;
+  z-index: var(--z-overlay);
 }
 .c-dialog {
   overflow: hidden;
