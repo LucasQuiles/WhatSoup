@@ -52,13 +52,14 @@ vi.mock('../../src/core/access-list.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { Database } from '../../src/core/database.ts';
-import { createIngestHandler } from '../../src/core/ingest.ts';
+import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand, sendApprovalRequest } from '../../src/core/admin.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
 import { getMessagesBySender } from '../../src/core/messages.ts';
+import { config } from '../../src/config.ts';
 
 // ---------------------------------------------------------------------------
 // Typed mock helpers
@@ -454,6 +455,69 @@ describe('REQ-002.AC-03: dispatch to runtime', () => {
     const handler = makeIngest(db, messenger, runtime);
 
     await expect(runIngest(handler, makeIncomingMessage())).resolves.toBeUndefined();
+  });
+
+  it('runtime.handleMessage throw still releases the ingest slot for the next message', async () => {
+    const originalIngestDescriptor = Object.getOwnPropertyDescriptor(config, 'ingest');
+    Object.defineProperty(config, 'ingest', {
+      configurable: true,
+      value: { ...config.ingest, maxConcurrent: 1 },
+    });
+
+    try {
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      vi.mocked(runtime.handleMessage)
+        .mockRejectedValueOnce(new Error('runtime error'))
+        .mockResolvedValueOnce(undefined);
+      const handler = makeIngest(db, messenger, runtime);
+
+      await expect(runIngest(handler, makeIncomingMessage({ messageId: 'slot-err-1' }))).resolves.toBeUndefined();
+      expect(getIngestStats().active).toBe(0);
+      expect(getIngestStats().queued).toBe(0);
+
+      await expect(runIngest(handler, makeIncomingMessage({ messageId: 'slot-err-2' }))).resolves.toBeUndefined();
+
+      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2);
+      expect(getIngestStats().active).toBe(0);
+      expect(getIngestStats().queued).toBe(0);
+    } finally {
+      if (originalIngestDescriptor) {
+        Object.defineProperty(config, 'ingest', originalIngestDescriptor);
+      }
+    }
+  });
+
+  it('unexpected acquireSlot-path throws are caught without corrupting slot counters', async () => {
+    const originalIngestDescriptor = Object.getOwnPropertyDescriptor(config, 'ingest');
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    try {
+      Object.defineProperty(config, 'ingest', {
+        configurable: true,
+        get: () => {
+          throw new Error('config ingest unavailable');
+        },
+      });
+
+      await expect(runIngest(handler, makeIncomingMessage({ messageId: 'slot-acquire-fail' }))).resolves.toBeUndefined();
+      expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+      expect(getIngestStats().active).toBe(0);
+      expect(getIngestStats().queued).toBe(0);
+    } finally {
+      if (originalIngestDescriptor) {
+        Object.defineProperty(config, 'ingest', originalIngestDescriptor);
+      }
+    }
+
+    await expect(runIngest(handler, makeIncomingMessage({ messageId: 'slot-acquire-ok' }))).resolves.toBeUndefined();
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(1);
+    expect(getIngestStats().active).toBe(0);
+    expect(getIngestStats().queued).toBe(0);
   });
 });
 
