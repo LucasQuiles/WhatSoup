@@ -195,6 +195,7 @@ void _mockQueueTypeCheck;
 // ─── Import after mocks ───────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { mkdirSync } from 'node:fs';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -214,6 +215,18 @@ function makeMessenger(): Messenger {
 // Access private field via type cast
 function getTimeout(runtime: AgentRuntime): ReturnType<typeof setTimeout> | null {
   return (runtime as unknown as { controlSessionTimeout: ReturnType<typeof setTimeout> | null }).controlSessionTimeout;
+}
+
+function getControlState(runtime: AgentRuntime): {
+  controlSession: unknown;
+  chatSessions: Map<string, unknown>;
+  chatQueues: Map<string, unknown>;
+} {
+  return runtime as unknown as {
+    controlSession: unknown;
+    chatSessions: Map<string, unknown>;
+    chatQueues: Map<string, unknown>;
+  };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -329,5 +342,38 @@ describe('control session hard timeout', () => {
     // On send failure: no timeout left pending, control report cleared
     expect(getTimeout(runtime)).toBeNull();
     expect(runtime.currentControlReportId).toBeNull();
+  });
+
+  it('releases the control slot when provisioning fails before session startup', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+
+    vi.mocked(mkdirSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC: no space left on device');
+    });
+
+    await expect(runtime.handleControlTurn('r-provision-fail', JSON.stringify({ reportId: 'r-provision-fail' }))).resolves.toBeUndefined();
+    expect(runtime.currentControlReportId).toBeNull();
+
+    await expect(runtime.handleControlTurn('r-after-provision-fail', JSON.stringify({ reportId: 'r-after-provision-fail' }))).resolves.toBeUndefined();
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+    expect(runtime.currentControlReportId).toBe('r-after-provision-fail');
+  });
+
+  it('cleans up partial control session state when startup fails after session creation', async () => {
+    mockSession.spawnSession.mockRejectedValueOnce(new Error('spawn failed'));
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+
+    await expect(runtime.handleControlTurn('r-spawn-fail', JSON.stringify({ reportId: 'r-spawn-fail' }))).resolves.toBeUndefined();
+
+    const state = getControlState(runtime);
+    expect(runtime.currentControlReportId).toBeNull();
+    expect(state.controlSession).toBeNull();
+    expect(state.chatSessions.has('control@heal.internal')).toBe(false);
+    expect(state.chatQueues.has('control@heal.internal')).toBe(false);
+    expect(runtime.getControlQueue()).toBeNull();
+    expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
   });
 });

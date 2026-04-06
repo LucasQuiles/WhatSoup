@@ -1041,7 +1041,9 @@ export class AgentRuntime implements Runtime {
               ...context,
               reportId: next.report_id,
               errorClass: next.error_class,
-            }));
+            })).catch(err => {
+              log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
+            });
           }
 
           return { sent: true, reportId: parsed.reportId, result: parsed.result };
@@ -1647,61 +1649,60 @@ export class AgentRuntime implements Runtime {
    * the caller (heal.ts) is responsible for queuing subsequent reports.
    */
   async handleControlTurn(reportId: string, payload: string): Promise<void> {
-    // Only non-sandboxed instances (Q) can run repairs
-    if (this.sandboxPerChat || this.sandbox) {
-      log.warn({ reportId }, 'handleControlTurn called on sandboxed instance — ignoring');
-      return;
-    }
-    // Single-flight gate
-    if (this.activeControlReportId) {
-      log.info(
-        { reportId, activeReportId: this.activeControlReportId },
-        'repair slot occupied — report will be queued by caller',
-      );
-      return;
-    }
-
-    this.activeControlReportId = reportId;
-
     const syntheticJid = 'control@heal.internal';
-
-    // Use a workspace at <cwd>/heal/ for the control session
-    const controlCwd = this.cwd ? join(this.cwd, 'heal') : join(homedir(), 'heal');
-    mkdirSync(controlCwd, { recursive: true, mode: 0o700 });
-
-    // Create or reuse control session
-    if (!this.controlSession) {
-      this.controlSession = this.createSessionManager({
-        chatJid: syntheticJid,
-        cwd: controlCwd,
-        onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
-        onCrash: (_info) => {
-          log.warn('control session crashed');
-          if (this.controlSessionTimeout) {
-            clearTimeout(this.controlSessionTimeout);
-            this.controlSessionTimeout = null;
-          }
-          this.activeControlReportId = null;
-        },
-        notifyUser: () => {},
-        onResumeFailed: () => {},
-      });
-
-      // Use ControlQueue instead of OutboundQueue so output is not forwarded as WhatsApp messages
-      const controlQueue = new ControlQueue(syntheticJid, this.messenger);
-      this.chatQueues.set('control@heal.internal', controlQueue);
-      this.chatSessions.set('control@heal.internal', this.controlSession);
-    }
-
-    // Spawn session if not active
-    if (!this.controlSession.getStatus().active) {
-      await this.controlSession.spawnSession();
-    }
-
-    // Format the turn
-    const turn = `[REPAIR REQUEST — report_id: ${reportId}]\n${payload}`;
-
     try {
+      // Only non-sandboxed instances (Q) can run repairs
+      if (this.sandboxPerChat || this.sandbox) {
+        log.warn({ reportId }, 'handleControlTurn called on sandboxed instance — ignoring');
+        return;
+      }
+      // Single-flight gate
+      if (this.activeControlReportId) {
+        log.info(
+          { reportId, activeReportId: this.activeControlReportId },
+          'repair slot occupied — report will be queued by caller',
+        );
+        return;
+      }
+
+      this.activeControlReportId = reportId;
+
+      // Use a workspace at <cwd>/heal/ for the control session
+      const controlCwd = this.cwd ? join(this.cwd, 'heal') : join(homedir(), 'heal');
+      mkdirSync(controlCwd, { recursive: true, mode: 0o700 });
+
+      // Create or reuse control session
+      if (!this.controlSession) {
+        this.controlSession = this.createSessionManager({
+          chatJid: syntheticJid,
+          cwd: controlCwd,
+          onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
+          onCrash: (_info) => {
+            log.warn('control session crashed');
+            if (this.controlSessionTimeout) {
+              clearTimeout(this.controlSessionTimeout);
+              this.controlSessionTimeout = null;
+            }
+            this.activeControlReportId = null;
+          },
+          notifyUser: () => {},
+          onResumeFailed: () => {},
+        });
+
+        // Use ControlQueue instead of OutboundQueue so output is not forwarded as WhatsApp messages
+        const controlQueue = new ControlQueue(syntheticJid, this.messenger);
+        this.chatQueues.set(syntheticJid, controlQueue);
+        this.chatSessions.set(syntheticJid, this.controlSession);
+      }
+
+      // Spawn session if not active
+      if (!this.controlSession.getStatus().active) {
+        await this.controlSession.spawnSession();
+      }
+
+      // Format the turn
+      const turn = `[REPAIR REQUEST — report_id: ${reportId}]\n${payload}`;
+
       await this.controlSession.sendTurn(turn);
       // Start hard timeout — if the control session doesn't resolve within 15 minutes,
       // force-escalate and shut it down to prevent resource exhaustion.
@@ -1744,16 +1745,30 @@ export class AgentRuntime implements Runtime {
             ...context,
             reportId: next.report_id,
             errorClass: next.error_class,
-          }));
+          })).catch(err => {
+            log.error({ err, reportId: next.report_id }, 'unhandled error in handleControlTurn');
+          });
         }
       }, CONTROL_SESSION_TIMEOUT_MS);
     } catch (err) {
-      log.error({ err, reportId }, 'failed to send repair turn to control session');
+      log.error({ err, reportId }, 'control session failed to start — releasing slot');
       if (this.controlSessionTimeout) {
         clearTimeout(this.controlSessionTimeout);
         this.controlSessionTimeout = null;
       }
+
       this.activeControlReportId = null;
+      const controlSession = this.controlSession;
+      this.controlSession = null;
+      this.chatSessions.delete(syntheticJid);
+      this.chatQueues.delete(syntheticJid);
+      if (controlSession) {
+        try {
+          await controlSession.shutdown();
+        } catch (shutdownErr) {
+          log.warn({ shutdownErr, reportId }, 'failed to shutdown control session during error cleanup');
+        }
+      }
     }
   }
 
