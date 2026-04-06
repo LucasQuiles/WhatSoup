@@ -283,6 +283,16 @@ const designSystemRestrictions = [
           selector: 'JSXAttribute[name.name="style"] Property[key.name="padding"][value.value=/^var\\(--sp-\\w+\\) var\\(--sp-\\w+\\)$/]',
           message: '⛔ Compound padding token in style. FIX: remove padding from style, add BOTH to className. padding: "var(--sp-2) var(--sp-4)"→"py-[var(--sp-2)] px-[var(--sp-4)]". First value is Y (top/bottom), second is X (left/right).',
         },
+        // padding: '0 var(--sp-X)' → py-0 px-[var(--sp-X)]
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="padding"][value.value=/^0 var\\(--sp-/]',
+          message: '⛔ Compound padding with zero in style. FIX: remove from style, add to className. padding: "0 var(--sp-4)"→"py-0 px-[var(--sp-4)]". First value=0→py-0, second is X→px-[var(--sp-X)].',
+        },
+        // padding: 'var(--sp-Y) 0' → py-[var(--sp-Y)] px-0
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="padding"][value.value=/^var\\(--sp-\\w+\\) 0$/]',
+          message: '⛔ Compound padding with zero in style. FIX: remove from style, add to className. padding: "var(--sp-3) 0"→"py-[var(--sp-3)] px-0". First is Y→py-[var(--sp-Y)], second=0→px-0.',
+        },
         // paddingTop/Bottom/Left/Right with token
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="paddingTop"][value.value=/^var\\(--sp-/]',
