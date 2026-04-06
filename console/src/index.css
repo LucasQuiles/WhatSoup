@@ -130,6 +130,7 @@
   --panel-confirm: 420px;    /* confirm dialog width */
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */
+  --panel-composer: 540px;   /* schedule composer modal width */
   --tooltip-min-w: 220px;    /* message tooltip min width */
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */

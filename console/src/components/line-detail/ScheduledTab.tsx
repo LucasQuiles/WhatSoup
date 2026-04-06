@@ -1,15 +1,19 @@
-import { useState } from 'react'
-import { Clock, Trash2, Loader2 } from 'lucide-react'
+import { useState, useMemo } from 'react'
+import { Clock, Plus } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import EmptyState from '../EmptyState.js'
-import type { ScheduledMessage } from '../../types.js'
+import { ScheduledMessageRow } from './ScheduledMessageRow.js'
+import { ScheduleComposerModal } from './ScheduleComposerModal.js'
+import type { ScheduledMessage, ChatItem } from '../../types.js'
 
 export function ScheduledTab({ lineName }: { lineName: string }) {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [cancelling, setCancelling] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState<number | null>(null)
+  const [composerOpen, setComposerOpen] = useState(false)
+  const [editMessage, setEditMessage] = useState<ScheduledMessage | undefined>(undefined)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['scheduled', lineName],
@@ -18,9 +22,30 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
     refetchInterval: 30_000,
   })
 
-  const messages: ScheduledMessage[] = (data as { scheduled?: ScheduledMessage[] })?.scheduled ?? []
+  const { data: chatsData } = useQuery({
+    queryKey: ['chats', lineName],
+    queryFn: () => api.getChats(lineName),
+    enabled: !!lineName,
+    staleTime: 60_000,
+  })
 
-  const handleCancel = async (id: string) => {
+  const chats: ChatItem[] = chatsData ?? []
+
+  // Sort: pending first (ASC by scheduledAt), then others (DESC by scheduledAt)
+  const sorted = useMemo(() => {
+    const all: ScheduledMessage[] = data?.messages ?? []
+    const pending = all
+      .filter(m => m.status === 'pending' || m.status === 'processing')
+      .sort((a, b) => a.scheduledAt - b.scheduledAt)
+    const rest = all
+      .filter(m => m.status !== 'pending' && m.status !== 'processing')
+      .sort((a, b) => b.scheduledAt - a.scheduledAt)
+    return [...pending, ...rest]
+  }, [data])
+
+  const messages = data?.messages ?? []
+
+  const handleCancel = async (id: number) => {
     setCancelling(id)
     try {
       await api.cancelScheduled(lineName, id)
@@ -31,6 +56,31 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
     } finally {
       setCancelling(null)
     }
+  }
+
+  const handleEdit = (message: ScheduledMessage) => {
+    setEditMessage(message)
+    setComposerOpen(true)
+  }
+
+  const handleDuplicate = (message: ScheduledMessage) => {
+    // Open composer with message pre-filled but no ID (creates new)
+    setEditMessage({ ...message, id: 0 } as ScheduledMessage)
+    setComposerOpen(true)
+  }
+
+  const handleNew = () => {
+    setEditMessage(undefined)
+    setComposerOpen(true)
+  }
+
+  const handleComposerClose = () => {
+    setComposerOpen(false)
+    setEditMessage(undefined)
+  }
+
+  const handleCreated = () => {
+    queryClient.invalidateQueries({ queryKey: ['scheduled', lineName] })
   }
 
   if (isLoading) {
@@ -47,56 +97,53 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
     )
   }
 
-  if (messages.length === 0) {
-    return (
-      <EmptyState
-        icon={<Clock size={40} strokeWidth={1.25} />}
-        title="No scheduled messages"
-        description="Messages scheduled via the agent or MCP tools will appear here."
-      />
-    )
-  }
-
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
-      <div className="c-col-header text-t4" style={{ padding: 'var(--sp-2) var(--sp-4)' }}>
-        {messages.length} scheduled message{messages.length !== 1 ? 's' : ''}
-      </div>
-      {messages.map((msg) => (
-        <div
-          key={msg.id}
-          className="flex items-start gap-3"
-          style={{
-            padding: 'var(--sp-3) var(--sp-4)',
-            background: 'var(--color-d2)',
-            borderWidth: 'var(--bw)',
-            borderStyle: 'solid',
-            borderColor: 'var(--b1)',
-            borderRadius: 'var(--radius-md)',
-          }}
-        >
-          <Clock size={16} strokeWidth={1.75} className="text-t4 flex-shrink-0" style={{ marginTop: '2px' }} />
-          <div className="flex-1 min-w-0">
-            <div className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
-              {msg.text.length > 100 ? msg.text.slice(0, 97) + '...' : msg.text}
-            </div>
-            <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px' }}>
-              {msg.chatName ?? msg.chatJid} · {new Date(msg.scheduledAt).toLocaleString()}
-            </div>
-          </div>
+    <>
+      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+        {/* Header bar */}
+        <div className="flex items-center justify-between" style={{ padding: 'var(--sp-2) var(--sp-4)' }}>
+          <span className="c-col-header text-t4 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
+            {messages.length} scheduled message{messages.length !== 1 ? 's' : ''}
+          </span>
           <button
             type="button"
-            onClick={() => handleCancel(msg.id)}
-            disabled={cancelling === msg.id}
-            aria-label={`Cancel scheduled message to ${msg.chatName ?? msg.chatJid}`}
-            className="c-btn c-btn-sm c-btn-danger font-mono flex-shrink-0"
-            style={{ fontSize: 'var(--font-size-label)' }}
+            onClick={handleNew}
+            className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1"
+            style={{ fontSize: 'var(--font-size-xs)' }}
           >
-            {cancelling === msg.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} strokeWidth={1.75} />}
-            Cancel
+            <Plus size={12} strokeWidth={2} />
+            New Scheduled Message
           </button>
         </div>
-      ))}
-    </div>
+
+        {sorted.length === 0 ? (
+          <EmptyState
+            icon={<Clock size={40} strokeWidth={1.25} />}
+            title="No scheduled messages"
+            description="Messages scheduled via the agent or MCP tools will appear here."
+          />
+        ) : (
+          sorted.map(msg => (
+            <ScheduledMessageRow
+              key={msg.id}
+              message={msg}
+              onCancel={handleCancel}
+              onEdit={handleEdit}
+              onDuplicate={handleDuplicate}
+              cancelling={cancelling}
+            />
+          ))
+        )}
+      </div>
+
+      <ScheduleComposerModal
+        open={composerOpen}
+        onClose={handleComposerClose}
+        onCreated={handleCreated}
+        lineName={lineName}
+        chats={chats}
+        editMessage={editMessage?.id ? editMessage : undefined}
+      />
+    </>
   )
 }
