@@ -35,6 +35,10 @@ export function contentTypeLabel(type: string): string {
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+/**
+ * Client-side cron-to-human formatter (browser — cannot import Node modules).
+ * Canonical implementation: src/core/cron.ts cronToHuman(). Keep both in sync.
+ */
 export function cronToHuman(expression: string): string {
   const parts = expression.trim().split(/\s+/);
   if (parts.length !== 5) return expression;

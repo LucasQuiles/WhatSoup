@@ -1,3 +1,4 @@
+// NOTE: Server-side duplicate exists at src/lib/phone.ts normalizePhoneE164()
 /** Normalize a phone number to E.164-style digits (prepend 1 for 10-digit NANP numbers). */
 export function normalizePhoneInput(value: string): string {
   const digits = value.replace(/\D/g, '')

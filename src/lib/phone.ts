@@ -24,6 +24,7 @@ export function normalizePhone(input: string): string {
  * If the number is 10 digits (US/CA), prepends "1".
  * Otherwise returns digits-only as-is.
  */
+// NOTE: Browser-side duplicate exists at console/src/lib/validation.ts normalizePhoneInput()
 export function normalizePhoneE164(input: string): string {
   const digits = input.replace(/\D/g, '');
   // 10-digit NANP number → prepend country code 1

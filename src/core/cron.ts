@@ -108,7 +108,11 @@ export function nextCronRun(expression: string, afterUnix: number): number {
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-/** Convert a cron expression to a human-readable string. Best-effort for common patterns. */
+/**
+ * Convert a cron expression to a human-readable string. Best-effort for common patterns.
+ * NOTE: A client-side copy lives in console/src/components/line-detail/scheduled-utils.ts
+ * because the console cannot import Node modules. Keep both in sync.
+ */
 export function cronToHuman(expression: string): string {
   const fields = parseCron(expression);
   const { minute, hour, dayOfMonth, month, dayOfWeek } = fields;
