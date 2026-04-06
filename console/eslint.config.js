@@ -213,6 +213,12 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ LETTER SPACING TOKEN IN STYLE ═══
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="letterSpacing"][value.value=/^var\\(--tracking-/]',
+          message: '⛔ letterSpacing token in style. FIX: remove from style, add to className. letterSpacing: "var(--tracking-tight)"→"tracking-[var(--tracking-tight)]". Pattern: tracking-[var(--tracking-NAME)].',
+        },
+
         // ═══ SIZING TOKEN IN STYLE ═══
         // width/height/min/max with var(--*) tokens → Tailwind arbitrary value classes
         {
