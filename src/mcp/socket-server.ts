@@ -1,5 +1,5 @@
 import { createServer } from 'node:net';
-import type { Server } from 'node:net';
+import type { Server, Socket } from 'node:net';
 import { unlinkSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import type { ToolRegistry } from './registry.ts';
@@ -21,16 +21,34 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+// ---------------------------------------------------------------------------
+// SP11: Per-connection SessionContext isolation
+//
+// Each MCP client connection receives its own shallow clone of the base
+// SessionContext. This prevents concurrent clients from racing on
+// deliveryJid or other mutable session fields.
+//
+// updateDeliveryJid propagates to ALL active connections so JID alias
+// changes (e.g., from LID resolution) reach every client.
+// ---------------------------------------------------------------------------
+
 export class WhatSoupSocketServer {
   private server: Server | null = null;
   private readonly socketPath: string;
   private readonly registry: ToolRegistry;
-  private readonly session: SessionContext;
+  private readonly baseSession: SessionContext;
+  /** Per-connection isolated sessions. Cleaned up on disconnect. */
+  private readonly connectionSessions = new Map<number, SessionContext>();
 
   constructor(socketPath: string, registry: ToolRegistry, session: SessionContext) {
     this.socketPath = socketPath;
     this.registry = registry;
-    this.session = session;
+    this.baseSession = session;
+  }
+
+  /** Number of active client connections. */
+  get connectionCount(): number {
+    return this.connectionSessions.size;
   }
 
   start(): void {
@@ -45,13 +63,18 @@ export class WhatSoupSocketServer {
 
     let clientCounter = 0;
 
-    this.server = createServer((socket) => {
+    this.server = createServer((socket: Socket) => {
       const clientId = ++clientCounter;
-      log.info({ clientId, socketPath: this.socketPath }, 'client connected');
+      // SP11: Clone base session for this connection
+      const connSession: SessionContext = { ...this.baseSession };
+      this.connectionSessions.set(clientId, connSession);
+
+      log.info({ clientId, socketPath: this.socketPath, connections: this.connectionSessions.size }, 'client connected');
       let buf = '';
 
       socket.on('close', () => {
-        log.info({ clientId }, 'client disconnected');
+        this.connectionSessions.delete(clientId);
+        log.info({ clientId, connections: this.connectionSessions.size }, 'client disconnected');
       });
 
       socket.on('data', (chunk) => {
@@ -82,7 +105,7 @@ export class WhatSoupSocketServer {
             continue;
           }
 
-          void this.handleRequest(req).then((response) => {
+          void this.handleRequest(req, connSession).then((response) => {
             if (response !== null) {
               try {
                 socket.write(JSON.stringify(response) + '\n');
@@ -109,6 +132,7 @@ export class WhatSoupSocketServer {
   }
 
   stop(): void {
+    this.connectionSessions.clear();
     if (this.server) {
       this.server.close();
       this.server = null;
@@ -120,11 +144,19 @@ export class WhatSoupSocketServer {
     }
   }
 
+  /**
+   * Update delivery JID on the base session AND all active connections.
+   * This ensures JID alias changes (e.g., LID resolution) propagate
+   * to every connected MCP client.
+   */
   updateDeliveryJid(jid: string): void {
-    this.session.deliveryJid = jid;
+    this.baseSession.deliveryJid = jid;
+    for (const session of this.connectionSessions.values()) {
+      session.deliveryJid = jid;
+    }
   }
 
-  private async handleRequest(req: JsonRpcRequest): Promise<JsonRpcResponse | null> {
+  private async handleRequest(req: JsonRpcRequest, session: SessionContext): Promise<JsonRpcResponse | null> {
     const id = req.id ?? null;
 
     try {
@@ -141,7 +173,7 @@ export class WhatSoupSocketServer {
           };
 
         case 'tools/list': {
-          const tools = this.registry.listTools(this.session);
+          const tools = this.registry.listTools(session);
           return {
             jsonrpc: '2.0',
             id,
@@ -153,7 +185,7 @@ export class WhatSoupSocketServer {
           const params = req.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
           const name = params?.name ?? '';
           const args = params?.arguments ?? {};
-          const callResult = await this.registry.call(name, args, this.session);
+          const callResult = await this.registry.call(name, args, session);
           return {
             jsonrpc: '2.0',
             id,

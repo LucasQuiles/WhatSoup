@@ -319,4 +319,102 @@ describe('WhatSoupSocketServer', () => {
     expect(ids).toContain(10);
     expect(ids).toContain(11);
   });
+
+  // --- SP11: Per-connection session isolation ---
+
+  it('SP11: concurrent connections hold isolated delivery contexts', async () => {
+    // Register an injected-mode tool that captures the deliveryJid from the session
+    const capturedJids: string[] = [];
+    registry.register(
+      makeTool({
+        name: 'capture_jid',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string() }),
+        handler: async (params) => {
+          capturedJids.push(params['chatJid'] as string);
+          return 'ok';
+        },
+      }),
+    );
+
+    session = makeSession({
+      tier: 'chat-scoped',
+      conversationKey: 'conv1',
+      deliveryJid: 'initial@s.whatsapp.net',
+    });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Both connections start with the same deliveryJid
+    const [r1, r2] = await Promise.all([
+      sendJsonRpc(socketPath, {
+        jsonrpc: '2.0', id: 100, method: 'tools/call',
+        params: { name: 'capture_jid', arguments: {} },
+      }),
+      sendJsonRpc(socketPath, {
+        jsonrpc: '2.0', id: 101, method: 'tools/call',
+        params: { name: 'capture_jid', arguments: {} },
+      }),
+    ]);
+
+    // Both should have seen the initial JID
+    expect(capturedJids).toHaveLength(2);
+    expect(capturedJids[0]).toBe('initial@s.whatsapp.net');
+    expect(capturedJids[1]).toBe('initial@s.whatsapp.net');
+  });
+
+  it('SP11: updateDeliveryJid propagates to all active connections', async () => {
+    const capturedJids: string[] = [];
+    registry.register(
+      makeTool({
+        name: 'capture_jid2',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({ chatJid: z.string() }),
+        handler: async (params) => {
+          capturedJids.push(params['chatJid'] as string);
+          return 'ok';
+        },
+      }),
+    );
+
+    session = makeSession({
+      tier: 'chat-scoped',
+      conversationKey: 'conv2',
+      deliveryJid: 'before@s.whatsapp.net',
+    });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Update the JID after connections would be established
+    server.updateDeliveryJid('after@s.whatsapp.net');
+
+    // New connections should see the updated JID
+    const r = await sendJsonRpc(socketPath, {
+      jsonrpc: '2.0', id: 200, method: 'tools/call',
+      params: { name: 'capture_jid2', arguments: {} },
+    });
+
+    expect(capturedJids).toHaveLength(1);
+    expect(capturedJids[0]).toBe('after@s.whatsapp.net');
+  });
+
+  it('SP11: connectionCount tracks active connections', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    expect(server.connectionCount).toBe(0);
+
+    server.start();
+    await waitForSocket(socketPath);
+
+    // Connect and immediately get a response (which closes the connection)
+    await sendJsonRpc(socketPath, { jsonrpc: '2.0', id: 300, method: 'initialize', params: {} });
+
+    // After sendJsonRpc closes, connection count should go back to 0
+    // (small delay for close event propagation)
+    await new Promise(r => setTimeout(r, 50));
+    expect(server.connectionCount).toBe(0);
+  });
 });
