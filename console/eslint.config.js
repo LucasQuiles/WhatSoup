@@ -189,6 +189,22 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
+        // ═══ OVERFLOW AXIS IN STYLE ═══
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="overflowY"]',
+          message: '⛔ Inline overflowY in style. FIX: remove from style, add to className. auto→"overflow-y-auto" scroll→"overflow-y-scroll" hidden→"overflow-y-hidden".',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="overflowX"]',
+          message: '⛔ Inline overflowX in style. FIX: remove from style, add to className. auto→"overflow-x-auto" scroll→"overflow-x-scroll" hidden→"overflow-x-hidden".',
+        },
+
+        // ═══ POINTER EVENTS IN STYLE ═══
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="pointerEvents"]',
+          message: '⛔ Inline pointerEvents in style. FIX: remove from style, add to className. none→"pointer-events-none" auto→"pointer-events-auto".',
+        },
+
         // ═══ CURSOR IN STYLE ═══
         // Cursor values have direct Tailwind equivalents
         {
