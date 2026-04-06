@@ -124,7 +124,8 @@ describe('design system compliance — round 2 token cleanup', () => {
     ]) {
       expect(groupDetail).not.toContain(literal)
     }
-    expect(groupDetail).toContain("maxHeight: 'var(--modal-max-h)'")
+    // Refactored to Tailwind class
+    expect(groupDetail).toContain('max-h-[var(--modal-max-h)]')
 
     for (const literal of [
       "maxWidth: '90%'",

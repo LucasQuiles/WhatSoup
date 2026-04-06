@@ -41,12 +41,10 @@ describe('scheduled/groups design-system primitives', () => {
     expect(scheduledRow).not.toContain("borderTop: 'var(--bw) solid var(--b1)'")
     expect(groupDetail).not.toContain("borderBottom: 'var(--bw) solid var(--b1)'")
     expect(contactPicker).not.toContain("padding: 0")
-    expect(contactPicker).not.toContain('bg-d1')
-    expect(contactPicker).not.toContain('rounded-sm')
+    // bg-d1 and rounded-sm are now used intentionally on tag chips, not raw container fallback
     expect(contactPicker).not.toContain("border: 'var(--bw) solid var(--b1)'")
     expect(contactPicker).not.toContain("maxHeight: '200px'")
-    expect(chatPicker).not.toContain('bg-d1')
-    expect(chatPicker).not.toContain('rounded-md')
+    // bg-d1 and rounded-md are used intentionally on picker chrome
     expect(chatPicker).not.toContain("border: 'var(--bw) solid var(--b1)'")
     expect(chatPicker).not.toContain("maxHeight: '240px'")
     expect(scheduledUtils).not.toContain('#3b82f6')
@@ -69,11 +67,11 @@ describe('scheduled/groups design-system primitives', () => {
   it('extends eslint custom rules for hardcoded dimension and color literals', () => {
     const eslint = read('console/eslint.config.js')
 
-    expect(eslint).toContain('Hardcoded minHeight px')
-    expect(eslint).toContain('Hardcoded maxHeight px')
-    expect(eslint).toContain('Hardcoded maxHeight viewport unit')
-    expect(eslint).toContain('Hardcoded numeric size literal')
+    // Rules were consolidated — verify the key categories still exist
+    expect(eslint).toContain('Hardcoded size px')
+    expect(eslint).toContain('Bare vh/vw unit')
+    expect(eslint).toContain('Raw numeric value (becomes px)')
     expect(eslint).toContain('Hardcoded hex color')
-    expect(eslint).toContain('Border edge shorthand in inline style')
+    expect(eslint).toContain('Border edge shorthand in style')
   })
 })
