@@ -139,8 +139,8 @@ export function SummaryTab({
         </div>
       </motion.div>
 
-      {/* Row 2.5: Runtime details — mode-specific data */}
-      {(line.mode === 'agent' || line.linkedStatus || line.models) && (
+      {/* Row 2.5: Instance details — link status, models, isolation (no duplicates with KPI row) */}
+      {(line.linkedStatus || line.models || line.sandboxPerChat || (line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0))) && (
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -166,41 +166,6 @@ export function SummaryTab({
                 {line.linkedStatus}
               </div>
             </div>
-          )}
-          {line.mode === 'agent' && line.health?.runtime?.agent && (
-            <>
-              <div
-                className="font-mono"
-                style={{
-                  padding: 'var(--sp-3) var(--sp-4)',
-                  background: 'var(--color-d2)',
-                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                  borderRadius: 'var(--radius-md)',
-                }}
-              >
-                <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>SESSIONS</div>
-                <div className="font-semibold text-t1" style={{ fontSize: 'var(--font-size-data)' }}>
-                  {line.health.runtime.agent.activeSessions} active
-                  {line.totalSessions != null && <span className="text-t4 font-normal"> / {line.totalSessions} total</span>}
-                </div>
-              </div>
-              {line.health.runtime.agent.lastSessionStatus && (
-                <div
-                  className="font-mono"
-                  style={{
-                    padding: 'var(--sp-3) var(--sp-4)',
-                    background: 'var(--color-d2)',
-                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                    borderRadius: 'var(--radius-md)',
-                  }}
-                >
-                  <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>LAST SESSION</div>
-                  <div className={`font-semibold ${line.health.runtime.agent.lastSessionStatus === 'completed' ? 'text-s-ok' : 'text-s-warn'}`} style={{ fontSize: 'var(--font-size-data)' }}>
-                    {line.health.runtime.agent.lastSessionStatus}
-                  </div>
-                </div>
-              )}
-            </>
           )}
           {line.models && (
             <div
@@ -232,6 +197,24 @@ export function SummaryTab({
               <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>ISOLATION</div>
               <div className="font-semibold text-m-agt" style={{ fontSize: 'var(--font-size-data)' }}>
                 sandbox per-chat
+              </div>
+            </div>
+          )}
+          {line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0) && (
+            <div
+              className="font-mono"
+              style={{
+                padding: 'var(--sp-3) var(--sp-4)',
+                background: 'var(--color-d2)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
+                borderRadius: 'var(--radius-md)',
+              }}
+            >
+              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>TOKENS</div>
+              <div className="text-t2" style={{ fontSize: 'var(--font-size-data)' }}>
+                <span className="text-m-pas">{(line.tokenUsage.input).toLocaleString()} in</span>
+                {' · '}
+                <span className="text-m-cht">{(line.tokenUsage.output).toLocaleString()} out</span>
               </div>
             </div>
           )}
