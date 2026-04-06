@@ -450,6 +450,11 @@ const designSystemRestrictions = [
           selector: 'Property[key.name="boxShadow"][value.value=/^[0-9]/]',
           message: '⛔ Hardcoded boxShadow. FIX: replace with token. Options: var(--card-shadow) var(--shadow-inset) var(--shadow-md) var(--shadow-lg). For glow: var(--s-ok-glow) var(--s-warn-glow) var(--s-crit-glow).',
         },
+        // boxShadow with token → shadow-[var(--*)] class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="boxShadow"][value.value=/^var\\(--/]',
+          message: '⛔ boxShadow token in style. FIX: remove from style, add to className. boxShadow: "var(--card-shadow)"→"shadow-[var(--card-shadow)]". Pattern: shadow-[var(--TOKEN)].',
+        },
 
         // ═══ FOCUS RINGS ═══
 
