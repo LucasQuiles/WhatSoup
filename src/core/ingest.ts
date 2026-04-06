@@ -138,189 +138,199 @@ export function createIngestHandler(
 ): (msg: IncomingMessage) => void {
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
-      // --- Backpressure gate (SP1) ---
-      const proceed = await acquireSlot(msg);
-      if (!proceed) return;
-
+      let slotAcquired = false;
       try {
-      // 0. Control plane intercept — before any normal storage
-      if (msg.content && extractProtocol(msg.content) !== null) {
-        const phone = resolvePhoneFromJid(msg.senderJid, db);
-        const isPeer = [...config.controlPeers.values()].includes(phone);
-        if (isPeer) {
-          const protocol = extractProtocol(msg.content);
-          // Store in control_messages, NOT messages
-          try {
-            db.raw.prepare(`
-              INSERT OR IGNORE INTO control_messages (message_id, direction, peer_jid, protocol, payload)
-              VALUES (?, 'inbound', ?, ?, ?)
-            `).run(msg.messageId, msg.senderJid, protocol, msg.content);
-          } catch (err) {
-            log.error({ err, messageId: msg.messageId }, 'failed to store control message');
-          }
+        // --- Backpressure gate (SP1) ---
+        const proceed = await acquireSlot(msg);
+        if (!proceed) return;
+        slotAcquired = true;
 
-          log.debug({ protocol, peer: msg.senderJid, messageId: msg.messageId }, 'control message intercepted');
-
-          // Route HEAL_COMPLETE and HEAL_ESCALATE to the heal state machine
-          if (protocol === 'HEAL_COMPLETE' || protocol === 'HEAL_ESCALATE') {
+        // 0. Control plane intercept — before any normal storage
+        if (msg.content && extractProtocol(msg.content) !== null) {
+          const phone = resolvePhoneFromJid(msg.senderJid, db);
+          const isPeer = [...config.controlPeers.values()].includes(phone);
+          if (isPeer) {
+            const protocol = extractProtocol(msg.content);
+            // Store in control_messages, NOT messages
             try {
-              const payload = extractPayload(msg.content);
-              if (payload) {
-                const parsed = HealCompletePayloadSchema.parse(payload);
-                if (protocol === 'HEAL_COMPLETE') {
-                  handleHealComplete(db, parsed);
-                } else {
-                  handleHealEscalate(db, parsed);
-                }
-              }
+              db.raw.prepare(`
+                INSERT OR IGNORE INTO control_messages (message_id, direction, peer_jid, protocol, payload)
+                VALUES (?, 'inbound', ?, ?, ?)
+              `).run(msg.messageId, msg.senderJid, protocol, msg.content);
             } catch (err) {
-              log.error({ err, messageId: msg.messageId, protocol }, 'failed to handle control message payload');
+              log.error({ err, messageId: msg.messageId }, 'failed to store control message');
+            }
+
+            log.debug({ protocol, peer: msg.senderJid, messageId: msg.messageId }, 'control message intercepted');
+
+            // Route HEAL_COMPLETE and HEAL_ESCALATE to the heal state machine
+            if (protocol === 'HEAL_COMPLETE' || protocol === 'HEAL_ESCALATE') {
+              try {
+                const payload = extractPayload(msg.content);
+                if (payload) {
+                  const parsed = HealCompletePayloadSchema.parse(payload);
+                  if (protocol === 'HEAL_COMPLETE') {
+                    handleHealComplete(db, parsed);
+                  } else {
+                    handleHealEscalate(db, parsed);
+                  }
+                }
+              } catch (err) {
+                log.error({ err, messageId: msg.messageId, protocol }, 'failed to handle control message payload');
+              }
+            }
+
+            if (durability) {
+              const seq = durability.journalInbound(msg.messageId, toConversationKey(msg.chatJid), msg.chatJid, 'control');
+              durability.markInboundSkipped(seq, 'control_message');
+            }
+            return;
+          }
+        }
+
+        // 1. Store the incoming message — always, even if we later reject it.
+        //    Atomic insert: INSERT OR IGNORE returns false if message_id already exists.
+        //    For LID DMs, resolve to the phone-based conversation key so messages from
+        //    the same person (via LID or JID) share one conversation thread.
+        let conversationKey: string;
+        try {
+          if (!msg.isGroup && isLidJid(msg.chatJid)) {
+            conversationKey = resolvePhoneFromJid(msg.chatJid, db);
+          } else {
+            conversationKey = toConversationKey(msg.chatJid);
+          }
+          const isNew = storeMessageIfNew(db, {
+            chatJid: msg.chatJid,
+            conversationKey,
+            senderJid: msg.senderJid,
+            senderName: msg.senderName,
+            messageId: msg.messageId,
+            content: msg.content,
+            contentText: msg.contentText ?? null,
+            contentType: msg.contentType,
+            isFromMe: msg.isFromMe,
+            timestamp: msg.timestamp,
+            quotedMessageId: msg.quotedMessageId,
+            rawMessage: msg.rawMessage != null ? JSON.stringify(msg.rawMessage) : null,
+          });
+          if (!isNew) {
+            log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
+            return;
+          }
+        } catch (err) {
+          log.error({ err, messageId: msg.messageId }, 'failed to store message');
+          return;
+        }
+
+        // 1b. Echo correlation — Baileys echoes our own sent messages back through
+        //     messages.upsert with isFromMe=true. Match against submitted outbound_ops
+        //     so they transition submitted → echoed. Never route to runtime.
+        if (msg.isFromMe) {
+          if (durability) {
+            durability.matchEcho(msg.messageId);
+          }
+          return;
+        }
+
+        // 1b+. Feed-visible inbound log -- carries messageId + chatJid for preview enrichment.
+        // Guard: !isFromMe is guaranteed here (isFromMe returns above).
+        log.info(
+          { messageId: msg.messageId, chatJid: msg.chatJid, senderName: msg.senderName, contentType: msg.contentType },
+          'inbound message received',
+        );
+
+        // 1c. Passive short-circuit — store message, journal as complete, no dispatch
+        if (instanceType === 'passive') {
+          if (durability) {
+            const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'passive');
+            durability.markInboundSkipped(seq, 'passive_instance');
+          }
+          return;
+        }
+
+        // 2. Check admin commands FIRST (before trigger check)
+        if (isAdminMessage(msg, db) && msg.content) {
+          const cmd = parseAdminCommand(msg.content);
+          if (cmd) {
+            let seq: number | undefined;
+            if (durability) {
+              seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'admin');
+            }
+            try {
+              await handleAdminCommand(
+                db,
+                messenger,
+                cmd.action,
+                cmd.subjectType,
+                cmd.subjectId,
+                msg.chatJid,
+                (m) => runtime.handleMessage(m),
+                durability,
+              );
+            } catch (err) {
+              log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
+            }
+            if (durability && seq !== undefined) {
+              durability.markInboundSkipped(seq, 'admin_command');
+            }
+            return;
+          }
+        }
+
+        // 3. Access policy / trigger check
+        const triggerResult = shouldRespond(msg, getBotJid(), getBotLid(), db);
+        if (!triggerResult.respond) {
+          log.info(
+            { messageId: msg.messageId, reason: triggerResult.reason, accessStatus: triggerResult.accessStatus },
+            'ingest: not dispatching',
+          );
+
+          // 4. Send approval request for unknown senders
+          if (triggerResult.accessStatus === 'unknown') {
+            const approvalPhone = resolvePhoneFromJid(msg.senderJid, db);
+            try {
+              await sendApprovalRequest(db, messenger, approvalPhone, msg.senderName ?? '', msg.content ?? '', durability);
+            } catch (err) {
+              log.error({ err, phone: approvalPhone }, 'failed to send approval request');
             }
           }
 
           if (durability) {
-            const seq = durability.journalInbound(msg.messageId, toConversationKey(msg.chatJid), msg.chatJid, 'control');
-            durability.markInboundSkipped(seq, 'control_message');
+            const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
+            durability.markInboundSkipped(seq, 'access_denied');
           }
+
           return;
         }
-      }
 
-      // 1. Store the incoming message — always, even if we later reject it.
-      //    Atomic insert: INSERT OR IGNORE returns false if message_id already exists.
-      //    For LID DMs, resolve to the phone-based conversation key so messages from
-      //    the same person (via LID or JID) share one conversation thread.
-      let conversationKey: string;
-      try {
-        if (!msg.isGroup && isLidJid(msg.chatJid)) {
-          conversationKey = resolvePhoneFromJid(msg.chatJid, db);
-        } else {
-          conversationKey = toConversationKey(msg.chatJid);
-        }
-        const isNew = storeMessageIfNew(db, {
-          chatJid: msg.chatJid,
-          conversationKey,
-          senderJid: msg.senderJid,
-          senderName: msg.senderName,
-          messageId: msg.messageId,
-          content: msg.content,
-          contentText: msg.contentText ?? null,
-          contentType: msg.contentType,
-          isFromMe: msg.isFromMe,
-          timestamp: msg.timestamp,
-          quotedMessageId: msg.quotedMessageId,
-          rawMessage: msg.rawMessage != null ? JSON.stringify(msg.rawMessage) : null,
-        });
-        if (!isNew) {
-          log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
-          return;
-        }
-      } catch (err) {
-        log.error({ err, messageId: msg.messageId }, 'failed to store message');
-        return;
-      }
-
-      // 1b. Echo correlation — Baileys echoes our own sent messages back through
-      //     messages.upsert with isFromMe=true. Match against submitted outbound_ops
-      //     so they transition submitted → echoed. Never route to runtime.
-      if (msg.isFromMe) {
+        // 5. Journal inbound event before dispatch so runtime can link outbound ops
+        const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
+        let seq: number | undefined;
         if (durability) {
-          durability.matchEcho(msg.messageId);
+          seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
+          msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
         }
-        return;
-      }
 
-      // 1b+. Feed-visible inbound log -- carries messageId + chatJid for preview enrichment.
-      // Guard: !isFromMe is guaranteed here (isFromMe returns above).
-      log.info(
-        { messageId: msg.messageId, chatJid: msg.chatJid, senderName: msg.senderName, contentType: msg.contentType },
-        'inbound message received',
-      );
-
-      // 1c. Passive short-circuit — store message, journal as complete, no dispatch
-      if (instanceType === 'passive') {
-        if (durability) {
-          const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'passive');
-          durability.markInboundSkipped(seq, 'passive_instance');
-        }
-        return;
-      }
-
-      // 2. Check admin commands FIRST (before trigger check)
-      if (isAdminMessage(msg, db) && msg.content) {
-        const cmd = parseAdminCommand(msg.content);
-        if (cmd) {
-          let seq: number | undefined;
-          if (durability) {
-            seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'admin');
-          }
-          try {
-            await handleAdminCommand(
-              db,
-              messenger,
-              cmd.action,
-              cmd.subjectType,
-              cmd.subjectId,
-              msg.chatJid,
-              (m) => runtime.handleMessage(m),
-              durability,
-            );
-          } catch (err) {
-            log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
-          }
+        // 6. Dispatch to runtime
+        try {
+          await runtime.handleMessage(msg);
+        } catch (err) {
+          log.error({ err, messageId: msg.messageId }, 'runtime.handleMessage threw');
           if (durability && seq !== undefined) {
-            durability.markInboundSkipped(seq, 'admin_command');
-          }
-          return;
-        }
-      }
-
-      // 3. Access policy / trigger check
-      const triggerResult = shouldRespond(msg, getBotJid(), getBotLid(), db);
-      if (!triggerResult.respond) {
-        log.info(
-          { messageId: msg.messageId, reason: triggerResult.reason, accessStatus: triggerResult.accessStatus },
-          'ingest: not dispatching',
-        );
-
-        // 4. Send approval request for unknown senders
-        if (triggerResult.accessStatus === 'unknown') {
-          const approvalPhone = resolvePhoneFromJid(msg.senderJid, db);
-          try {
-            await sendApprovalRequest(db, messenger, approvalPhone, msg.senderName ?? '', msg.content ?? '', durability);
-          } catch (err) {
-            log.error({ err, phone: approvalPhone }, 'failed to send approval request');
+            durability.markInboundFailed(seq);
           }
         }
-
-        if (durability) {
-          const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
-          durability.markInboundSkipped(seq, 'access_denied');
-        }
-
-        return;
-      }
-
-      // 5. Journal inbound event before dispatch so runtime can link outbound ops
-      const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
-      let seq: number | undefined;
-      if (durability) {
-        seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, routedTo);
-        msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
-      }
-
-      // 6. Dispatch to runtime
-      try {
-        await runtime.handleMessage(msg);
       } catch (err) {
-        log.error({ err, messageId: msg.messageId }, 'runtime.handleMessage threw');
-        if (durability && seq !== undefined) {
-          durability.markInboundFailed(seq);
-        }
-      }
+        log.error({ err, messageId: msg.messageId }, 'unhandled error in ingest handler');
       } finally {
-        ingestActive--;
-        releaseSlot();
+        if (slotAcquired) {
+          ingestActive--;
+          try {
+            releaseSlot();
+          } catch (releaseErr) {
+            log.error({ err: releaseErr, messageId: msg.messageId }, 'releaseSlot failed — slot may be permanently consumed');
+          }
+        }
       }
     })();
   };
