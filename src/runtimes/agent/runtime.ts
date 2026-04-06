@@ -67,6 +67,7 @@ const AUTO_RESPAWN_MAX_CRASHES = 3;
 const AUTO_RESPAWN_BASE_MS = 2_000;
 /** Maximum respawn delay (ms) — caps the exponential backoff. */
 const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
+const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
@@ -523,12 +524,31 @@ export class AgentRuntime implements Runtime {
   private recentCrashCount = 0;
   private lastCrashAt: string | null = null;
 
-  /** Maps toolId → toolName for the current turn, so tool_result errors can reference the tool. */
-  private activeToolNames = new Map<string, string>();
+  /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
+  private activeToolNames = new Map<string, Map<string, string>>();
+  private nextToolScopeOrdinal = 0;
 
   private recordCrash(): void {
     this.recentCrashCount++;
     this.lastCrashAt = new Date().toISOString();
+  }
+
+  private createToolScopeKey(scopeBase: string): string {
+    this.nextToolScopeOrdinal += 1;
+    return `${scopeBase}#${this.nextToolScopeOrdinal}`;
+  }
+
+  private getToolNames(toolScopeKey: string): Map<string, string> {
+    let names = this.activeToolNames.get(toolScopeKey);
+    if (!names) {
+      names = new Map<string, string>();
+      this.activeToolNames.set(toolScopeKey, names);
+    }
+    return names;
+  }
+
+  private clearToolNames(toolScopeKey: string): void {
+    this.activeToolNames.delete(toolScopeKey);
   }
 
   // Tracks inbound seq for the current turn (single/shared mode)
@@ -859,10 +879,11 @@ export class AgentRuntime implements Runtime {
         log.info({ conversationKey: cp.conversation_key, sessionId: full.session_id, chatJid }, 'proactive per_chat resume on startup');
 
         // Create session + queue (same as ensureSessionAndQueueSync but with resume)
+        const toolScopeKey = this.createToolScopeKey(chatJid);
         const session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
-          onEvent: (event) => this.handleEventPerChat(chatJid, event),
+          onEvent: (event) => this.handleEventPerChat(chatJid, event, toolScopeKey),
           onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
           notifyUser: (msg) => {
             const s = this.chatSessions.get(chatJid);
@@ -1423,7 +1444,7 @@ export class AgentRuntime implements Runtime {
    * Resolves queue and session locally from the mapKey to avoid mutating shared
    * instance fields that another concurrent chat could overwrite.
    */
-  private handleEventPerChat(mapKey: string, event: AgentEvent): void {
+  private handleEventPerChat(mapKey: string, event: AgentEvent, toolScopeKey: string): void {
     const queue = this.chatQueues.get(mapKey);
     if (!queue) return;
     const session = this.chatSessions.get(mapKey) ?? null;
@@ -1437,7 +1458,7 @@ export class AgentRuntime implements Runtime {
       // Turn completed successfully — clear pending replay text
       this.pendingTurnText.delete(mapKey);
     }
-    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey);
+    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey);
   }
 
   /**
@@ -1445,7 +1466,7 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string): void {
+  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string, toolScopeKey: string = mapKey ?? GLOBAL_TOOL_SCOPE_KEY): void {
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -1472,7 +1493,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
-        this.activeToolNames.set(event.toolId, event.toolName);
+        this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
 
@@ -1487,18 +1508,22 @@ export class AgentRuntime implements Runtime {
       case 'tool_result':
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
+        const toolNames = this.activeToolNames.get(toolScopeKey);
         if (event.isError) {
-          const toolName = this.activeToolNames.get(event.toolId) ?? 'unknown';
+          const toolName = toolNames?.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
         }
-        this.activeToolNames.delete(event.toolId);
+        toolNames?.delete(event.toolId);
+        if (toolNames && toolNames.size === 0) {
+          this.activeToolNames.delete(toolScopeKey);
+        }
         break;
 
       case 'result':
         session?.clearTurnWatchdog();
-        this.activeToolNames.clear();
+        this.clearToolNames(toolScopeKey);
         if (event.text) {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
@@ -1673,10 +1698,11 @@ export class AgentRuntime implements Runtime {
 
       // Create or reuse control session
       if (!this.controlSession) {
+        const toolScopeKey = this.createToolScopeKey('control@heal.internal');
         this.controlSession = this.createSessionManager({
           chatJid: syntheticJid,
           cwd: controlCwd,
-          onEvent: (event) => this.handleEventPerChat('control@heal.internal', event),
+          onEvent: (event) => this.handleEventPerChat('control@heal.internal', event, toolScopeKey),
           onCrash: (_info) => {
             log.warn('control session crashed');
             if (this.controlSessionTimeout) {
@@ -1989,10 +2015,11 @@ export class AgentRuntime implements Runtime {
       const resumable = getResumableSessionForChat(this.db, workspaceKey);
 
       // Create SessionManager with workspace-scoped cwd
+      const toolScopeKey = this.createToolScopeKey(workspaceKey);
       const session = this.createSessionManager({
         chatJid,
         cwd: workspacePath,  // scoped cwd instead of this.cwd
-        onEvent: (event) => this.handleEventPerChat(workspaceKey, event),
+        onEvent: (event) => this.handleEventPerChat(workspaceKey, event, toolScopeKey),
         onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
         notifyUser: (msg) => {
           // Only remove session from map if it's actually dead (crash/exit).
@@ -2047,10 +2074,11 @@ export class AgentRuntime implements Runtime {
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per raw chatJid
       if (!this.chatSessions.has(chatJid)) {
+        const toolScopeKey = this.createToolScopeKey(chatJid);
         const session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
-          onEvent: (event) => this.handleEventPerChat(chatJid, event),
+          onEvent: (event) => this.handleEventPerChat(chatJid, event, toolScopeKey),
           onCrash: (info) => this.handlePerChatCrash(chatJid, chatJid, info),
           notifyUser: (msg) => {
             // Only remove session from map if it's actually dead (crash/exit).
@@ -2388,7 +2416,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
-        this.activeToolNames.set(event.toolId, event.toolName);
+        this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
         queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
         break;
 
@@ -2409,8 +2437,9 @@ export class AgentRuntime implements Runtime {
       case 'tool_result':
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
+        const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
         if (event.isError) {
-          const toolName = this.activeToolNames.get(event.toolId) ?? 'unknown';
+          const toolName = toolNames?.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
@@ -2420,12 +2449,15 @@ export class AgentRuntime implements Runtime {
           }, 'tool error reported by agent');
           queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
         }
-        this.activeToolNames.delete(event.toolId);
+        toolNames?.delete(event.toolId);
+        if (toolNames && toolNames.size === 0) {
+          this.activeToolNames.delete(GLOBAL_TOOL_SCOPE_KEY);
+        }
         break;
 
       case 'result':
         this.session?.clearTurnWatchdog();
-        this.activeToolNames.clear();
+        this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
           // Suppress usage-limit messages — log and kill session instead of forwarding

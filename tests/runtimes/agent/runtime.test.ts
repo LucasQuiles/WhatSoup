@@ -296,6 +296,26 @@ async function sendAndDrainShared(runtime: AgentRuntime, msg: IncomingMessage): 
   await (runtime as unknown as { turnQueue: { idle: () => Promise<void> } }).turnQueue.idle();
 }
 
+function makeQueueMock(targetChatJid: string): IOutboundQueue {
+  return {
+    enqueueText: vi.fn(),
+    enqueueStreamingText: vi.fn(),
+    enqueueResultText: vi.fn(),
+    enqueueToolUpdate: vi.fn(),
+    indicateTyping: vi.fn(),
+    flush: vi.fn(async () => {}),
+    shutdown: vi.fn(async () => {}),
+    abortTurn: vi.fn(),
+    updateDeliveryJid: vi.fn(),
+    setInboundSeq: vi.fn(),
+    markLastTerminal: vi.fn(),
+    setToolUpdateMode: vi.fn(),
+    targetChatJid,
+    getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
+  };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime', () => {
@@ -1699,6 +1719,128 @@ describe('AgentRuntime', () => {
     // handleNew should have been called on A's session (key '111'), not B's ('222')
     expect(handleNewCalls).toContain('111');
     expect(handleNewCalls).not.toContain('222');
+  });
+
+  it('per_chat late result from a replaced session does not wipe the new session tool name scope', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const queueOld = makeQueueMock('111@s.whatsapp.net');
+    const queueNew = makeQueueMock('111@s.whatsapp.net');
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    handleEventWithContext(
+      { type: 'tool_use', toolName: 'Read', toolId: 'old-tool', toolInput: { file_path: '/tmp/old.txt' } },
+      queueOld,
+      null,
+      undefined,
+      undefined,
+      '111',
+      '111#old-session',
+    );
+    handleEventWithContext(
+      { type: 'tool_use', toolName: 'Bash', toolId: 'new-tool', toolInput: { command: 'git status' } },
+      queueNew,
+      null,
+      undefined,
+      undefined,
+      '111',
+      '111#new-session',
+    );
+
+    handleEventWithContext(
+      { type: 'result', text: null },
+      queueOld,
+      null,
+      undefined,
+      undefined,
+      '111',
+      '111#old-session',
+    );
+    handleEventWithContext(
+      { type: 'tool_result', isError: true, toolId: 'new-tool', content: 'boom' },
+      queueNew,
+      null,
+      undefined,
+      undefined,
+      '111',
+      '111#new-session',
+    );
+
+    expect(queueNew.enqueueToolUpdate).toHaveBeenLastCalledWith({ category: 'error', detail: 'Bash — boom' });
+  });
+
+  it('per_chat result from one chat leaves another chat tool name scope intact', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const queueA = makeQueueMock('111@s.whatsapp.net');
+    const queueB = makeQueueMock('222@s.whatsapp.net');
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    handleEventWithContext(
+      { type: 'tool_use', toolName: 'Read', toolId: 'tool-a', toolInput: { file_path: '/tmp/a.txt' } },
+      queueA,
+      null,
+      undefined,
+      undefined,
+      '111',
+      '111#session',
+    );
+    handleEventWithContext(
+      { type: 'tool_use', toolName: 'Bash', toolId: 'tool-b', toolInput: { command: 'git status' } },
+      queueB,
+      null,
+      undefined,
+      undefined,
+      '222',
+      '222#session',
+    );
+
+    handleEventWithContext(
+      { type: 'result', text: null },
+      queueA,
+      null,
+      undefined,
+      undefined,
+      '111',
+      '111#session',
+    );
+    handleEventWithContext(
+      { type: 'tool_result', isError: true, toolId: 'tool-b', content: 'boom' },
+      queueB,
+      null,
+      undefined,
+      undefined,
+      '222',
+      '222#session',
+    );
+
+    expect(queueB.enqueueToolUpdate).toHaveBeenLastCalledWith({ category: 'error', detail: 'Bash — boom' });
   });
 
   // ─── Voice reply integration tests (SP4) ─────────────────────────────────────
