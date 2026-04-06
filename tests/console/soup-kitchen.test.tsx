@@ -493,6 +493,15 @@ describe('SoupKitchen structural composition', () => {
     expect(source).toContain('setShowAddWizard(true)');
   });
 
+  it('uses class-based layout primitives instead of inline style props', () => {
+    expect(source).toContain('className="flex flex-col flex-1 min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"');
+    expect(source).toContain('className="c-card flex-shrink-0 grid grid-cols-7 gap-[var(--sp-2)] p-[var(--sp-2)]"');
+    expect(source).toContain('className="flex flex-1 min-h-0 gap-[var(--sp-3)]"');
+    expect(source).toContain('className="c-card flex flex-col min-h-0 overflow-hidden basis-0 grow-[3]"');
+    expect(source).toContain('className="c-card flex flex-col min-h-0 overflow-hidden basis-0 flex-1 min-w-[var(--feed-min-w)]"');
+    expect(source).not.toContain('style={{');
+  });
+
   it('navigates to line detail on row click', () => {
     expect(source).toContain('navigate(`/lines/${line.name}`)');
   });

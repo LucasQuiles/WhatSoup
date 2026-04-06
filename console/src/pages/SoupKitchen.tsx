@@ -25,18 +25,18 @@ type KpiFilter = "connected" | "attention" | "unread" | "agent" | "messages" | n
 type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv" | "tokens" | "sessions" | "active" | null;
 type SortDir = "asc" | "desc";
 
-const COLUMNS: { label: string; w: string | undefined; center: boolean; sortKey: SortKey }[] = [
-  { label: "Mode", w: "90px", center: false, sortKey: "mode" },
-  { label: "Line", w: undefined, center: false, sortKey: "name" },
-  { label: "Chats", w: "60px", center: true, sortKey: "chats" },
-  { label: "Groups", w: "64px", center: true, sortKey: "groups" },
-  { label: "Unread", w: "64px", center: true, sortKey: "unread" },
-  { label: "Sent", w: "68px", center: true, sortKey: "sent" },
-  { label: "Recv", w: "68px", center: true, sortKey: "recv" },
-  { label: "Tokens", w: "80px", center: true, sortKey: "tokens" },
-  { label: "Sessions", w: "72px", center: true, sortKey: "sessions" },
-  { label: "Tags", w: undefined, center: false, sortKey: null },
-  { label: "Active", w: "80px", center: true, sortKey: "active" },
+const COLUMNS: { label: string; widthClass?: string; center: boolean; sortKey: SortKey }[] = [
+  { label: "Mode", widthClass: "w-[90px]", center: false, sortKey: "mode" },
+  { label: "Line", center: false, sortKey: "name" },
+  { label: "Chats", widthClass: "w-[60px]", center: true, sortKey: "chats" },
+  { label: "Groups", widthClass: "w-[64px]", center: true, sortKey: "groups" },
+  { label: "Unread", widthClass: "w-[64px]", center: true, sortKey: "unread" },
+  { label: "Sent", widthClass: "w-[68px]", center: true, sortKey: "sent" },
+  { label: "Recv", widthClass: "w-[68px]", center: true, sortKey: "recv" },
+  { label: "Tokens", widthClass: "w-[80px]", center: true, sortKey: "tokens" },
+  { label: "Sessions", widthClass: "w-[72px]", center: true, sortKey: "sessions" },
+  { label: "Tags", center: false, sortKey: null },
+  { label: "Active", widthClass: "w-[80px]", center: true, sortKey: "active" },
 ];
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
@@ -170,19 +170,13 @@ const SoupKitchen: FC = () => {
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 overflow-hidden" style={{ padding: "var(--sp-4)", gap: "var(--sp-3)" }}>
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]">
       {/* KPI Strip — Grafana-style stat cards with sparklines */}
       <motion.div
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease }}
-        className="c-card flex-shrink-0"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(7, 1fr)",
-          gap: "var(--sp-2)",
-          padding: "var(--sp-2)",
-        }}
+        className="c-card flex-shrink-0 grid grid-cols-7 gap-[var(--sp-2)] p-[var(--sp-2)]"
       >
         <KpiCard
           value={kpis.connected}
@@ -250,21 +244,12 @@ const SoupKitchen: FC = () => {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5, delay: 0.1, ease }}
-        className="flex flex-1 min-h-0"
-        style={{ gap: "var(--sp-3)" }}
+        className="flex flex-1 min-h-0 gap-[var(--sp-3)]"
       >
         {/* Connection Table */}
-        <div
-          className="c-card flex flex-col min-h-0 overflow-hidden"
-          style={{
-            flex: 3,
-          }}
-        >
+        <div className="c-card flex flex-col min-h-0 overflow-hidden basis-0 grow-[3]">
           {/* Toolbar */}
-          <div
-            className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-            style={{ borderBottom: "var(--bw) solid var(--b1)" }}
-          >
+          <div className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b">
             <div className="flex items-center gap-4">
               <h2
                 className="c-heading-lg"
@@ -273,7 +258,7 @@ const SoupKitchen: FC = () => {
               </h2>
 
               {/* Mode filter pills */}
-              <div className="flex" style={{ gap: "var(--sp-1h)" }}>
+              <div className="flex gap-[var(--sp-1h)]">
                 {modeFilterOptions.map((m) => (
                   <FilterPill
                     key={m}
@@ -293,7 +278,7 @@ const SoupKitchen: FC = () => {
             </div>
 
             {/* Search — fills remaining toolbar width */}
-            <div className="relative flex-1" style={{ marginLeft: "var(--sp-4)" }}>
+            <div className="relative flex-1 ml-[var(--sp-4)]">
               <Search
                 size={13}
                 strokeWidth={1.75}
@@ -310,9 +295,8 @@ const SoupKitchen: FC = () => {
             </div>
 
             <button
-              className="c-btn c-btn-add flex-shrink-0"
+              className="c-btn c-btn-add flex-shrink-0 ml-[var(--sp-3)]"
               onClick={() => setShowAddWizard(true)}
-              style={{ marginLeft: 'var(--sp-3)' }}
             >
               <Plus size={16} strokeWidth={2} />
               <span className="c-btn-add-label">Add Line</span>
@@ -321,21 +305,17 @@ const SoupKitchen: FC = () => {
 
           {/* Table */}
           <div className="flex-1 overflow-y-auto scrollbar-hide">
-            <table className="w-full" style={{ borderCollapse: "collapse" }}>
+            <table className="w-full border-collapse">
               <thead>
-                <tr
-                  className="sticky top-0 bg-d3 z-10"
-                  style={{ borderBottom: "var(--bw) solid var(--b2)" }}
-                >
+                <tr className="sticky top-0 bg-d3 z-10 c-border-b-b2">
                   {COLUMNS.map((h) => (
                     <th
                       key={h.label}
-                      className={`c-col-header c-cell ${h.center ? "text-center" : "text-left"} ${h.sortKey ? "cursor-pointer select-none" : ""}`}
-                      style={{ width: h.w }}
+                      className={`c-col-header c-cell ${h.widthClass ?? ""} ${h.center ? "text-center" : "text-left"} ${h.sortKey ? "cursor-pointer select-none" : ""}`}
                       onClick={h.sortKey ? () => toggleSort(h.sortKey) : undefined}
                       aria-sort={sortKey === h.sortKey ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
                     >
-                      <span className={`inline-flex items-center ${h.center ? "justify-center" : ""}`} style={{ gap: "var(--sp-1)" }}>
+                      <span className={`inline-flex items-center gap-[var(--sp-1)] ${h.center ? "justify-center" : ""}`}>
                         {h.label}
                         {sortKey === h.sortKey && (
                           sortDir === "asc"
@@ -357,15 +337,7 @@ const SoupKitchen: FC = () => {
                     <tr
                       key={line.name}
                       onClick={() => navigate(`/lines/${line.name}`)}
-                      className="cursor-pointer c-row-hover"
-                      style={{
-                        borderBottom: "var(--bw) solid var(--b1)",
-                        ...(isError
-                          ? { backgroundColor: "var(--s-crit-wash)" }
-                          : isDegraded
-                          ? { backgroundColor: "var(--s-warn-wash)" }
-                          : {}),
-                      }}
+                      className={`cursor-pointer c-row-hover c-border-b ${isError ? "bg-[var(--s-crit-wash)]" : isDegraded ? "bg-[var(--s-warn-wash)]" : ""}`}
                     >
                       {/* Mode */}
                       <td className="c-cell">
@@ -376,8 +348,7 @@ const SoupKitchen: FC = () => {
                       <td className="c-cell">
                         <div className="flex flex-col">
                           <span
-                            className="font-sans font-medium text-t1"
-                            style={{ fontSize: 'var(--font-size-body)' }}
+                            className="font-sans font-medium text-t1 text-[var(--font-size-body)]"
                           >
                             {displayInstanceName(line.name)}
                           </span>
@@ -448,8 +419,7 @@ const SoupKitchen: FC = () => {
                       {/* Last Active */}
                       <td className="c-cell text-center">
                         <span
-                          className={`c-data ${isError ? "text-s-crit" : "text-t4"}`}
-                          style={{ whiteSpace: 'nowrap' }}
+                          className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-t4"}`}
                         >
                           {line.lastActive ? formatRelative(line.lastActive) : "—"}
                         </span>
@@ -462,8 +432,7 @@ const SoupKitchen: FC = () => {
                   <tr>
                     <td
                       colSpan={11}
-                      className="text-center text-t5 font-mono py-12"
-                      style={{ fontSize: 'var(--font-size-data)' }}
+                      className="text-center text-t5 font-mono py-12 text-[var(--font-size-data)]"
                     >
                       No instances match the current filters
                     </td>
@@ -475,13 +444,7 @@ const SoupKitchen: FC = () => {
         </div>
 
         {/* Activity Feed */}
-        <div
-          className="c-card flex flex-col min-h-0 overflow-hidden"
-          style={{
-            flex: 1,
-            minWidth: "var(--feed-min-w)",
-          }}
-        >
+        <div className="c-card flex flex-col min-h-0 overflow-hidden basis-0 flex-1 min-w-[var(--feed-min-w)]">
           <ActivityFeed events={feed} />
         </div>
       </motion.div>
