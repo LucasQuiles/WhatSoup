@@ -596,6 +596,19 @@ export class AgentRuntime implements Runtime {
     return created;
   }
 
+  /**
+   * Remove all per-chat auxiliary state for a given map key.
+   * Call this whenever a session is removed from chatSessions.
+   */
+  private cleanupPerChatState(mapKey: string): void {
+    this.perChatInboundSeqQueue.delete(mapKey);
+    this.perChatTurnContentType.delete(mapKey);
+    this.perChatTurnText.delete(mapKey);
+    this.perChatAssistantItemText.delete(mapKey);
+    this.pendingTurnText.delete(mapKey);
+    this.resumeFailedHandling.delete(mapKey);
+  }
+
   private normalizeAssistantTextForDelivery(
     event: Extract<AgentEvent, { type: 'assistant_text' }>,
     mapKey?: string,
@@ -2035,6 +2048,7 @@ export class AgentRuntime implements Runtime {
     }
 
     this.chatSessions.delete(workspaceKey);
+    this.cleanupPerChatState(workspaceKey);
 
     const res = this.workspaceResources.get(workspaceKey);
     if (!res) return;

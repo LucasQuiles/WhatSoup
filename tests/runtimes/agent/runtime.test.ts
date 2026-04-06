@@ -3,6 +3,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import { readFile } from 'node:fs/promises';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
@@ -344,6 +345,20 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
   };
+}
+
+type PerChatCleanupRuntimeState = {
+  cleanupPerChatState: (mapKey: string) => void;
+  perChatInboundSeqQueue: Map<string, number[]>;
+  perChatTurnContentType: Map<string, string>;
+  perChatTurnText: Map<string, string>;
+  perChatAssistantItemText: Map<string, Map<string, string>>;
+  pendingTurnText: Map<string, string>;
+  resumeFailedHandling: Set<string>;
+};
+
+function getPerChatCleanupState(runtime: AgentRuntime): PerChatCleanupRuntimeState {
+  return runtime as unknown as PerChatCleanupRuntimeState;
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -935,6 +950,91 @@ describe('AgentRuntime', () => {
 
     expect(mockSession.shutdown).toHaveBeenCalled();
     expect(mockQueue.shutdown).toHaveBeenCalled();
+  });
+
+  it('cleanupPerChatState removes all auxiliary per-chat state for one key only', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = getPerChatCleanupState(runtime);
+
+    const targetKey = 'target@s.whatsapp.net';
+    const otherKey = 'other@s.whatsapp.net';
+    state.perChatInboundSeqQueue.set(targetKey, [1, 2]);
+    state.perChatInboundSeqQueue.set(otherKey, [3]);
+    state.perChatTurnContentType.set(targetKey, 'audio');
+    state.perChatTurnContentType.set(otherKey, 'text');
+    state.perChatTurnText.set(targetKey, 'target text');
+    state.perChatTurnText.set(otherKey, 'other text');
+    state.perChatAssistantItemText.set(targetKey, new Map([['item-a', 'value-a']]));
+    state.perChatAssistantItemText.set(otherKey, new Map([['item-b', 'value-b']]));
+    state.pendingTurnText.set(targetKey, 'replay target');
+    state.pendingTurnText.set(otherKey, 'replay other');
+    state.resumeFailedHandling.add(targetKey);
+    state.resumeFailedHandling.add(otherKey);
+
+    state.cleanupPerChatState(targetKey);
+
+    expect(state.perChatInboundSeqQueue.has(targetKey)).toBe(false);
+    expect(state.perChatTurnContentType.has(targetKey)).toBe(false);
+    expect(state.perChatTurnText.has(targetKey)).toBe(false);
+    expect(state.perChatAssistantItemText.has(targetKey)).toBe(false);
+    expect(state.pendingTurnText.has(targetKey)).toBe(false);
+    expect(state.resumeFailedHandling.has(targetKey)).toBe(false);
+
+    expect(state.perChatInboundSeqQueue.get(otherKey)).toEqual([3]);
+    expect(state.perChatTurnContentType.get(otherKey)).toBe('text');
+    expect(state.perChatTurnText.get(otherKey)).toBe('other text');
+    expect(state.perChatAssistantItemText.get(otherKey)?.get('item-b')).toBe('value-b');
+    expect(state.pendingTurnText.get(otherKey)).toBe('replay other');
+    expect(state.resumeFailedHandling.has(otherKey)).toBe(true);
+  });
+
+  it('cleanupPerChatState is idempotent for missing keys', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = getPerChatCleanupState(runtime);
+
+    const survivorKey = 'survivor@s.whatsapp.net';
+    state.perChatInboundSeqQueue.set(survivorKey, [7]);
+    state.perChatTurnContentType.set(survivorKey, 'text');
+    state.perChatTurnText.set(survivorKey, 'still here');
+    state.perChatAssistantItemText.set(survivorKey, new Map([['item', 'value']]));
+    state.pendingTurnText.set(survivorKey, 'pending');
+    state.resumeFailedHandling.add(survivorKey);
+
+    expect(() => state.cleanupPerChatState('missing@s.whatsapp.net')).not.toThrow();
+
+    expect(state.perChatInboundSeqQueue.get(survivorKey)).toEqual([7]);
+    expect(state.perChatTurnContentType.get(survivorKey)).toBe('text');
+    expect(state.perChatTurnText.get(survivorKey)).toBe('still here');
+    expect(state.perChatAssistantItemText.get(survivorKey)?.get('item')).toBe('value');
+    expect(state.pendingTurnText.get(survivorKey)).toBe('pending');
+    expect(state.resumeFailedHandling.has(survivorKey)).toBe(true);
+  });
+
+  it('cleanupPerChatState structurally covers all six auxiliary per-chat maps', async () => {
+    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
+    const match = source.match(/private cleanupPerChatState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
+
+    expect(match).toBeTruthy();
+
+    const methodBody = match?.[1] ?? '';
+    const expectedDeletes = [
+      'this.perChatInboundSeqQueue.delete(mapKey);',
+      'this.perChatTurnContentType.delete(mapKey);',
+      'this.perChatTurnText.delete(mapKey);',
+      'this.perChatAssistantItemText.delete(mapKey);',
+      'this.pendingTurnText.delete(mapKey);',
+      'this.resumeFailedHandling.delete(mapKey);',
+    ];
+
+    for (const expectedDelete of expectedDeletes) {
+      expect(methodBody).toContain(expectedDelete);
+    }
+
+    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length);
   });
 
   it('shutdown continues cleanup after individual failures and clears runtime state', async () => {
