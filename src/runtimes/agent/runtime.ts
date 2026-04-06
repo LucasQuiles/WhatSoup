@@ -810,31 +810,35 @@ export class AgentRuntime implements Runtime {
     // Cross-references agent_sessions with session_checkpoints to safely identify which
     // processes to keep and which to reap. Only kills PIDs verified as owned children.
     if (this.sessionScope === 'per_chat' || this.sandboxPerChat) {
-      const classified = classifyActiveSessions(this.db, this.durability!);
-      for (const session of classified) {
-        switch (session.classification) {
-          case 'stale_dead':
-            markOrphaned(this.db, session.id);
-            break;
-          case 'stale_live':
-            log.warn({
-              id: session.id,
-              pid: session.claudePid,
-              conversationKey: session.conversationKey,
-              reason: session.reason,
-            }, 'reaping stale session');
-            try { process.kill(session.claudePid, 'SIGTERM'); } catch { /* already gone */ }
-            markOrphaned(this.db, session.id);
-            break;
-          case 'ambiguous':
-            log.warn({
-              id: session.id,
-              pid: session.claudePid,
-              conversationKey: session.conversationKey,
-              reason: session.reason,
-            }, 'ambiguous session — not touching');
-            break;
-          // authoritative_live: leave alone
+      if (!this.durability) {
+        log.warn('durability engine not set — skipping active session classification');
+      } else {
+        const classified = classifyActiveSessions(this.db, this.durability);
+        for (const session of classified) {
+          switch (session.classification) {
+            case 'stale_dead':
+              markOrphaned(this.db, session.id);
+              break;
+            case 'stale_live':
+              log.warn({
+                id: session.id,
+                pid: session.claudePid,
+                conversationKey: session.conversationKey,
+                reason: session.reason,
+              }, 'reaping stale session');
+              try { process.kill(session.claudePid, 'SIGTERM'); } catch { /* already gone */ }
+              markOrphaned(this.db, session.id);
+              break;
+            case 'ambiguous':
+              log.warn({
+                id: session.id,
+                pid: session.claudePid,
+                conversationKey: session.conversationKey,
+                reason: session.reason,
+              }, 'ambiguous session — not touching');
+              break;
+            // authoritative_live: leave alone
+          }
         }
       }
     }

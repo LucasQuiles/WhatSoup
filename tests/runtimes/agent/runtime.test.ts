@@ -48,15 +48,19 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef };
 });
 
-// ─── Module mocks ─────────────────────────────────────────────────────────────
-
-vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
+const { mockLog } = vi.hoisted(() => ({
+  mockLog: {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
-  }),
+  },
+}));
+
+// ─── Module mocks ─────────────────────────────────────────────────────────────
+
+vi.mock('../../../src/logger.ts', () => ({
+  createChildLogger: () => mockLog,
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -205,6 +209,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     listTools = vi.fn(() => []);
     call = vi.fn();
     getChatScopedToolNames = vi.fn(() => []);
+    setDurability = vi.fn();
   },
 }));
 
@@ -354,6 +359,19 @@ describe('AgentRuntime', () => {
       'agent',
       undefined, // no enabledPlugins configured
     );
+  });
+
+  it('start() with per_chat session scope and null durability logs warning and skips classification', async () => {
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+    await expect(runtime.start()).resolves.toBeUndefined();
+
+    expect(classifyActiveSessions).not.toHaveBeenCalled();
+    expect(mockLog.warn).toHaveBeenCalledWith('durability engine not set — skipping active session classification');
   });
 
   it('handleMessage ignores null content', async () => {
@@ -1396,6 +1414,7 @@ describe('AgentRuntime', () => {
       sandbox,
       cwd: tmpdir(),
     });
+    runtime.setDurability({} as any);
     await runtime.start();
 
     expect(mockBackfillWorkspaceKeys).toHaveBeenCalledWith(db, tmpdir());
@@ -1423,6 +1442,7 @@ describe('AgentRuntime', () => {
       sandbox,
       cwd: tmpdir(),
     });
+    runtime.setDurability({} as any);
     await runtime.start();
 
     expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 42);
