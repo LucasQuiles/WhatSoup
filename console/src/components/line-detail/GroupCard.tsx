@@ -10,8 +10,10 @@ interface GroupCardProps {
 }
 
 export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
+  // Match by full JID or by phone-number prefix (handles @s.whatsapp.net vs @lid variants)
+  const myPhone = myJid?.split('@')[0]
   const myParticipant = myJid
-    ? group.participants.find(p => p.id === myJid || p.id.startsWith(myJid.split('@')[0]))
+    ? group.participants.find(p => p.id === myJid || (myPhone && p.id.split('@')[0] === myPhone))
     : undefined
   const badge = roleBadgeStyle(myParticipant?.admin)
   const initials = getInitials(group.subject)

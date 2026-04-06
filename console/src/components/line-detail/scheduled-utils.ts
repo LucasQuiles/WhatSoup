@@ -46,7 +46,8 @@ export function cronToHuman(expression: string): string {
 
   // Every N minutes
   if (min.startsWith('*/') && hr === '*' && dom === '*' && dow === '*') {
-    return `Every ${min.slice(2)} minutes`;
+    const step = min.slice(2);
+    return step === '1' ? 'Every minute' : `Every ${step} minutes`;
   }
 
   // Specific time

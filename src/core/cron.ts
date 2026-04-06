@@ -122,7 +122,7 @@ export function cronToHuman(expression: string): string {
     if (minute.length > 1 && minute[0] === 0) {
       const step = minute[1] - minute[0];
       const isStep = minute.every((v, i) => v === i * step);
-      if (isStep) return `Every ${step} minutes`;
+      if (isStep) return step === 1 ? 'Every minute' : `Every ${step} minutes`;
     }
   }
 

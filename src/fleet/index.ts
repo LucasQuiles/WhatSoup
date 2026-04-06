@@ -115,8 +115,9 @@ type RouteParamsByHandler = {
 };
 
 type RouteKey = keyof RouteParamsByHandler;
+/** Route keys whose params include at least a `name` field (NameRouteParams | NameIdRouteParams | NameJidRouteParams). */
 type NamedRouteKey = {
-  [K in RouteKey]: RouteParamsByHandler[K] extends NameRouteParams ? K : never
+  [K in RouteKey]: RouteParamsByHandler[K] extends { name: string } ? K : never
 }[RouteKey];
 type RouteHandler<K extends RouteKey> = (
   req: IncomingMessage,
@@ -445,7 +446,14 @@ export function createFleetServer(deps: FleetDeps) {
         if (params) {
           if (hasNameParam(route.handler)) {
             if (typeof params.name !== 'string') continue;
-            await handlers[route.handler](req, res, routeDeps, params as any);
+            // Safe: regex named groups produce the exact shape each handler expects
+            // ({name}, {name,id}, or {name,jid}). TypeScript can't prove this statically
+            // because the handler key is a runtime value — the ROUTES array + RouteParamsByHandler
+            // type map guarantee correctness.
+            const handler = handlers[route.handler] as unknown as (
+              req: IncomingMessage, res: ServerResponse, deps: RouteDeps, params: Record<string, string>,
+            ) => void | Promise<void>;
+            await handler(req, res, routeDeps, params);
             return;
           }
 
