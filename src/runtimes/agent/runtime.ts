@@ -72,6 +72,7 @@ const HEALTH_STATS_INTERVAL_MS = 60_000;
 const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
+const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
@@ -540,19 +541,51 @@ export class AgentRuntime implements Runtime {
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
 
-  // Crash tracking — survives session map deletions for accurate health reporting.
-  // Incremented on every crash, decremented on successful session spawn (capped at 0).
-  // lastCrashAt gives operators context to interpret a stale count.
-  private recentCrashCount = 0;
+  // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
+  // single global key for single/shared mode. Counts survive session map deletions
+  // so health reporting can surface recent failures until a successful respawn decays them.
+  private perChatCrashCount = new Map<string, number>();
   private lastCrashAt: string | null = null;
 
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
 
-  private recordCrash(): void {
-    this.recentCrashCount++;
+  private recordCrash(mapKey: string): number {
+    const count = (this.perChatCrashCount.get(mapKey) ?? 0) + 1;
+    this.perChatCrashCount.set(mapKey, count);
     this.lastCrashAt = new Date().toISOString();
+    return count;
+  }
+
+  private getCrashCount(mapKey: string): number {
+    return this.perChatCrashCount.get(mapKey) ?? 0;
+  }
+
+  private getRecentCrashCount(): number {
+    let total = 0;
+    for (const count of this.perChatCrashCount.values()) {
+      total += count;
+    }
+    return total;
+  }
+
+  private decrementCrashCount(mapKey: string): void {
+    const count = this.perChatCrashCount.get(mapKey) ?? 0;
+    if (count <= 1) {
+      this.perChatCrashCount.delete(mapKey);
+      return;
+    }
+    this.perChatCrashCount.set(mapKey, count - 1);
+  }
+
+  private getCrashScopeKey(chatJid: string): string {
+    if (this.sessionScope !== 'per_chat') {
+      return GLOBAL_CRASH_SCOPE_KEY;
+    }
+    return this.sandboxPerChat
+      ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
+      : chatJid;
   }
 
   private createToolScopeKey(scopeBase: string): string {
@@ -602,7 +635,7 @@ export class AgentRuntime implements Runtime {
         external: memoryUsage.external,
         arrayBuffers: memoryUsage.arrayBuffers,
       },
-      recentCrashCount: this.recentCrashCount,
+      recentCrashCount: this.getRecentCrashCount(),
       lastCrashAt: this.lastCrashAt,
     }, 'agent runtime health stats');
   }
@@ -735,6 +768,7 @@ export class AgentRuntime implements Runtime {
    * Call this whenever a session is removed from chatSessions.
    */
   private cleanupPerChatState(mapKey: string): void {
+    this.perChatCrashCount.delete(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
@@ -1125,7 +1159,7 @@ export class AgentRuntime implements Runtime {
         onEvent: (event) => this.handleEvent(event),
         onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
         onCrash: (info) => {
-          this.recordCrash();
+          this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
           this.getActiveQueue()?.abortTurn();
           this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
@@ -1547,6 +1581,7 @@ export class AgentRuntime implements Runtime {
     const mapKeyForChat = this.sandboxPerChat
       ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
       : undefined;
+    const crashScopeKey = this.getCrashScopeKey(chatJid);
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
@@ -1556,7 +1591,7 @@ export class AgentRuntime implements Runtime {
       await session.shutdown();
       await session.spawnSession();
       // Successful spawn after a crash — decay the crash counter
-      if (this.recentCrashCount > 0) this.recentCrashCount--;
+      this.decrementCrashCount(crashScopeKey);
 
       // Inject recent chat history so the agent has conversational context.
       // This runs on every fresh session spawn (not just resume failures),
@@ -1888,7 +1923,8 @@ export class AgentRuntime implements Runtime {
       // (indicated by recent crashes, not by inactivity).
       // Crash counter survives session map deletions — if sessions have been crashing
       // recently but were cleaned up before this health check, recentCrashCount captures it.
-      if (this.recentCrashCount > 0 && healthStatus === 'healthy') {
+      const recentCrashCount = this.getRecentCrashCount();
+      if (recentCrashCount > 0 && healthStatus === 'healthy') {
         healthStatus = 'degraded';
       }
       return {
@@ -1898,7 +1934,7 @@ export class AgentRuntime implements Runtime {
           lastSessionStatus,
           lastSessionStartedAt,
           sessionCount: sessions.length,
-          recentCrashes: this.recentCrashCount,
+          recentCrashes: recentCrashCount,
           lastCrashAt: this.lastCrashAt,
         },
       };
@@ -2185,6 +2221,7 @@ export class AgentRuntime implements Runtime {
     this.outboundQueues.clear();
     this.chatSessions.clear();
     this.chatQueues.clear();
+    this.perChatCrashCount.clear();
     this.activeToolNames.clear();
     this.perChatInboundSeqQueue.clear();
     this.currentTurnInboundContentType = null;
@@ -2502,7 +2539,7 @@ export class AgentRuntime implements Runtime {
         cwd: this.cwd,
         onEvent: (event) => this.handleEvent(event),
         onCrash: (info) => {
-          this.recordCrash();
+          this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
           this.getActiveQueue()?.abortTurn();
           this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
@@ -2549,7 +2586,8 @@ export class AgentRuntime implements Runtime {
   }
 
   private handlePerChatCrash(mapKey: string, chatJid?: string, info?: SessionCrashInfo): void {
-    this.recordCrash();
+    this.recordCrash(mapKey);
+    const crashCount = this.getCrashCount(mapKey);
     this.chatQueues.get(mapKey)?.abortTurn();
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];
@@ -2574,13 +2612,13 @@ export class AgentRuntime implements Runtime {
     // Auto-respawn: if we haven't hit the crash limit, try to resume the session
     // after a short delay. This lets the agent continue mid-conversation without
     // requiring the user to send a new message.
-    if (this.recentCrashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
+    if (crashCount <= AUTO_RESPAWN_MAX_CRASHES && info?.sessionId) {
       const session = this.chatSessions.get(mapKey);
       if (session) {
         const sessionId = info.sessionId;
         const dbRowId = info.dbRowId;
-        const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, this.recentCrashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS);
-        log.info({ mapKey, sessionId, attempt: this.recentCrashCount, delayMs }, 'scheduling auto-respawn');
+        const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, crashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS);
+        log.info({ mapKey, sessionId, attempt: crashCount, delayMs }, 'scheduling auto-respawn');
         const timer = setTimeout(() => {
           this.pendingRespawnTimers.delete(timer);
           // Verify the session is still in the map and still inactive
@@ -2604,12 +2642,12 @@ export class AgentRuntime implements Runtime {
         }, delayMs);
         this.pendingRespawnTimers.add(timer);
       }
-    } else if (this.recentCrashCount > AUTO_RESPAWN_MAX_CRASHES) {
-      log.error({ mapKey, crashes: this.recentCrashCount }, 'auto-respawn exhausted — emitting alert');
+    } else if (crashCount > AUTO_RESPAWN_MAX_CRASHES) {
+      log.error({ mapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
       emitAlert(
         this.instanceName,
         'agent_respawn_failed',
-        `whatsoup@${this.instanceName} agent respawn exhausted (${this.recentCrashCount} crashes)`,
+        `whatsoup@${this.instanceName} agent respawn exhausted (${crashCount} crashes)`,
         `Chat: ${mapKey}, Last exit: code=${info?.exitCode ?? '?'} signal=${info?.signal ?? 'none'}`,
       );
     }

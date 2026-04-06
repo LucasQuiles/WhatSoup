@@ -361,6 +361,7 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
 
 type PerChatCleanupRuntimeState = {
   cleanupPerChatState: (mapKey: string) => void;
+  perChatCrashCount: Map<string, number>;
   perChatInboundSeqQueue: Map<string, number[]>;
   perChatTurnContentType: Map<string, string>;
   perChatTurnText: Map<string, string>;
@@ -606,6 +607,141 @@ describe('AgentRuntime', () => {
 
       expect(runtimeState.pendingRespawnTimers?.size ?? 0).toBe(0);
       expect(session.spawnSession).toHaveBeenCalledWith('sess-1', 42);
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('tracks per-chat crash counts independently when scheduling auto-respawn', () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const makeSession = () => ({
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({
+          active: false,
+          pid: null,
+          sessionId: null,
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        })),
+      });
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makeSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+        handlePerChatCrash: (
+          mapKey: string,
+          chatJid?: string,
+          info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+        ) => void;
+      };
+
+      runtimeState.chatSessions.set('chat-a', makeSession());
+      runtimeState.chatSessions.set('chat-b', makeSession());
+      runtimeState.chatSessions.set('chat-c', makeSession());
+      runtimeState.chatQueues.set('chat-a', makeQueueMock('chat-a@s.whatsapp.net'));
+      runtimeState.chatQueues.set('chat-b', makeQueueMock('chat-b@s.whatsapp.net'));
+      runtimeState.chatQueues.set('chat-c', makeQueueMock('chat-c@s.whatsapp.net'));
+
+      mockRuntimeLogger.info.mockClear();
+
+      runtimeState.handlePerChatCrash('chat-a', 'chat-a@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-a',
+        dbRowId: 1,
+      });
+      runtimeState.handlePerChatCrash('chat-b', 'chat-b@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-b',
+        dbRowId: 2,
+      });
+      runtimeState.handlePerChatCrash('chat-c', 'chat-c@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-c',
+        dbRowId: 3,
+      });
+
+      const attempts = mockRuntimeLogger.info.mock.calls
+        .filter((call) => call[1] === 'scheduling auto-respawn')
+        .map((call) => (call[0] as { attempt?: number }).attempt);
+
+      expect(attempts).toEqual([1, 1, 1]);
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('chat A exhausting respawns does not block chat B auto-respawn', () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const makeSession = () => ({
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({
+          active: false,
+          pid: null,
+          sessionId: null,
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        })),
+      });
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, ReturnType<typeof makeSession>>;
+        chatQueues: Map<string, IOutboundQueue>;
+        pendingRespawnTimers?: Set<ReturnType<typeof setTimeout>>;
+        handlePerChatCrash: (
+          mapKey: string,
+          chatJid?: string,
+          info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+        ) => void;
+      };
+
+      runtimeState.chatSessions.set('chat-a', makeSession());
+      runtimeState.chatSessions.set('chat-b', makeSession());
+      runtimeState.chatQueues.set('chat-a', makeQueueMock('chat-a@s.whatsapp.net'));
+      runtimeState.chatQueues.set('chat-b', makeQueueMock('chat-b@s.whatsapp.net'));
+
+      runtimeState.handlePerChatCrash('chat-a', 'chat-a@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-a',
+        dbRowId: 1,
+      });
+      runtimeState.handlePerChatCrash('chat-a', 'chat-a@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-a',
+        dbRowId: 1,
+      });
+      runtimeState.handlePerChatCrash('chat-a', 'chat-a@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-a',
+        dbRowId: 1,
+      });
+      runtimeState.handlePerChatCrash('chat-b', 'chat-b@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-b',
+        dbRowId: 2,
+      });
+
+      expect(runtimeState.pendingRespawnTimers?.size).toBe(4);
     } finally {
       randomSpy.mockRestore();
       vi.useRealTimers();
@@ -1215,6 +1351,8 @@ describe('AgentRuntime', () => {
 
     const targetKey = 'target@s.whatsapp.net';
     const otherKey = 'other@s.whatsapp.net';
+    state.perChatCrashCount.set(targetKey, 2);
+    state.perChatCrashCount.set(otherKey, 1);
     state.perChatInboundSeqQueue.set(targetKey, [1, 2]);
     state.perChatInboundSeqQueue.set(otherKey, [3]);
     state.perChatTurnContentType.set(targetKey, 'audio');
@@ -1230,6 +1368,7 @@ describe('AgentRuntime', () => {
 
     state.cleanupPerChatState(targetKey);
 
+    expect(state.perChatCrashCount.has(targetKey)).toBe(false);
     expect(state.perChatInboundSeqQueue.has(targetKey)).toBe(false);
     expect(state.perChatTurnContentType.has(targetKey)).toBe(false);
     expect(state.perChatTurnText.has(targetKey)).toBe(false);
@@ -1237,6 +1376,7 @@ describe('AgentRuntime', () => {
     expect(state.pendingTurnText.has(targetKey)).toBe(false);
     expect(state.resumeFailedHandling.has(targetKey)).toBe(false);
 
+    expect(state.perChatCrashCount.get(otherKey)).toBe(1);
     expect(state.perChatInboundSeqQueue.get(otherKey)).toEqual([3]);
     expect(state.perChatTurnContentType.get(otherKey)).toBe('text');
     expect(state.perChatTurnText.get(otherKey)).toBe('other text');
@@ -1252,6 +1392,7 @@ describe('AgentRuntime', () => {
     const state = getPerChatCleanupState(runtime);
 
     const survivorKey = 'survivor@s.whatsapp.net';
+    state.perChatCrashCount.set(survivorKey, 2);
     state.perChatInboundSeqQueue.set(survivorKey, [7]);
     state.perChatTurnContentType.set(survivorKey, 'text');
     state.perChatTurnText.set(survivorKey, 'still here');
@@ -1261,6 +1402,7 @@ describe('AgentRuntime', () => {
 
     expect(() => state.cleanupPerChatState('missing@s.whatsapp.net')).not.toThrow();
 
+    expect(state.perChatCrashCount.get(survivorKey)).toBe(2);
     expect(state.perChatInboundSeqQueue.get(survivorKey)).toEqual([7]);
     expect(state.perChatTurnContentType.get(survivorKey)).toBe('text');
     expect(state.perChatTurnText.get(survivorKey)).toBe('still here');
@@ -1269,7 +1411,7 @@ describe('AgentRuntime', () => {
     expect(state.resumeFailedHandling.has(survivorKey)).toBe(true);
   });
 
-  it('cleanupPerChatState structurally covers all six auxiliary per-chat maps', async () => {
+  it('cleanupPerChatState structurally covers all seven auxiliary per-chat maps', async () => {
     const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
     const match = source.match(/private cleanupPerChatState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
 
@@ -1277,6 +1419,7 @@ describe('AgentRuntime', () => {
 
     const methodBody = match?.[1] ?? '';
     const expectedDeletes = [
+      'this.perChatCrashCount.delete(mapKey);',
       'this.perChatInboundSeqQueue.delete(mapKey);',
       'this.perChatTurnContentType.delete(mapKey);',
       'this.perChatTurnText.delete(mapKey);',
