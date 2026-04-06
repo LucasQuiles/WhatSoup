@@ -13,6 +13,7 @@ import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
+import { ContactSearch } from '../components/ContactSearch'
 import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
@@ -601,6 +602,15 @@ export default function Inbox() {
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* Contact lookup */}
+              <div style={{ marginTop: 'var(--sp-4)' }}>
+                <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Find Contact</div>
+                <ContactSearch
+                  lineName={activeLine}
+                  onSelect={(c) => toast.info(`${c.name ?? c.jid}`)}
+                />
               </div>
             </div>
           </>
