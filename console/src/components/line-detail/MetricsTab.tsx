@@ -65,7 +65,7 @@ export function MetricsTab({
         <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
           <MetricsChart data={metrics.messageVolume} />
           {metrics.activeHours && (
-            <ActiveHoursHeatmap data={metrics.activeHours} />
+            <ActiveHoursHeatmap data={metrics.activeHours} range={metricsRange} />
           )}
 
           {/* Token Usage Card */}

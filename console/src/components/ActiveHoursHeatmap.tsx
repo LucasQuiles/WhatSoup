@@ -1,3 +1,5 @@
+import type { MetricsRange } from './line-detail/types';
+
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
@@ -18,8 +20,86 @@ function formatHour(h: number): string {
   return `${h - 12}p`;
 }
 
-/** 7×24 heatmap of message activity by day-of-week and hour. */
-export function ActiveHoursHeatmap({ data }: { data: number[][] }) {
+/** Collapse a 7×24 grid into a single 24-element array by summing across days. */
+function collapseToSingleDay(data: number[][]): number[] {
+  const collapsed = new Array<number>(24).fill(0);
+  for (const row of data) {
+    for (let h = 0; h < 24; h++) {
+      collapsed[h] += row[h] ?? 0;
+    }
+  }
+  return collapsed;
+}
+
+/** 7×24 heatmap of message activity, or a single 24h bar chart when range is '24h'. */
+export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: MetricsRange }) {
+  const is24h = range === '24h';
+
+  if (is24h) {
+    const hourly = collapseToSingleDay(data);
+    const max = Math.max(...hourly, 1);
+
+    return (
+      <section
+        className="c-card font-mono"
+        style={{
+          padding: 'var(--sp-4)',
+          background: 'var(--color-d2)',
+        }}
+      >
+        <div
+          className="font-mono text-t4"
+          style={{
+            fontSize: 'var(--font-size-xs)',
+            marginBottom: 'var(--sp-3)',
+            textTransform: 'uppercase',
+            letterSpacing: 'var(--tracking-label)',
+          }}
+        >
+          Active Hours
+        </div>
+
+        {/* 24h bar chart */}
+        <div
+          className="flex items-end"
+          style={{ gap: '2px', height: '64px' }}
+        >
+          {hourly.map((value, h) => (
+            <div
+              key={h}
+              title={`${formatHour(h)}: ${value} messages`}
+              style={{
+                flex: 1,
+                height: max > 0 ? `${Math.max((value / max) * 100, value > 0 ? 4 : 0)}%` : '0%',
+                background: value > 0 ? intensityColor(value, max) : 'var(--color-d4)',
+                borderRadius: 'var(--radius-sm) var(--radius-sm) 0 0',
+                minHeight: value > 0 ? '2px' : undefined,
+              }}
+            />
+          ))}
+        </div>
+
+        {/* Hour labels */}
+        <div className="flex" style={{ marginTop: '2px' }}>
+          {HOURS.map((h) => (
+            <div
+              key={h}
+              className="text-t5 font-mono leading-tight"
+              style={{
+                flex: 1,
+                fontSize: '9px',
+                textAlign: 'center',
+              }}
+            >
+              {h % 3 === 0 ? formatHour(h) : ''}
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  // 7d / 30d — full 7×24 heatmap grid
   const max = Math.max(...data.flat(), 1);
 
   return (
