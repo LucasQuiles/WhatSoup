@@ -744,10 +744,18 @@ export class AgentRuntime implements Runtime {
   }
 
   /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */
-  private createOutboundQueue(chatJid: string): OutboundQueue {
+  private createOutboundQueue(chatJid: string, reason: string): OutboundQueue {
     const q = new OutboundQueue(this.messenger, chatJid);
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
+    log.debug({
+      chatJid,
+      reason,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      hasDurability: this.durability !== null,
+    }, 'created outbound queue');
     return q;
   }
 
@@ -1010,7 +1018,7 @@ export class AgentRuntime implements Runtime {
           },
         });
         this.chatSessions.set(chatJid, session);
-        const perChatQ = this.createOutboundQueue(chatJid);
+        const perChatQ = this.createOutboundQueue(chatJid, 'startup proactive per-chat resume');
         this.chatQueues.set(chatJid, perChatQ);
 
         // Attempt resume, then send a continuation turn so the agent picks up
@@ -1076,10 +1084,10 @@ export class AgentRuntime implements Runtime {
       });
 
       if (this.shared) {
-        const q = this.createOutboundQueue(resumeChatJid);
+        const q = this.createOutboundQueue(resumeChatJid, 'startup resume shared');
         this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
       } else {
-        const q = this.createOutboundQueue(resumeChatJid);
+        const q = this.createOutboundQueue(resumeChatJid, 'startup resume single');
         this.queue = q;
       }
 
@@ -1189,7 +1197,13 @@ export class AgentRuntime implements Runtime {
     this.startHealthStatsTimer();
     this.startQueueSweepTimer();
 
-    log.info('AgentRuntime started');
+    log.info({
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      sandboxed: this.sandbox !== undefined,
+    }, 'AgentRuntime started');
   }
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
@@ -1269,6 +1283,12 @@ export class AgentRuntime implements Runtime {
                 ? this.chatSessions.get(chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey)
                 : this.chatSessions.get(chatJid))
             : this.session;
+          log.info({
+            chatJid,
+            sessionScope: this.sessionScope,
+            shared: this.shared,
+            sandboxPerChat: this.sandboxPerChat,
+          }, 'resetting session and queue for /new');
           // Abort the old queue — clears timers and typing heartbeat before discarding.
           // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
           this.getQueueForChat(chatJid)?.abortTurn();
@@ -1278,18 +1298,18 @@ export class AgentRuntime implements Runtime {
             // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
             const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
             this.chatSessions.delete(workspaceKey);
-            const q1 = this.createOutboundQueue(chatJid);
+            const q1 = this.createOutboundQueue(chatJid, '/new sandbox per-chat replacement');
             this.chatQueues.set(workspaceKey, q1);
           } else if (this.shared) {
-            const q2 = this.createOutboundQueue(chatJid);
+            const q2 = this.createOutboundQueue(chatJid, '/new shared replacement');
             this.outboundQueues.set(chatJid, q2);
           } else if (this.sessionScope === 'per_chat') {
             // non-sandboxPerChat per_chat: keyed by raw chatJid
             this.chatSessions.delete(chatJid);
-            const q3 = this.createOutboundQueue(chatJid);
+            const q3 = this.createOutboundQueue(chatJid, '/new per-chat replacement');
             this.chatQueues.set(chatJid, q3);
           } else {
-            const q4 = this.createOutboundQueue(chatJid);
+            const q4 = this.createOutboundQueue(chatJid, '/new single replacement');
             this.queue = q4;
           }
           // NOTE: sessionForNew was captured before the map delete above. handleNew()
@@ -1432,7 +1452,12 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
-        log.warn({ chatJid }, 'stdin write timed out — notifying user');
+        const status = this.session?.getStatus() ?? { sessionId: null, pid: null };
+        log.warn({
+          chatJid,
+          sessionId: status.sessionId,
+          pid: status.pid,
+        }, 'stdin write timed out — notifying user');
         this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.');
       } else {
         throw err;
@@ -1502,7 +1527,12 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
-        log.warn({ chatJid }, 'stdin write timed out — notifying user');
+        const status = session.getStatus();
+        log.warn({
+          chatJid,
+          sessionId: status.sessionId,
+          pid: status.pid,
+        }, 'stdin write timed out — notifying user');
         this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.');
       } else {
         throw err;
@@ -1563,7 +1593,10 @@ export class AgentRuntime implements Runtime {
    */
   private handleEventPerChat(mapKey: string, event: AgentEvent, toolScopeKey: string): void {
     const queue = this.chatQueues.get(mapKey);
-    if (!queue) return;
+    if (!queue) {
+      log.debug({ mapKey, eventType: event.type }, 'event dropped — no queue for chat');
+      return;
+    }
     const session = this.chatSessions.get(mapKey) ?? null;
     // Use queue.targetChatJid — mapKey may be a workspaceKey (not a raw JID) when sandboxPerChat=true
     const conversationKey = toConversationKey(queue.targetChatJid);
@@ -1847,8 +1880,13 @@ export class AgentRuntime implements Runtime {
           chatJid: syntheticJid,
           cwd: controlCwd,
           onEvent: (event) => this.handleEventPerChat('control@heal.internal', event, toolScopeKey),
-          onCrash: (_info) => {
-            log.warn('control session crashed');
+          onCrash: (info) => {
+            log.warn({
+              exitCode: info.exitCode,
+              signal: info.signal,
+              sessionId: info.sessionId,
+              reportId: this.activeControlReportId ?? reportId,
+            }, 'control session crashed');
             if (this.controlSessionTimeout) {
               clearTimeout(this.controlSessionTimeout);
               this.controlSessionTimeout = null;
@@ -1958,7 +1996,12 @@ export class AgentRuntime implements Runtime {
   }
 
   async shutdown(): Promise<void> {
-    log.info({ instanceName: this.instanceName }, 'AgentRuntime shutting down');
+    log.info({
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+    }, 'AgentRuntime shutting down');
     const startedAt = Date.now();
 
     if (this.controlSessionTimeout) {
@@ -2028,6 +2071,7 @@ export class AgentRuntime implements Runtime {
     if (this.globalSocketServer) {
       try {
         this.globalSocketServer.stop();
+        log.debug({ instanceName: this.instanceName }, 'global socket server stopped');
       } catch (err) {
         log.warn({ err, instanceName: this.instanceName }, 'global socket server stop failed');
       }
@@ -2035,10 +2079,13 @@ export class AgentRuntime implements Runtime {
     }
 
     // Stop workspace-scoped socket servers and media bridges (sandboxPerChat)
+    let workspaceSocketServersStopped = 0;
+    let workspaceMediaBridgesStopped = 0;
     for (const [conversationKey, res] of this.workspaceResources) {
       if (res.socketServer) {
         try {
           res.socketServer.stop();
+          workspaceSocketServersStopped += 1;
         } catch (err) {
           log.warn({ err, conversationKey, socketPath: res.socketPath }, 'workspace socket server stop failed');
         }
@@ -2046,11 +2093,17 @@ export class AgentRuntime implements Runtime {
       if (res.mediaBridge) {
         try {
           res.mediaBridge();  // MediaBridge handle is a cleanup function
+          workspaceMediaBridgesStopped += 1;
         } catch (err) {
           log.warn({ err, conversationKey, workspacePath: res.workspacePath }, 'workspace media bridge stop failed');
         }
       }
     }
+    log.info({
+      workspaceResourcesStopped: this.workspaceResources.size,
+      workspaceSocketServersStopped,
+      workspaceMediaBridgesStopped,
+    }, 'workspace resources stopped in shutdown');
     this.workspaceResources.clear();
     this.outboundQueues.clear();
     this.chatSessions.clear();
@@ -2066,7 +2119,13 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnText.clear();
     this.resumeFailedHandling.clear();
 
-    log.info({ instanceName: this.instanceName, durationMs: Date.now() - startedAt }, 'AgentRuntime shut down');
+    log.info({
+      instanceName: this.instanceName,
+      sessionScope: this.sessionScope,
+      shared: this.shared,
+      sandboxPerChat: this.sandboxPerChat,
+      durationMs: Date.now() - startedAt,
+    }, 'AgentRuntime shut down');
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
@@ -2270,8 +2329,9 @@ export class AgentRuntime implements Runtime {
           },
           onResumeFailed: () => this.handleResumeFailed(chatJid),
         });
+        log.info({ chatJid, workspaceKey, workspacePath }, 'created sandbox per-chat session manager');
         this.chatSessions.set(workspaceKey, session);
-        const chatQ = this.createOutboundQueue(chatJid);
+        const chatQ = this.createOutboundQueue(chatJid, 'sandbox per-chat session init');
         this.chatQueues.set(workspaceKey, chatQ);
 
         // Spawn with resume if available — fall back to fresh session if resume fails
@@ -2338,8 +2398,9 @@ export class AgentRuntime implements Runtime {
             this.handleCrashNotify(msg, chatJid);
           },
         });
+        log.info({ chatJid, sessionScope: this.sessionScope }, 'created per-chat session manager');
         this.chatSessions.set(chatJid, session);
-        const perChatQ = this.createOutboundQueue(chatJid);
+        const perChatQ = this.createOutboundQueue(chatJid, 'per-chat session init');
         this.chatQueues.set(chatJid, perChatQ);
       }
       // per_chat mode: do NOT set this.session/this.queue shared fields.
@@ -2378,10 +2439,11 @@ export class AgentRuntime implements Runtime {
         },
         notifyUser: (msg) => this.handleCrashNotify(msg),
       });
+      log.info({ chatJid, shared: this.shared, sessionScope: this.sessionScope }, 'created shared/single session manager');
       if (this.shared) {
         this.ensureOutboundQueue(chatJid);
       } else {
-        const singletonQ = this.createOutboundQueue(chatJid);
+        const singletonQ = this.createOutboundQueue(chatJid, 'single session init');
         this.queue = singletonQ;
       }
     } else if (this.shared) {
@@ -2395,7 +2457,7 @@ export class AgentRuntime implements Runtime {
    */
   private ensureOutboundQueue(chatJid: string): void {
     if (!this.outboundQueues.has(chatJid)) {
-      const q = this.createOutboundQueue(chatJid);
+      const q = this.createOutboundQueue(chatJid, 'shared ensureOutboundQueue');
       this.outboundQueues.set(chatJid, q);
     }
   }
@@ -2431,7 +2493,8 @@ export class AgentRuntime implements Runtime {
       if (session) {
         const sessionId = info.sessionId;
         const dbRowId = info.dbRowId;
-        log.info({ mapKey, sessionId, attempt: this.recentCrashCount }, 'scheduling auto-respawn');
+        const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, this.recentCrashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS);
+        log.info({ mapKey, sessionId, attempt: this.recentCrashCount, delayMs }, 'scheduling auto-respawn');
         const timer = setTimeout(() => {
           this.pendingRespawnTimers.delete(timer);
           // Verify the session is still in the map and still inactive
@@ -2452,7 +2515,7 @@ export class AgentRuntime implements Runtime {
           }).catch((err) => {
             log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
           });
-        }, jitteredDelay(AUTO_RESPAWN_BASE_MS, this.recentCrashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS));
+        }, delayMs);
         this.pendingRespawnTimers.add(timer);
       }
     } else if (this.recentCrashCount > AUTO_RESPAWN_MAX_CRASHES) {
@@ -2609,7 +2672,9 @@ export class AgentRuntime implements Runtime {
               this.pendingTurnText.delete(mapKey);
             }
           }
-        }).catch(() => {});
+        }).catch((err) => {
+          log.error({ err, chatJid, mapKey }, 'context recovery turn failed after resume failure');
+        });
       })
       .catch((err) => {
         if (mapKey) this.resumeFailedHandling.delete(mapKey);

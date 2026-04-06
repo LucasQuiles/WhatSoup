@@ -170,6 +170,8 @@ export function backfillWorkspaceKeys(db: Database, instanceCwd: string): void {
        WHERE workspace_key IS NULL AND chat_jid IS NOT NULL`,
     )
     .all() as { id: number; chat_jid: string; started_in_directory: string | null }[];
+  let ended = 0;
+  let updated = 0;
 
   for (const row of rows) {
     const dir = row.started_in_directory ?? '';
@@ -181,6 +183,7 @@ export function backfillWorkspaceKeys(db: Database, instanceCwd: string): void {
       db.raw
         .prepare(`UPDATE agent_sessions SET status = 'ended' WHERE id = ?`)
         .run(row.id);
+      ended += 1;
     } else {
       let key: string;
       try {
@@ -191,8 +194,11 @@ export function backfillWorkspaceKeys(db: Database, instanceCwd: string): void {
       db.raw
         .prepare(`UPDATE agent_sessions SET workspace_key = ? WHERE id = ?`)
         .run(key, row.id);
+      updated += 1;
     }
   }
+
+  log.info({ processed: rows.length, ended: ended, updated: updated }, 'backfilled workspace keys');
 }
 
 /** Mark a session as orphaned (process disappeared unexpectedly). */
