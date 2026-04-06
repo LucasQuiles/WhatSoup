@@ -645,7 +645,7 @@ describe('advanced tools', () => {
     it('rejects when enableRelayMessage is false (config gate)', async () => {
       const { config } = await import('../../../src/config.ts');
       const original = config.advanced.enableRelayMessage;
-      config.advanced.enableRelayMessage = false;
+      (config.advanced as any).enableRelayMessage = false;
       try {
         const result = await registry.call(
           'relay_message',
@@ -655,7 +655,7 @@ describe('advanced tools', () => {
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toMatch(/disabled/i);
       } finally {
-        config.advanced.enableRelayMessage = original;
+        (config.advanced as any).enableRelayMessage = original;
       }
     });
 
@@ -663,7 +663,7 @@ describe('advanced tools', () => {
       const { config } = await import('../../../src/config.ts');
       const original = config.advanced.relayMaxPayloadBytes;
       // Set a very small cap to trigger rejection
-      config.advanced.relayMaxPayloadBytes = 10;
+      (config.advanced as any).relayMaxPayloadBytes = 10;
       try {
         const result = await registry.call(
           'relay_message',
@@ -673,7 +673,7 @@ describe('advanced tools', () => {
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toMatch(/too large/i);
       } finally {
-        config.advanced.relayMaxPayloadBytes = original;
+        (config.advanced as any).relayMaxPayloadBytes = original;
       }
     });
 

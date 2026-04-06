@@ -282,8 +282,8 @@ describe('sendApprovalRequest', () => {
 describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
   it('caps replayed messages to adminReplayMax', async () => {
     const { config } = await import('../../src/config.ts');
-    config.adminReplayMax = 3;
-    config.adminReplayDelayMs = 0;
+    (config as any).adminReplayMax = 3;
+    (config as any).adminReplayDelayMs = 0;
 
     const db = openDb();
     const messenger = makeMockMessenger();
@@ -316,8 +316,8 @@ describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
 
   it('deduplicates — same message is not replayed twice across allow calls', async () => {
     const { config } = await import('../../src/config.ts');
-    config.adminReplayMax = 10;
-    config.adminReplayDelayMs = 0;
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
 
     const db = openDb();
     const messenger = makeMockMessenger();
@@ -349,8 +349,8 @@ describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
 
   it('applies throttle delay between replayed messages', async () => {
     const { config } = await import('../../src/config.ts');
-    config.adminReplayMax = 10;
-    config.adminReplayDelayMs = 50; // 50ms per message
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 50; // 50ms per message
 
     const db = openDb();
     const messenger = makeMockMessenger();
