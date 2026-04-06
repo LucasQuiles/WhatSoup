@@ -5,6 +5,7 @@ import { jsonResponse } from '../../lib/http.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { UpdateChecker } from '../update-checker.ts';
+import { createServiceManager } from '../platform.ts';
 
 const execFileAsync = promisify(execFile);
 const log = createChildLogger('fleet:update');
@@ -166,17 +167,17 @@ export async function handleUpdate(
       writeSSE('progress', { step: 'console-build', status: 'skip', message: 'No console file changes' });
     }
 
-    // Step 5: Restart fleet server via systemd
+    // Step 5: Restart fleet server via service manager
     writeSSE('progress', { step: 'restart', status: 'running' });
-    execFile('systemctl', ['--user', 'restart', 'whatsoup-fleet'], (err) => {
-      if (err) {
-        writeSSE('error', {
-          step: 'restart',
-          message: 'Fleet not managed by systemd. Restart manually: npm run fleet',
-        });
-      }
+    const svcMgr = createServiceManager();
+    svcMgr.restart('whatsoup-fleet').catch((err: Error) => {
+      writeSSE('error', {
+        step: 'restart',
+        message: `Fleet restart failed: ${err.message}. Restart manually: npm run fleet`,
+      });
+    }).finally(() => {
       // Always release mutex + end response — on success the process is about
-      // to be killed by systemd, but if it survives (e.g. systemd is slow),
+      // to be killed by the service manager, but if it survives (e.g. slow),
       // the endpoint must not stay permanently locked.
       endOnce();
     });

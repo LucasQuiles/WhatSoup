@@ -25,7 +25,9 @@ const lockPath = (config as any).lockPath ?? '/var/run/whatsoup.lock';
 
 if (existsSync(lockPath)) {
   console.error(
-    `Bot is currently running. Stop it first: systemctl --user stop whatsoup`,
+    `Bot is currently running. Stop it first:\n` +
+    `  Linux: systemctl --user stop whatsoup\n` +
+    `  macOS: launchctl stop com.whatsoup.<name>`,
   );
   process.exit(1);
 }
