@@ -643,7 +643,7 @@ describe('sibling bot filter', () => {
     }
   });
 
-  it('sibling bot suppressed in auto-respond group without explicit mention', async () => {
+  it('sibling bot in auto-respond group responds when @mentioned', async () => {
     const { config: realConfig } = await import('../../src/config.ts');
     realConfig.siblingPhones.add(SIBLING_PHONE);
     try {
