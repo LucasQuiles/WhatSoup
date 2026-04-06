@@ -6,6 +6,7 @@ import type { ToolDeclaration, SessionContext } from '../types.ts';
 import { resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
+import { buildSafeFtsMatchQuery } from '../../fleet/db-reader.ts';
 
 // ---------------------------------------------------------------------------
 // search_messages — global FTS5 across all conversations
@@ -33,6 +34,7 @@ function makeSearchMessages(db: Database): ToolDeclaration {
     replayPolicy: 'read_only',
     handler: async (params) => {
       const { query, limit = 20 } = SearchMessagesSchema.parse(params);
+      const matchQuery = buildSafeFtsMatchQuery(query);
 
       const rows = db.raw
         .prepare(
@@ -44,7 +46,7 @@ function makeSearchMessages(db: Database): ToolDeclaration {
            ORDER BY m.timestamp DESC
            LIMIT ?`,
         )
-        .all(query, limit) as unknown as MessageRow[];
+        .all(matchQuery, limit) as unknown as MessageRow[];
 
       return { results: rows.map(rowToMessage), total: rows.length };
     },
@@ -73,6 +75,7 @@ function makeSearchChatMessages(db: Database): ToolDeclaration {
     handler: async (params, session: SessionContext) => {
       const { conversation_key: caller_key, query, limit = 20 } = SearchChatMessagesSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
+      const matchQuery = buildSafeFtsMatchQuery(query);
 
       const rows = db.raw
         .prepare(
@@ -85,7 +88,7 @@ function makeSearchChatMessages(db: Database): ToolDeclaration {
            ORDER BY m.timestamp DESC
            LIMIT ?`,
         )
-        .all(query, conversation_key, limit) as unknown as MessageRow[];
+        .all(matchQuery, conversation_key, limit) as unknown as MessageRow[];
 
       return { results: rows.map(rowToMessage), total: rows.length };
     },
@@ -220,6 +223,7 @@ function makeSearchMessagesAdvanced(db: Database): ToolDeclaration {
 
       let sql: string;
       if (query) {
+        const matchQuery = buildSafeFtsMatchQuery(query);
         // FTS-first path: join through messages_fts for text matching
         sql = `SELECT m.*
                FROM messages_fts fts
@@ -228,7 +232,7 @@ function makeSearchMessagesAdvanced(db: Database): ToolDeclaration {
                  AND ${where}
                ORDER BY m.timestamp DESC
                LIMIT ?`;
-        bindings.unshift(query);
+        bindings.unshift(matchQuery);
       } else {
         // Metadata-only path: query messages directly
         sql = `SELECT m.*

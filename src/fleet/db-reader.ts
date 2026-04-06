@@ -57,6 +57,25 @@ const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] 
 };
 
 // ---------------------------------------------------------------------------
+// FTS query safety
+// ---------------------------------------------------------------------------
+
+export function buildSafeFtsMatchQuery(query: string): string {
+  const tokens = query.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) {
+    throw new Error('Invalid FTS MATCH query: query must not be empty');
+  }
+
+  for (const token of tokens) {
+    if (/["\u0000-\u001f\u007f]/u.test(token)) {
+      throw new Error('Invalid FTS MATCH query: unsafe characters are not allowed');
+    }
+  }
+
+  return tokens.map((token) => `"${token}"`).join(' AND ');
+}
+
+// ---------------------------------------------------------------------------
 // FleetDbReader
 // ---------------------------------------------------------------------------
 
@@ -219,6 +238,8 @@ export class FleetDbReader {
     opts: { query: string; conversationKey?: string; limit: number },
   ): DbResult<MessageRow[]> {
     return this.query(name, dbPath, (db) => {
+      const matchQuery = buildSafeFtsMatchQuery(opts.query);
+
       if (opts.conversationKey) {
         return db.prepare(`
           SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
@@ -230,7 +251,7 @@ export class FleetDbReader {
             AND m.conversation_key = ?
           ORDER BY m.timestamp DESC
           LIMIT ?
-        `).all(opts.query, opts.conversationKey, opts.limit) as unknown as MessageRow[];
+        `).all(matchQuery, opts.conversationKey, opts.limit) as unknown as MessageRow[];
       }
       return db.prepare(`
         SELECT m.pk, m.conversation_key, m.chat_jid, m.sender_jid, m.sender_name,
@@ -241,7 +262,7 @@ export class FleetDbReader {
           AND m.deleted_at IS NULL
         ORDER BY m.timestamp DESC
         LIMIT ?
-      `).all(opts.query, opts.limit) as unknown as MessageRow[];
+      `).all(matchQuery, opts.limit) as unknown as MessageRow[];
     });
   }
 

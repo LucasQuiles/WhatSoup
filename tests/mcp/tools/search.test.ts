@@ -106,6 +106,18 @@ describe('search tools', () => {
       const data = JSON.parse(result.content[0].text) as { results: Array<{ messageId: string }> };
       expect(data.results.map((r) => r.messageId)).not.toContain('msg1');
     });
+
+    it('treats MATCH operators as literal text instead of query syntax', async () => {
+      const result = await registry.call(
+        'search_messages',
+        { query: 'world OR secret' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { results: Array<{ messageId: string }> };
+      expect(data.results).toHaveLength(0);
+      expect(data.results.map((r) => r.messageId)).not.toContain('msg4');
+    });
   });
 
   // --- search_chat_messages ---
@@ -313,6 +325,16 @@ describe('search tools', () => {
       );
       const data = JSON.parse(result.content[0].text) as { messages: unknown[] };
       expect(data.messages).toHaveLength(0);
+    });
+
+    it('rejects invalid MATCH syntax before hitting SQLite', async () => {
+      const result = await registry.call(
+        'search_messages_advanced',
+        { query: 'bad "quote' },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Invalid FTS MATCH query/i);
     });
 
     // -- Metadata-only tests --

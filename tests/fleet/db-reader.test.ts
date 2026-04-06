@@ -53,6 +53,8 @@ const MINIMAL_SCHEMA = `
     decided_at TEXT,
     PRIMARY KEY (subject_type, subject_id)
   );
+
+  CREATE VIRTUAL TABLE messages_fts USING fts5(content, content=messages, content_rowid=pk);
 `;
 
 /** Seed a DB with test messages and access_list entries. */
@@ -355,6 +357,20 @@ describe('FleetDbReader', () => {
       const result = msgReader.getMessagesByIds('self', dbPath, []);
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.data).toHaveLength(0);
+    });
+  });
+
+  // ── searchMessages ─────────────────────────────────────────────────────
+
+  describe('searchMessages', () => {
+    it('rejects invalid MATCH syntax before querying SQLite', () => {
+      const result = reader.searchMessages('self', '', {
+        query: 'bad "quote',
+        limit: 10,
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error).toMatch(/Invalid FTS MATCH query/i);
     });
   });
 
