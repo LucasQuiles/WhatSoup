@@ -34,8 +34,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
 
   return (
     <div
-      className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: 'var(--overlay)' }}
+      className="c-dialog-backdrop"
       onClick={onCancel}
     >
       <div

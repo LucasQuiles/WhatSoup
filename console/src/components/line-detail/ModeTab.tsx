@@ -91,7 +91,7 @@ export function ModeTab({
                 style={{
                   fontSize: 'var(--font-size-data)',
                   color: 'var(--color-m-cht)',
-                  paddingTop: '2px',
+                  paddingTop: 'var(--radius-xs)',
                 }}
               >
                 {entry.key}
@@ -108,9 +108,9 @@ export function ModeTab({
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
                     <span
                       style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: '50%',
+                        width: 'var(--dot-table)',
+                        height: 'var(--dot-table)',
+                        borderRadius: 'var(--radius-circle)',
                         background: entry.value === 'true' ? 'var(--color-s-ok)' : 'var(--color-t5)',
                         flexShrink: 0,
                       }}

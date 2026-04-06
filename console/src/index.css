@@ -132,6 +132,7 @@
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */
   --panel-composer: 540px;   /* schedule composer modal width */
+  --panel-config-edit: 560px; /* config edit dialog width */
   --panel-max-inline: 90%;   /* standard dialog max inline size */
   --panel-max-inline-wide: 95vw; /* wide dialog max inline size */
   --tooltip-min-w: 220px;    /* message tooltip min width */
@@ -140,6 +141,7 @@
   --sep-h: 14px;             /* filter separator height */
   --input-h: 32px;           /* search input height */
   --input-btn: 28px;         /* square icon button — optically corrected */
+  --input-number-w: 120px;   /* number input width */
   --feed-min-w: 240px;       /* activity feed min width */
   --feed-col-time: 68px;     /* feed card time column width */
   --feed-col-icon: 16px;     /* feed card icon column width */
@@ -151,6 +153,7 @@
   --stepper-line-w: 32px;    /* wizard stepper connector width */
   --stepper-dot: 8px;        /* wizard stepper dot size */
   --qr-size: 256px;          /* QR code display size */
+  --modal-min-h: 500px;      /* wizard minimum height */
   --modal-max-h: 85vh;       /* modal maximum height */
   --modal-max-h-sm: 80vh;    /* compact modal maximum height */
   --modal-max-h-lg: 90vh;    /* expanded modal maximum height */

@@ -86,23 +86,20 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             </span>
             {/* Status badge */}
             <span
-              className="flex-shrink-0 font-mono"
+              className="flex-shrink-0 font-mono inline-flex items-center"
               style={{
                 fontSize: 'var(--font-size-xs)',
                 color: statusColor(message.status),
-                display: 'inline-flex',
-                alignItems: 'center',
                 gap: 'var(--sp-1)',
               }}
             >
               <span
+                className="inline-block shrink-0"
                 style={{
-                  display: 'inline-block',
                   width: 'var(--radius-md)',
                   height: 'var(--radius-md)',
-                  borderRadius: '50%',
+                  borderRadius: 'var(--radius-circle)',
                   background: statusColor(message.status),
-                  flexShrink: 0,
                 }}
               />
               {statusLabel(message.status)}
@@ -206,7 +203,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Expanded details */}
       {expanded && (
         <div
-          className="font-mono text-t4"
+          className="font-mono text-t4 flex flex-wrap"
           style={{
             fontSize: 'var(--font-size-xs)',
             padding: 'var(--sp-2) var(--sp-4)',
@@ -214,8 +211,6 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             borderTopWidth: 'var(--bw)',
             borderTopStyle: 'solid',
             borderTopColor: 'var(--b1)',
-            display: 'flex',
-            flexWrap: 'wrap',
             gap: 'var(--sp-3)',
           }}
         >
