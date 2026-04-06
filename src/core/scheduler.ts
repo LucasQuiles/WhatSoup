@@ -4,6 +4,7 @@
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
+import { nextCronRun } from './cron.ts';
 
 const log = createChildLogger('scheduler');
 
@@ -14,6 +15,8 @@ interface ScheduledRow {
   payload: string;
   retry_count: number;
   media_blob: Uint8Array | null;
+  recurrence: string | null;
+  run_count: number;
 }
 
 export class MessageScheduler {
@@ -62,17 +65,22 @@ export class MessageScheduler {
   async tick(): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
 
-    // Fetch pending rows whose scheduled_at has passed, then claim each by id.
-    // Fetching ids first and updating by id ensures we only process rows we
-    // explicitly claimed in this tick — pre-existing 'processing' rows (from a
-    // crash before recoverStale() ran) are left alone.
+    // Fetch pending rows whose scheduled_at (one-shot) or next_run_at (recurring)
+    // has passed, then claim each by id. Fetching ids first and updating by id
+    // ensures we only process rows we explicitly claimed in this tick —
+    // pre-existing 'processing' rows (from a crash before recoverStale() ran)
+    // are left alone.
     const candidates = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count
          FROM scheduled_messages
-         WHERE status = 'pending' AND scheduled_at <= ?`,
+         WHERE status = 'pending'
+           AND (
+             (recurrence IS NULL AND scheduled_at <= ?)
+             OR (recurrence IS NOT NULL AND next_run_at IS NOT NULL AND next_run_at <= ?)
+           )`,
       )
-      .all(now) as unknown as ScheduledRow[];
+      .all(now, now) as unknown as ScheduledRow[];
 
     if (candidates.length === 0) return;
 
@@ -89,7 +97,7 @@ export class MessageScheduler {
     // Only process the rows we just claimed (re-fetch to confirm claimed status)
     const rows = this.db.raw
       .prepare(
-        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob
+        `SELECT id, chat_jid, content_type, payload, retry_count, media_blob, recurrence, run_count
          FROM scheduled_messages
          WHERE id IN (${placeholders}) AND status = 'processing'`,
       )
@@ -98,14 +106,29 @@ export class MessageScheduler {
     for (const row of rows) {
       try {
         await this.executeSend(row);
-        this.db.raw
-          .prepare(
-            `UPDATE scheduled_messages
-             SET status = 'sent', sent_at = ?
-             WHERE id = ?`,
-          )
-          .run(Math.floor(Date.now() / 1000), row.id);
-        log.info({ id: row.id, chatJid: row.chat_jid }, 'scheduler: message sent');
+        const sentAt = Math.floor(Date.now() / 1000);
+        if (row.recurrence) {
+          // Recurring: stay pending with updated next_run_at and run_count
+          const nextRun = nextCronRun(row.recurrence, sentAt);
+          this.db.raw
+            .prepare(
+              `UPDATE scheduled_messages
+               SET status = 'pending', sent_at = ?, run_count = ?, next_run_at = ?
+               WHERE id = ?`,
+            )
+            .run(sentAt, row.run_count + 1, nextRun, row.id);
+          log.info({ id: row.id, chatJid: row.chat_jid, nextRun }, 'scheduler: recurring message sent, rescheduled');
+        } else {
+          // One-shot: mark as sent
+          this.db.raw
+            .prepare(
+              `UPDATE scheduled_messages
+               SET status = 'sent', sent_at = ?
+               WHERE id = ?`,
+            )
+            .run(sentAt, row.id);
+          log.info({ id: row.id, chatJid: row.chat_jid }, 'scheduler: message sent');
+        }
       } catch (err) {
         const newRetryCount = row.retry_count + 1;
         if (newRetryCount >= this.config.maxRetries) {
