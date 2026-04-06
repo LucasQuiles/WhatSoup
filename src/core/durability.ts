@@ -69,6 +69,35 @@ export interface RecoveryStats {
   sessionsRestored: number;
 }
 
+export interface SessionCheckpointFields {
+  sessionId?: string;
+  transcriptPath?: string;
+  activeTurnId?: string | null;
+  lastInboundSeq?: number;
+  lastFlushedOutboundId?: number;
+  watchdogState?: string;
+  workspacePath?: string;
+  claudePid?: number;
+  sessionStatus?: string;
+}
+
+export interface CompleteTurnParams {
+  sessionTokens?: {
+    dbRowId: number;
+    inputTokens: number;
+    outputTokens: number;
+  };
+  checkpoint?: {
+    conversationKey: string;
+    fields: SessionCheckpointFields;
+  };
+  inbound?: {
+    seq: number;
+    terminalReason: string;
+  };
+  lastOpId?: number;
+}
+
 export interface OutboundOpParams {
   conversationKey: string;
   chatJid: string;
@@ -101,6 +130,7 @@ type DurabilityStatements = {
   recordToolCall: PreparedStatement;
   markToolExecuting: PreparedStatement;
   markToolComplete: PreparedStatement;
+  accumulateSessionTokens: PreparedStatement;
   upsertSessionCheckpoint: PreparedStatement;
   getSessionCheckpoint: PreparedStatement;
   getAllActiveCheckpoints: PreparedStatement;
@@ -180,6 +210,12 @@ export class DurabilityEngine {
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
         `UPDATE tool_calls SET status = 'complete', result = ?, completed_at = datetime('now'), outbound_op_id = ? WHERE id = ?`,
+      ),
+      accumulateSessionTokens: prepare(
+        `UPDATE agent_sessions
+         SET total_input_tokens = total_input_tokens + ?,
+             total_output_tokens = total_output_tokens + ?
+         WHERE id = ?`,
       ),
       upsertSessionCheckpoint: prepare(`
         INSERT INTO session_checkpoints (conversation_key, session_id, transcript_path, active_turn_id,
@@ -269,6 +305,24 @@ export class DurabilityEngine {
     };
   }
 
+  private runUpsertSessionCheckpoint(conversationKey: string, fields: SessionCheckpointFields): void {
+    this.statements.upsertSessionCheckpoint.run(
+      conversationKey, fields.sessionId ?? null, fields.transcriptPath ?? null,
+      fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
+      fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
+      fields.workspacePath ?? null, fields.claudePid ?? null,
+      fields.sessionStatus ?? 'active',
+    );
+  }
+
+  private runCompleteInbound(seq: number, reason: string): void {
+    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
+    if (row?.processing_status === 'processing') {
+      this.markTurnDone(seq);
+    }
+    this.markInboundComplete(seq, reason);
+  }
+
   // ── Inbound events ──
   journalInbound(messageId: string, conversationKey: string, chatJid: string, routedTo: string): number {
     const result = this.statements.journalInbound.run(messageId, conversationKey, chatJid, routedTo);
@@ -295,11 +349,52 @@ export class DurabilityEngine {
 
   /** Transition inbound event: processing → turn_done → complete. */
   completeInbound(seq: number, reason: string): void {
-    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
-    if (row?.processing_status === 'processing') {
-      this.markTurnDone(seq);
+    this.runCompleteInbound(seq, reason);
+  }
+
+  /** Batch turn-completion bookkeeping into a single SQLite transaction. */
+  completeTurn(params: CompleteTurnParams): void {
+    const hasWrites =
+      params.sessionTokens !== undefined ||
+      params.checkpoint !== undefined ||
+      params.inbound !== undefined ||
+      params.lastOpId !== undefined;
+    if (!hasWrites) return;
+
+    let inTransaction = false;
+    try {
+      this.db.raw.exec('BEGIN IMMEDIATE');
+      inTransaction = true;
+
+      if (params.sessionTokens) {
+        this.statements.accumulateSessionTokens.run(
+          params.sessionTokens.inputTokens,
+          params.sessionTokens.outputTokens,
+          params.sessionTokens.dbRowId,
+        );
+      }
+      if (params.checkpoint) {
+        this.runUpsertSessionCheckpoint(params.checkpoint.conversationKey, params.checkpoint.fields);
+      }
+      if (params.inbound) {
+        this.runCompleteInbound(params.inbound.seq, params.inbound.terminalReason);
+      }
+      if (params.lastOpId !== undefined) {
+        this.statements.markTerminal.run(params.lastOpId);
+      }
+
+      this.db.raw.exec('COMMIT');
+      inTransaction = false;
+    } catch (err) {
+      if (inTransaction) {
+        try {
+          this.db.raw.exec('ROLLBACK');
+        } catch (rollbackErr) {
+          log.warn({ err: rollbackErr }, 'completeTurn: rollback failed');
+        }
+      }
+      throw err;
     }
-    this.markInboundComplete(seq, reason);
   }
 
   // ── Outbound ops ──
@@ -383,13 +478,7 @@ export class DurabilityEngine {
     watchdogState?: string; workspacePath?: string;
     claudePid?: number; sessionStatus?: string;
   }): void {
-    this.statements.upsertSessionCheckpoint.run(
-      conversationKey, fields.sessionId ?? null, fields.transcriptPath ?? null,
-      fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
-      fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
-      fields.workspacePath ?? null, fields.claudePid ?? null,
-      fields.sessionStatus ?? 'active',
-    );
+    this.runUpsertSessionCheckpoint(conversationKey, fields);
   }
 
   getSessionCheckpoint(conversationKey: string): SessionCheckpointRow | undefined {

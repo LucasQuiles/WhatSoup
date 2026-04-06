@@ -1657,25 +1657,52 @@ export class AgentRuntime implements Runtime {
         if (mapKey !== undefined) {
           this.perChatAssistantItemText.delete(mapKey);
         }
-        if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
-          const rowId = session?.getDbRowId() ?? null;
-          if (rowId !== null) {
+        const rowId = session?.getDbRowId() ?? null;
+        const lastOpId = queue.getLastOpId();
+        if (this.durability) {
+          this.durability.completeTurn({
+            ...((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null
+              ? {
+                  sessionTokens: {
+                    dbRowId: rowId,
+                    inputTokens: event.inputTokens ?? 0,
+                    outputTokens: event.outputTokens ?? 0,
+                  },
+                }
+              : {}),
+            ...(conversationKey
+              ? {
+                  checkpoint: {
+                    conversationKey,
+                    fields: {
+                      activeTurnId: null,
+                      ...(inboundSeq !== undefined && { lastInboundSeq: inboundSeq }),
+                      ...(lastOpId !== undefined && { lastFlushedOutboundId: lastOpId }),
+                    },
+                  },
+                }
+              : {}),
+            ...(inboundSeq !== undefined
+              ? {
+                  inbound: {
+                    seq: inboundSeq,
+                    terminalReason: 'response_sent',
+                  },
+                }
+              : {}),
+            ...(lastOpId !== undefined ? { lastOpId } : {}),
+          });
+          if (lastOpId !== undefined) {
+            queue.clearLastOpId();
+          }
+        } else {
+          if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
             accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
           }
+          // Defense-in-depth: mark last op terminal so echo auto-complete fires if
+          // the process crashes after send but before completeInbound runs.
+          queue.markLastTerminal();
         }
-        if (this.durability && conversationKey) {
-          this.durability.upsertSessionCheckpoint(conversationKey, {
-            activeTurnId: null,
-            ...(inboundSeq !== undefined && { lastInboundSeq: inboundSeq }),
-            ...(queue.getLastOpId() !== undefined && { lastFlushedOutboundId: queue.getLastOpId() }),
-          });
-        }
-        if (this.durability && inboundSeq !== undefined) {
-          this.durability.completeInbound(inboundSeq, 'response_sent');
-        }
-        // Defense-in-depth: mark last op terminal so echo auto-complete fires if
-        // the process crashes after send but before completeInbound runs.
-        queue.markLastTerminal();
         {
           // Capture voice reply context before flush (SP4)
           const chatJidForVoice = queue.targetChatJid;
@@ -2711,33 +2738,61 @@ export class AgentRuntime implements Runtime {
           this.currentTurnAssistantText += event.text;
         }
         this.currentTurnAssistantItemText.clear();
-        if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
-          const rowId = this.session?.getDbRowId() ?? null;
-          if (rowId !== null) {
-            accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
-          }
-        }
+        const rowId = this.session?.getDbRowId() ?? null;
+        const lastOpId = queue.getLastOpId();
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput) {
           queue.enqueueText('_(no response)_');
         }
         this.turnHadVisibleOutput = false;
         this.currentTurnChatJid = null;
-        if (this.durability && this.activeChatJid) {
-          const conversationKey = toConversationKey(this.activeChatJid);
-          this.durability.upsertSessionCheckpoint(conversationKey, {
-            activeTurnId: null,
-            ...(this.currentInboundSeq !== undefined && { lastInboundSeq: this.currentInboundSeq }),
-            ...(queue.getLastOpId() !== undefined && { lastFlushedOutboundId: queue.getLastOpId() }),
+        if (this.durability) {
+          this.durability.completeTurn({
+            ...((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null
+              ? {
+                  sessionTokens: {
+                    dbRowId: rowId,
+                    inputTokens: event.inputTokens ?? 0,
+                    outputTokens: event.outputTokens ?? 0,
+                  },
+                }
+              : {}),
+            ...(this.activeChatJid
+              ? {
+                  checkpoint: {
+                    conversationKey: toConversationKey(this.activeChatJid),
+                    fields: {
+                      activeTurnId: null,
+                      ...(this.currentInboundSeq !== undefined && { lastInboundSeq: this.currentInboundSeq }),
+                      ...(lastOpId !== undefined && { lastFlushedOutboundId: lastOpId }),
+                    },
+                  },
+                }
+              : {}),
+            ...(this.currentInboundSeq !== undefined
+              ? {
+                  inbound: {
+                    seq: this.currentInboundSeq,
+                    terminalReason: 'response_sent',
+                  },
+                }
+              : {}),
+            ...(lastOpId !== undefined ? { lastOpId } : {}),
           });
+          if (this.currentInboundSeq !== undefined) {
+            this.currentInboundSeq = undefined;
+          }
+          if (lastOpId !== undefined) {
+            queue.clearLastOpId();
+          }
+        } else {
+          if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
+            accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+          }
+          // Defense-in-depth: mark last op terminal so echo auto-complete fires if
+          // the process crashes after send but before completeInbound runs.
+          queue.markLastTerminal();
         }
-        if (this.durability && this.currentInboundSeq !== undefined) {
-          this.durability.completeInbound(this.currentInboundSeq, 'response_sent');
-          this.currentInboundSeq = undefined;
-        }
-        // Defense-in-depth: mark last op terminal so echo auto-complete fires if
-        // the process crashes after send but before completeInbound runs.
-        queue.markLastTerminal();
         {
           // Capture voice reply context before flush (SP4)
           const chatJidForVoice = this.shared ? this.currentTurnChatJid : this.activeChatJid;

@@ -1,21 +1,29 @@
+# PERF-03 Output
+
 <!-- BEAD_OUTPUT_COMPLETE -->
-# LEAK-07 Bead Output
 
-- Bead: LEAK-07 — track and cancel auto-respawn timers
-- Implementation commit: `8a294d7`
-- Branch: `fix/leak-07-respawn-timer-tracking`
-
-## Verification
-- `npx vitest run tests/runtimes/agent/runtime.test.ts -t "tracks pending auto-respawn timers per crash and removes them after firing|shutdown clears pending auto-respawn timers before per_chat session cleanup"` ✅
-- `npm run typecheck` ✅
-- `npx vitest run --pool=forks` ✅ — 198 files, 3,729 tests passed
+- Bead: PERF-03 — batch turn-completion SQLite writes
+- Branch: fix/perf-03-turn-completion-transaction
+- Commit: pending (recorded in result message after commit)
+- Summary: Added `DurabilityEngine.completeTurn()` to batch session-token accumulation, checkpoint upsert, inbound completion, and terminal-op marking in one transaction, then routed both result handlers through it.
 
 ## Files Changed
-- `src/runtimes/agent/runtime.ts`
-- `tests/runtimes/agent/runtime.test.ts`
-- `bead-output.md`
+- src/core/durability.ts
+- src/runtimes/agent/runtime.ts
+- src/runtimes/agent/outbound-queue.ts
+- src/runtimes/agent/control-queue.ts
+- tests/core/durability.test.ts
+- tests/core/perf-prepared-statements.test.ts
+- tests/runtimes/agent/runtime.test.ts
+- tests/runtimes/agent/codex-turn-lifecycle.test.ts
+- bead-output.md
 
-## Summary
-- Added `pendingRespawnTimers` tracking on `AgentRuntime` so per-chat auto-respawn timers are stored when scheduled and removed when they fire.
-- Cleared every pending respawn timer during `shutdown()` before per-chat session cleanup begins, preventing timers from surviving teardown.
-- Added regressions covering both timer self-removal after respawn and shutdown-time cancellation ordering.
+## Verification
+- `npx vitest run tests/runtimes/agent/runtime.test.ts tests/core/durability.test.ts tests/core/perf-prepared-statements.test.ts tests/runtimes/agent/codex-turn-lifecycle.test.ts --pool=forks` ✅
+- `npm run typecheck` ✅
+- `npx vitest run` ✅
+
+## Notes
+- `completeTurn()` uses a single explicit SQLite transaction (`BEGIN IMMEDIATE` / `COMMIT`) and rolls back on failure.
+- `OutboundQueue`/`ControlQueue` gained `clearLastOpId()` so the result handlers can clear terminal bookkeeping without issuing an extra durability write.
+- `tests/core/perf-prepared-statements.test.ts` now covers the added cached token-accumulation statement as part of the constructor cache set.

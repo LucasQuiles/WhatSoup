@@ -235,6 +235,74 @@ describe('DurabilityEngine', () => {
     });
   });
 
+  describe('completeTurn', () => {
+    it('batches token, checkpoint, inbound, and terminal writes in one transaction', () => {
+      const inboundSeq = engine.journalInbound('msg-turn-1', 'key-1', 'jid-1', 'agent');
+      const outboundId = engine.createOutboundOp({
+        conversationKey: 'key-1',
+        chatJid: 'jid-1',
+        opType: 'text',
+        payload: '{"text":"done"}',
+        replayPolicy: 'safe',
+      });
+
+      const sessionInsert = db.raw.prepare(
+        `INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, status)
+         VALUES (?, ?, datetime('now'), 'active')`,
+      ).run(123, '/tmp/session');
+      const sessionRowId = Number(sessionInsert.lastInsertRowid);
+
+      const execSpy = vi.spyOn(db.raw, 'exec');
+
+      engine.completeTurn({
+        sessionTokens: {
+          dbRowId: sessionRowId,
+          inputTokens: 11,
+          outputTokens: 7,
+        },
+        checkpoint: {
+          conversationKey: 'key-1',
+          fields: {
+            activeTurnId: null,
+            lastInboundSeq: inboundSeq,
+            lastFlushedOutboundId: outboundId,
+          },
+        },
+        inbound: {
+          seq: inboundSeq,
+          terminalReason: 'response_sent',
+        },
+        lastOpId: outboundId,
+      });
+
+      expect(execSpy.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN IMMEDIATE', 'COMMIT']);
+
+      const sessionRow = db.raw.prepare(
+        'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?',
+      ).get(sessionRowId) as any;
+      expect(sessionRow.total_input_tokens).toBe(11);
+      expect(sessionRow.total_output_tokens).toBe(7);
+
+      const checkpoint = db.raw.prepare(
+        'SELECT active_turn_id, last_inbound_seq, last_flushed_outbound_id FROM session_checkpoints WHERE conversation_key = ?',
+      ).get('key-1') as any;
+      expect(checkpoint.active_turn_id).toBeNull();
+      expect(checkpoint.last_inbound_seq).toBe(inboundSeq);
+      expect(checkpoint.last_flushed_outbound_id).toBe(outboundId);
+
+      const inboundRow = db.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(inboundSeq) as any;
+      expect(inboundRow.processing_status).toBe('complete');
+      expect(inboundRow.terminal_reason).toBe('response_sent');
+
+      const outboundRow = db.raw.prepare(
+        'SELECT is_terminal FROM outbound_ops WHERE id = ?',
+      ).get(outboundId) as any;
+      expect(outboundRow.is_terminal).toBe(1);
+    });
+  });
+
   describe('sendTracked', () => {
     it('creates outbound op, marks sending, marks submitted on success', async () => {
       const mockMessenger = {
