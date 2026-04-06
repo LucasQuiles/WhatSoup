@@ -489,6 +489,13 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [16, (db: DatabaseSync) => {
     db.exec(`ALTER TABLE scheduled_messages ADD COLUMN media_blob BLOB`);
   }],
+  [17, (db: DatabaseSync) => {
+    db.exec(`ALTER TABLE scheduled_messages ADD COLUMN chat_name TEXT`);
+    db.exec(`ALTER TABLE scheduled_messages ADD COLUMN recurrence TEXT`);
+    db.exec(`ALTER TABLE scheduled_messages ADD COLUMN next_run_at INTEGER`);
+    db.exec(`ALTER TABLE scheduled_messages ADD COLUMN run_count INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_scheduled_next_run ON scheduled_messages(status, next_run_at) WHERE status = 'pending' AND next_run_at IS NOT NULL`);
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
