@@ -64,14 +64,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
 
   return (
     <div
-      style={{
-        background: 'var(--color-d2)',
-        borderWidth: 'var(--bw)',
-        borderStyle: 'solid',
-        borderColor: 'var(--b1)',
-        borderRadius: 'var(--radius-md)',
-        overflow: 'hidden',
-      }}
+      className="c-card overflow-hidden"
     >
       {/* Main row */}
       <div className="flex items-start gap-3" style={{ padding: 'var(--sp-3) var(--sp-4)' }}>

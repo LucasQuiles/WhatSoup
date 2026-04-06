@@ -22,14 +22,9 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
   return (
     <button
       type="button"
-      className="w-full flex items-center gap-3 c-hover text-left"
+      className="c-card w-full flex items-center gap-3 c-hover text-left"
       style={{
         padding: 'var(--sp-3) var(--sp-4)',
-        background: 'var(--color-d2)',
-        borderWidth: 'var(--bw)',
-        borderStyle: 'solid',
-        borderColor: 'var(--b1)',
-        borderRadius: 'var(--radius-md)',
       }}
       onClick={() => onSelect(group)}
     >
