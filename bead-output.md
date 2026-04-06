@@ -1,23 +1,24 @@
-# RACE-02 Output
+# LOG-02 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: RACE-02 — non-sandboxed per_chat concurrent spawn
-- Branch: fix/race-02-perchat-concurrent-spawn
-- Commit: e4ebfee
-- Summary: Added a regression proving same-chat non-sandboxed `per_chat` messages stay serialized behind the pending `spawnSession()` on `turnChain`, so the suspected double-spawn race is not reachable and no runtime mutex change is required.
+- Bead: LOG-02 — periodic health stats emission
+- Branch: fix/log-02-periodic-health-stats
+- Commit: 40e1a9a
+- Summary: Added a 60-second runtime health-stats timer that logs key map sizes, file descriptor count, and memory usage with structured fields, and clears the timer during shutdown.
 
 ## Files Changed
+- src/runtimes/agent/runtime.ts
 - tests/runtimes/agent/runtime.test.ts
 - bead-output.md
 
 ## Verification
-- `npx vitest run tests/runtimes/agent/runtime.test.ts -t "non-sandboxed per_chat serializes same-chat messages while spawnSession is pending" --pool=forks` ✅
+- `npx vitest run tests/runtimes/agent/runtime.test.ts -t "emits periodic health stats every 60s and stops after shutdown" --pool=forks` ✅
 - `npx vitest run tests/runtimes/agent/runtime.test.ts --pool=forks` ✅
 - `npm run typecheck` ✅
 - `npx vitest run --pool=forks` ✅
-- `git push -u origin fix/race-02-perchat-concurrent-spawn` ⏳
+- `git push -u origin fix/log-02-periodic-health-stats` ⏳
 
 ## Notes
-- `handleMessage()` chains `_handleMessageInner()` onto `turnChain`, and the per-chat path fully awaits `sendTurnPerChat()` → `sendTurnToSession()` → `spawnSession()`, so a second same-chat message cannot enter the spawn path until the first finishes.
-- The new test blocks `spawnSession()` mid-flight, sends two rapid messages for the same chat, and proves only one `spawnSession()` happens while both user turns are eventually delivered in order.
+- The stats payload includes `chatSessions`, `chatQueues`, `outboundQueues`, `workspaceResources`, `fdCount`, and a `memoryUsage` object (`rss`, `heapTotal`, `heapUsed`, `external`, `arrayBuffers`) plus crash context fields.
+- The interval is `unref()`'d and nulled during shutdown so it does not keep the process alive or continue logging after teardown.
