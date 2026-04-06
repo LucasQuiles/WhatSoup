@@ -213,6 +213,29 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ SIZING TOKEN IN STYLE ═══
+        // width/height/min/max with var(--*) tokens → Tailwind arbitrary value classes
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="width"][value.value=/^var\\(--/]',
+          message: '⛔ width token in style. FIX: remove from style, add to className. width: "var(--avatar-sm)"→"w-[var(--avatar-sm)]" width: "var(--sp-3)"→"w-[var(--sp-3)]". Pattern: w-[var(--TOKEN)].',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="height"][value.value=/^var\\(--/]',
+          message: '⛔ height token in style. FIX: remove from style, add to className. height: "var(--avatar-sm)"→"h-[var(--avatar-sm)]" height: "var(--sp-3)"→"h-[var(--sp-3)]". Pattern: h-[var(--TOKEN)].',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="minHeight"][value.value=/^var\\(--/]',
+          message: '⛔ minHeight token in style. FIX: remove from style, add to className. minHeight: "var(--toolbar-h)"→"min-h-[var(--toolbar-h)]". Pattern: min-h-[var(--TOKEN)].',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="maxWidth"][value.value=/^var\\(--/]',
+          message: '⛔ maxWidth token in style. FIX: remove from style, add to className. maxWidth: "var(--empty-max-w)"→"max-w-[var(--empty-max-w)]". Pattern: max-w-[var(--TOKEN)].',
+        },
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="minWidth"][value.value=/^var\\(--(?!bw)/]',
+          message: '⛔ minWidth token in style. FIX: remove from style, add to className. minWidth: "var(--feed-min-w)"→"min-w-[var(--feed-min-w)]". Pattern: min-w-[var(--TOKEN)]. Note: minWidth: 0 is handled by the min-w-0 rule.',
+        },
+
         // ═══ MARGIN TOKEN IN STYLE ═══
         // marginTop/Bottom/Left/Right with var(--sp-*) → mt-[]/mb-[]/ml-[]/mr-[] class
         {
