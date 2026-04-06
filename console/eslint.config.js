@@ -213,6 +213,13 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ GAP TOKEN IN STYLE ═══
+        // gap: 'var(--sp-*)' in JSX style should be a gap-[var(--sp-*)] class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="gap"][value.value=/^var\\(--sp-/]',
+          message: '⛔ gap token in style. FIX: remove gap from style, add to className. gap: "var(--sp-1)"→"gap-[var(--sp-1)]" gap: "var(--sp-2)"→"gap-[var(--sp-2)]" etc. Pattern: gap-[var(--sp-N)].',
+        },
+
         // ═══ FONT SIZE TOKEN IN STYLE ═══
         // fontSize: 'var(--font-size-*)' in JSX style should be a text-[var(--font-size-*)] class
         {
