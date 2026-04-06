@@ -568,7 +568,7 @@ export default function Inbox() {
                       try {
                         const subjectType = currentChat.isGroup ? 'group' : 'number'
                         await api.accessDecision(activeLine, subjectType, currentChat.conversationKey, 'block')
-                        toast.error(`Blocked ${resolveDisplayName(currentChat.name)}`)
+                        toast.info(`Blocked ${resolveDisplayName(currentChat.name)}`)
                       } catch (err) {
                         toast.error(`Failed to block: ${err instanceof Error ? err.message : String(err)}`)
                       }
