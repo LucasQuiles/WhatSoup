@@ -114,6 +114,7 @@ function makeRuntime(): Runtime {
     handleMessage: vi.fn().mockResolvedValue(undefined),
     getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: {} }),
     shutdown: vi.fn().mockResolvedValue(undefined),
+    setDurability: vi.fn(),
   };
 }
 
@@ -130,6 +131,7 @@ function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): Incoming
     mentionedJids: [],
     timestamp: Math.floor(Date.now() / 1000),
     quotedMessageId: null,
+    contentText: null,
     isResponseWorthy: true,
     ...overrides,
   };

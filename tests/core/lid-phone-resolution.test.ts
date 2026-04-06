@@ -138,6 +138,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
     mentionedJids: [],
     timestamp: Math.floor(Date.now() / 1000),
     quotedMessageId: null,
+    contentText: null,
     isResponseWorthy: true,
     ...overrides,
   };

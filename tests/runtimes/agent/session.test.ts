@@ -87,6 +87,7 @@ function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: str
       sentMessages.push({ jid, text });
       return { waMessageId: null };
     }),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
   return { messenger, sentMessages };
 }

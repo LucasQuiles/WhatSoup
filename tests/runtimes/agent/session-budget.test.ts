@@ -87,6 +87,7 @@ function makeDb(): Database {
 function makeMessenger(): Messenger {
   return {
     sendMessage: vi.fn(async () => ({ waMessageId: null })),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
 }
 

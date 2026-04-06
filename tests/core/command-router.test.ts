@@ -74,6 +74,7 @@ function makeIncomingMsg(overrides: Partial<IncomingMessage> = {}): IncomingMess
     mentionedJids: [],
     timestamp: 1700000000,
     quotedMessageId: null,
+    contentText: null,
     isResponseWorthy: true,
     ...overrides,
   };

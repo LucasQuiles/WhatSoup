@@ -30,6 +30,7 @@ function makeMessenger(): { messenger: Messenger; calls: string[]; typingCalls: 
       calls.push(text);
       return { waMessageId: null };
     }),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
     setTyping: vi.fn(async (_jid: string, typing: boolean) => {
       typingCalls.push(typing);
     }),
@@ -244,6 +245,7 @@ describe('OutboundQueue', () => {
         sendTimes.push(Date.now());
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(timedMessenger, CHAT_JID);
@@ -524,6 +526,7 @@ describe('OutboundQueue', () => {
         concurrent -= 1;
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(serialMessenger, CHAT_JID);
@@ -552,6 +555,7 @@ describe('OutboundQueue', () => {
         // 3rd call succeeds
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(retryMessenger, CHAT_JID);
@@ -571,6 +575,7 @@ describe('OutboundQueue', () => {
       sendMessage: vi.fn(async () => {
         throw new Error('permanent failure');
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const successCalls: string[] = [];
@@ -589,6 +594,7 @@ describe('OutboundQueue', () => {
         successCalls.push(text);
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(mixedMessenger, CHAT_JID);

@@ -199,7 +199,7 @@ function makeDb(): Database {
 }
 
 function makeMessenger(): Messenger {
-  return { sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }) };
+  return { sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }), sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }) };
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

@@ -68,6 +68,7 @@ const makeMsg = (overrides: Partial<IncomingMessage> = {}): IncomingMessage => (
   mentionedJids: [],
   timestamp: 1234567890,
   quotedMessageId: null,
+  contentText: null,
   isResponseWorthy: true,
   ...overrides,
 });
