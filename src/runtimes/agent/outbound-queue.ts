@@ -92,6 +92,7 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
  * here, TypeScript will reject any mock that doesn't include it.
  */
 export interface IOutboundQueue {
+  lastActivity?: number;
   enqueueText(text: string): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
   enqueueStreamingText(text: string): void;
@@ -117,6 +118,8 @@ export interface IOutboundQueue {
   markLastTerminal(): void;
   /** Propagate durability engine after late initialization. */
   setDurability(engine: DurabilityEngine): void;
+  /** Whether the queue still has buffered, in-flight, or typing work that should block eviction. */
+  hasPendingWork?(): boolean;
 }
 
 export class OutboundQueue implements IOutboundQueue {
@@ -163,6 +166,7 @@ export class OutboundQueue implements IOutboundQueue {
   private minimalLastSentAt = Date.now();
   /** In minimal mode: timer for "still working" heartbeat when silence exceeds threshold. */
   private minimalHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  public lastActivity = Date.now();
 
   constructor(messenger: Messenger, chatJid: string) {
     this.messenger = messenger;
@@ -376,6 +380,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Flush all pending messages (tool buffer + send queue) immediately. */
   async flush(): Promise<void> {
+    this.lastActivity = Date.now();
     this.flushStreamBuffer();
     this.flushToolBuffer();
     // Wait for the current chain to drain
@@ -414,6 +419,18 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   get targetChatJid(): string { return this.chatJid; }
+
+  hasPendingWork(): boolean {
+    return this.sending
+      || this.sendQueue.length > 0
+      || this.toolBuffer.length > 0
+      || this.streamBuffer.length > 0
+      || this.isTyping
+      || this.toolTimer !== null
+      || this.toolMaxAgeTimer !== null
+      || this.streamTimer !== null
+      || this.minimalHeartbeatTimer !== null;
+  }
 
   /** Retarget all subsequent sends to a different JID variant. */
   updateDeliveryJid(jid: string): void {
@@ -538,6 +555,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private enqueue(chunk: string): void {
+    this.lastActivity = Date.now();
     this.sendQueue.push(chunk);
     if (!this.sending) {
       this.drainQueue();

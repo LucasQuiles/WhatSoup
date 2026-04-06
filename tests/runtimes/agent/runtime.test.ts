@@ -1406,6 +1406,115 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('shared sweepIdleQueues evicts idle outbound queues and shuts them down', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const staleQueue = Object.assign(makeQueueMock('idle@s.whatsapp.net'), {
+      lastActivity: Date.now() - (61 * 60_000),
+      hasPendingWork: vi.fn(() => false),
+      shutdown: vi.fn(async () => {}),
+    });
+    const runtimeState = runtime as unknown as {
+      outboundQueues: Map<string, typeof staleQueue>;
+      sweepIdleQueues: () => void;
+    };
+
+    runtimeState.outboundQueues.set('idle@s.whatsapp.net', staleQueue);
+
+    runtimeState.sweepIdleQueues();
+
+    expect(staleQueue.shutdown).toHaveBeenCalledTimes(1);
+    expect(runtimeState.outboundQueues.has('idle@s.whatsapp.net')).toBe(false);
+  });
+
+  it('shared sweepIdleQueues preserves recently active outbound queues', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const activeQueue = Object.assign(makeQueueMock('active@s.whatsapp.net'), {
+      lastActivity: Date.now() - (5 * 60_000),
+      hasPendingWork: vi.fn(() => false),
+      shutdown: vi.fn(async () => {}),
+    });
+    const runtimeState = runtime as unknown as {
+      outboundQueues: Map<string, typeof activeQueue>;
+      sweepIdleQueues: () => void;
+    };
+
+    runtimeState.outboundQueues.set('active@s.whatsapp.net', activeQueue);
+
+    runtimeState.sweepIdleQueues();
+
+    expect(activeQueue.shutdown).not.toHaveBeenCalled();
+    expect(runtimeState.outboundQueues.has('active@s.whatsapp.net')).toBe(true);
+  });
+
+  it('shared sweepIdleQueues preserves queues with pending work even if idle', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const busyQueue = Object.assign(makeQueueMock('busy@s.whatsapp.net'), {
+      lastActivity: Date.now() - (2 * 60 * 60_000),
+      hasPendingWork: vi.fn(() => true),
+      shutdown: vi.fn(async () => {}),
+    });
+    const runtimeState = runtime as unknown as {
+      outboundQueues: Map<string, typeof busyQueue>;
+      sweepIdleQueues: () => void;
+    };
+
+    runtimeState.outboundQueues.set('busy@s.whatsapp.net', busyQueue);
+
+    runtimeState.sweepIdleQueues();
+
+    expect(busyQueue.shutdown).not.toHaveBeenCalled();
+    expect(runtimeState.outboundQueues.has('busy@s.whatsapp.net')).toBe(true);
+  });
+
+  it('shared ensureOutboundQueue recreates an evicted outbound queue on demand', async () => {
+    const { OutboundQueue: MockOutboundQueueCtor } = await import('../../../src/runtimes/agent/outbound-queue.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+    const runtimeState = runtime as unknown as {
+      ensureOutboundQueue: (chatJid: string) => void;
+      outboundQueues: Map<string, IOutboundQueue>;
+    };
+
+    runtimeState.ensureOutboundQueue('recreated@s.whatsapp.net');
+
+    expect(runtimeState.outboundQueues.has('recreated@s.whatsapp.net')).toBe(true);
+    expect(MockOutboundQueueCtor).toHaveBeenCalledWith(messenger, 'recreated@s.whatsapp.net');
+  });
+
+  it('shared queue sweep timer is started with the runtime and cleared on shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'loops', { shared: true });
+      const runtimeState = runtime as unknown as {
+        queueSweepTimer: ReturnType<typeof setInterval> | null;
+      };
+
+      await runtime.start();
+      expect(runtimeState.queueSweepTimer).not.toBeNull();
+
+      await runtime.shutdown();
+      expect(runtimeState.queueSweepTimer).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shared queue sweep timer is unrefd and cleared structurally', async () => {
+    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('this.queueSweepTimer.unref?.();');
+    expect(source).toContain('clearInterval(this.queueSweepTimer);');
+  });
+
   // ─── Session resume ────────────────────────────────────────────────────────
 
   it('start() with resumable session — spawns with resume and sets pending startup message', async () => {

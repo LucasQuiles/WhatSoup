@@ -69,6 +69,8 @@ const AUTO_RESPAWN_BASE_MS = 2_000;
 const AUTO_RESPAWN_MAX_DELAY_MS = 15_000;
 /** Periodic runtime health stats emission interval. */
 const HEALTH_STATS_INTERVAL_MS = 60_000;
+const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
+const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 
 /**
@@ -525,6 +527,7 @@ export class AgentRuntime implements Runtime {
   private turnHadVisibleOutput = false;
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
+  private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   // Crash tracking — survives session map deletions for accurate health reporting.
   // Incremented on every crash, decremented on successful session spawn (capped at 0).
@@ -597,6 +600,31 @@ export class AgentRuntime implements Runtime {
     if (this.healthStatsTimer) return;
     this.healthStatsTimer = setInterval(() => this.logHealthStats(), HEALTH_STATS_INTERVAL_MS);
     this.healthStatsTimer.unref?.();
+  }
+
+  private startQueueSweepTimer(): void {
+    if (!this.shared || this.queueSweepTimer) return;
+    this.queueSweepTimer = setInterval(() => this.sweepIdleQueues(), SHARED_QUEUE_SWEEP_INTERVAL_MS);
+    this.queueSweepTimer.unref?.();
+  }
+
+  private sweepIdleQueues(): void {
+    if (!this.shared) return;
+
+    const now = Date.now();
+    for (const [chatJid, queue] of this.outboundQueues) {
+      const lastActivity = typeof queue.lastActivity === 'number' ? queue.lastActivity : now;
+      const idleMs = now - lastActivity;
+      if (idleMs <= SHARED_QUEUE_IDLE_MS) continue;
+      if (chatJid === this.currentTurnChatJid) continue;
+      if (queue.hasPendingWork?.() === true) continue;
+
+      log.debug({ chatJid, idleMs }, 'evicting idle outbound queue');
+      void queue.shutdown().catch((err) => {
+        log.warn({ err, chatJid }, 'idle outbound queue shutdown failed');
+      });
+      this.outboundQueues.delete(chatJid);
+    }
   }
 
   // Tracks inbound seq for the current turn (single/shared mode)
@@ -1158,6 +1186,7 @@ export class AgentRuntime implements Runtime {
     }
 
     this.startHealthStatsTimer();
+    this.startQueueSweepTimer();
 
     log.info('AgentRuntime started');
   }
@@ -1912,6 +1941,10 @@ export class AgentRuntime implements Runtime {
     if (this.healthStatsTimer) {
       clearInterval(this.healthStatsTimer);
       this.healthStatsTimer = null;
+    }
+    if (this.queueSweepTimer) {
+      clearInterval(this.queueSweepTimer);
+      this.queueSweepTimer = null;
     }
 
     // Shutdown per_chat sessions

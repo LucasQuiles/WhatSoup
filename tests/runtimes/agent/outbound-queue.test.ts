@@ -73,6 +73,41 @@ describe('OutboundQueue', () => {
     expect(TYPING_REFRESH_MS).toBe(8_000);
   });
 
+  it('tracks lastActivity when text is enqueued', async () => {
+    const { messenger } = makeMessenger();
+    vi.setSystemTime(new Date('2026-04-06T00:00:00Z'));
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    const queueState = queue as OutboundQueue & { lastActivity?: number };
+
+    expect(queueState.lastActivity).toBe(Date.now());
+
+    vi.setSystemTime(new Date('2026-04-06T00:05:00Z'));
+    queue.enqueueText('Hello!');
+
+    expect(queueState.lastActivity).toBe(Date.now());
+
+    await queue.flush();
+  });
+
+  it('flush updates lastActivity and clears pending work state', async () => {
+    const { messenger } = makeMessenger();
+    vi.setSystemTime(new Date('2026-04-06T01:00:00Z'));
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    const queueState = queue as OutboundQueue & {
+      lastActivity?: number;
+      hasPendingWork?: () => boolean;
+    };
+
+    queue.enqueueStreamingText('partial');
+    expect(queueState.hasPendingWork?.()).toBe(true);
+
+    vi.setSystemTime(new Date('2026-04-06T01:07:00Z'));
+    await queue.flush();
+
+    expect(queueState.lastActivity).toBe(Date.now());
+    expect(queueState.hasPendingWork?.()).toBe(false);
+  });
+
   // ─── Test 1: enqueueText sends immediately (after pacing) ──────────────────
 
   it('enqueueText sends a short message after pacing', async () => {
