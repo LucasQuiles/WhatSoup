@@ -329,6 +329,9 @@ export function ConfigEditDialog({
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="config-edit-dialog-title"
         className="flex flex-col overflow-hidden"
         style={{
           background: 'var(--color-d2)',
@@ -346,7 +349,7 @@ export function ConfigEditDialog({
           className="flex items-center justify-between flex-shrink-0"
           style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
         >
-          <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+          <span id="config-edit-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
             Edit Configuration
           </span>
           <button

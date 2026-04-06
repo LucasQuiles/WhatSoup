@@ -35,6 +35,9 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
       onClick={onCancel}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
         className="overflow-hidden"
         style={{
           background: 'var(--color-d2)',
@@ -51,7 +54,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
           className="flex items-center justify-between"
           style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
         >
-          <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+          <span id="confirm-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
             {title}
           </span>
           <button

@@ -202,6 +202,8 @@ export default function LineDetail() {
       >
       <div
         className="flex gap-0 flex-shrink-0"
+        role="tablist"
+        aria-label="Line detail tabs"
         style={{ padding: '0 var(--sp-4)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d2)' }}
       >
         {TABS.map(tab => {
@@ -210,6 +212,10 @@ export default function LineDetail() {
           return (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`tabpanel-${tab.id}`}
+              id={`tab-${tab.id}`}
               onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-2 font-sans font-medium c-hover relative ${
                 isActive
@@ -232,7 +238,13 @@ export default function LineDetail() {
       </div>
 
       {/* ═══ Tab content ═══ */}
-      <div className="flex-1 overflow-hidden min-h-0 flex flex-col" style={{ padding: 'var(--sp-5)' }}>
+      <div
+        className="flex-1 overflow-hidden min-h-0 flex flex-col"
+        role="tabpanel"
+        id={`tabpanel-${activeTab}`}
+        aria-labelledby={`tab-${activeTab}`}
+        style={{ padding: 'var(--sp-5)' }}
+      >
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}

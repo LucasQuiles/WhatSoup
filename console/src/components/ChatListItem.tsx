@@ -15,7 +15,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
 
   return (
     <div
-      role="button"
+      role="option"
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}

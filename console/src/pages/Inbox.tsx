@@ -206,7 +206,7 @@ export default function Inbox() {
         />
 
         {/* Chat list */}
-        <div className="flex-1 overflow-auto scrollbar-hide">
+        <div className="flex-1 overflow-auto scrollbar-hide" role="listbox" aria-label="Chat conversations">
           {chats?.map(chat => (
             <ChatListItem
               key={chat.conversationKey}
@@ -279,6 +279,7 @@ export default function Inbox() {
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   placeholder="Search this conversation..."
+                  aria-label="Search messages in this conversation"
                   className="c-input c-input-search"
                 />
                 {isSearchBusy ? (

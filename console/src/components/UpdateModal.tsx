@@ -271,6 +271,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       onClick={handleClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="update-dialog-title"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 'var(--panel-confirm)',
@@ -291,7 +294,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         >
           <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
             <Download size={16} className="text-m-cht" />
-            <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            <span id="update-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
               {phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
             </span>
           </div>

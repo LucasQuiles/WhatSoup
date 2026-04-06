@@ -19,6 +19,9 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="relink-dialog-title"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 'var(--panel-confirm)',
@@ -39,7 +42,7 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
         >
           <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
             <Link2 size={16} className="text-t3" />
-            <span className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            <span id="relink-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
               Re-link {lineName}
             </span>
           </div>

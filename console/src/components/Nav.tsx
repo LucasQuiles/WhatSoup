@@ -25,6 +25,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
   const { connected } = useRealtime();
   return (
     <nav
+      role="navigation"
+      aria-label="Main navigation"
       className="bg-d1 flex items-center justify-between flex-shrink-0"
       style={{
         height: "var(--nav-h)",
