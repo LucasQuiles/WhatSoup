@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createConnection } from 'node:net';
+import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -77,6 +77,34 @@ function waitForSocket(socketPath: string, timeoutMs = 2000): Promise<void> {
       }
     };
     check();
+  });
+}
+
+function waitForClientConnect(client: Socket, timeoutMs = 2000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('client connect timeout')), timeoutMs);
+    client.once('connect', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    client.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function waitForClientClose(client: Socket, timeoutMs = 500): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('client close timeout')), timeoutMs);
+    client.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    client.once('error', () => {
+      // Remote destroy may surface as ECONNRESET before close. The close
+      // event is the actual signal that the FD is gone, so ignore errors here.
+    });
   });
 }
 
@@ -416,5 +444,24 @@ describe('WhatSoupSocketServer', () => {
     // (small delay for close event propagation)
     await new Promise(r => setTimeout(r, 50));
     expect(server.connectionCount).toBe(0);
+  });
+
+  it('stop destroys active client connections', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const client = createConnection(socketPath);
+    await waitForClientConnect(client);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(server.connectionCount).toBe(1);
+
+    server.stop();
+
+    try {
+      await waitForClientClose(client);
+    } finally {
+      client.destroy();
+    }
   });
 });

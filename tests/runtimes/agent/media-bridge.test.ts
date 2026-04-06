@@ -3,7 +3,7 @@
 // Uses real Unix sockets and real temp files — no mocks for infrastructure.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createConnection } from 'node:net';
+import { createConnection, type Socket } from 'node:net';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -80,6 +80,34 @@ function waitListening(bridge: MediaBridge): Promise<void> {
     server.once('listening', resolve);
     server.once('error', reject);
     setTimeout(() => reject(new Error('bridge listen timeout')), 3000);
+  });
+}
+
+function waitForClientConnect(client: Socket, timeoutMs = 3000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('client connect timeout')), timeoutMs);
+    client.once('connect', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    client.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function waitForClientClose(client: Socket, timeoutMs = 500): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('client close timeout')), timeoutMs);
+    client.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    client.once('error', () => {
+      // Remote destroy may reset the connection before close; close is the
+      // lifecycle signal we care about, so ignore socket errors here.
+    });
   });
 }
 
@@ -286,6 +314,33 @@ describe('cleanup', () => {
     extraBridge();
 
     // Wait for the server's 'close' event to confirm it stopped
+    await new Promise<void>((resolve) => {
+      if (!extraBridge._server.listening) {
+        resolve();
+        return;
+      }
+      extraBridge._server.once('close', resolve);
+    });
+
+    expect(extraBridge._server.listening).toBe(false);
+  });
+
+  it('calling the bridge handle destroys active client sockets', async () => {
+    const extraSocketPath = makeSocketPath();
+    const extraBridge = startMediaBridge(extraSocketPath, makeMessenger(), allowedRoot);
+    await waitListening(extraBridge);
+
+    const client = createConnection(extraSocketPath);
+    await waitForClientConnect(client);
+
+    extraBridge();
+
+    try {
+      await waitForClientClose(client);
+    } finally {
+      client.destroy();
+    }
+
     await new Promise<void>((resolve) => {
       if (!extraBridge._server.listening) {
         resolve();
