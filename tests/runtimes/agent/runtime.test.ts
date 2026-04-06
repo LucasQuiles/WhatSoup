@@ -554,6 +554,59 @@ describe('AgentRuntime', () => {
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
   });
 
+  it('tracks pending auto-respawn timers per crash and removes them after firing', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const queue = makeQueueMock('chat-a@s.whatsapp.net');
+      const session = {
+        ...mockSession,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({
+          active: false,
+          pid: null,
+          sessionId: null,
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        })),
+      };
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, typeof session>;
+        chatQueues: Map<string, IOutboundQueue>;
+        pendingRespawnTimers?: Set<ReturnType<typeof setTimeout>>;
+        handlePerChatCrash: (
+          mapKey: string,
+          chatJid?: string,
+          info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+        ) => void;
+      };
+
+      runtimeState.chatSessions.set('chat-a', session);
+      runtimeState.chatQueues.set('chat-a', queue);
+
+      runtimeState.handlePerChatCrash('chat-a', 'chat-a@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-1',
+        dbRowId: 42,
+      });
+
+      expect(runtimeState.pendingRespawnTimers?.size).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      expect(runtimeState.pendingRespawnTimers?.size ?? 0).toBe(0);
+      expect(session.spawnSession).toHaveBeenCalledWith('sess-1', 42);
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('LEAK-02 structurally wires cleanup into crash/deletion sites without dropping replay text', async () => {
     const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
     const chatJidCleanupMatches = source.match(/this\.cleanupPerChatState\(chatJid\);/g) ?? [];
@@ -1329,6 +1382,65 @@ describe('AgentRuntime', () => {
       expect(runtimeState.pendingTurnText.size).toBe(0);
       expect(runtimeState.resumeFailedHandling.size).toBe(0);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shutdown clears pending auto-respawn timers before per_chat session cleanup', async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const sessionShutdown = vi.fn(async () => {});
+      const session = {
+        ...mockSession,
+        shutdown: sessionShutdown,
+        spawnSession: vi.fn(async () => {}),
+        getStatus: vi.fn(() => ({
+          active: false,
+          pid: null,
+          sessionId: null,
+          startedAt: null,
+          messageCount: 0,
+          lastMessageAt: null,
+        })),
+      };
+      const queue = makeQueueMock('chat-a@s.whatsapp.net');
+      const runtimeState = runtime as unknown as {
+        chatSessions: Map<string, typeof session>;
+        chatQueues: Map<string, IOutboundQueue>;
+        pendingRespawnTimers?: Set<ReturnType<typeof setTimeout>>;
+        handlePerChatCrash: (
+          mapKey: string,
+          chatJid?: string,
+          info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+        ) => void;
+      };
+
+      runtimeState.chatSessions.set('chat-a', session);
+      runtimeState.chatQueues.set('chat-a', queue);
+
+      runtimeState.handlePerChatCrash('chat-a', 'chat-a@s.whatsapp.net', {
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-1',
+        dbRowId: 42,
+      });
+
+      const [pendingTimer] = Array.from(runtimeState.pendingRespawnTimers ?? []);
+      expect(pendingTimer).toBeDefined();
+
+      await runtime.shutdown();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(pendingTimer);
+      expect(runtimeState.pendingRespawnTimers?.size ?? 0).toBe(0);
+      expect(clearTimeoutSpy.mock.invocationCallOrder[0]).toBeLessThan(sessionShutdown.mock.invocationCallOrder[0]);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+      randomSpy.mockRestore();
       vi.useRealTimers();
     }
   });

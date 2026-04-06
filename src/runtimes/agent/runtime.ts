@@ -528,6 +528,7 @@ export class AgentRuntime implements Runtime {
   private turnChain: Promise<void> = Promise.resolve();
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // Crash tracking — survives session map deletions for accurate health reporting.
   // Incremented on every crash, decremented on successful session spawn (capped at 0).
@@ -1946,6 +1947,10 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
     }
+    for (const timer of this.pendingRespawnTimers) {
+      clearTimeout(timer);
+    }
+    this.pendingRespawnTimers.clear();
 
     // Shutdown per_chat sessions
     if (this.sessionScope === 'per_chat') {
@@ -2400,7 +2405,8 @@ export class AgentRuntime implements Runtime {
         const sessionId = info.sessionId;
         const dbRowId = info.dbRowId;
         log.info({ mapKey, sessionId, attempt: this.recentCrashCount }, 'scheduling auto-respawn');
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          this.pendingRespawnTimers.delete(timer);
           // Verify the session is still in the map and still inactive
           const current = this.chatSessions.get(mapKey);
           if (!current || current !== session || current.getStatus().active) return;
@@ -2420,6 +2426,7 @@ export class AgentRuntime implements Runtime {
             log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
           });
         }, jitteredDelay(AUTO_RESPAWN_BASE_MS, this.recentCrashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS));
+        this.pendingRespawnTimers.add(timer);
       }
     } else if (this.recentCrashCount > AUTO_RESPAWN_MAX_CRASHES) {
       log.error({ mapKey, crashes: this.recentCrashCount }, 'auto-respawn exhausted — emitting alert');
