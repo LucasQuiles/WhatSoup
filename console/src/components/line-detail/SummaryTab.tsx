@@ -25,10 +25,13 @@ export function SummaryTab({
   const modeColor = getModeColor(line.mode)
   const connectionState = line.health?.connection?.state ?? 'unknown'
 
-  // KPI cards show only runtime health metrics — identity/config fields live in header and config panel
+  // All instance KPIs in one row — health, runtime, identity, tokens
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
     { label: 'CONNECTION', value: connectionState, color: connectionState === 'connected' ? 'text-s-ok' : connectionState === 'connecting' ? 'text-s-warn' : 'text-t4' },
+    ...(line.linkedStatus
+      ? [{ label: 'LINK', value: line.linkedStatus, color: line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn' }]
+      : []),
     // Mode-specific runtime metrics
     ...(line.mode === 'passive' ? [
       { label: 'UNREAD', value: String(line.unread ?? 0), color: (line.unread ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
@@ -46,6 +49,16 @@ export function SummaryTab({
         ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
         : []),
     ] : []),
+    // Instance metadata
+    ...(line.models?.conversation
+      ? [{ label: 'MODEL', value: line.models.conversation, color: 'text-t2' }]
+      : []),
+    ...(line.sandboxPerChat
+      ? [{ label: 'ISOLATION', value: 'per-chat', color: 'text-m-agt' }]
+      : []),
+    ...(line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0)
+      ? [{ label: 'TOKENS', value: `${(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}`, color: 'text-t2' }]
+      : []),
   ]
 
   // Pipeline node active states driven by real runtime data
@@ -138,88 +151,6 @@ export function SummaryTab({
           ))}
         </div>
       </motion.div>
-
-      {/* Row 2.5: Instance details — link status, models, isolation (no duplicates with KPI row) */}
-      {(line.linkedStatus || line.models || line.sandboxPerChat || (line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0))) && (
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-            gap: 'var(--sp-2)',
-          }}
-        >
-          {line.linkedStatus && (
-            <div
-              className="font-mono"
-              style={{
-                padding: 'var(--sp-3) var(--sp-4)',
-                background: 'var(--color-d2)',
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                borderRadius: 'var(--radius-md)',
-              }}
-            >
-              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>LINK</div>
-              <div className={`font-semibold ${line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn'}`} style={{ fontSize: 'var(--font-size-data)' }}>
-                {line.linkedStatus}
-              </div>
-            </div>
-          )}
-          {line.models && (
-            <div
-              className="font-mono"
-              style={{
-                padding: 'var(--sp-3) var(--sp-4)',
-                background: 'var(--color-d2)',
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                borderRadius: 'var(--radius-md)',
-              }}
-            >
-              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>MODELS</div>
-              <div className="text-t2" style={{ fontSize: 'var(--font-size-xs)' }}>
-                {line.models.conversation && <div>{line.models.conversation}</div>}
-                {line.models.fallback && <div className="text-t4">{line.models.fallback} (fallback)</div>}
-              </div>
-            </div>
-          )}
-          {line.sandboxPerChat && (
-            <div
-              className="font-mono"
-              style={{
-                padding: 'var(--sp-3) var(--sp-4)',
-                background: 'var(--color-d2)',
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                borderRadius: 'var(--radius-md)',
-              }}
-            >
-              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>ISOLATION</div>
-              <div className="font-semibold text-m-agt" style={{ fontSize: 'var(--font-size-data)' }}>
-                sandbox per-chat
-              </div>
-            </div>
-          )}
-          {line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0) && (
-            <div
-              className="font-mono"
-              style={{
-                padding: 'var(--sp-3) var(--sp-4)',
-                background: 'var(--color-d2)',
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                borderRadius: 'var(--radius-md)',
-              }}
-            >
-              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>TOKENS</div>
-              <div className="text-t2" style={{ fontSize: 'var(--font-size-data)' }}>
-                <span className="text-m-pas">{(line.tokenUsage.input).toLocaleString()} in</span>
-                {' · '}
-                <span className="text-m-cht">{(line.tokenUsage.output).toLocaleString()} out</span>
-              </div>
-            </div>
-          )}
-        </motion.div>
-      )}
 
       {/* Row 3: Config + Actions side-by-side */}
       <div className="flex" style={{ gap: 'var(--sp-3)' }}>
