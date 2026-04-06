@@ -911,6 +911,105 @@ describe('AgentRuntime', () => {
     expect(mockQueue.shutdown).toHaveBeenCalled();
   });
 
+  it('shutdown continues cleanup after individual failures and clears runtime state', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger);
+      const sessionShutdown = vi.fn(async () => {
+        throw new Error('session boom');
+      });
+      const queue = makeQueueMock('test@s.whatsapp.net');
+      const queueShutdown = vi.fn(async () => {});
+      queue.shutdown = queueShutdown;
+      const globalSocketStop = vi.fn(() => {
+        throw new Error('global socket boom');
+      });
+      const workspaceSocketStopA = vi.fn(() => {
+        throw new Error('workspace socket boom');
+      });
+      const workspaceMediaStopA = vi.fn(() => {
+        throw new Error('workspace media boom');
+      });
+      const workspaceSocketStopB = vi.fn();
+      const workspaceMediaStopB = vi.fn();
+      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+      const timeout = setTimeout(() => undefined, 60_000);
+
+      const runtimeState = runtime as unknown as {
+        session: { shutdown: () => Promise<void> } | null;
+        queue: IOutboundQueue | null;
+        globalSocketServer: { stop: () => void } | null;
+        workspaceResources: Map<string, {
+          socketPath: string;
+          workspacePath: string;
+          socketServer: { stop: () => void } | null;
+          mediaBridge: (() => void) | null;
+        }>;
+        controlSessionTimeout: ReturnType<typeof setTimeout> | null;
+        activeToolNames: Map<string, Map<string, string>>;
+        perChatInboundSeqQueue: Map<string, number[]>;
+        perChatTurnContentType: Map<string, string>;
+        perChatTurnText: Map<string, string>;
+        perChatAssistantItemText: Map<string, Map<string, string>>;
+        pendingTurnText: Map<string, string>;
+        resumeFailedHandling: Set<string>;
+      };
+
+      runtimeState.session = { shutdown: sessionShutdown };
+      runtimeState.queue = queue;
+      runtimeState.globalSocketServer = { stop: globalSocketStop };
+      runtimeState.workspaceResources = new Map([
+        ['chat-a', {
+          socketPath: '/tmp/a.sock',
+          workspacePath: '/tmp/a',
+          socketServer: { stop: workspaceSocketStopA },
+          mediaBridge: workspaceMediaStopA,
+        }],
+        ['chat-b', {
+          socketPath: '/tmp/b.sock',
+          workspacePath: '/tmp/b',
+          socketServer: { stop: workspaceSocketStopB },
+          mediaBridge: workspaceMediaStopB,
+        }],
+      ]);
+      runtimeState.controlSessionTimeout = timeout;
+      runtimeState.activeToolNames.set('scope', new Map([['tool-1', 'Read']]));
+      runtimeState.perChatInboundSeqQueue.set('chat-a', [1]);
+      runtimeState.perChatTurnContentType.set('chat-a', 'text');
+      runtimeState.perChatTurnText.set('chat-a', 'reply');
+      runtimeState.perChatAssistantItemText.set('chat-a', new Map([['item-1', 'chunk']]));
+      runtimeState.pendingTurnText.set('chat-a', 'hello');
+      runtimeState.resumeFailedHandling.add('chat-a');
+
+      await expect(runtime.shutdown()).resolves.toBeUndefined();
+
+      expect(sessionShutdown).toHaveBeenCalledTimes(1);
+      expect(queueShutdown).toHaveBeenCalledTimes(1);
+      expect(globalSocketStop).toHaveBeenCalledTimes(1);
+      expect(workspaceSocketStopA).toHaveBeenCalledTimes(1);
+      expect(workspaceMediaStopA).toHaveBeenCalledTimes(1);
+      expect(workspaceSocketStopB).toHaveBeenCalledTimes(1);
+      expect(workspaceMediaStopB).toHaveBeenCalledTimes(1);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timeout);
+      expect(runtimeState.session).toBeNull();
+      expect(runtimeState.queue).toBeNull();
+      expect(runtimeState.globalSocketServer).toBeNull();
+      expect(runtimeState.controlSessionTimeout).toBeNull();
+      expect(runtimeState.workspaceResources.size).toBe(0);
+      expect(runtimeState.activeToolNames.size).toBe(0);
+      expect(runtimeState.perChatInboundSeqQueue.size).toBe(0);
+      expect(runtimeState.perChatTurnContentType.size).toBe(0);
+      expect(runtimeState.perChatTurnText.size).toBe(0);
+      expect(runtimeState.perChatAssistantItemText.size).toBe(0);
+      expect(runtimeState.pendingTurnText.size).toBe(0);
+      expect(runtimeState.resumeFailedHandling.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ─── Session resume ────────────────────────────────────────────────────────
 
   it('start() with resumable session — spawns with resume and sets pending startup message', async () => {

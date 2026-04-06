@@ -1814,7 +1814,13 @@ export class AgentRuntime implements Runtime {
   }
 
   async shutdown(): Promise<void> {
-    log.info('AgentRuntime shutting down');
+    log.info({ instanceName: this.instanceName }, 'AgentRuntime shutting down');
+    const startedAt = Date.now();
+
+    if (this.controlSessionTimeout) {
+      clearTimeout(this.controlSessionTimeout);
+      this.controlSessionTimeout = null;
+    }
 
     // Shutdown per_chat sessions
     if (this.sessionScope === 'per_chat') {
@@ -1828,7 +1834,13 @@ export class AgentRuntime implements Runtime {
       this.chatQueues.clear();
     }
 
-    if (this.session && this.sessionScope !== 'per_chat') await this.session.shutdown();
+    if (this.session && this.sessionScope !== 'per_chat') {
+      try {
+        await this.session.shutdown();
+      } catch (err) {
+        log.warn({ err, instanceName: this.instanceName }, 'session shutdown failed');
+      }
+    }
 
     if (this.shared) {
       // Shutdown all per-chat outbound queues
@@ -1857,18 +1869,47 @@ export class AgentRuntime implements Runtime {
 
     // Stop global socket server
     if (this.globalSocketServer) {
-      this.globalSocketServer.stop();
+      try {
+        this.globalSocketServer.stop();
+      } catch (err) {
+        log.warn({ err, instanceName: this.instanceName }, 'global socket server stop failed');
+      }
       this.globalSocketServer = null;
     }
 
     // Stop workspace-scoped socket servers and media bridges (sandboxPerChat)
-    for (const [, res] of this.workspaceResources) {
-      if (res.socketServer) res.socketServer.stop();
-      if (res.mediaBridge) res.mediaBridge();  // MediaBridge handle is a cleanup function
+    for (const [conversationKey, res] of this.workspaceResources) {
+      if (res.socketServer) {
+        try {
+          res.socketServer.stop();
+        } catch (err) {
+          log.warn({ err, conversationKey, socketPath: res.socketPath }, 'workspace socket server stop failed');
+        }
+      }
+      if (res.mediaBridge) {
+        try {
+          res.mediaBridge();  // MediaBridge handle is a cleanup function
+        } catch (err) {
+          log.warn({ err, conversationKey, workspacePath: res.workspacePath }, 'workspace media bridge stop failed');
+        }
+      }
     }
     this.workspaceResources.clear();
+    this.outboundQueues.clear();
+    this.chatSessions.clear();
+    this.chatQueues.clear();
+    this.activeToolNames.clear();
+    this.perChatInboundSeqQueue.clear();
+    this.currentTurnInboundContentType = null;
+    this.currentTurnAssistantText = '';
+    this.currentTurnAssistantItemText.clear();
+    this.perChatTurnContentType.clear();
+    this.perChatTurnText.clear();
+    this.perChatAssistantItemText.clear();
+    this.pendingTurnText.clear();
+    this.resumeFailedHandling.clear();
 
-    log.info('AgentRuntime shut down');
+    log.info({ instanceName: this.instanceName, durationMs: Date.now() - startedAt }, 'AgentRuntime shut down');
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
