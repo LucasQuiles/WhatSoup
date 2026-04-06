@@ -16,7 +16,8 @@
 | Execute Phase 2 | complete | 2026-04-05 |
 | Synthesize | complete | 2026-04-05 |
 | Deploy (canary) | complete | 2026-04-05 — BES Bot canary, 6/6 smoke test PASS |
-| Deploy (full) | pending | — Q instance needs restart from Lucas |
+| Deploy (full) | complete | 2026-04-05 — all instances running Phase 2 code |
+| **Follow-on** | active | → `agent-layer-hardening-20260405` (Phase 6 hardening) |
 
 ## Bead Manifest
 
