@@ -66,7 +66,7 @@ export async function handleUpdate(
       // safe for git pull and should not prevent updates.
       const trackedChanges = porcelain.split('\n').filter(l => l.trim() && !l.startsWith('??'));
       if (trackedChanges.length > 0) {
-        writeSSE('error', { step: 'pull', message: `Working tree has uncommitted changes — commit or stash before updating.\n${trackedChanges.join('\n')}` });
+        writeSSE('error', { step: 'pull', message: `Working tree has ${trackedChanges.length} uncommitted change(s). Commit or stash before updating.` });
         endOnce();
         return;
       }
@@ -78,9 +78,21 @@ export async function handleUpdate(
       const { stdout } = await execFileAsync('git', ['pull', 'origin', 'main'], {
         cwd: repoRoot, timeout: 60_000,
       });
-      writeSSE('progress', { step: 'pull', status: 'done', message: stdout.trim() });
+      // Read the new SHA explicitly so the console can detect the update
+      // without relying on checker.checkNow() completing in time
+      let newSha: string | undefined;
+      try {
+        newSha = (await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, timeout: 5_000 })).stdout.trim();
+      } catch { /* non-critical — proceed without */ }
+
+      const alreadyUpToDate = stdout.includes('Already up to date');
+      if (alreadyUpToDate) {
+        writeSSE('progress', { step: 'pull', status: 'done', message: 'Already up to date — no new changes to pull.', noChanges: true, newSha });
+      } else {
+        writeSSE('progress', { step: 'pull', status: 'done', message: stdout.trim(), newSha });
+      }
       // Refresh cached version state so /api/version reflects the pull
-      await checker.checkNow();
+      checker.checkNow().catch(() => {});
     } catch (err: any) {
       writeSSE('error', { step: 'pull', message: err.stderr?.trim() || err.message });
       endOnce();

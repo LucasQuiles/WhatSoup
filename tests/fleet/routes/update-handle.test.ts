@@ -87,7 +87,7 @@ function makeChecker(impl?: () => Promise<any>) {
 
 // Convenience: configure execFileAsync for the standard happy-path sequence.
 // Call this at the start of a test; it mutates execFileAsyncSpy.
-// Sequence: rev-parse HEAD → git status --porcelain → git pull → diff prePullSha → vite build
+// Sequence: rev-parse HEAD → git status --porcelain → git pull → rev-parse --short HEAD → diff prePullSha → vite build
 function setupHappyPath({
   pullStdout = 'Already up to date.\n',
   diffFiles = 'src/foo.ts\nconsole/src/bar.ts\n',
@@ -97,6 +97,7 @@ function setupHappyPath({
     .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })   // git rev-parse HEAD (pre-pull)
     .mockResolvedValueOnce({ stdout: dirtyFiles, stderr: '' })     // git status --porcelain (dirty check)
     .mockResolvedValueOnce({ stdout: pullStdout, stderr: '' })     // git pull
+    .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })   // git rev-parse --short HEAD (post-pull newSha)
     .mockResolvedValueOnce({ stdout: diffFiles, stderr: '' })      // git diff prePullSha --name-only (single call)
     .mockResolvedValueOnce({ stdout: '', stderr: '' });            // npx vite build
   execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
@@ -250,6 +251,7 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
 
     // Set up remaining mocks for the first call to complete
     execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })             // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' })   // diff
       .mockResolvedValueOnce({ stdout: '', stderr: '' });                       // vite build
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
@@ -339,6 +341,7 @@ describe('handleUpdate — vite build failure', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })             // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                       // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Already up to date.\n', stderr: '' }) // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })             // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }); // diff (console/ file triggers build)
 
     const buildErr: any = new Error('build failed');
@@ -364,6 +367,7 @@ describe('handleUpdate — vite build failure', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })            // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })       // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })  // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }) // diff
       .mockRejectedValueOnce(err2)                                  // vite build fails
       .mockResolvedValueOnce({ stdout: '', stderr: '' });           // rollback
@@ -381,6 +385,7 @@ describe('handleUpdate — vite build failure', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })            // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' })       // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })  // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }) // diff
       .mockRejectedValueOnce(err3)                                  // vite build fails
       .mockResolvedValueOnce({ stdout: '', stderr: '' });           // rollback
@@ -407,6 +412,7 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234abc1234abc1234abc1234abc1234abc1234\n', stderr: '' }) // rev-parse HEAD (full SHA)
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                          // git pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                    // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
       .mockRejectedValueOnce(installErr)                                                              // npm install fails
       .mockResolvedValueOnce({ stdout: '', stderr: '' });                                             // git reset --hard (rollback)
@@ -432,6 +438,7 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234abc1234abc1234abc1234abc1234abc1234\n', stderr: '' }) // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                          // git pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                    // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
       .mockRejectedValueOnce(installErr)                                                              // npm install fails
       .mockRejectedValueOnce(resetErr);                                                               // git reset fails too
@@ -454,6 +461,7 @@ describe('handleUpdate — rollback', () => {
       .mockRejectedValueOnce(new Error('git not found'))      // rev-parse fails
       .mockResolvedValueOnce({ stdout: '', stderr: '' })      // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' }) // pull succeeds
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' }) // rev-parse --short HEAD (post-pull)
       .mockRejectedValueOnce(installErr);                     // npm install fails (no diff — runs unconditionally)
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
@@ -553,7 +561,8 @@ describe('writeSSE skip after stream ended', () => {
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })       // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                 // git status --porcelain
-      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' }); // pull
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' }) // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' });      // rev-parse --short HEAD (post-pull)
     // Remaining calls resolve but should not cause writes after ended
     execFileAsyncSpy.mockResolvedValue({ stdout: '', stderr: '' });
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
@@ -598,12 +607,13 @@ describe('handleUpdate — lockfile change detection', () => {
   });
 
   it('runs root npm install when package-lock.json IS in diff', async () => {
-    // rev-parse → porcelain → pull → diff (has root lockfile) → npm install root
+    // rev-parse → porcelain → pull → rev-parse --short → diff (has root lockfile) → npm install root
     // No console/ files in diff → console-build is skipped
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                              // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'package-lock.json\nsrc/x.ts\n', stderr: '' })          // diff
       .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // npm install root
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
@@ -624,6 +634,7 @@ describe('handleUpdate — lockfile change detection', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                              // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/package-lock.json\nsrc/y.ts\n', stderr: '' })  // diff
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install console
       .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // vite build
@@ -643,6 +654,7 @@ describe('handleUpdate — lockfile change detection', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                                         // rev-parse
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                                // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                          // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'package-lock.json\nconsole/package-lock.json\n', stderr: '' })     // diff (both)
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // npm install root
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                                    // npm install console
@@ -663,6 +675,7 @@ describe('handleUpdate — lockfile change detection', () => {
       .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })                              // rev-parse
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'Updating abc..def\n', stderr: '' })                    // pull
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                              // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/package-lock.json\n', stderr: '' })             // diff
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                        // npm install console
       .mockResolvedValueOnce({ stdout: '', stderr: '' });                                       // vite build

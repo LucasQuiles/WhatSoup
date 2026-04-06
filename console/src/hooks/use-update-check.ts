@@ -27,7 +27,7 @@ export function useUpdateCheck() {
   useEffect(() => {
     if (query.data?.updateAvailable && !notifiedRef.current) {
       notifiedRef.current = true;
-      toast.info(`Update available: ${query.data.sha} → ${query.data.remoteSha}`);
+      toast.info('A new version is available. Click the update button in the nav bar to install.');
     }
     if (query.data && !query.data.updateAvailable) {
       notifiedRef.current = false;
