@@ -143,6 +143,7 @@ const mockProcessMedia = vi.mocked(processMedia);
 function makeMessenger(): Messenger & { sendMessage: ReturnType<typeof vi.fn> } {
   return {
     sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+    sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
   };
 }
 
@@ -235,7 +236,7 @@ function makeHandler() {
  * Use for tests that need processMessage() to complete.
  */
 async function handleAndDrain(
-  handler: ConversationHandler,
+  handler: InstanceType<typeof ConversationHandler>,
   msg: IncomingMessage,
 ): Promise<void> {
   await handler.handleMessage(msg);
