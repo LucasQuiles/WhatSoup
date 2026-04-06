@@ -778,7 +778,7 @@ export class AgentRuntime implements Runtime {
             this.perChatAssistantItemText.delete(lidKey);
             this.perChatAssistantItemText.set(canonical, itemText);
           }
-
+          this.cleanupPerChatState(lidKey);
           log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
         }
       }
@@ -932,6 +932,7 @@ export class AgentRuntime implements Runtime {
               this.chatSessions.delete(chatJid);
               this.chatQueues.get(chatJid)?.abortTurn();
               this.chatQueues.delete(chatJid);
+              this.cleanupPerChatState(chatJid);
             }
             this.handleCrashNotify(msg, chatJid);
           },
@@ -2148,6 +2149,7 @@ export class AgentRuntime implements Runtime {
               this.chatSessions.delete(workspaceKey);
               this.chatQueues.get(workspaceKey)?.abortTurn();
               this.chatQueues.delete(workspaceKey);
+              this.cleanupPerChatState(workspaceKey);
             }
             this.handleCrashNotify(msg, chatJid);
           },
@@ -2216,6 +2218,7 @@ export class AgentRuntime implements Runtime {
               this.chatSessions.delete(chatJid);
               this.chatQueues.get(chatJid)?.abortTurn();
               this.chatQueues.delete(chatJid);
+              this.cleanupPerChatState(chatJid);
             }
             this.handleCrashNotify(msg, chatJid);
           },
@@ -2359,7 +2362,6 @@ export class AgentRuntime implements Runtime {
     this.activeToolNames.clear();
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
-    this.pendingTurnText.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
