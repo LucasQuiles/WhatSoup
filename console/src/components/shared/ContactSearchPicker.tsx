@@ -64,8 +64,7 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
         />
         {results.length > 0 && (
           <div
-            className="c-card absolute left-0 right-0 z-50 overflow-y-auto mt-[var(--sp-1)]"
-            style={{ top: '100%', maxHeight: 'calc(var(--sp-10) * 5)' }}
+            className="c-card absolute left-0 right-0 z-50 overflow-y-auto mt-[var(--sp-1)] top-full max-h-[calc(var(--sp-10)*5)]"
           >
             {results.filter((r) => !selectedJids.has(r.jid)).map((contact) => (
               <button

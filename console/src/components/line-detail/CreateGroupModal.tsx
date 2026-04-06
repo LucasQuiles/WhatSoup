@@ -67,10 +67,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-group-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline)]"
-        style={{
-          maxHeight: 'var(--modal-max-h-sm)',
-        }}
+        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline)] max-h-[var(--modal-max-h-sm)]"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

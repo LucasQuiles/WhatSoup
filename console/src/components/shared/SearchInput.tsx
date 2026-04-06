@@ -12,8 +12,7 @@ export function SearchInput({ containerClassName, className, endAdornment, ...pr
       <Search
         size={13}
         strokeWidth={1.75}
-        className="absolute top-1/2 -translate-y-1/2 pointer-events-none text-t5"
-        style={{ left: 'var(--sp-2h)' }}
+        className="absolute top-1/2 -translate-y-1/2 pointer-events-none text-t5 left-[var(--sp-2h)]"
       />
       <input
         type="text"
@@ -22,8 +21,7 @@ export function SearchInput({ containerClassName, className, endAdornment, ...pr
       />
       {endAdornment ? (
         <div
-          className="absolute top-1/2 -translate-y-1/2"
-          style={{ right: 'var(--sp-2h)' }}
+          className="absolute top-1/2 -translate-y-1/2 right-[var(--sp-2h)]"
         >
           {endAdornment}
         </div>

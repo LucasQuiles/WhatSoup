@@ -63,8 +63,7 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
       />
       {open && filtered.length > 0 && (
         <div
-          className="c-card absolute left-0 right-0 z-50 overflow-y-auto mt-[var(--sp-1)]"
-          style={{ top: '100%', maxHeight: 'calc(var(--sp-12) * 5)' }}
+          className="c-card absolute left-0 right-0 z-50 overflow-y-auto mt-[var(--sp-1)] top-full max-h-[calc(var(--sp-12)*5)]"
         >
           {filtered.map((chat) => (
             <button

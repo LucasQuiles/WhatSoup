@@ -150,8 +150,7 @@ function InfoTab({
             onBlur={handleDescSave}
             rows={3}
             placeholder="Group description..."
-            className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)+var(--sp-6)))]"
-            style={{ height: 'auto' }}
+            className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)+var(--sp-6)))] h-auto"
           />
         ) : (
           <div className="c-data text-t3">
@@ -759,10 +758,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
         role="dialog"
         aria-modal="true"
         aria-labelledby="group-detail-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-wizard)] max-w-[var(--panel-max-inline)]"
-        style={{
-          maxHeight: 'var(--modal-max-h)',
-        }}
+        className="c-dialog flex flex-col w-[var(--panel-wizard)] max-w-[var(--panel-max-inline)] max-h-[var(--modal-max-h)]"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

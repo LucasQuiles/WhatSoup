@@ -176,10 +176,7 @@ export function ScheduleComposerModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="composer-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline-wide)]"
-        style={{
-          maxHeight: 'var(--modal-max-h-lg)',
-        }}
+        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline-wide)] max-h-[var(--modal-max-h-lg)]"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -248,8 +245,7 @@ export function ScheduleComposerModal({
                   onChange={e => setText(e.target.value)}
                   placeholder="Type your message..."
                   rows={4}
-                  className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)*2))]"
-                  style={{ height: 'auto' }}
+                  className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)*2))] h-auto"
                 />
               </div>
             ) : (
@@ -283,8 +279,7 @@ export function ScheduleComposerModal({
                     onChange={e => setCaption(e.target.value)}
                     placeholder="Optional caption..."
                     rows={2}
-                    className="c-input font-mono text-t2 resize-vertical"
-                    style={{ height: 'auto' }}
+                    className="c-input font-mono text-t2 resize-vertical h-auto"
                   />
                 </div>
               </div>
@@ -310,7 +305,7 @@ export function ScheduleComposerModal({
 
             {/* Recurrence toggle */}
             <div>
-              <div className="flex items-center gap-2" style={{ marginBottom: recurring ? 'var(--sp-3)' : 0 }}>
+              <div className={`flex items-center gap-2 ${recurring ? 'mb-[var(--sp-3)]' : ''}`}>
                 <button
                   type="button"
                   onClick={() => setRecurring(!recurring)}
