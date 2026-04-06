@@ -1,6 +1,8 @@
+import { Download } from 'lucide-react'
 import { MetricsChart } from '../MetricsChart'
 import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
+import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import type { MetricsRange, LineMetrics } from './types'
 
 export function MetricsTab({
@@ -9,12 +11,14 @@ export function MetricsTab({
   metricsError,
   metricsRange,
   setMetricsRange,
+  lineName,
 }: {
   metrics: LineMetrics | undefined
   metricsLoading: boolean
   metricsError: Error | null
   metricsRange: MetricsRange
   setMetricsRange: (r: MetricsRange) => void
+  lineName?: string
 }) {
   return (
     <div className="flex-1 overflow-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
@@ -30,6 +34,18 @@ export function MetricsTab({
             {r}
           </button>
         ))}
+        {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
+          <button
+            className="c-btn c-btn-sm c-btn-ghost"
+            onClick={() => {
+              const csv = metricsToCSV(metrics.messageVolume);
+              downloadCSV(csv, `${lineName ?? 'metrics'}-${metricsRange}.csv`);
+            }}
+            title="Export metrics as CSV"
+          >
+            <Download size={14} />
+          </button>
+        )}
       </div>
 
       {metricsLoading ? (

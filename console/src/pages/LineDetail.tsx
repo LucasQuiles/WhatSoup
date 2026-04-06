@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '../hooks/use-fleet'
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
+import { getPreference, setPreference } from '../lib/preferences'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
@@ -48,7 +49,10 @@ export default function LineDetail() {
   const { name } = useParams<{ name: string }>()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<TabId>('summary')
-  const [metricsRange, setMetricsRange] = useState<MetricsRange>('24h')
+  const [metricsRange, setMetricsRangeRaw] = useState<MetricsRange>(
+    () => getPreference('metricsRange', '24h') as MetricsRange
+  )
+  const setMetricsRange = (r: MetricsRange) => { setMetricsRangeRaw(r); setPreference('metricsRange', r); }
   const { data: line } = useLine(name || '')
   const { data: chats } = useChats(name || '')
   const { data: access } = useAccess(name || '')
@@ -290,6 +294,7 @@ export default function LineDetail() {
                 metricsError={metricsError}
                 metricsRange={metricsRange}
                 setMetricsRange={setMetricsRange}
+                lineName={name}
               />
             )}
           </motion.div>
