@@ -45,6 +45,9 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    targetChatJid: 'test@s.whatsapp.net',
+    getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
   };
 
   return { mockSession, mockQueue };
@@ -120,7 +123,7 @@ vi.mock('../../../src/core/durability.ts', () => ({
 }));
 
 const { mockDequeueNextReport } = vi.hoisted(() => ({
-  mockDequeueNextReport: vi.fn(() => null as null),
+  mockDequeueNextReport: vi.fn((): unknown => null),
 }));
 
 vi.mock('../../../src/core/heal.ts', () => ({
@@ -205,7 +208,7 @@ function makeDb(): Database {
 }
 
 function makeMessenger(): Messenger {
-  return { sendMessage: vi.fn(async () => {}) };
+  return { sendMessage: vi.fn(async () => ({ waMessageId: null })), sendMedia: vi.fn(async () => ({ waMessageId: null })) };
 }
 
 // Access private field via type cast

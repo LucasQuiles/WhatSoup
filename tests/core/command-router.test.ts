@@ -200,10 +200,10 @@ describe('parseAdminCommand — negative', () => {
 
 describe('Non-admin cannot trigger admin commands', () => {
   it('isAdminMessage rejects non-admin sender', () => {
-    expect(isAdminMessage(makeIncomingMsg({ senderJid: '15550000000@s.whatsapp.net', isGroup: false }))).toBe(false);
+    expect(isAdminMessage(makeIncomingMsg({ senderJid: '15550000000@s.whatsapp.net', isGroup: false }), mockDb)).toBe(false);
   });
 
   it('isAdminMessage rejects group messages from admin', () => {
-    expect(isAdminMessage(makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: true }))).toBe(false);
+    expect(isAdminMessage(makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: true }), mockDb)).toBe(false);
   });
 });

@@ -1160,7 +1160,8 @@ describe('LID sender display name handling', () => {
   it('unresolvable LID falls back to LID number (unavoidable)', () => {
     const db = createTestDb();
     const phone = resolvePhoneFromJid(UNKNOWN_LID_JID, db);
-    const displayName = null ?? phone;
+    const senderName: string | null = null;
+    const displayName = senderName ?? phone;
     // This is the best we can do without a mapping
     expect(displayName).toBe(UNKNOWN_LID);
     db.close();

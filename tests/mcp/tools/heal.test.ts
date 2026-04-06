@@ -45,6 +45,9 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    targetChatJid: 'test@s.whatsapp.net',
+    getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef };
@@ -246,7 +249,8 @@ function makeDb(): Database {
 
 function makeMessenger(): Messenger {
   return {
-    sendMessage: vi.fn(async () => {}),
+    sendMessage: vi.fn(async () => ({ waMessageId: null })),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
 }
 
@@ -379,7 +383,7 @@ describe('emit_heal_result MCP tool', () => {
     }, { tier: 'global' });
 
     expect(mockControlQueueInstance.sendControlMessage).toHaveBeenCalledOnce();
-    const [targetJid, protocol, payload] = mockControlQueueInstance.sendControlMessage.mock.calls[0] as [string, string, Record<string, unknown>];
+    const [targetJid, protocol, payload] = mockControlQueueInstance.sendControlMessage.mock.calls[0] as unknown as [string, string, Record<string, unknown>];
     expect(targetJid).toBe('15559990001@s.whatsapp.net');
     expect(protocol).toBe('HEAL_COMPLETE');
     expect(payload.reportId).toBe('r-FIX');
@@ -420,14 +424,14 @@ describe('emit_heal_result MCP tool', () => {
 
     // Control message goes to loops
     expect(mockControlQueueInstance.sendControlMessage).toHaveBeenCalledOnce();
-    const [targetJid, protocol, payload] = mockControlQueueInstance.sendControlMessage.mock.calls[0] as [string, string, Record<string, unknown>];
+    const [targetJid, protocol, payload] = mockControlQueueInstance.sendControlMessage.mock.calls[0] as unknown as [string, string, Record<string, unknown>];
     expect(targetJid).toBe('15559990001@s.whatsapp.net');
     expect(protocol).toBe('HEAL_ESCALATE');
     expect(payload.reportId).toBe('r-ESC');
 
     // Admin DM is also sent
     expect(mockSendTracked).toHaveBeenCalledOnce();
-    const [, adminJid, adminMsg] = mockSendTracked.mock.calls[0] as [unknown, string, string];
+    const [, adminJid, adminMsg] = mockSendTracked.mock.calls[0] as unknown as [unknown, string, string];
     expect(adminJid).toBe('15550100001@s.whatsapp.net');
     expect(adminMsg).toContain('[HEAL_ESCALATE]');
     expect(adminMsg).toContain('crash__oom');

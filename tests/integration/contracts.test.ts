@@ -213,6 +213,9 @@ describe('Health endpoint contract', () => {
       connectionManager as unknown as import('../../src/transport/connection.ts').ConnectionManager,
     startedAt,
     getEnrichmentStats: () => ({ lastRun, unprocessed: 0 }),
+    instanceName: 'test',
+    instanceType: 'chat',
+    accessMode: 'allowlist',
   };
 
   beforeAll(async () => {
@@ -304,6 +307,9 @@ describe('Health endpoint contract', () => {
       getEnrichmentStats: () => {
         throw new Error('stats explosion');
       },
+      instanceName: 'test',
+      instanceType: 'chat',
+      accessMode: 'allowlist',
     };
 
     const { config } = await import('../../src/config.ts');

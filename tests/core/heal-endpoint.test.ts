@@ -132,6 +132,9 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
     } as any,
     startedAt: Date.now() - 1000,
     getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),
+    instanceName: 'test',
+    instanceType: 'agent',
+    accessMode: 'allowlist',
     ...overrides,
   };
 }

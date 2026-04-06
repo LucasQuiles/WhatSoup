@@ -202,7 +202,7 @@ describe('handleConfigUpdate PATCH validation', () => {
         res, deps, { name: 'test-line' },
       );
 
-      expect(res._status).toBe(200, `expected 200 for accessMode=${mode}`);
+      expect(res._status).toBe(200);
       expect(JSON.parse(res._body).accessMode).toBe(mode);
     }
   });

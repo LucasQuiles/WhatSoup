@@ -44,6 +44,7 @@ vi.mock('../../src/logger.ts', () => ({
 
 import { Database } from '../../src/core/database.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
+import type { ConnectionManager } from '../../src/transport/connection.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -124,7 +125,7 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
-    },
+    } as unknown as ConnectionManager,
     startedAt: Date.now() - 1000,
     getEnrichmentStats: vi.fn().mockReturnValue({ lastRun: null, unprocessed: 0 }),
     instanceName: 'WhatSoup',
@@ -174,7 +175,7 @@ describe('GET /health', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
-      },
+      } as unknown as ConnectionManager,
     });
     await new Promise<void>((resolve) => server.close(() => resolve()));
     ({ server, port } = await buildTestServer(deps));

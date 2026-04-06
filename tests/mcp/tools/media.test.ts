@@ -542,7 +542,7 @@ describe('download_media', () => {
   it('falls through to download when media_path file is missing from disk', async () => {
     insertMessage('msg-stale', 'image', {
       mediaPath: '/tmp/whatsoup-media/deleted.jpg',
-      rawMessage: null,
+      rawMessage: undefined,
     });
 
     const result = await registry.call(

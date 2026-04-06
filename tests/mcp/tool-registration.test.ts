@@ -50,7 +50,7 @@ describe('tool registration', () => {
 
     // Messaging & media
     registerMessagingTools(registry, { connection, db: db.raw });
-    registerMediaTools(registry, { connection });
+    registerMediaTools(registry, { connection, db });
 
     // DB-dependent tools
     registerChatManagementTools(db, getSock, register);

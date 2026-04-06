@@ -33,7 +33,7 @@ describe('retention tools', () => {
     mkdirSync(join(tempRoot, 'cache'), { recursive: true });
 
     originalMediaDir = config.mediaDir;
-    config.mediaDir = join(tempRoot, 'tmp');
+    (config as { mediaDir: string }).mediaDir = join(tempRoot, 'tmp');
 
     registry = new ToolRegistry();
     db = new Database(':memory:');
@@ -42,7 +42,7 @@ describe('retention tools', () => {
   });
 
   afterEach(() => {
-    config.mediaDir = originalMediaDir;
+    (config as { mediaDir: string }).mediaDir = originalMediaDir;
     db.raw.close();
     rmSync(tempRoot, { recursive: true, force: true });
   });
