@@ -49,6 +49,8 @@ const ScheduleMessageSchema = z.object({
   viewOnce: z.boolean().optional(),
   isAnimated: z.boolean().optional(),
   mediaType: z.enum(['image', 'video', 'audio', 'document', 'sticker']).optional(),
+  recurrence: z.string().optional().describe('5-field cron expression for recurring messages'),
+  chatName: z.string().optional().describe('Display name for the target chat'),
 });
 
 const ListScheduledSchema = z.object({
@@ -61,12 +63,27 @@ const CancelScheduledSchema = z.object({
   id: z.number().int().positive(),
 });
 
+const GetScheduledSchema = z.object({
+  id: z.number().int().positive(),
+});
+
+const UpdateScheduledSchema = z.object({
+  id: z.number().int().positive(),
+  scheduled_at: z.number().int().optional(),
+  text: z.string().optional(),
+  recurrence: z.string().optional(),
+});
+
 interface ScheduledMessageRow {
   id: number;
   chat_jid: string;
+  chat_name: string | null;
   content_type: string;
   payload: string;
   scheduled_at: number;
+  recurrence: string | null;
+  next_run_at: number | null;
+  run_count: number;
   status: string;
   created_at: number;
   sent_at: number | null;
@@ -192,9 +209,13 @@ function rowToScheduledMessage(row: ScheduledMessageRow) {
   return {
     id: row.id,
     chatJid: row.chat_jid,
+    chatName: row.chat_name,
     contentType: row.content_type,
     payload: JSON.parse(row.payload) as Record<string, unknown>,
     scheduledAt: row.scheduled_at,
+    recurrence: row.recurrence,
+    nextRunAt: row.next_run_at,
+    runCount: row.run_count,
     status: row.status,
     createdAt: row.created_at,
     sentAt: row.sent_at,
@@ -221,10 +242,11 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       }
 
       const { contentType, payload, mediaBlob } = buildScheduledPayload(parsed, session);
+      const nextRunAt = parsed.recurrence ? parsed.scheduled_at : null;
       const result = db.raw.prepare(
-        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, media_blob)
-         VALUES (?, ?, ?, ?, 'pending', ?)`,
-      ).run(parsed.chatJid, contentType, JSON.stringify(payload), parsed.scheduled_at, mediaBlob);
+        `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, recurrence, next_run_at, status, media_blob)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      ).run(parsed.chatJid, parsed.chatName ?? null, contentType, JSON.stringify(payload), parsed.scheduled_at, parsed.recurrence ?? null, nextRunAt, mediaBlob);
 
       return {
         id: Number(result.lastInsertRowid),
@@ -317,6 +339,68 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       ).run(id);
 
       return { cancelled: true, id };
+    },
+  });
+
+  registry.register({
+    name: 'get_scheduled',
+    description: 'Get details of a single scheduled message by ID.',
+    scope: 'chat',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'read_only',
+    schema: GetScheduledSchema,
+    handler: async (params, session) => {
+      const { id } = GetScheduledSchema.parse(params);
+      const row = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as ScheduledMessageRow | undefined;
+      if (!row) throw new Error(`Scheduled message ${id} not found`);
+      assertSessionAccess(row.chat_jid, session);
+      return rowToScheduledMessage(row);
+    },
+  });
+
+  registry.register({
+    name: 'update_scheduled',
+    description: 'Update a pending scheduled message. Can change time, text, or recurrence.',
+    scope: 'chat',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'safe',
+    schema: UpdateScheduledSchema,
+    handler: async (params, session) => {
+      const { id, scheduled_at, text, recurrence } = UpdateScheduledSchema.parse(params);
+      const row = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as ScheduledMessageRow | undefined;
+      if (!row) throw new Error(`Scheduled message ${id} not found`);
+      assertSessionAccess(row.chat_jid, session);
+      if (row.status !== 'pending') throw new Error(`Scheduled message ${id} is ${row.status} and cannot be updated`);
+
+      const updates: string[] = [];
+      const values: unknown[] = [];
+
+      if (scheduled_at !== undefined) {
+        updates.push('scheduled_at = ?');
+        values.push(scheduled_at);
+      }
+      if (text !== undefined) {
+        updates.push('payload = ?');
+        values.push(JSON.stringify({ text }));
+        updates.push("content_type = 'text'");
+      }
+      if (recurrence !== undefined) {
+        const { parseCron, nextCronRun } = await import('../../core/cron.ts');
+        parseCron(recurrence); // throws if invalid
+        updates.push('recurrence = ?');
+        values.push(recurrence);
+        const nextRun = nextCronRun(recurrence, Math.floor(Date.now() / 1000) - 60);
+        updates.push('next_run_at = ?');
+        values.push(nextRun);
+      }
+
+      if (updates.length === 0) throw new Error('No fields to update');
+
+      values.push(id);
+      db.raw.prepare(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+      const updated = db.raw.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id) as ScheduledMessageRow;
+      return rowToScheduledMessage(updated);
     },
   });
 }
