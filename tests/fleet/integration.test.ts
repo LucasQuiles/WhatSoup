@@ -299,7 +299,7 @@ describe('fleet integration -- fleet overview', () => {
   it('each line includes a health status field', async () => {
     const { body } = await fetchJson('/api/lines');
     for (const line of body as any[]) {
-      expect(['online', 'degraded', 'unreachable', 'unknown']).toContain(line.status);
+      expect(['online', 'degraded', 'unreachable', 'unknown', 'config_error']).toContain(line.status);
     }
   });
 });

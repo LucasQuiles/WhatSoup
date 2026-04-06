@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { VALID_ACCESS_MODES, VALID_SESSION_SCOPES, VALID_TYPES } from '../instance-loader.ts';
 import { createChildLogger } from '../logger.ts';
 import { configRoot as defaultConfigRoot, dataRoot, stateRoot } from './paths.ts';
 
@@ -31,6 +32,7 @@ export interface DiscoveredInstance {
   guiPort?: number;
   models?: InstanceModels;
   sandboxPerChat?: boolean;
+  configError?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,13 +65,25 @@ export class FleetDiscovery {
         const configPath = path.join(this.configRoot, name, 'config.json');
         if (!fs.existsSync(configPath)) continue;
 
-        const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
         // Resolve paths using XDG conventions (mirror instance-loader.ts resolvePaths)
         const instDataRoot = dataRoot(name);
         const instStateRoot = stateRoot(name);
         const logDir = path.join(instDataRoot, 'logs');
         const dbPath = path.join(instDataRoot, 'bot.db');
+
+        let raw: Record<string, unknown> = {};
+        let configError: string | null = null;
+        try {
+          const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            configError = 'Invalid config.json: config is not a JSON object';
+          } else {
+            raw = parsed as Record<string, unknown>;
+            configError = validateConfig(raw, name);
+          }
+        } catch (err) {
+          configError = `Invalid config.json: ${(err as Error).message}`;
+        }
 
         // Read health token from tokens.env
         let healthToken: string | null = null;
@@ -88,26 +102,29 @@ export class FleetDiscovery {
         // Determine socket path based on instance type
         let socketPath: string | null = null;
         if (raw.type === 'passive') {
-          socketPath = raw.socketPath ?? path.join(instStateRoot, 'whatsoup.sock');
+          socketPath = typeof raw.socketPath === 'string' && raw.socketPath ? raw.socketPath : path.join(instStateRoot, 'whatsoup.sock');
         } else if (raw.type === 'agent') {
           socketPath = path.join(instStateRoot, 'whatsoup.sock');
         }
 
         this.instances.set(name, {
           name,
-          type: raw.type ?? 'chat',
-          accessMode: raw.accessMode ?? 'self_only',
-          healthPort: raw.healthPort ?? 3010,
+          type: VALID_TYPES.has(String(raw.type)) ? (raw.type as 'passive' | 'chat' | 'agent') : 'chat',
+          accessMode: typeof raw.accessMode === 'string' ? raw.accessMode : 'self_only',
+          healthPort: typeof raw.healthPort === 'number' ? raw.healthPort : 3010,
           dbPath,
           stateRoot: instStateRoot,
           logDir,
           healthToken,
           configPath,
           socketPath,
-          gui: raw.gui,
-          guiPort: raw.guiPort,
-          models: raw.models ?? undefined,
-          sandboxPerChat: raw.agentOptions?.sandboxPerChat ?? undefined,
+          gui: typeof raw.gui === 'boolean' ? raw.gui : undefined,
+          guiPort: typeof raw.guiPort === 'number' ? raw.guiPort : undefined,
+          models: raw.models as InstanceModels | undefined,
+          sandboxPerChat: typeof raw.agentOptions === 'object' && raw.agentOptions !== null && !Array.isArray(raw.agentOptions)
+            ? ((raw.agentOptions as Record<string, unknown>).sandboxPerChat as boolean | undefined)
+            : undefined,
+          configError,
         });
       } catch (err) {
         log.warn(
@@ -145,4 +162,77 @@ export class FleetDiscovery {
   getInstance(name: string): DiscoveredInstance | undefined {
     return this.instances.get(name);
   }
+}
+
+function validateConfig(raw: Record<string, unknown>, name: string): string | null {
+  if (raw.type !== undefined && !VALID_TYPES.has(String(raw.type))) {
+    return `Invalid type "${String(raw.type)}": must be one of ${[...VALID_TYPES].join(', ')}`;
+  }
+
+  if (raw.accessMode !== undefined && !VALID_ACCESS_MODES.has(String(raw.accessMode))) {
+    return `Invalid accessMode "${String(raw.accessMode)}": must be one of ${[...VALID_ACCESS_MODES].join(', ')}`;
+  }
+
+  if (raw.healthPort !== undefined && raw.healthPort !== null && (typeof raw.healthPort !== 'number' || raw.healthPort < 1 || raw.healthPort > 65535)) {
+    return `Invalid healthPort "${String(raw.healthPort)}": must be a number between 1 and 65535`;
+  }
+
+  if (raw.type === 'agent') {
+    const agentOpts = raw.agentOptions;
+    if (agentOpts !== undefined && agentOpts !== null) {
+      if (typeof agentOpts !== 'object' || Array.isArray(agentOpts)) {
+        return 'agentOptions must be an object';
+      }
+      const opts = agentOpts as Record<string, unknown>;
+      if (!VALID_SESSION_SCOPES.has(String(opts.sessionScope ?? ''))) {
+        return `agentOptions.sessionScope is required and must be one of ${[...VALID_SESSION_SCOPES].join(', ')}`;
+      }
+      if (opts.cwd !== undefined && typeof opts.cwd !== 'string') {
+        return 'agentOptions.cwd must be a string when provided';
+      }
+      if (opts.instructionsPath !== undefined && typeof opts.instructionsPath !== 'string') {
+        return 'agentOptions.instructionsPath must be a string';
+      }
+      if (opts.pluginDirs !== undefined) {
+        if (!Array.isArray(opts.pluginDirs) || !opts.pluginDirs.every((d: unknown) => typeof d === 'string')) {
+          return 'agentOptions.pluginDirs must be an array of strings';
+        }
+      }
+      if (opts.sandboxPerChat === true && opts.sessionScope !== 'per_chat') {
+        return 'agentOptions.sandboxPerChat requires sessionScope "per_chat"';
+      }
+      if (opts.provider !== undefined) {
+        if (typeof opts.provider !== 'string' || (opts.provider as string).trim() === '') {
+          return 'agentOptions.provider must be a non-empty string when provided';
+        }
+      }
+      if (opts.providerConfig !== undefined) {
+        if (typeof opts.providerConfig !== 'object' || Array.isArray(opts.providerConfig) || opts.providerConfig === null) {
+          return 'agentOptions.providerConfig must be an object when provided';
+        }
+        const pc = opts.providerConfig as Record<string, unknown>;
+        if (pc.budget !== undefined) {
+          if (typeof pc.budget !== 'object' || Array.isArray(pc.budget) || pc.budget === null) {
+            return 'agentOptions.providerConfig.budget must be an object when provided';
+          }
+        }
+      }
+      if (opts.sessionScope !== 'shared' && opts.sessionScope !== 'per_chat' && raw.accessMode !== 'self_only') {
+        return `Agent instances require accessMode "self_only", got "${String(raw.accessMode)}"`;
+      }
+    } else if (raw.accessMode !== undefined && raw.accessMode !== 'self_only') {
+      return `Agent instances require accessMode "self_only", got "${String(raw.accessMode)}"`;
+    }
+  }
+
+  if (raw.type === 'passive') {
+    if (raw.systemPrompt) {
+      return 'Passive instances must not have a systemPrompt';
+    }
+    if (raw.accessMode !== undefined && raw.accessMode !== 'self_only') {
+      return `Passive instances require accessMode "self_only", got "${String(raw.accessMode)}"`;
+    }
+  }
+
+  return null;
 }

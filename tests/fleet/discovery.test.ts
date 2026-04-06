@@ -193,7 +193,7 @@ describe('FleetDiscovery.scan — tokens.env', () => {
 // ---------------------------------------------------------------------------
 
 describe('FleetDiscovery.scan — malformed config.json', () => {
-  it('skips instances with invalid JSON and continues scanning', () => {
+  it('keeps instances with invalid JSON and marks them config_error', () => {
     writeInstanceConfig('loops', chatInstance);
 
     // Write malformed JSON for another instance
@@ -204,10 +204,30 @@ describe('FleetDiscovery.scan — malformed config.json', () => {
     const discovery = new FleetDiscovery(configRoot);
     const instances = discovery.scan();
 
-    // Should find the good instance, skip the bad one
-    expect(instances.size).toBe(1);
+    // Should find the good instance and keep the bad one with an error state
+    expect(instances.size).toBe(2);
     expect(instances.has('loops')).toBe(true);
-    expect(instances.has('broken')).toBe(false);
+    expect(instances.has('broken')).toBe(true);
+
+    const broken = instances.get('broken');
+    expect(broken?.configError).toMatch(/Expected property name/i);
+  });
+
+  it('keeps instances with schema errors and marks them config_error', () => {
+    writeInstanceConfig('broken-schema', {
+      name: 'broken-schema',
+      type: 'not-a-real-type',
+      accessMode: 'self_only',
+      adminPhones: ['15551234567'],
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    expect(instances.size).toBe(1);
+    const broken = instances.get('broken-schema');
+    expect(broken).toBeDefined();
+    expect(broken?.configError).toMatch(/Invalid type/i);
   });
 
   it('skips directories without config.json', () => {

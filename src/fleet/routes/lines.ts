@@ -232,6 +232,7 @@ interface EnrichOpts {
 /** Build the enriched LineInstance object the console expects. */
 function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
   const h = poll?.health ?? null;
+  const isConfigError = inst.configError != null;
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
   const accountJid = dig(h, 'whatsapp', 'account_jid') as string | undefined;
@@ -253,8 +254,9 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     socketPath: inst.socketPath,
 
     // Poller status
-    status: poll?.status ?? 'unknown',
-    error: poll?.error ?? null,
+    status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
+    error: inst.configError ?? poll?.error ?? null,
+    configError: inst.configError ?? null,
 
     // Derived from health snapshot
     phone: phoneFromJid(accountJid),
