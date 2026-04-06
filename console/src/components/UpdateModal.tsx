@@ -120,6 +120,14 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     prevOpenRef.current = open
   }, [open, lines])
 
+  // Close on Escape key
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open, onClose])
+
   const waitForFleetRestart = useCallback(() => {
     // Guard: if already polling, don't spawn duplicate intervals (RES-002)
     if (pollRef.current) return

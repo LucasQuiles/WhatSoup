@@ -1,4 +1,4 @@
-import { type FC } from 'react'
+import { type FC, useEffect } from 'react'
 import { X, Link2 } from 'lucide-react'
 import LinkStep from './wizard/LinkStep'
 
@@ -10,6 +10,13 @@ interface RelinkModalProps {
 }
 
 const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }) => {
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open, onClose])
+
   if (!open) return null
 
   return (

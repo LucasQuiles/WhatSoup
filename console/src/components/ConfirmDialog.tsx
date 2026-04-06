@@ -1,4 +1,4 @@
-import { type FC, type ReactNode } from 'react'
+import { type FC, type ReactNode, useEffect } from 'react'
 import { X } from 'lucide-react'
 
 interface ConfirmDialogProps {
@@ -22,6 +22,14 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
   onConfirm,
   onCancel,
 }) => {
+  // Close on Escape key
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open, onCancel])
+
   if (!open) return null
 
   const confirmStyles = confirmVariant === 'danger'
