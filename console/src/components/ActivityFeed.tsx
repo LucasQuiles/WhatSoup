@@ -205,14 +205,14 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
       <ConfirmDialog
         open={!!stopTarget}
-        title="Stop line"
-        confirmLabel="Stop line"
+        title={`Stop ${stopTarget}?`}
+        confirmLabel="Stop instance"
         confirmVariant="danger"
         confirmIcon={<Square size={14} strokeWidth={2} />}
         onConfirm={confirmStop}
         onCancel={() => setStopTarget(null)}
       >
-        Stop the <strong>{stopTarget}</strong> line? This will disconnect the WhatsApp session.
+        Stopping will disconnect <strong>{stopTarget}</strong> from WhatsApp. The instance will not reconnect until manually started.
       </ConfirmDialog>
     </div>
   );

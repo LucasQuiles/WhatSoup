@@ -368,7 +368,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
         <button
           key="stop"
           className="fc-action fc-action--danger"
-          aria-label={`Stop ${inst} line`}
+          aria-label={`Stop ${inst} instance`}
           onClick={(e) => { e.stopPropagation(); onStop(inst); }}
         >
           <Square size={12} strokeWidth={2} />

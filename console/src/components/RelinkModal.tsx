@@ -53,7 +53,7 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
               Re-link {lineName}
             </span>
           </div>
-          <button onClick={onClose} className="c-btn c-btn-ghost">
+          <button onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost">
             <X size={16} />
           </button>
         </div>
