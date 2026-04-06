@@ -3,7 +3,8 @@
 
 import { resolvePhoneFromJid, extractLocal } from './access-list.ts';
 import type { Database } from './database.ts';
-import { toPersonalJid, isLidJid } from './jid-constants.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import { toPersonalJid, toLidJid, isLidJid } from './jid-constants.ts';
 
 /**
  * Result of formatting + extracting mentions from a text string.
@@ -57,6 +58,12 @@ export class ContactsDirectory {
   /** Inject the database after construction (for ConnectionManager). */
   setDatabase(db: Database): void {
     this.db = db;
+  }
+
+  /** Build bidirectional LID mappings from the DB. Returns null if no DB available. */
+  getLidMappings(): LidMappings | undefined {
+    if (!this.db) return undefined;
+    return buildLidMappings(this.db);
   }
 
   /**
@@ -155,43 +162,111 @@ export class ContactsDirectory {
 // ---------------------------------------------------------------------------
 
 /**
+ * Bidirectional LID↔phone mappings for mention resolution.
+ *
+ * Built from lid_mappings DB table via getAllLidMappings().
+ * When provided, formatMentions can:
+ *   1. Detect when a mentioned number is a LID (not a phone) and resolve
+ *      it to the real phone number for display text.
+ *   2. Emit both @s.whatsapp.net AND @lid JIDs so mentions render
+ *      correctly in both phone-addressed and LID-addressed groups.
+ */
+export interface LidMappings {
+  /** phone digits → LID digits */
+  phoneToLid: Map<string, string>;
+  /** LID digits → phone digits */
+  lidToPhone: Map<string, string>;
+}
+
+/**
+ * Build bidirectional LID mappings from the lid_mappings DB table.
+ * Call once per send or cache and invalidate when mappings change.
+ */
+export function buildLidMappings(db: Database | DatabaseSync): LidMappings {
+  const rawDb: DatabaseSync = 'raw' in db ? (db as Database).raw : db as DatabaseSync;
+  const rows = rawDb.prepare(
+    'SELECT lid, phone_jid FROM lid_mappings',
+  ).all() as { lid: string; phone_jid: string }[];
+
+  const phoneToLid = new Map<string, string>();
+  const lidToPhone = new Map<string, string>();
+  for (const row of rows) {
+    const phone = row.phone_jid.split('@')[0];
+    if (phone && row.lid) {
+      phoneToLid.set(phone, row.lid);
+      lidToPhone.set(row.lid, phone);
+    }
+  }
+  return { phoneToLid, lidToPhone };
+}
+
+/**
  * Scan outgoing text for @mention patterns, resolve names to phone numbers
  * via the contacts directory, rewrite the text, and build the Baileys
  * mentions array.
  *
  * Recognition order:
- *   1. `@<digits>` / `@+<digits>` — used as-is (direct phone mention)
+ *   1. `@<digits>` / `@+<digits>` — check if it's a known LID first,
+ *      then treat as phone number
  *   2. `@<word>` / `@<Word>` — looked up in contacts map (name mention)
  *
- * Only `@s.whatsapp.net` JIDs are emitted — `@lid` variants are omitted
- * to avoid duplicates in the Baileys mentions array.
+ * When `lidMappings` is provided:
+ *   - Numbers that are known LIDs are resolved to phone for display text
+ *   - Both @s.whatsapp.net and @lid JIDs are emitted for each mention
+ *   - This ensures mentions work in both phone-addressed and LID-addressed groups
  *
  * Unresolved @name patterns are left unchanged in the text.
  */
-export function formatMentions(text: string, contacts?: ContactsMap): FormattedMentions {
+export function formatMentions(
+  text: string,
+  contacts?: ContactsMap,
+  lidMappings?: LidMappings,
+): FormattedMentions {
   const seen = new Set<string>();
   const jids: string[] = [];
 
   // Single pass: match @<something> patterns
-  // - @+?<digits> for phone numbers
+  // - @+?<digits> for phone numbers or LIDs
   // - @<word chars> for names (letters, hyphens, underscores)
   const formatted = text.replace(
     /@(\+?\d{5,}\b|[A-Za-z][\w-]*)/g,
     (fullMatch, capture: string) => {
       let phone: string | undefined;
+      let lid: string | undefined;
 
       if (/^\+?\d{5,}$/.test(capture)) {
-        // Direct phone number — strip leading +
-        phone = capture.replace(/^\+/, '');
+        const digits = capture.replace(/^\+/, '');
+
+        // Check if this number is actually a LID (not a phone number).
+        // LID-addressed groups show participant IDs as LIDs, so users
+        // naturally copy/paste LID numbers into @mentions.
+        if (lidMappings?.lidToPhone.has(digits)) {
+          phone = lidMappings.lidToPhone.get(digits)!;
+          lid = digits;
+        } else {
+          phone = digits;
+          // Look up the corresponding LID for this phone number
+          if (lidMappings) {
+            lid = lidMappings.phoneToLid.get(digits);
+          }
+        }
       } else if (contacts) {
         // Name-based — look up in contacts directory
         phone = contacts.get(capture.toLowerCase());
+        // Resolve LID for name-based mentions too
+        if (phone && lidMappings) {
+          lid = lidMappings.phoneToLid.get(phone);
+        }
       }
 
       if (phone && !seen.has(phone)) {
         seen.add(phone);
-        // Emit only @s.whatsapp.net — no @lid variant
+        // Emit @s.whatsapp.net for phone-addressed groups
         jids.push(toPersonalJid(phone));
+        // Also emit @lid for LID-addressed groups
+        if (lid) {
+          jids.push(toLidJid(lid));
+        }
       }
 
       if (phone) {
