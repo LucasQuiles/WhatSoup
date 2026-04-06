@@ -189,6 +189,20 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
+        // ═══ FLEX SHORTHAND IN STYLE ═══
+        // Raw numeric flex values have Tailwind equivalents
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="flex"][value.type="Literal"][value.raw=/^[0-9]/]',
+          message: '⛔ Inline flex numeric in style. FIX: remove from style, add to className. 1→"flex-1" 0→"flex-none". For flex: 1.6 or other ratios, use style={{ flex: "1.6" }} only if no Tailwind equivalent exists.',
+        },
+
+        // ═══ INLINE ANIMATION ═══
+        // Animations with hardcoded durations should use CSS @keyframes + class
+        {
+          selector: 'Property[key.name="animation"][value.value=/\\d+\\.?\\d*(s|ms)/]',
+          message: '⛔ Inline animation with hardcoded duration. FIX: move to a CSS @keyframes rule in index.css and apply via className.',
+        },
+
         // ═══ WHITESPACE / TEXT STYLING IN STYLE ═══
         // These have direct Tailwind equivalents
         {
