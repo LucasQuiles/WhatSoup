@@ -6,7 +6,7 @@ interface ConfirmDialogProps {
   title: string
   children: ReactNode
   confirmLabel?: string
-  confirmVariant?: 'danger' | 'primary'
+  confirmVariant?: 'danger' | 'primary' | 'warning'
   confirmIcon?: ReactNode
   onConfirm: () => void
   onCancel: () => void
@@ -31,10 +31,6 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
   }, [open, onCancel])
 
   if (!open) return null
-
-  const confirmStyles = confirmVariant === 'danger'
-    ? { background: 'transparent', borderColor: 'var(--s-crit-soft)', color: 'var(--color-s-crit)' }
-    : { background: 'var(--color-m-cht)', borderColor: 'var(--color-m-cht)', color: 'var(--color-d0)' }
 
   return (
     <div
@@ -92,20 +88,17 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         >
           <button
             onClick={onCancel}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans text-t3 hover:text-t2 hover:bg-d4 cursor-pointer c-hover"
-            style={{ fontSize: 'var(--font-size-heading)', border: 'none', background: 'transparent' }}
+            className="c-btn c-btn-ghost"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md font-sans font-medium cursor-pointer c-hover"
-            style={{
-              fontSize: 'var(--font-size-heading)',
-              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: confirmStyles.borderColor,
-              background: confirmStyles.background,
-              color: confirmStyles.color,
-            }}
+            className={`c-btn ${
+              confirmVariant === 'danger' ? 'c-btn-danger'
+              : confirmVariant === 'warning' ? 'c-btn-warning'
+              : 'c-btn-primary'
+            }`}
           >
             {confirmIcon}
             {confirmLabel}

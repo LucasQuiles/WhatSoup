@@ -95,6 +95,7 @@
   --s-crit-border: rgba(252,129,129, 0.1);
   --s-crit-ring: rgba(252,129,129, 0.3);
   --s-ok-ring: rgba(45,212,168, 0.3);
+  --s-warn-ring: rgba(246,173,85, 0.3);
   /* ═══ Elevation shadows ═══ */
   --shadow-inset: inset 0 -2px 8px rgba(0,0,0,0.15);
   --shadow-md: 0 8px 24px rgba(0,0,0,0.4);
@@ -846,6 +847,8 @@ body::before {
 .c-btn-success:hover { background: var(--s-ok-wash); }
 .c-btn-ghost         { background: transparent; border-color: transparent; color: var(--color-t3); }
 .c-btn-ghost:hover   { background: var(--color-d4); color: var(--color-t2); }
+.c-btn-warning       { background: transparent; border-color: var(--s-warn-ring); color: var(--color-s-warn); }
+.c-btn-warning:hover { background: var(--s-warn-wash); }
 
 /* Disabled state for all button variants */
 .c-btn:disabled,
