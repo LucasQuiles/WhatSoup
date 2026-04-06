@@ -123,7 +123,7 @@ function InfoTab({
 
       {/* Subject */}
       <div>
-        <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <label className="c-field-label">
           Subject
         </label>
         {isAdmin ? (
@@ -141,7 +141,7 @@ function InfoTab({
 
       {/* Description */}
       <div>
-        <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <label className="c-field-label">
           Description
         </label>
         {isAdmin ? (
@@ -183,7 +183,7 @@ function InfoTab({
 
       {/* Invite link */}
       <div>
-        <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <label className="c-field-label">
           Invite link
         </label>
         {inviteLink ? (
@@ -200,8 +200,7 @@ function InfoTab({
               <button
                 type="button"
                 onClick={handleCopyLink}
-                className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1"
-                style={{ fontSize: 'var(--font-size-xs)' }}
+                className="c-btn c-btn-xs c-btn-ghost font-mono"
               >
                 <Copy size={11} /> Copy
               </button>
@@ -209,8 +208,7 @@ function InfoTab({
                 <button
                   type="button"
                   onClick={() => setConfirmRevoke(true)}
-                  className="c-btn c-btn-sm c-btn-danger font-mono flex items-center gap-1"
-                  style={{ fontSize: 'var(--font-size-xs)' }}
+                  className="c-btn c-btn-xs c-btn-danger font-mono"
                 >
                   <X size={11} /> Revoke
                 </button>
@@ -222,8 +220,7 @@ function InfoTab({
             type="button"
             onClick={handleFetchInviteLink}
             disabled={loadingLink}
-            className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1"
-            style={{ fontSize: 'var(--font-size-xs)' }}
+            className="c-btn c-btn-xs c-btn-ghost font-mono"
           >
             <Link size={11} /> {loadingLink ? 'Fetching...' : 'Fetch invite link'}
           </button>
@@ -326,7 +323,7 @@ function ParticipantsTab({
       {/* Add participants (admin only) */}
       {isAdmin && (
         <div>
-          <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+          <label className="c-field-label">
             Add participants
           </label>
           <ContactSearchPicker
@@ -341,8 +338,7 @@ function ParticipantsTab({
               type="button"
               onClick={handleAdd}
               disabled={adding}
-              className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1 mt-[var(--sp-2)]"
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className="c-btn c-btn-xs c-btn-primary font-mono mt-[var(--sp-2)]"
             >
               <UserPlus size={11} /> {adding ? 'Adding...' : `Add ${addContacts.length}`}
             </button>
@@ -363,16 +359,14 @@ function ParticipantsTab({
                 <button
                   type="button"
                   onClick={() => handleRequestAction(req.jid, 'add')}
-                  className="c-btn c-btn-sm c-btn-primary font-mono"
-                  style={{ fontSize: 'var(--font-size-xs)' }}
+                  className="c-btn c-btn-xs c-btn-primary font-mono"
                 >
                   Approve
                 </button>
                 <button
                   type="button"
                   onClick={() => handleRequestAction(req.jid, 'remove')}
-                  className="c-btn c-btn-sm c-btn-danger font-mono"
-                  style={{ fontSize: 'var(--font-size-xs)' }}
+                  className="c-btn c-btn-xs c-btn-danger font-mono"
                 >
                   Reject
                 </button>
@@ -422,8 +416,7 @@ function ParticipantsTab({
                   <button
                     type="button"
                     onClick={() => handleToggleAdmin(p)}
-                    className="c-btn c-btn-sm c-btn-ghost font-mono flex items-center gap-1"
-                    style={{ fontSize: 'var(--font-size-xs)' }}
+                    className="c-btn c-btn-xs c-btn-ghost font-mono"
                     title={p.admin ? 'Demote' : 'Promote to admin'}
                   >
                     {p.admin ? <ShieldOff size={11} /> : <ShieldCheck size={11} />}
@@ -431,8 +424,7 @@ function ParticipantsTab({
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(p)}
-                    className="c-btn c-btn-sm c-btn-danger font-mono flex items-center gap-1"
-                    style={{ fontSize: 'var(--font-size-xs)' }}
+                    className="c-btn c-btn-xs c-btn-danger font-mono"
                     title="Remove participant"
                   >
                     <UserMinus size={11} />
@@ -575,8 +567,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'announce'}
               onClick={() => handleSetting('not_announcement', 'announce')}
-              className={`c-btn c-btn-sm font-mono ${!detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${!detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               All
             </button>
@@ -584,8 +575,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'announce'}
               onClick={() => handleSetting('announcement', 'announce')}
-              className={`c-btn c-btn-sm font-mono ${detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               Admins only
             </button>
@@ -607,8 +597,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'locked'}
               onClick={() => handleSetting('unlocked', 'locked')}
-              className={`c-btn c-btn-sm font-mono ${!detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${!detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               All
             </button>
@@ -616,8 +605,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'locked'}
               onClick={() => handleSetting('locked', 'locked')}
-              className={`c-btn c-btn-sm font-mono ${detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               Admins only
             </button>
@@ -639,8 +627,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'memberAddMode'}
               onClick={() => handleMemberAddMode('all_member_add')}
-              className={`c-btn c-btn-sm font-mono ${detail.memberAddMode !== 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${detail.memberAddMode !== 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               All
             </button>
@@ -648,8 +635,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'memberAddMode'}
               onClick={() => handleMemberAddMode('admin_add')}
-              className={`c-btn c-btn-sm font-mono ${detail.memberAddMode === 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${detail.memberAddMode === 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               Admins only
             </button>
@@ -671,8 +657,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'joinApproval'}
               onClick={() => handleJoinApproval('off')}
-              className={`c-btn c-btn-sm font-mono ${detail.joinApprovalMode !== 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${detail.joinApprovalMode !== 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               Off
             </button>
@@ -680,8 +665,7 @@ function SettingsTab({
               type="button"
               disabled={saving === 'joinApproval'}
               onClick={() => handleJoinApproval('on')}
-              className={`c-btn c-btn-sm font-mono ${detail.joinApprovalMode === 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className={`c-btn c-btn-xs font-mono ${detail.joinApprovalMode === 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
             >
               On
             </button>
@@ -702,8 +686,7 @@ function SettingsTab({
             value={detail.ephemeralDuration ?? 0}
             disabled={saving === 'ephemeral'}
             onChange={e => handleEphemeral(Number(e.target.value))}
-            className="font-mono text-t2 c-btn c-btn-sm c-btn-ghost bg-d1"
-            style={{ fontSize: 'var(--font-size-xs)' }}
+            className="font-mono text-t2 c-btn c-btn-xs c-btn-ghost bg-d1"
           >
             {EPHEMERAL_OPTIONS.map(opt => (
               <option key={opt.seconds} value={opt.seconds}>{opt.label}</option>
@@ -717,7 +700,7 @@ function SettingsTab({
         <button
           type="button"
           onClick={() => setConfirmLeave(true)}
-          className="c-btn c-btn-danger font-mono flex items-center gap-1"
+          className="c-btn c-btn-danger font-mono"
           style={{ fontSize: 'var(--font-size-data)' }}
         >
           <LogOut size={14} /> Leave group

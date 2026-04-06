@@ -190,7 +190,7 @@ export function ScheduleComposerModal({
               {isEditing ? 'Edit Scheduled Message' : 'Schedule Message'}
             </span>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost c-btn-sm">
+          <button type="button" onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost c-btn-xs">
             <X size={18} strokeWidth={1.75} />
           </button>
         </div>
@@ -201,7 +201,7 @@ export function ScheduleComposerModal({
 
             {/* Chat picker */}
             <div>
-              <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+              <label className="c-field-label">
                 Target chat
               </label>
               <ChatPicker
@@ -215,7 +215,7 @@ export function ScheduleComposerModal({
 
             {/* Content type selector */}
             <div>
-              <label className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+              <label className="c-field-label">
                 Content type
               </label>
               <div className="flex gap-2">
@@ -224,8 +224,7 @@ export function ScheduleComposerModal({
                     key={ct}
                     type="button"
                     onClick={() => setContentType(ct)}
-                    className={`c-btn c-btn-sm font-mono flex items-center gap-1 ${contentType === ct ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                    style={{ fontSize: 'var(--font-size-xs)' }}
+                    className={`c-btn c-btn-xs font-mono ${contentType === ct ? 'c-btn-primary' : 'c-btn-ghost'}`}
                   >
                     {ct === 'text' ? <MessageSquare size={12} strokeWidth={1.75} /> : <FileText size={12} strokeWidth={1.75} />}
                     {capitalize(ct)}
@@ -239,7 +238,7 @@ export function ScheduleComposerModal({
               <div>
                 <label
                   htmlFor="composer-text"
-                  className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}
+                  className="c-field-label"
                 >
                   Message text
                 </label>
@@ -258,7 +257,7 @@ export function ScheduleComposerModal({
                 <div>
                   <label
                     htmlFor="composer-path"
-                    className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}
+                    className="c-field-label"
                   >
                     File path
                   </label>
@@ -274,7 +273,7 @@ export function ScheduleComposerModal({
                 <div>
                   <label
                     htmlFor="composer-caption"
-                    className="font-mono text-t4 block mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}
+                    className="c-field-label"
                   >
                     Caption (optional)
                   </label>
@@ -296,7 +295,6 @@ export function ScheduleComposerModal({
               <label
                 htmlFor="composer-datetime"
                 className="font-mono text-t4 block mb-[var(--sp-1)]"
-                style={{ fontSize: 'var(--font-size-xs)' }}
               >
                 Scheduled time (local)
               </label>
@@ -316,8 +314,7 @@ export function ScheduleComposerModal({
                 <button
                   type="button"
                   onClick={() => setRecurring(!recurring)}
-                  className={`c-btn c-btn-sm font-mono flex items-center gap-1 ${recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                  style={{ fontSize: 'var(--font-size-xs)' }}
+                  className={`c-btn c-btn-xs font-mono ${recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
                 >
                   <RefreshCw size={12} strokeWidth={1.75} />
                   Recurring
@@ -338,8 +335,7 @@ export function ScheduleComposerModal({
                         key={preset.label}
                         type="button"
                         onClick={() => setCronExpr(preset.cron)}
-                        className={`c-btn c-btn-sm font-mono ${cronExpr === preset.cron ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                        style={{ fontSize: 'var(--font-size-xs)' }}
+                        className={`c-btn c-btn-xs font-mono ${cronExpr === preset.cron ? 'c-btn-primary' : 'c-btn-ghost'}`}
                       >
                         {preset.label}
                       </button>
@@ -355,7 +351,7 @@ export function ScheduleComposerModal({
                   />
                   {/* Preview */}
                   {cronPreview && (
-                    <div className="font-mono text-t4 text-m-cht" style={{ fontSize: 'var(--font-size-xs)' }}>
+                    <div className="font-mono text-t4 mt-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
                       {cronPreview}
                     </div>
                   )}
@@ -375,7 +371,7 @@ export function ScheduleComposerModal({
             type="button"
             onClick={handleSubmit}
             disabled={submitting || !selectedChat}
-            className="c-btn c-btn-primary font-mono flex items-center gap-1"
+            className="c-btn c-btn-primary font-mono"
             style={{ fontSize: 'var(--font-size-data)' }}
           >
             <Clock size={13} strokeWidth={1.75} />

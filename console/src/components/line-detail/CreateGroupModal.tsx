@@ -144,7 +144,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             type="button"
             onClick={handleCreate}
             disabled={submitting || !subject.trim() || participants.length === 0}
-            className="c-btn c-btn-primary font-mono flex items-center gap-1"
+            className="c-btn c-btn-primary font-mono"
             style={{ fontSize: 'var(--font-size-data)' }}
           >
             <Users size={13} strokeWidth={1.75} />
