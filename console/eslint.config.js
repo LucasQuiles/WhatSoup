@@ -206,11 +206,16 @@ const designSystemRestrictions = [
           message: '⛔ Simple mode color in style. FIX: remove from style, add to className. var(--color-m-pas)→"text-m-pas" var(--color-m-cht)→"text-m-cht" var(--color-m-agt)→"text-m-agt".',
         },
 
-        // ═══ SIMPLE BACKGROUND COLOR IN STYLE ═══
+        // ═══ BACKGROUND TOKEN IN STYLE ═══
         // background: 'var(--color-dN)' should be a Tailwind bg-dN class
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="background"][value.value=/^var\\(--color-d\\d\\)$/]',
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
+        },
+        // background: 'var(--*)' (non-dN tokens) → bg-[var(--*)] class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="background"][value.value=/^var\\(--(?!color-d\\d)/]',
+          message: '⛔ background token in style. FIX: remove from style, add to className. background: "var(--s-warn-wash)"→"bg-[var(--s-warn-wash)]" background: "var(--overlay)"→"bg-[var(--overlay)]". Pattern: bg-[var(--TOKEN)].',
         },
 
         // ═══ BORDER EDGE SHORTHAND IN STYLE ═══
