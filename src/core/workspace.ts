@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { defaultSettingsJson, type PermissionsSettings } from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
+import { createChildLogger } from '../logger.ts';
+
+const log = createChildLogger('workspace');
 
 export interface WorkspaceInfo {
   kind: 'dm' | 'group';
@@ -85,14 +88,19 @@ export function writeSandboxArtifacts(
   policy: Record<string, unknown>,
   hookPath: string,
 ): void {
-  writeFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2), { mode: 0o600 });
+  try {
+    writeFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2), { mode: 0o600 });
 
-  const settings = {
-    hooks: {
-      PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
-    },
-  };
-  writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2), { mode: 0o600 });
+    const settings = {
+      hooks: {
+        PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
+      },
+    };
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2), { mode: 0o600 });
+  } catch (err) {
+    log.error({ err, claudeDir }, 'failed to write sandbox artifacts');
+    throw err;
+  }
 }
 
 /**
@@ -106,24 +114,29 @@ export function writePermissionsSettings(
   claudeDir: string,
   settings: PermissionsSettings,
 ): void {
-  mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
-  const settingsPath = join(claudeDir, 'settings.json');
+  try {
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    const settingsPath = join(claudeDir, 'settings.json');
 
-  let existing: Record<string, unknown> = {};
-  if (existsSync(settingsPath)) {
-    try {
-      existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    } catch {
-      // Corrupt file — overwrite entirely
+    let existing: Record<string, unknown> = {};
+    if (existsSync(settingsPath)) {
+      try {
+        existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      } catch {
+        // Corrupt file — overwrite entirely
+      }
     }
-  }
 
-  const merged: Record<string, unknown> = { ...existing, permissions: settings.permissions };
-  if (settings.enabledPlugins !== undefined) {
-    // null or {} = reset to global inheritance; non-empty object = override
-    merged.enabledPlugins = settings.enabledPlugins ?? {};
+    const merged: Record<string, unknown> = { ...existing, permissions: settings.permissions };
+    if (settings.enabledPlugins !== undefined) {
+      // null or {} = reset to global inheritance; non-empty object = override
+      merged.enabledPlugins = settings.enabledPlugins ?? {};
+    }
+    writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+  } catch (err) {
+    log.error({ err, claudeDir }, 'failed to write permissions settings');
+    throw err;
   }
-  writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -141,39 +154,44 @@ export function ensurePermissionsSettings(
   type: string,
   enabledPlugins?: Record<string, boolean>,
 ): void {
-  if (type !== 'agent') return;
+  try {
+    if (type !== 'agent') return;
 
-  const defaults = defaultSettingsJson(type);
-  if (!defaults) return;
+    const defaults = defaultSettingsJson(type);
+    if (!defaults) return;
 
-  mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
-  const settingsPath = join(claudeDir, 'settings.json');
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    const settingsPath = join(claudeDir, 'settings.json');
 
-  if (existsSync(settingsPath)) {
-    try {
-      const existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
-      // Apply enabledPlugins from config — always overwrite to stay in sync
-      if (enabledPlugins) {
-        existing.enabledPlugins = enabledPlugins;
-        writeFileSync(settingsPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+    if (existsSync(settingsPath)) {
+      try {
+        const existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        // Apply enabledPlugins from config — always overwrite to stay in sync
+        if (enabledPlugins) {
+          existing.enabledPlugins = enabledPlugins;
+          writeFileSync(settingsPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+        }
+        if (existing.permissions) return; // Already has permissions — don't overwrite
+        // Has settings (e.g. hooks) but no permissions — add them
+        const merged = { ...existing, permissions: defaults.permissions };
+        writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+      } catch {
+        // Corrupt file — overwrite with defaults
+        const out: Record<string, unknown> = { ...defaults };
+        if (enabledPlugins) out.enabledPlugins = enabledPlugins;
+        writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
       }
-      if (existing.permissions) return; // Already has permissions — don't overwrite
-      // Has settings (e.g. hooks) but no permissions — add them
-      const merged = { ...existing, permissions: defaults.permissions };
-      writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
-    } catch {
-      // Corrupt file — overwrite with defaults
-      const out: Record<string, unknown> = { ...defaults };
-      if (enabledPlugins) out.enabledPlugins = enabledPlugins;
-      writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
+      return;
     }
-    return;
-  }
 
-  // No settings.json at all — write defaults + enabledPlugins if provided
-  const out: Record<string, unknown> = { ...defaults };
-  if (enabledPlugins) out.enabledPlugins = enabledPlugins;
-  writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
+    // No settings.json at all — write defaults + enabledPlugins if provided
+    const out: Record<string, unknown> = { ...defaults };
+    if (enabledPlugins) out.enabledPlugins = enabledPlugins;
+    writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
+  } catch (err) {
+    log.error({ err, claudeDir, type }, 'failed to ensure permissions settings');
+    throw err;
+  }
 }
 
 /**
@@ -183,58 +201,63 @@ export function ensurePermissionsSettings(
 export function provisionWorkspace(opts: ProvisionOptions): string {
   const { workspacePath, instanceCwd, sandbox, hookPath, mcpServerPath, sendMediaServerPath } = opts;
 
-  // 1. Ensure .claude/ directory exists
-  const claudeDir = join(workspacePath, '.claude');
-  mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
-
-  // 2. Write sandbox-policy.json and settings.json via shared helper
-  const mcpAllowlist = opts.chatScopedToolNames
-    ? buildMcpAllowlist(opts.chatScopedToolNames, !!opts.sendMediaServerPath)
-    : undefined;
-
-  const sandboxPolicy = {
-    allowedPaths: [workspacePath],
-    allowedTools: sandbox.allowedTools,
-    ...(sandbox.allowedMcpTools !== undefined ? { allowedMcpTools: sandbox.allowedMcpTools }
-      : mcpAllowlist ? { allowedMcpTools: mcpAllowlist } : {}),
-    bash: sandbox.bash,
-  };
-  writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath);
-
-  // 3. Compute socket path (whatsoup.sock)
-  const socketPath = join(claudeDir, 'whatsoup.sock');
-
-  // 4. Write .mcp.json — whatsoup-proxy + optional send-media entry
-  const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
-  const mcpServers: Record<string, unknown> = {
-    'whatsoup': {
-      command: 'node',
-      args: ['--experimental-strip-types', mcpServerPath],
-      env: { WHATSOUP_SOCKET: socketPath },
-    },
-  };
-  if (sendMediaServerPath) {
-    mcpServers['send-media'] = {
-      command: 'node',
-      args: ['--experimental-strip-types', sendMediaServerPath],
-      env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
-    };
-  }
-  writeFileSync(
-    join(workspacePath, '.mcp.json'),
-    JSON.stringify({ mcpServers }, null, 2),
-  );
-
-  // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
-  const symlinkPath = join(workspacePath, 'CLAUDE.md');
-  const symlinkTarget = join(instanceCwd, 'CLAUDE.md');
   try {
-    unlinkSync(symlinkPath);
-  } catch {
-    // Ignore error if symlink does not exist yet
-  }
-  symlinkSync(symlinkTarget, symlinkPath);
+    // 1. Ensure .claude/ directory exists
+    const claudeDir = join(workspacePath, '.claude');
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
-  // 6. Return socket path
-  return socketPath;
+    // 2. Write sandbox-policy.json and settings.json via shared helper
+    const mcpAllowlist = opts.chatScopedToolNames
+      ? buildMcpAllowlist(opts.chatScopedToolNames, !!opts.sendMediaServerPath)
+      : undefined;
+
+    const sandboxPolicy = {
+      allowedPaths: [workspacePath],
+      allowedTools: sandbox.allowedTools,
+      ...(sandbox.allowedMcpTools !== undefined ? { allowedMcpTools: sandbox.allowedMcpTools }
+        : mcpAllowlist ? { allowedMcpTools: mcpAllowlist } : {}),
+      bash: sandbox.bash,
+    };
+    writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath);
+
+    // 3. Compute socket path (whatsoup.sock)
+    const socketPath = join(claudeDir, 'whatsoup.sock');
+
+    // 4. Write .mcp.json — whatsoup-proxy + optional send-media entry
+    const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
+    const mcpServers: Record<string, unknown> = {
+      'whatsoup': {
+        command: 'node',
+        args: ['--experimental-strip-types', mcpServerPath],
+        env: { WHATSOUP_SOCKET: socketPath },
+      },
+    };
+    if (sendMediaServerPath) {
+      mcpServers['send-media'] = {
+        command: 'node',
+        args: ['--experimental-strip-types', sendMediaServerPath],
+        env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
+      };
+    }
+    writeFileSync(
+      join(workspacePath, '.mcp.json'),
+      JSON.stringify({ mcpServers }, null, 2),
+    );
+
+    // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
+    const symlinkPath = join(workspacePath, 'CLAUDE.md');
+    const symlinkTarget = join(instanceCwd, 'CLAUDE.md');
+    try {
+      unlinkSync(symlinkPath);
+    } catch {
+      // Ignore error if symlink does not exist yet
+    }
+    symlinkSync(symlinkTarget, symlinkPath);
+
+    // 6. Return socket path
+    return socketPath;
+  } catch (err) {
+    log.error({ err, workspacePath }, 'workspace provisioning failed');
+    throw err;
+  }
 }

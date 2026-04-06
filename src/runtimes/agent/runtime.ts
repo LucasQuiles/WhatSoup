@@ -190,8 +190,13 @@ function relocateMediaToWorkspace(content: string, workspacePath: string): strin
 
   const mediaDestDir = join(workspacePath, 'media');
   if (!createdMediaDirs.has(mediaDestDir)) {
-    mkdirSync(mediaDestDir, { recursive: true, mode: 0o700 });
-    createdMediaDirs.add(mediaDestDir);
+    try {
+      mkdirSync(mediaDestDir, { recursive: true, mode: 0o700 });
+      createdMediaDirs.add(mediaDestDir);
+    } catch (err) {
+      log.warn({ err, mediaDestDir }, 'failed to create workspace media directory');
+      return content;
+    }
   }
 
   // Match file paths from the global media temp dir
@@ -773,52 +778,75 @@ export class AgentRuntime implements Runtime {
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
       const cwd = this.cwd ?? homedir();
-      const claudeDir = join(cwd, '.claude');
-      mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+      try {
+        const claudeDir = join(cwd, '.claude');
+        mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
-      // Resolve allowedPaths to absolute paths before writing
-      const resolvedPolicy = {
-        ...this.sandbox,
-        allowedPaths: this.sandbox.allowedPaths.map(p =>
-          p.startsWith('~/') ? join(homedir(), p.slice(2)) : resolve(p),
-        ),
-      };
-      const hookPath = resolve(
-        new URL('.', import.meta.url).pathname,
-        '../../../deploy/hooks/agent-sandbox.sh',
-      );
-      writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath);
-      log.info({ cwd, hookPath }, 'wrote sandbox-policy.json and settings.json');
+        // Resolve allowedPaths to absolute paths before writing
+        const resolvedPolicy = {
+          ...this.sandbox,
+          allowedPaths: this.sandbox.allowedPaths.map(p =>
+            p.startsWith('~/') ? join(homedir(), p.slice(2)) : resolve(p),
+          ),
+        };
+        const hookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/agent-sandbox.sh',
+        );
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath);
+        log.info({ cwd, hookPath }, 'wrote sandbox-policy.json and settings.json');
+      } catch (err) {
+        log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
+        throw err;
+      }
     }
 
     // Ensure settings.json has a permissions block — safety net for instances
     // without sandbox config. Prevents Claude Code's "sensitive file" blocks.
     {
       const cwd = this.cwd ?? homedir();
-      const claudeDir = join(cwd, '.claude');
-      ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins);
+      try {
+        const claudeDir = join(cwd, '.claude');
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins);
+      } catch (err) {
+        log.error({ err, cwd }, 'failed to ensure permissions settings during startup');
+        throw err;
+      }
     }
 
     // Start global WhatSoup socket server (non-sandboxPerChat mode only)
     if (!this.sandboxPerChat) {
       const agentCwd = this.cwd ?? homedir();
-      const claudeDir = join(agentCwd, '.claude');
-      mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
-      const socketPath = join(claudeDir, 'whatsoup.sock');
+      try {
+        const claudeDir = join(agentCwd, '.claude');
+        mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+        const socketPath = join(claudeDir, 'whatsoup.sock');
 
-      const globalSession: SessionContext = { tier: 'global' };
-      this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
-      this.globalSocketServer.start();
-      log.info({ socketPath }, 'global WhatSoup socket server started');
+        const globalSession: SessionContext = { tier: 'global' };
+        this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
+        this.globalSocketServer.start();
+        log.info({ socketPath }, 'global WhatSoup socket server started');
 
-      // Write .mcp.json so Claude Code discovers the whatsoup MCP server
-      const mcpServerScript = resolve(
-        new URL('.', import.meta.url).pathname,
-        '../../../deploy/mcp/whatsoup-proxy.ts',
-      );
-      const mcpConfig = generateMcpConfigFile('claude-cli', socketPath, mcpServerScript);
-      writeFileSync(join(agentCwd, '.mcp.json'), JSON.stringify(mcpConfig, null, 2));
-      log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
+        // Write .mcp.json so Claude Code discovers the whatsoup MCP server
+        const mcpServerScript = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/mcp/whatsoup-proxy.ts',
+        );
+        const mcpConfig = generateMcpConfigFile('claude-cli', socketPath, mcpServerScript);
+        writeFileSync(join(agentCwd, '.mcp.json'), JSON.stringify(mcpConfig, null, 2));
+        log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
+      } catch (err) {
+        if (this.globalSocketServer) {
+          try {
+            this.globalSocketServer.stop();
+          } catch (stopErr) {
+            log.warn({ err: stopErr, agentCwd }, 'failed to clean up global socket server after startup error');
+          }
+          this.globalSocketServer = null;
+        }
+        log.error({ err, agentCwd }, 'failed to initialize global MCP socket resources');
+        throw err;
+      }
     }
 
     // sandboxPerChat: backfill workspace keys for legacy rows
@@ -1954,6 +1982,40 @@ export class AgentRuntime implements Runtime {
     return session;
   }
 
+  private cleanupFailedSandboxWorkspace(workspaceKey: string): void {
+    const queue = this.chatQueues.get(workspaceKey);
+    if (queue) {
+      try {
+        queue.abortTurn();
+      } catch (err) {
+        log.warn({ err, workspaceKey }, 'failed to abort queued turn during workspace cleanup');
+      }
+      this.chatQueues.delete(workspaceKey);
+    }
+
+    this.chatSessions.delete(workspaceKey);
+
+    const res = this.workspaceResources.get(workspaceKey);
+    if (!res) return;
+
+    if (res.socketServer) {
+      try {
+        res.socketServer.stop();
+      } catch (err) {
+        log.warn({ err, workspaceKey }, 'failed to stop socket server during workspace cleanup');
+      }
+    }
+    if (res.mediaBridge) {
+      try {
+        res.mediaBridge();
+      } catch (err) {
+        log.warn({ err, workspaceKey }, 'failed to stop media bridge during workspace cleanup');
+      }
+    }
+
+    this.workspaceResources.delete(workspaceKey);
+  }
+
   /**
    * Async variant of session/queue initialization for sandboxPerChat mode.
    * Called only when sandboxPerChat=true so the async/await overhead doesn't
@@ -1964,89 +2026,99 @@ export class AgentRuntime implements Runtime {
     const { workspaceKey, workspacePath } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
 
     if (!this.chatSessions.has(workspaceKey)) {
-      // Provision workspace (deterministic rewrite of control files)
-      const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
-      const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
-      const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
-      const chatScopedToolNames = this.registry.getChatScopedToolNames();
-      const socketPath = provisionWorkspace({
-        workspacePath,
-        instanceCwd: this.cwd ?? homedir(),
-        sandbox: this.sandbox!,
-        hookPath,
-        mcpServerPath,
-        sendMediaServerPath,
-        chatScopedToolNames,
-      });
+      try {
+        // Provision workspace (deterministic rewrite of control files)
+        const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
+        const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
+        const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
+        const chatScopedToolNames = this.registry.getChatScopedToolNames();
+        const socketPath = provisionWorkspace({
+          workspacePath,
+          instanceCwd: this.cwd ?? homedir(),
+          sandbox: this.sandbox!,
+          hookPath,
+          mcpServerPath,
+          sendMediaServerPath,
+          chatScopedToolNames,
+        });
 
-      // Start chat-scoped WhatSoup socket server + media bridge for this workspace if not already running
-      if (!this.workspaceResources.has(workspaceKey)) {
-        let socketServer: WhatSoupSocketServer | null = null;
-        let mediaBridge: MediaBridge | null = null;
-        try {
-          const chatSession: SessionContext = {
-            tier: 'chat-scoped',
-            conversationKey: workspaceKey,
-            deliveryJid: chatJid,
-            allowedRoot: workspacePath,
-          };
-          socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
-          socketServer.start();
-          log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
-        } catch (err) {
-          log.warn({ err, socketPath }, 'failed to start WhatSoup socket server for workspace');
-        }
-
-        // Start media bridge — allows Claude Code subprocess to send media via Unix socket.
-        // The bridge socket lives at .claude/media-bridge.sock alongside whatsoup.sock.
-        const mediaBridgeSocketPath = join(workspacePath, '.claude', 'media-bridge.sock');
-        try {
-          mediaBridge = startMediaBridge(mediaBridgeSocketPath, this.messenger, workspacePath);
-          setMediaBridgeChat(mediaBridge, chatJid);
-          log.info({ mediaBridgeSocketPath, workspaceKey }, 'media bridge started');
-        } catch (err) {
-          log.warn({ err, mediaBridgeSocketPath }, 'failed to start media bridge for workspace');
-        }
-
-        this.workspaceResources.set(workspaceKey, { socketPath, workspacePath, socketServer, mediaBridge });
-      }
-
-      // Check for resumable session
-      const resumable = getResumableSessionForChat(this.db, workspaceKey);
-
-      // Create SessionManager with workspace-scoped cwd
-      const toolScopeKey = this.createToolScopeKey(workspaceKey);
-      const session = this.createSessionManager({
-        chatJid,
-        cwd: workspacePath,  // scoped cwd instead of this.cwd
-        onEvent: (event) => this.handleEventPerChat(workspaceKey, event, toolScopeKey),
-        onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
-        notifyUser: (msg) => {
-          // Only remove session from map if it's actually dead (crash/exit).
-          // Watchdog warnings fire on ACTIVE sessions — removing those breaks
-          // event routing and causes cascading false-idle notifications.
-          const s = this.chatSessions.get(workspaceKey);
-          if (s && !s.getStatus().active) {
-            this.chatSessions.delete(workspaceKey);
-            this.chatQueues.get(workspaceKey)?.abortTurn();
-            this.chatQueues.delete(workspaceKey);
+        // Start chat-scoped WhatSoup socket server + media bridge for this workspace if not already running
+        if (!this.workspaceResources.has(workspaceKey)) {
+          let socketServer: WhatSoupSocketServer | null = null;
+          let mediaBridge: MediaBridge | null = null;
+          try {
+            const chatSession: SessionContext = {
+              tier: 'chat-scoped',
+              conversationKey: workspaceKey,
+              deliveryJid: chatJid,
+              allowedRoot: workspacePath,
+            };
+            socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
+            socketServer.start();
+            log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
+          } catch (err) {
+            log.warn({ err, socketPath }, 'failed to start WhatSoup socket server for workspace');
           }
-          this.handleCrashNotify(msg, chatJid);
-        },
-        onResumeFailed: () => this.handleResumeFailed(chatJid),
-      });
-      this.chatSessions.set(workspaceKey, session);
-      const chatQ = this.createOutboundQueue(chatJid);
-      this.chatQueues.set(workspaceKey, chatQ);
 
-      // Spawn with resume if available — fall back to fresh session if resume fails
-      if (resumable) {
-        try {
-          await session.spawnSession(resumable.session_id, resumable.id);
-        } catch (err) {
-          log.warn({ err, workspaceKey, sessionId: resumable.session_id }, 'resume threw — spawning fresh session');
-          await session.spawnSession();
+          // Start media bridge — allows Claude Code subprocess to send media via Unix socket.
+          // The bridge socket lives at .claude/media-bridge.sock alongside whatsoup.sock.
+          const mediaBridgeSocketPath = join(workspacePath, '.claude', 'media-bridge.sock');
+          try {
+            mediaBridge = startMediaBridge(mediaBridgeSocketPath, this.messenger, workspacePath);
+            setMediaBridgeChat(mediaBridge, chatJid);
+            log.info({ mediaBridgeSocketPath, workspaceKey }, 'media bridge started');
+          } catch (err) {
+            log.warn({ err, mediaBridgeSocketPath }, 'failed to start media bridge for workspace');
+          }
+
+          this.workspaceResources.set(workspaceKey, { socketPath, workspacePath, socketServer, mediaBridge });
         }
+
+        // Check for resumable session
+        const resumable = getResumableSessionForChat(this.db, workspaceKey);
+
+        // Create SessionManager with workspace-scoped cwd
+        const toolScopeKey = this.createToolScopeKey(workspaceKey);
+        const session = this.createSessionManager({
+          chatJid,
+          cwd: workspacePath,  // scoped cwd instead of this.cwd
+          onEvent: (event) => this.handleEventPerChat(workspaceKey, event, toolScopeKey),
+          onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
+          notifyUser: (msg) => {
+            // Only remove session from map if it's actually dead (crash/exit).
+            // Watchdog warnings fire on ACTIVE sessions — removing those breaks
+            // event routing and causes cascading false-idle notifications.
+            const s = this.chatSessions.get(workspaceKey);
+            if (s && !s.getStatus().active) {
+              this.chatSessions.delete(workspaceKey);
+              this.chatQueues.get(workspaceKey)?.abortTurn();
+              this.chatQueues.delete(workspaceKey);
+            }
+            this.handleCrashNotify(msg, chatJid);
+          },
+          onResumeFailed: () => this.handleResumeFailed(chatJid),
+        });
+        this.chatSessions.set(workspaceKey, session);
+        const chatQ = this.createOutboundQueue(chatJid);
+        this.chatQueues.set(workspaceKey, chatQ);
+
+        // Spawn with resume if available — fall back to fresh session if resume fails
+        if (resumable) {
+          try {
+            await session.spawnSession(resumable.session_id, resumable.id);
+          } catch (err) {
+            log.warn({ err, workspaceKey, sessionId: resumable.session_id }, 'resume threw — spawning fresh session');
+            try {
+              await session.spawnSession();
+            } catch (spawnErr) {
+              log.error({ err: spawnErr, workspaceKey }, 'fresh spawn also failed — cleaning up workspace');
+              throw spawnErr;
+            }
+          }
+        }
+      } catch (err) {
+        this.cleanupFailedSandboxWorkspace(workspaceKey);
+        throw err;
       }
     }
 

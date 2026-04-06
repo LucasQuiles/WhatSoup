@@ -208,6 +208,27 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
   WhatSoupSocketServer: MockWhatSoupSocketServer,
 }));
 
+const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
+  const mockMediaBridgeHandle = vi.fn() as unknown as ReturnType<typeof vi.fn> & {
+    _server: null;
+    _currentChatJid: string | null;
+  };
+  mockMediaBridgeHandle._server = null;
+  mockMediaBridgeHandle._currentChatJid = null;
+
+  const mockStartMediaBridge = vi.fn(() => mockMediaBridgeHandle);
+  const mockSetMediaBridgeChat = vi.fn((bridge: { _currentChatJid: string | null }, chatJid: string) => {
+    bridge._currentChatJid = chatJid;
+  });
+
+  return { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat };
+});
+
+vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
+  startMediaBridge: mockStartMediaBridge,
+  setMediaBridgeChat: mockSetMediaBridgeChat,
+}));
+
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {
     register = vi.fn();
@@ -333,6 +354,8 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current = null;
     capturedOnCrashRef.current = null;
     capturedNotifyUserRef.current = null;
+    capturedOnResumeFailedRef.current = null;
+    mockSession.spawnSession.mockResolvedValue(undefined);
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
     mockGetActiveSession.mockReturnValue(null);
@@ -342,6 +365,9 @@ describe('AgentRuntime', () => {
       const key = chatJid.replace('@s.whatsapp.net', '').replace('@lid', '');
       return { kind: 'dm' as const, workspaceKey: key, workspacePath: `/tmp/${key}` };
     });
+    mockProvisionWorkspace.mockImplementation(() => '/tmp/workspace/.claude/whatsoup.sock');
+    mockStartMediaBridge.mockImplementation(() => mockMediaBridgeHandle);
+    mockMediaBridgeHandle._currentChatJid = null;
     // Reset SessionManager mock to the default hoisted implementation.
     // Some tests (per_chat /status, per_chat /new) override it; reset so voice reply
     // tests (and others) see the default mock that captures capturedOnEventRef.
@@ -1582,6 +1608,84 @@ describe('AgentRuntime', () => {
     await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
 
     expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-resumed', 5);
+  });
+
+  it('sandboxPerChat: provisioning failure leaves no partial workspace resources', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
+      kind: 'dm' as const,
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
+    }));
+    mockGetResumableSessionForChat.mockReturnValue(null);
+    mockProvisionWorkspace.mockImplementation(() => {
+      throw new Error('ENOSPC');
+    });
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
+
+    const workspaceResources = (runtime as unknown as { workspaceResources: Map<string, unknown> }).workspaceResources;
+    const chatSessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
+    const chatQueues = (runtime as unknown as { chatQueues: Map<string, unknown> }).chatQueues;
+
+    expect(workspaceResources.has('15550100001')).toBe(false);
+    expect(chatSessions.has('15550100001')).toBe(false);
+    expect(chatQueues.has('15550100001')).toBe(false);
+    expect(mockSocketServerInstance.start).not.toHaveBeenCalled();
+    expect(mockStartMediaBridge).not.toHaveBeenCalled();
+  });
+
+  it('sandboxPerChat: failed resume fallback cleans up workspace resources', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, _chatJid: string) => ({
+      kind: 'dm' as const,
+      workspaceKey: '15550100001',
+      workspacePath: '/tmp/15550100001',
+    }));
+    mockGetResumableSessionForChat.mockReturnValue({
+      id: 5,
+      session_id: 'sess-resumed',
+      chat_jid: '15550100001@s.whatsapp.net',
+    });
+    mockSession.spawnSession
+      .mockRejectedValueOnce(new Error('resume failed'))
+      .mockRejectedValueOnce(new Error('fresh spawn failed'));
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
+
+    const workspaceResources = (runtime as unknown as { workspaceResources: Map<string, unknown> }).workspaceResources;
+    const chatSessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
+    const chatQueues = (runtime as unknown as { chatQueues: Map<string, unknown> }).chatQueues;
+
+    expect(mockSession.spawnSession).toHaveBeenNthCalledWith(1, 'sess-resumed', 5);
+    expect(mockSession.spawnSession).toHaveBeenNthCalledWith(2);
+    expect(workspaceResources.has('15550100001')).toBe(false);
+    expect(chatSessions.has('15550100001')).toBe(false);
+    expect(chatQueues.has('15550100001')).toBe(false);
+    expect(mockSocketServerInstance.stop).toHaveBeenCalled();
+    expect(mockMediaBridgeHandle).toHaveBeenCalled();
   });
 
   it('sandboxPerChat: chat-scoped socket server provisioned with correct SessionContext', async () => {
