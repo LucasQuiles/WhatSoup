@@ -24,6 +24,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, c
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
+    setDurability: vi.fn((_durability: unknown) => {}),
   };
 
   // NOTE: IOutboundQueue cannot be imported inside vi.hoisted() (runs before imports),
@@ -488,7 +489,7 @@ describe('AgentRuntime', () => {
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
   });
 
-  it('per_chat crash callbacks consume inbound seq, clear dirty turn state, and notify the user', async () => {
+  it('per_chat crash callbacks consume inbound seq, preserve replay text, clear dirty turn state, and notify the user', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -533,13 +534,198 @@ describe('AgentRuntime', () => {
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
     expect((durability as { markInboundFailed: ReturnType<typeof vi.fn> }).markInboundFailed).toHaveBeenCalledWith(77);
     expect((runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
-    expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.has('test@s.whatsapp.net')).toBe(false);
+    expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.get('test@s.whatsapp.net')).toBe('hello');
     expect((runtime as unknown as { perChatTurnContentType: Map<string, string | null> }).perChatTurnContentType.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { perChatTurnText: Map<string, string> }).perChatTurnText.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { perChatAssistantItemText: Map<string, Map<number, string>> }).perChatAssistantItemText.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.size).toBe(0);
     expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'));
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('LEAK-02 structurally wires cleanup into crash/deletion sites without dropping replay text', async () => {
+    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
+    const chatJidCleanupMatches = source.match(/this\.cleanupPerChatState\(chatJid\);/g) ?? [];
+    const workspaceCleanupMatches = source.match(/this\.cleanupPerChatState\(workspaceKey\);/g) ?? [];
+    const crashMatch = source.match(/private cleanupPerChatCrashTurnState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
+
+    expect(chatJidCleanupMatches).toHaveLength(2);
+    expect(workspaceCleanupMatches).toHaveLength(2);
+    expect(source).toContain('this.cleanupPerChatState(lidKey);');
+    expect(crashMatch).toBeTruthy();
+
+    const crashBody = crashMatch?.[1] ?? '';
+    expect(crashBody).toContain('this.perChatTurnContentType.delete(mapKey);');
+    expect(crashBody).toContain('this.perChatTurnText.delete(mapKey);');
+    expect(crashBody).toContain('this.perChatAssistantItemText.delete(mapKey);');
+    expect(crashBody).not.toContain('this.pendingTurnText.delete(mapKey);');
+  });
+
+  it('startup proactive-resume notifyUser cleanup removes only the crashed chat state', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
+      chatQueues: Map<string, IOutboundQueue>;
+      durability: {
+        getResumableCheckpoints: () => Array<{ conversation_key: string }>;
+        getSessionCheckpoint: (key: string) => { session_id: string } | null;
+      } | null;
+    };
+    const targetKey = '15550001111@lid';
+    const otherKey = 'other@s.whatsapp.net';
+
+    mockSession.spawnSession.mockImplementation(() => new Promise<void>(() => {}));
+    state.durability = {
+      getResumableCheckpoints: () => [{ conversation_key: '15550001111' }],
+      getSessionCheckpoint: () => ({ session_id: 'resume-1' }),
+    };
+
+    await runtime.start();
+
+    expect(capturedNotifyUserRef.current).toBeTypeOf('function');
+
+    state.perChatInboundSeqQueue.set(targetKey, [1]);
+    state.perChatTurnContentType.set(targetKey, 'text');
+    state.perChatTurnText.set(targetKey, 'partial');
+    state.perChatAssistantItemText.set(targetKey, new Map([['item-a', 'value-a']]));
+    state.pendingTurnText.set(targetKey, 'pending');
+    state.resumeFailedHandling.add(targetKey);
+
+    state.chatSessions.set(otherKey, { getStatus: () => mockSession.getStatus() });
+    state.chatQueues.set(otherKey, makeQueueMock(otherKey));
+    state.perChatInboundSeqQueue.set(otherKey, [2]);
+    state.perChatTurnContentType.set(otherKey, 'audio');
+    state.perChatTurnText.set(otherKey, 'other');
+    state.perChatAssistantItemText.set(otherKey, new Map([['item-b', 'value-b']]));
+    state.pendingTurnText.set(otherKey, 'other-pending');
+    state.resumeFailedHandling.add(otherKey);
+
+    capturedNotifyUserRef.current?.('session crashed');
+
+    expect(state.chatSessions.has(targetKey)).toBe(false);
+    expect(state.chatQueues.has(targetKey)).toBe(false);
+    expect(state.perChatInboundSeqQueue.has(targetKey)).toBe(false);
+    expect(state.perChatTurnContentType.has(targetKey)).toBe(false);
+    expect(state.perChatTurnText.has(targetKey)).toBe(false);
+    expect(state.perChatAssistantItemText.has(targetKey)).toBe(false);
+    expect(state.pendingTurnText.has(targetKey)).toBe(false);
+    expect(state.resumeFailedHandling.has(targetKey)).toBe(false);
+
+    expect(state.chatSessions.has(otherKey)).toBe(true);
+    expect(state.chatQueues.has(otherKey)).toBe(true);
+    expect(state.perChatInboundSeqQueue.get(otherKey)).toEqual([2]);
+    expect(state.perChatTurnContentType.get(otherKey)).toBe('audio');
+    expect(state.perChatTurnText.get(otherKey)).toBe('other');
+    expect(state.perChatAssistantItemText.get(otherKey)?.get('item-b')).toBe('value-b');
+    expect(state.pendingTurnText.get(otherKey)).toBe('other-pending');
+    expect(state.resumeFailedHandling.has(otherKey)).toBe(true);
+  });
+
+  it('sandbox per_chat notifyUser cleanup removes only the crashed workspace state', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      cwd: '/agent/cwd',
+    });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
+      chatQueues: Map<string, IOutboundQueue>;
+    };
+    const targetChatJid = '15550002222@s.whatsapp.net';
+    const targetKey = '15550002222';
+    const otherKey = '15550003333';
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid: targetChatJid, senderJid: targetChatJid, content: 'hello sandbox' }));
+
+    expect(capturedNotifyUserRef.current).toBeTypeOf('function');
+
+    state.perChatInboundSeqQueue.set(targetKey, [10]);
+    state.perChatTurnContentType.set(targetKey, 'text');
+    state.perChatTurnText.set(targetKey, 'target');
+    state.perChatAssistantItemText.set(targetKey, new Map([['item-a', 'value-a']]));
+    state.pendingTurnText.set(targetKey, 'pending-target');
+    state.resumeFailedHandling.add(targetKey);
+
+    state.chatSessions.set(otherKey, { getStatus: () => mockSession.getStatus() });
+    state.chatQueues.set(otherKey, makeQueueMock(otherKey));
+    state.perChatInboundSeqQueue.set(otherKey, [20]);
+    state.perChatTurnContentType.set(otherKey, 'audio');
+    state.perChatTurnText.set(otherKey, 'other');
+    state.perChatAssistantItemText.set(otherKey, new Map([['item-b', 'value-b']]));
+    state.pendingTurnText.set(otherKey, 'pending-other');
+    state.resumeFailedHandling.add(otherKey);
+
+    capturedNotifyUserRef.current?.('workspace crashed');
+
+    expect(state.chatSessions.has(targetKey)).toBe(false);
+    expect(state.chatQueues.has(targetKey)).toBe(false);
+    expect(state.perChatInboundSeqQueue.has(targetKey)).toBe(false);
+    expect(state.perChatTurnContentType.has(targetKey)).toBe(false);
+    expect(state.perChatTurnText.has(targetKey)).toBe(false);
+    expect(state.perChatAssistantItemText.has(targetKey)).toBe(false);
+    expect(state.pendingTurnText.has(targetKey)).toBe(false);
+    expect(state.resumeFailedHandling.has(targetKey)).toBe(false);
+
+    expect(state.chatSessions.has(otherKey)).toBe(true);
+    expect(state.chatQueues.has(otherKey)).toBe(true);
+    expect(state.perChatInboundSeqQueue.get(otherKey)).toEqual([20]);
+    expect(state.perChatTurnContentType.get(otherKey)).toBe('audio');
+    expect(state.perChatTurnText.get(otherKey)).toBe('other');
+    expect(state.perChatAssistantItemText.get(otherKey)?.get('item-b')).toBe('value-b');
+    expect(state.pendingTurnText.get(otherKey)).toBe('pending-other');
+    expect(state.resumeFailedHandling.has(otherKey)).toBe(true);
+  });
+
+  it('handleJidAliasChanged cleans the old key after migrating per-chat state', () => {
+    const canonicalJid = '15550004444@s.whatsapp.net';
+    const db = makeDb();
+    (db.raw.prepare as ReturnType<typeof vi.fn>).mockReturnValue({
+      run: vi.fn(),
+      get: vi.fn(() => ({ phone_jid: canonicalJid })),
+    });
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
+      chatQueues: Map<string, IOutboundQueue>;
+    };
+    const lidKey = '15550004444@lid';
+    const sessionRef = { getStatus: () => mockSession.getStatus() };
+    const queueRef = makeQueueMock(lidKey);
+
+    state.chatSessions.set(lidKey, sessionRef);
+    state.chatQueues.set(lidKey, queueRef);
+    state.perChatInboundSeqQueue.set(lidKey, [4, 5]);
+    state.perChatTurnContentType.set(lidKey, 'text');
+    state.perChatTurnText.set(lidKey, 'reply');
+    state.perChatAssistantItemText.set(lidKey, new Map([['item-1', 'chunk']]));
+    state.pendingTurnText.set(lidKey, 'pending');
+    state.resumeFailedHandling.add(lidKey);
+
+    expect(() => runtime.handleJidAliasChanged('15550004444', canonicalJid)).not.toThrow();
+
+    expect(state.chatSessions.get(canonicalJid)).toBe(sessionRef);
+    expect(state.chatQueues.get(canonicalJid)).toBe(queueRef);
+    expect(queueRef.updateDeliveryJid).toHaveBeenCalledWith(canonicalJid);
+    expect(state.perChatInboundSeqQueue.get(canonicalJid)).toEqual([4, 5]);
+    expect(state.perChatTurnContentType.get(canonicalJid)).toBe('text');
+    expect(state.perChatTurnText.get(canonicalJid)).toBe('reply');
+    expect(state.perChatAssistantItemText.get(canonicalJid)?.get('item-1')).toBe('chunk');
+    expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
+
+    expect(state.chatSessions.has(lidKey)).toBe(false);
+    expect(state.chatQueues.has(lidKey)).toBe(false);
+    expect(state.perChatInboundSeqQueue.has(lidKey)).toBe(false);
+    expect(state.perChatTurnContentType.has(lidKey)).toBe(false);
+    expect(state.perChatTurnText.has(lidKey)).toBe(false);
+    expect(state.perChatAssistantItemText.has(lidKey)).toBe(false);
+    expect(state.pendingTurnText.has(lidKey)).toBe(false);
+    expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
   });
 
   it('handleMessage /status sends status when inactive', async () => {

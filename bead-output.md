@@ -1,23 +1,23 @@
-# RACE-02 Output
-
 <!-- BEAD_OUTPUT_COMPLETE -->
+# LEAK-02 Bead Output
 
-- Bead: RACE-02 — non-sandboxed per_chat concurrent spawn
-- Branch: fix/race-02-perchat-concurrent-spawn
-- Commit: e4ebfee
-- Summary: Added a regression proving same-chat non-sandboxed `per_chat` messages stay serialized behind the pending `spawnSession()` on `turnChain`, so the suspected double-spawn race is not reachable and no runtime mutex change is required.
-
-## Files Changed
-- tests/runtimes/agent/runtime.test.ts
-- bead-output.md
+- Bead: LEAK-02 — wire cleanup into crash paths
+- Implementation commit: `640faf2`
+- Branch: `fix/leak-02-wire-crash-paths`
 
 ## Verification
-- `npx vitest run tests/runtimes/agent/runtime.test.ts -t "non-sandboxed per_chat serializes same-chat messages while spawnSession is pending" --pool=forks` ✅
-- `npx vitest run tests/runtimes/agent/runtime.test.ts --pool=forks` ✅
+- `grep -n 'chatSessions.delete\|chatQueues.delete' src/runtimes/agent/runtime.ts` ✅ (audited current deletion sites before wiring cleanup)
+- `npx vitest run tests/runtimes/agent/runtime.test.ts -t "preserve replay text|LEAK-02 structurally wires cleanup|startup proactive-resume notifyUser cleanup|sandbox per_chat notifyUser cleanup|handleJidAliasChanged cleans the old key"` ✅ (5 targeted regressions)
+- `npx vitest run tests/runtimes/agent/runtime.test.ts` ✅ (78 tests)
 - `npm run typecheck` ✅
-- `npx vitest run --pool=forks` ✅
-- `git push -u origin fix/race-02-perchat-concurrent-spawn` ⏳
+- `npx vitest run` ✅ — 197 files, 3713 tests passed
 
-## Notes
-- `handleMessage()` chains `_handleMessageInner()` onto `turnChain`, and the per-chat path fully awaits `sendTurnPerChat()` → `sendTurnToSession()` → `spawnSession()`, so a second same-chat message cannot enter the spawn path until the first finishes.
-- The new test blocks `spawnSession()` mid-flight, sends two rapid messages for the same chat, and proves only one `spawnSession()` happens while both user turns are eventually delivered in order.
+## Files Changed
+- `src/runtimes/agent/runtime.ts`
+- `tests/runtimes/agent/runtime.test.ts`
+- `bead-output.md`
+
+## Summary
+- Wired `cleanupPerChatState()` into the proactive-resume crash notify path plus sandbox/non-sandbox per-chat session creation callbacks when a dead session is removed from the maps.
+- Added defensive old-key cleanup after LID→phone re-keying so stale auxiliary state cannot linger under the retired key.
+- Narrowed crash-turn cleanup to turn-scoped maps only, preserving pending replay text and inbound sequencing needed by resume-failure recovery.
