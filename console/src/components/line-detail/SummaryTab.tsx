@@ -28,13 +28,21 @@ export function SummaryTab({
     ? (getProvider(provider)?.displayName ?? provider)
     : line.mode
 
+  const connectionState = line.health?.connection?.state ?? 'unknown'
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
+    { label: 'CONNECTION', value: connectionState, color: connectionState === 'connected' ? 'text-s-ok' : connectionState === 'connecting' ? 'text-s-warn' : 'text-t4' },
     { label: 'UPTIME', value: line.uptime ?? '—', color: 'text-t1' },
     { label: 'MESSAGES', value: (line.messagesToday ?? 0).toLocaleString(), color: 'text-t1' },
     { label: line.mode === 'agent' ? 'PROVIDER' : 'MODE', value: providerDisplay, color: line.mode === 'passive' ? 'text-m-pas' : line.mode === 'chat' ? 'text-m-cht' : 'text-m-agt' },
     { label: 'ACCESS', value: line.accessMode ?? '—', color: 'text-t2' },
     { label: 'ACTIVE', value: line.lastActive ? formatRelative(line.lastActive) : '—', color: 'text-t3' },
+    ...(line.health?.runtime?.agent?.lastSessionStatus
+      ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
+      : []),
+    ...(line.health?.runtime?.passive?.lastActivityAt
+      ? [{ label: 'LAST ACTIVITY', value: formatRelative(line.health.runtime.passive.lastActivityAt), color: 'text-t3' }]
+      : []),
   ]
 
   // Pipeline node active states driven by real runtime data
@@ -127,6 +135,105 @@ export function SummaryTab({
           ))}
         </div>
       </motion.div>
+
+      {/* Row 2.5: Runtime details — mode-specific data */}
+      {(line.mode === 'agent' || line.linkedStatus || line.models) && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+            gap: 'var(--sp-2)',
+          }}
+        >
+          {line.linkedStatus && (
+            <div
+              className="font-mono"
+              style={{
+                padding: 'var(--sp-3) var(--sp-4)',
+                background: 'var(--color-d2)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
+                borderRadius: 'var(--radius-md)',
+              }}
+            >
+              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>LINK</div>
+              <div className={`font-semibold ${line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn'}`} style={{ fontSize: 'var(--font-size-data)' }}>
+                {line.linkedStatus}
+              </div>
+            </div>
+          )}
+          {line.mode === 'agent' && line.health?.runtime?.agent && (
+            <>
+              <div
+                className="font-mono"
+                style={{
+                  padding: 'var(--sp-3) var(--sp-4)',
+                  background: 'var(--color-d2)',
+                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
+                  borderRadius: 'var(--radius-md)',
+                }}
+              >
+                <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>SESSIONS</div>
+                <div className="font-semibold text-t1" style={{ fontSize: 'var(--font-size-data)' }}>
+                  {line.health.runtime.agent.activeSessions} active
+                  {line.totalSessions != null && <span className="text-t4 font-normal"> / {line.totalSessions} total</span>}
+                </div>
+              </div>
+              {line.health.runtime.agent.lastSessionStatus && (
+                <div
+                  className="font-mono"
+                  style={{
+                    padding: 'var(--sp-3) var(--sp-4)',
+                    background: 'var(--color-d2)',
+                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
+                    borderRadius: 'var(--radius-md)',
+                  }}
+                >
+                  <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>LAST SESSION</div>
+                  <div className={`font-semibold ${line.health.runtime.agent.lastSessionStatus === 'completed' ? 'text-s-ok' : 'text-s-warn'}`} style={{ fontSize: 'var(--font-size-data)' }}>
+                    {line.health.runtime.agent.lastSessionStatus}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          {line.models && (
+            <div
+              className="font-mono"
+              style={{
+                padding: 'var(--sp-3) var(--sp-4)',
+                background: 'var(--color-d2)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
+                borderRadius: 'var(--radius-md)',
+              }}
+            >
+              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>MODELS</div>
+              <div className="text-t2" style={{ fontSize: 'var(--font-size-xs)' }}>
+                {line.models.conversation && <div>{line.models.conversation}</div>}
+                {line.models.fallback && <div className="text-t4">{line.models.fallback} (fallback)</div>}
+              </div>
+            </div>
+          )}
+          {line.sandboxPerChat && (
+            <div
+              className="font-mono"
+              style={{
+                padding: 'var(--sp-3) var(--sp-4)',
+                background: 'var(--color-d2)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
+                borderRadius: 'var(--radius-md)',
+              }}
+            >
+              <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>ISOLATION</div>
+              <div className="font-semibold text-m-agt" style={{ fontSize: 'var(--font-size-data)' }}>
+                sandbox per-chat
+              </div>
+            </div>
+          )}
+        </motion.div>
+      )}
 
       {/* Row 3: Config + Actions side-by-side */}
       <div className="flex" style={{ gap: 'var(--sp-3)' }}>
