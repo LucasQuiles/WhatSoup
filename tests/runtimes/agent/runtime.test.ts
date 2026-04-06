@@ -1558,6 +1558,57 @@ describe('AgentRuntime', () => {
     expect(mockSession.handleNew).toHaveBeenCalled();
   });
 
+  it('non-sandboxed per_chat serializes same-chat messages while spawnSession is pending', async () => {
+    const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    let active = false;
+    let releaseSpawn!: () => void;
+    const spawnBlocked = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+
+    mockSession.getStatus.mockImplementation(() => ({
+      active,
+      pid: active ? 123 : null,
+      sessionId: active ? 'sess-per-chat' : null,
+      startedAt: active ? new Date().toISOString() : null,
+      messageCount: 0,
+      lastMessageAt: null,
+    }));
+    mockSession.spawnSession.mockImplementation(async () => {
+      await spawnBlocked;
+      active = true;
+    });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+
+    await runtime.handleMessage(makeMsg({ messageId: 'msg-1', chatJid: 'same@s.whatsapp.net', content: 'first' }));
+    await runtime.handleMessage(makeMsg({ messageId: 'msg-2', chatJid: 'same@s.whatsapp.net', content: 'second' }));
+
+    await vi.waitFor(() => {
+      expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect((MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+
+    releaseSpawn();
+    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
+
+    const chatSessions = (runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions;
+    expect(chatSessions.size).toBe(1);
+    expect(chatSessions.has('same@s.whatsapp.net')).toBe(true);
+    expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
+    expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+    const userTurns = mockSession.sendTurn.mock.calls
+      .map(([turnText]) => turnText as string)
+      .filter((turnText) => turnText === 'first' || turnText === 'second');
+    expect(userTurns).toEqual(['first', 'second']);
+  });
+
   // ─── sandboxPerChat workspace isolation ────────────────────────────────────
 
   it('sandboxPerChat: two DMs from different JIDs produce different sessions', async () => {
