@@ -17,9 +17,7 @@ export function ModeTab({
 }) {
   if (mode === 'passive') {
     return (
-      <div
-        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
-      >
+      <div className="c-section">
         <EmptyState
           icon={<Bot size={40} strokeWidth={1.25} />}
           title="Read-only Mode"
@@ -42,9 +40,7 @@ export function ModeTab({
   const config = buildConfigEntries(rawConfig)
 
   return (
-    <div
-      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
-    >
+    <div className="c-section">
       <div
         className="flex items-center justify-between flex-wrap"
         style={{ gap: 'var(--sp-2)', marginBottom: 'var(--sp-5)' }}

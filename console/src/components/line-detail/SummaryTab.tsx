@@ -110,11 +110,9 @@ export function SummaryTab({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: i * 0.04, ease: [0.22, 1, 0.36, 1] }}
+            className="c-card"
             style={{
               padding: 'var(--sp-3) var(--sp-4)',
-              background: 'var(--color-d2)',
-              borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-              borderRadius: 'var(--radius-md)',
             }}
           >
             <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>
@@ -132,11 +130,8 @@ export function SummaryTab({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
-        className="flex items-center justify-between"
+        className="c-card flex items-center justify-between"
         style={{
-          background: 'var(--color-d2)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
           padding: 'var(--sp-4) var(--sp-5)',
         }}
       >
@@ -160,21 +155,15 @@ export function SummaryTab({
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
-          className="flex-1"
-          style={{
-            background: 'var(--color-d2)',
-            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-            borderRadius: 'var(--radius-lg)',
-            overflow: 'hidden',
-          }}
+          className="c-card flex-1 overflow-hidden"
         >
-          <div className="flex items-center justify-between c-toolbar bg-d3" style={{ borderBottom: 'var(--bw) solid var(--b1)' }}>
+          <div className="flex items-center justify-between c-toolbar bg-d3 c-border-b">
             <span className="c-col-header text-t4">{line.mode} Configuration</span>
             {config && (
               <button
                 onClick={onEditConfig}
                 className="c-btn c-btn-ghost"
-                style={{ padding: '3px var(--sp-2)', fontSize: 'var(--font-size-xs)' }}
+                style={{ padding: 'var(--sp-0h) var(--sp-2)', fontSize: 'var(--font-size-xs)' }}
               >
                 Edit
               </button>
@@ -183,7 +172,7 @@ export function SummaryTab({
           {config ? (
             <div style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
               {line.mode === 'agent' && (
-                <div className="flex items-center justify-between" style={{ padding: '6px 0', ...(config.length > 0 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
+                <div className="flex items-center justify-between" style={{ padding: 'var(--sp-1h) 0', ...(config.length > 0 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
                   <span className="c-label">provider</span>
                   <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
                     {getProvider(
@@ -193,7 +182,7 @@ export function SummaryTab({
                 </div>
               )}
               {config.map((entry, i) => (
-                <div key={entry.key} className="flex items-center justify-between" style={{ padding: '6px 0', ...(i < config.length - 1 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
+                <div key={entry.key} className="flex items-center justify-between" style={{ padding: 'var(--sp-1h) 0', ...(i < config.length - 1 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
                   <span className="c-label">{entry.key}</span>
                   <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
                 </div>
@@ -211,16 +200,13 @@ export function SummaryTab({
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
+          className="c-card overflow-hidden"
           style={{
             width: 'var(--panel-actions)',
             flexShrink: 0,
-            background: 'var(--color-d2)',
-            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-            borderRadius: 'var(--radius-lg)',
-            overflow: 'hidden',
           }}
         >
-          <div className="c-toolbar bg-d3" style={{ borderBottom: 'var(--bw) solid var(--b1)' }}>
+          <div className="c-toolbar bg-d3 c-border-b">
             <span className="c-col-header text-t4">Actions</span>
           </div>
           <div className="flex flex-col" style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-2)' }}>

@@ -9,10 +9,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
   const filtered = filter === 'all' ? logs : logs.filter(l => l.level === filter)
 
   return (
-    <div
-      className="overflow-hidden"
-      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}
-    >
+    <div className="c-card overflow-hidden flex flex-col">
       {/* Toolbar with level filter pills */}
       <div
         className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"

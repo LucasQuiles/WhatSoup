@@ -181,9 +181,7 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
 
   if (mode === 'passive') {
     return (
-      <div
-        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
-      >
+      <div className="c-section">
         <div className="flex items-center justify-center gap-2 py-12">
           <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
           <PipelineArrow />
@@ -200,9 +198,7 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
     const queueDepth = line.queueDepth ?? 0
     const enrichUnproc = line.enrichmentUnprocessed ?? 0
     return (
-      <div
-        style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
-      >
+      <div className="c-section">
         <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
           <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
           <PipelineArrow />
@@ -224,9 +220,7 @@ export function PipelineTab({ mode, line, modeColor }: { mode: Mode; line: LineI
   // Agent mode
   const sessions = line.activeSessions ?? 0
   return (
-    <div
-      style={{ borderRadius: 'var(--radius-lg)', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', padding: 'var(--sp-7)' }}
-    >
+    <div className="c-section">
       <div className="flex items-center justify-center gap-2 py-12 flex-wrap">
         <PipelineNode label="Inbound" color={modeColor} active={isOnline} selected={selectedNode === 'Inbound'} onClick={() => toggleNode('Inbound')} />
         <PipelineArrow />
