@@ -23,7 +23,8 @@ export function SummaryTab({
   const toast = useToast()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
   const modeColor = getModeColor(line.mode)
-  const connectionState = line.health?.connection?.state ?? 'unknown'
+  const whatsapp = line.health?.whatsapp as Record<string, unknown> | undefined
+  const connectionState = (whatsapp?.connection as Record<string, unknown> | undefined)?.state as string ?? line.health?.connection?.state as string ?? 'unknown'
 
   // All instance KPIs in one row — health, runtime, identity, tokens
   const cards = [
