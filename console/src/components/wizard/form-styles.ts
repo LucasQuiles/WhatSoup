@@ -61,3 +61,23 @@ export const checkboxRowStyle: React.CSSProperties = {
   alignItems: 'center',
   gap: 'var(--sp-2)',
 }
+
+export const dialogHeaderStyle: React.CSSProperties = {
+  padding: 'var(--sp-4) var(--sp-5)',
+  borderBottom: 'var(--bw) solid var(--b1)',
+}
+
+export const dialogFooterStyle: React.CSSProperties = {
+  padding: 'var(--sp-3) var(--sp-5)',
+  borderTop: 'var(--bw) solid var(--b1)',
+  background: 'var(--color-d1)',
+}
+
+export const sectionCardStyle: React.CSSProperties = {
+  borderRadius: 'var(--radius-lg)',
+  background: 'var(--color-d2)',
+  borderWidth: 'var(--bw)',
+  borderStyle: 'solid',
+  borderColor: 'var(--b1)',
+  padding: 'var(--sp-7)',
+}

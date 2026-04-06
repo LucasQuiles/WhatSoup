@@ -148,6 +148,14 @@
   --stepper-dot: 8px;        /* wizard stepper dot size */
   --qr-size: 256px;          /* QR code display size */
   --modal-max-h: 85vh;       /* modal maximum height */
+  /* ═══ Z-index scale ═══ */
+  --z-float: 10;             /* floating buttons, scroll indicators */
+  --z-dropdown: 50;          /* dropdown menus, popovers */
+  --z-overlay: 100;          /* modal overlays, dialogs */
+  /* ═══ Opacity scale ═══ */
+  --opacity-disabled: 0.45;  /* disabled buttons, locked fields */
+  --opacity-muted: 0.6;      /* blocked/dimmed entries */
+  --opacity-soft: 0.3;       /* background decorations, sparklines */
   /* ═══ Off-grid half-steps ═══ */
   --sp-0h: 3px;              /* 0.75 × 4px — pill vertical padding */
   --sp-1h: 6px;              /* 1.5 × 4px — pill gaps, nav padding */
@@ -938,6 +946,71 @@ body::before {
   max-width: var(--feed-inst-max);
   opacity: 1;
 }
+
+/* ═══ Tab button — c-tab from design system ═══ */
+.c-tab {
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--font-size-data);
+  font-family: var(--font-sans);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-bottom: var(--bw-accent) solid transparent;
+  color: var(--color-t4);
+  transition: border-color var(--dur-norm) var(--ease), color var(--dur-norm) var(--ease);
+  position: relative;
+}
+.c-tab:hover              { color: var(--color-t3); }
+.c-tab[aria-selected="true"],
+.c-tab.active             { color: var(--color-t1); border-bottom-color: var(--wizard-accent, var(--color-m-cht)); }
+.c-tab:disabled,
+.c-tab[disabled]          { opacity: 0.4; cursor: not-allowed; }
+
+/* ═══ Keyboard shortcut key — c-kbd from design system ═══ */
+.c-kbd {
+  padding: 1px var(--sp-1h);
+  border-radius: var(--radius-sm);
+  background: var(--color-d4);
+  border: var(--bw) solid var(--b2);
+  font-size: var(--font-size-xs);
+  color: var(--color-t2);
+  font-family: var(--font-mono);
+}
+
+/* ═══ Section card — rounded panel for tab content sections ═══ */
+.c-section {
+  background: var(--color-d2);
+  border: var(--bw) solid var(--b1);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-7);
+}
+
+/* ═══ Dialog header — consistent dialog title bar ═══ */
+.c-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: var(--bw) solid var(--b1);
+}
+
+/* ═══ Dialog footer — consistent dialog action bar ═══ */
+.c-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: var(--bw) solid var(--b1);
+  background: var(--color-d1);
+  flex-shrink: 0;
+}
+
+/* ═══ Border utilities — replace inline border triplets ═══ */
+.c-border      { border: var(--bw) solid var(--b1); }
+.c-border-b2   { border: var(--bw) solid var(--b2); }
+.c-border-b    { border-bottom: var(--bw) solid var(--b1); }
+.c-border-b-b2 { border-bottom: var(--bw) solid var(--b2); }
 
 /* Wizard accent-scoped focus ring — matches the selected line type color */
 .wizard-accent-scope input:focus-visible,
