@@ -23,26 +23,29 @@ export function SummaryTab({
   const toast = useToast()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
   const modeColor = getModeColor(line.mode)
-  const provider = (line.config?.agentOptions as Record<string, unknown> | undefined)?.provider as string | undefined
-  const providerDisplay = line.mode === 'agent' && provider
-    ? (getProvider(provider)?.displayName ?? provider)
-    : line.mode
-
   const connectionState = line.health?.connection?.state ?? 'unknown'
+
+  // KPI cards show only runtime health metrics — identity/config fields live in header and config panel
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
     { label: 'CONNECTION', value: connectionState, color: connectionState === 'connected' ? 'text-s-ok' : connectionState === 'connecting' ? 'text-s-warn' : 'text-t4' },
-    { label: 'UPTIME', value: line.uptime ?? '—', color: 'text-t1' },
-    { label: 'MESSAGES', value: (line.messagesToday ?? 0).toLocaleString(), color: 'text-t1' },
-    { label: line.mode === 'agent' ? 'PROVIDER' : 'MODE', value: providerDisplay, color: line.mode === 'passive' ? 'text-m-pas' : line.mode === 'chat' ? 'text-m-cht' : 'text-m-agt' },
-    { label: 'ACCESS', value: line.accessMode ?? '—', color: 'text-t2' },
-    { label: 'ACTIVE', value: line.lastActive ? formatRelative(line.lastActive) : '—', color: 'text-t3' },
-    ...(line.health?.runtime?.agent?.lastSessionStatus
-      ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
-      : []),
-    ...(line.health?.runtime?.passive?.lastActivityAt
-      ? [{ label: 'LAST ACTIVITY', value: formatRelative(line.health.runtime.passive.lastActivityAt), color: 'text-t3' }]
-      : []),
+    // Mode-specific runtime metrics
+    ...(line.mode === 'passive' ? [
+      { label: 'UNREAD', value: String(line.unread ?? 0), color: (line.unread ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
+      ...(line.health?.runtime?.passive?.lastActivityAt
+        ? [{ label: 'LAST ACTIVITY', value: formatRelative(line.health.runtime.passive.lastActivityAt), color: 'text-t3' }]
+        : []),
+    ] : []),
+    ...(line.mode === 'chat' ? [
+      { label: 'QUEUE', value: String(line.queueDepth ?? 0), color: (line.queueDepth ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
+      { label: 'ENRICHMENT', value: String(line.enrichmentUnprocessed ?? 0), color: (line.enrichmentUnprocessed ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
+    ] : []),
+    ...(line.mode === 'agent' ? [
+      { label: 'SESSIONS', value: String(line.activeSessions ?? 0), color: (line.activeSessions ?? 0) > 0 ? 'text-m-agt' : 'text-t3' },
+      ...(line.health?.runtime?.agent?.lastSessionStatus
+        ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
+        : []),
+    ] : []),
   ]
 
   // Pipeline node active states driven by real runtime data

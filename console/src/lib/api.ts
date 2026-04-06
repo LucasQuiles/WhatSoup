@@ -8,13 +8,16 @@
 import type {
   AccessEntry,
   ChatItem,
+  ContactResult,
   FeedEvent,
   FleetMetrics,
+  GroupInfo,
   LineInstance,
   LineMetrics,
   LogEntry,
   Message,
   MetricsRange,
+  ScheduledMessage,
 } from '../types.js';
 
 const API_BASE = '';
@@ -127,4 +130,18 @@ export const api = {
 
   getVersion: () =>
     apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string }>('/api/version'),
+
+  // ── MCP proxy operations ──
+
+  getScheduled: (name: string) =>
+    apiFetch<{ scheduled: ScheduledMessage[] }>(`/api/lines/${encodeURIComponent(name)}/scheduled`, { signal: AbortSignal.timeout(15000) }),
+
+  cancelScheduled: (name: string, messageId: string) =>
+    apiFetch<{ cancelled: boolean; messageId: string }>(`/api/lines/${encodeURIComponent(name)}/scheduled?id=${encodeURIComponent(messageId)}`, { method: 'DELETE' }),
+
+  getGroups: (name: string) =>
+    apiFetch<{ groups: GroupInfo[] }>(`/api/lines/${encodeURIComponent(name)}/groups`, { signal: AbortSignal.timeout(15000) }),
+
+  searchContacts: (name: string, query: string) =>
+    apiFetch<{ contacts: ContactResult[] }>(`/api/lines/${encodeURIComponent(name)}/contacts/search?q=${encodeURIComponent(query)}`),
 };

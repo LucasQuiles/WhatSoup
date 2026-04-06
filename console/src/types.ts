@@ -144,3 +144,31 @@ export interface FeedEvent {
   level?: 'info' | 'warn' | 'error';
   detail?: FeedDetail;
 }
+
+// ---------------------------------------------------------------------------
+//  MCP Proxy Types
+// ---------------------------------------------------------------------------
+
+export interface ScheduledMessage {
+  id: string;
+  chatJid: string;
+  chatName?: string;
+  text: string;
+  scheduledAt: string;
+  createdAt?: string;
+}
+
+export interface GroupInfo {
+  jid: string;
+  subject: string;
+  participants: number;
+  creation?: number;
+  desc?: string;
+}
+
+export interface ContactResult {
+  jid: string;
+  name?: string;
+  notify?: string;
+  number?: string;
+}

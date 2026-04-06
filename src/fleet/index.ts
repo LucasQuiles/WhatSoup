@@ -16,6 +16,7 @@ import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
 import { handleGetVersion, handleUpdate } from './routes/update.ts';
+import { handleGetScheduled, handleCancelScheduled, handleGetGroups, handleSearchContacts } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
 import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -77,6 +78,10 @@ type RouteParamsByHandler = {
   update: EmptyRouteParams;
   getLidMappings: EmptyRouteParams;
   syncLidMappings: EmptyRouteParams;
+  getScheduled: NameRouteParams;
+  cancelScheduled: NameRouteParams;
+  getGroups: NameRouteParams;
+  searchContacts: NameRouteParams;
 };
 
 type RouteKey = keyof RouteParamsByHandler;
@@ -108,6 +113,10 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'deleteLine',
   'checkExists',
   'auth',
+  'getScheduled',
+  'cancelScheduled',
+  'getGroups',
+  'searchContacts',
 ]);
 
 function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
@@ -141,6 +150,10 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   update:       (req, res, deps, _params) => handleUpdate(req, res, deps.updateChecker, repoRoot),
   getLidMappings:  (_req, res, deps, _params) => handleGetLidMappings(_req, res, deps),
   syncLidMappings: (req, res, deps, _params) => handleSyncLidMappings(req, res, deps),
+  getScheduled:    (_req, res, deps, params) => handleGetScheduled(_req, res, deps, params),
+  cancelScheduled: (req, res, deps, params) => handleCancelScheduled(req, res, deps, params),
+  getGroups:       (_req, res, deps, params) => handleGetGroups(_req, res, deps, params),
+  searchContacts:  (req, res, deps, params) => handleSearchContacts(req, res, deps, params),
 };
 
 // ---------------------------------------------------------------------------
@@ -195,6 +208,10 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/auth$/, handler: 'auth' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'getScheduled' },
+  { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)\/scheduled$/, handler: 'cancelScheduled' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/groups$/, handler: 'getGroups' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/contacts\/search$/, handler: 'searchContacts' },
   { method: 'GET',   path: /^\/api\/version$/, handler: 'getVersion' },
   { method: 'POST',  path: /^\/api\/update$/,  handler: 'update' },
   { method: 'GET',   path: /^\/api\/lid-mappings$/, handler: 'getLidMappings' },
