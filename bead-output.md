@@ -1,21 +1,22 @@
 <!-- BEAD_OUTPUT_COMPLETE -->
-# ERR-04 Bead Output
+# RACE-03 Bead Output
 
-- Bead: ERR-04 — shutdown exception safety
-- Implementation commit: `9b76cc3`
-- Branch: `fix/err-04-shutdown-exception-safety`
+- Bead: RACE-03 — SQLITE_BUSY orphaned child cleanup
+- Implementation commit: `c765928`
+- Branch: `fix/race-03-sqlite-busy-orphan`
 
 ## Verification
-- `npx vitest run tests/runtimes/agent/runtime.test.ts -t "shutdown continues cleanup after individual failures and clears runtime state"` ✅
+- `npx vitest run tests/runtimes/agent/session.test.ts -t "db failure during spawn kills the child and resets session state|db failure during spawn does not block a later successful retry"` ✅ (2 tests)
+- `npx vitest run tests/runtimes/agent/session.test.ts` ✅ (59 tests)
 - `npm run typecheck` ✅
-- `npx vitest run` ✅ — 196 files, 3703 tests passed
+- `npx vitest run` ✅ — 197 files, 3708 tests passed
 
 ## Files Changed
-- `src/runtimes/agent/runtime.ts`
-- `tests/runtimes/agent/runtime.test.ts`
+- `src/runtimes/agent/session.ts`
+- `tests/runtimes/agent/session.test.ts`
 - `bead-output.md`
 
 ## Summary
-- Wrapped shutdown cleanup phases so session, socket, and workspace teardown failures no longer abort the rest of shutdown.
-- Cleared runtime turn/tool/per-chat state during shutdown and cancelled the control-session timeout.
-- Added a regression proving cleanup continues and state is cleared even when earlier shutdown steps throw.
+- Wrapped the post-spawn session DB write in a failure boundary so `createSession`/`updateSessionStatus` errors no longer leave an untracked child running.
+- On DB persistence failure, the spawned child is force-killed, runtime/session state is reset, and the original error is re-thrown for caller handling.
+- Added regressions covering both immediate cleanup on SQLITE_BUSY and successful retry after the failed spawn.
