@@ -4,6 +4,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import Nav from './components/Nav'
 import { useLines } from './hooks/use-fleet'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
+import { useKeyboardShortcuts } from './hooks/use-keyboard-shortcuts'
 
 // Route-level code splitting — each page loads its own chunk on navigation
 const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
@@ -29,6 +30,9 @@ export default function App() {
 
   const update = useUpdateCheck()
   const version = update.data?.sha ?? getStaticVersion()
+
+  // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav)
+  useKeyboardShortcuts()
 
   return (
     <div className="flex flex-col h-screen bg-d0 overflow-hidden">
