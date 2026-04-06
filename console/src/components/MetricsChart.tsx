@@ -9,16 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MessageVolumeBucket } from '../types';
-
-const AXIS_TICK = {
-  fontSize: 'var(--font-size-xs)',
-  fill: 'var(--color-t4)',
-};
-
-function formatBucketLabel(bucket: string): string {
-  const date = new Date(bucket);
-  return date.toLocaleTimeString([], { hour: 'numeric' });
-}
+import { AXIS_TICK, formatBucketLabel } from '../lib/chart-utils.js';
 
 export function MetricsChart({ data }: { data: MessageVolumeBucket[] }) {
   return (
