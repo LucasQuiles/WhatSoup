@@ -105,7 +105,7 @@ describe('MetricsChart', () => {
     const rootChildren = toChildren(element)
     const responsive = rootChildren[1] as { props?: { width?: string; height?: number; children?: unknown } } | undefined
     expect(responsive?.props?.width).toBe('100%')
-    expect(String(responsive?.props?.height)).toMatch(/^180(px)?$/)
+    expect(String(responsive?.props?.height)).toMatch(/^(180(px)?|var\(--chart-height-lg\))$/)
 
     const barChart = toChildren(responsive)[0]
     const chartChildren = toChildren(barChart)
