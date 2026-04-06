@@ -54,8 +54,9 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
       <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${iconColor[variant]}`} />
       <span className="flex-1 text-t2">{message}</span>
       <button
+        type="button"
         onClick={onClose}
-        className="text-t5 hover:text-t3 cursor-pointer c-hover"
+        className="c-btn c-btn-ghost c-btn-sm"
         aria-label="Dismiss notification"
       >
         <X size={14} strokeWidth={1.75} />

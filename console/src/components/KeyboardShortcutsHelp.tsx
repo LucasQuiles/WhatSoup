@@ -18,26 +18,24 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
   return (
     <div
       className="fixed inset-0 flex items-center justify-center"
-      style={{ background: 'var(--overlay)', zIndex: 100 }}
+      style={{ background: 'var(--overlay)', zIndex: 'var(--z-overlay)' }}
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="kbd-shortcuts-title"
     >
       <div
-        className="bg-d2 font-mono"
+        className="c-dialog font-mono"
         style={{
-          borderRadius: 'var(--radius-lg)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-          boxShadow: 'var(--shadow-lg)',
-          padding: 'var(--sp-5)',
           width: 'var(--panel-shortcuts)',
           maxWidth: '90vw',
+          padding: 'var(--sp-5)',
         }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2" style={{ marginBottom: 'var(--sp-4)' }}>
           <Keyboard size={16} strokeWidth={1.75} className="text-t3" />
-          <span className="font-sans font-semibold text-t1" style={{ fontSize: 'var(--font-size-body)' }}>
+          <span id="kbd-shortcuts-title" className="font-sans font-semibold text-t1" style={{ fontSize: 'var(--font-size-body)' }}>
             Keyboard Shortcuts
           </span>
         </div>
@@ -48,19 +46,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
               <span className="text-t3" style={{ fontSize: 'var(--font-size-data)' }}>{s.label}</span>
               <div className="flex" style={{ gap: 'var(--sp-1)' }}>
                 {s.keys.map((k) => (
-                  <kbd
-                    key={k}
-                    style={{
-                      padding: '1px 6px',
-                      borderRadius: 'var(--radius-sm)',
-                      background: 'var(--color-d4)',
-                      borderWidth: 'var(--bw)',
-                      borderStyle: 'solid',
-                      borderColor: 'var(--b2)',
-                      fontSize: 'var(--font-size-xs)',
-                      color: 'var(--color-t2)',
-                    }}
-                  >
+                  <kbd key={k} className="c-kbd">
                     {k}
                   </kbd>
                 ))}
@@ -70,7 +56,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
         </div>
 
         <div className="text-t5 text-center" style={{ marginTop: 'var(--sp-4)', fontSize: 'var(--font-size-xs)' }}>
-          Press <kbd style={{ padding: '0 4px', background: 'var(--color-d4)', borderRadius: 'var(--radius-sm)' }}>?</kbd> or <kbd style={{ padding: '0 4px', background: 'var(--color-d4)', borderRadius: 'var(--radius-sm)' }}>Esc</kbd> to close
+          Press <kbd className="c-kbd">?</kbd> or <kbd className="c-kbd">Esc</kbd> to close
         </div>
       </div>
     </div>

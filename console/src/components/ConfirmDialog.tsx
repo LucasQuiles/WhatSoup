@@ -62,9 +62,10 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
             {title}
           </span>
           <button
+            type="button"
             onClick={onCancel}
             aria-label="Close dialog"
-            className="text-t4 hover:text-t2 cursor-pointer c-hover"
+            className="c-btn c-btn-ghost c-btn-sm"
           >
             <X size={18} strokeWidth={1.75} />
           </button>

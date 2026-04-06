@@ -97,16 +97,18 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       {showActions === 'pending' && (
         <div className="flex gap-1.5">
           <button
+            type="button"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
-            className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
-            style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
+            className="c-btn c-btn-sm c-btn-success font-mono"
+            style={{ fontSize: 'var(--font-size-label)' }}
           >
             <UserCheck size={11} strokeWidth={1.75} /> Allow
           </button>
           <button
+            type="button"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
-            className="flex items-center gap-1 px-2.5 py-1 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
-            style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
+            className="c-btn c-btn-sm c-btn-danger font-mono"
+            style={{ fontSize: 'var(--font-size-label)' }}
           >
             <Ban size={11} strokeWidth={1.75} /> Block
           </button>
@@ -114,18 +116,22 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       )}
       {showActions === 'allowed' && (
         <button
+          type="button"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
-          className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-crit hover:bg-d5 cursor-pointer c-hover"
-          style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
+          className="c-btn c-btn-sm c-btn-danger font-mono"
+          style={{ fontSize: 'var(--font-size-label)' }}
+          aria-label="Block contact"
         >
           <Ban size={11} strokeWidth={1.75} />
         </button>
       )}
       {showActions === 'blocked' && (
         <button
+          type="button"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
-          className="flex items-center gap-1 px-2 py-0.5 rounded font-mono text-s-ok hover:bg-d5 cursor-pointer c-hover"
-          style={{ fontSize: 'var(--font-size-label)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)' }}
+          className="c-btn c-btn-sm c-btn-success font-mono"
+          style={{ fontSize: 'var(--font-size-label)' }}
+          aria-label="Allow contact"
         >
           <UserCheck size={11} strokeWidth={1.75} />
         </button>
@@ -137,10 +143,9 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
     <div className="space-y-4">
       {/* Pending queue */}
       {pending.length > 0 && (
-        <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
+        <div className="c-card overflow-hidden">
           <div
-            className="c-col-header text-t4"
-            style={{ padding: 'var(--sp-2) var(--msg-pad-h)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
+            className="c-toolbar c-border-b c-col-header text-t4"
           >
             Pending ({pending.length})
           </div>
@@ -150,19 +155,17 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
 
       {/* Allowed + Blocked in two columns */}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
-        <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
+        <div className="c-card overflow-hidden">
           <div
-            className="c-col-header text-t4"
-            style={{ padding: 'var(--sp-2) var(--msg-pad-h)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
+            className="c-toolbar c-border-b c-col-header text-t4"
           >
             Allowed ({allowed.length})
           </div>
           {allowed.map(e => renderItem(e, 'allowed'))}
         </div>
-        <div className="rounded-lg overflow-hidden" style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
+        <div className="c-card overflow-hidden">
           <div
-            className="c-col-header text-t4"
-            style={{ padding: 'var(--sp-2) var(--msg-pad-h)', borderBottom: 'var(--bw) solid var(--b1)', background: 'var(--color-d3)' }}
+            className="c-toolbar c-border-b c-col-header text-t4"
           >
             Blocked ({blocked.length})
           </div>
