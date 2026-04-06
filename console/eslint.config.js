@@ -213,6 +213,12 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ SIMPLE BORDER COLOR IN STYLE ═══
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name=/^borderColor$|^border(Top|Bottom|Left|Right)Color$/][value.value=/^var\\(--b\\d\\)$/]',
+          message: '⛔ Simple borderColor in style. FIX: if this is the ONLY border prop in style, move to className with border-[var(--bN)]. If part of a Width/Style/Color triplet, keep — triplets must stay together.',
+        },
+
         // ═══ OVERFLOW AXIS IN STYLE ═══
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="overflowY"]',
