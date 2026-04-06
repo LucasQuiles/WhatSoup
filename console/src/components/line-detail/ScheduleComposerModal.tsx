@@ -294,7 +294,7 @@ export function ScheduleComposerModal({
             <div>
               <label
                 htmlFor="composer-datetime"
-                className="font-mono text-t4 block mb-[var(--sp-1)]"
+                className="c-field-label"
               >
                 Scheduled time (local)
               </label>
