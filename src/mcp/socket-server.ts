@@ -39,6 +39,8 @@ export class WhatSoupSocketServer {
   private readonly baseSession: SessionContext;
   /** Per-connection isolated sessions. Cleaned up on disconnect. */
   private readonly connectionSessions = new Map<number, SessionContext>();
+  /** Active client sockets. Destroyed on stop() so FDs do not leak. */
+  private readonly activeSockets = new Map<number, Socket>();
 
   constructor(socketPath: string, registry: ToolRegistry, session: SessionContext) {
     this.socketPath = socketPath;
@@ -68,12 +70,14 @@ export class WhatSoupSocketServer {
       // SP11: Clone base session for this connection
       const connSession: SessionContext = { ...this.baseSession };
       this.connectionSessions.set(clientId, connSession);
+      this.activeSockets.set(clientId, socket);
 
       log.info({ clientId, socketPath: this.socketPath, connections: this.connectionSessions.size }, 'client connected');
       let buf = '';
 
       socket.on('close', () => {
         this.connectionSessions.delete(clientId);
+        this.activeSockets.delete(clientId);
         log.info({ clientId, connections: this.connectionSessions.size }, 'client disconnected');
       });
 
@@ -132,6 +136,10 @@ export class WhatSoupSocketServer {
   }
 
   stop(): void {
+    for (const socket of this.activeSockets.values()) {
+      socket.destroy();
+    }
+    this.activeSockets.clear();
     this.connectionSessions.clear();
     if (this.server) {
       this.server.close();

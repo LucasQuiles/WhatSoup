@@ -2,7 +2,7 @@
 // Unix domain socket server that bridges Claude Code subprocess media sends to Messenger.sendMedia().
 // Ported from legacy whatsapp-bot/src/runtimes/agent/media-bridge.ts.
 
-import { createServer, type Server } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { unlinkSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
@@ -89,9 +89,15 @@ export function startMediaBridge(
   const resolvedRoot = resolve(allowedRoot);
 
   const MAX_BUF = 1_024 * 1_024; // 1 MB — match WhatSoupSocketServer's limit
+  const activeSockets = new Set<Socket>();
 
   const server = createServer((socket) => {
+    activeSockets.add(socket);
     let buf = '';
+
+    socket.on('close', () => {
+      activeSockets.delete(socket);
+    });
 
     socket.on('data', (chunk) => {
       buf += chunk.toString();
@@ -133,6 +139,10 @@ export function startMediaBridge(
   });
 
   const cleanup = function () {
+    for (const socket of activeSockets) {
+      socket.destroy();
+    }
+    activeSockets.clear();
     server.close(() => {
       try { unlinkSync(socketPath); } catch { /* already gone */ }
       log.info({ socketPath }, 'media bridge closed');
