@@ -6,6 +6,7 @@ import type { Database } from '../../core/database.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
+import { parseCron, nextCronRun } from '../../core/cron.ts';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
@@ -372,6 +373,10 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       assertSessionAccess(row.chat_jid, session);
       if (row.status !== 'pending') throw new Error(`Scheduled message ${id} is ${row.status} and cannot be updated`);
 
+      if (scheduled_at !== undefined && scheduled_at <= Math.floor(Date.now() / 1000)) {
+        throw new Error('scheduled_at must be a future UTC unix timestamp');
+      }
+
       const updates: string[] = [];
       const values: unknown[] = [];
 
@@ -385,7 +390,6 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
         updates.push("content_type = 'text'");
       }
       if (recurrence !== undefined) {
-        const { parseCron, nextCronRun } = await import('../../core/cron.ts');
         parseCron(recurrence); // throws if invalid
         updates.push('recurrence = ?');
         values.push(recurrence);
