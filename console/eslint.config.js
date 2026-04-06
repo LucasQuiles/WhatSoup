@@ -213,6 +213,13 @@ const designSystemRestrictions = [
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
 
+        // ═══ BORDER RADIUS TOKEN IN STYLE ═══
+        // borderRadius: 'var(--radius-*)' should be a Tailwind rounded-* class
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="borderRadius"][value.value=/^var\\(--radius-/]',
+          message: '⛔ borderRadius token in style. FIX: remove from style, add to className. var(--radius-xs)→"rounded-xs" var(--radius-sm)→"rounded-sm" var(--radius-md)→"rounded-md" var(--radius-lg)→"rounded-lg" var(--radius-circle)→"rounded-full".',
+        },
+
         // ═══ SIMPLE BORDER COLOR IN STYLE ═══
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name=/^borderColor$|^border(Top|Bottom|Left|Right)Color$/][value.value=/^var\\(--b\\d\\)$/]',
