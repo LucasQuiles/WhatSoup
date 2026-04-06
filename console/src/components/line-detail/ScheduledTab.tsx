@@ -99,17 +99,16 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
 
   return (
     <>
-      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+      <div className="flex flex-col gap-[var(--sp-2)]">
         {/* Header bar */}
-        <div className="flex items-center justify-between" style={{ padding: 'var(--sp-2) var(--sp-4)' }}>
-          <span className="c-col-header text-t4 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <div className="flex items-center justify-between py-[var(--sp-2)] px-[var(--sp-4)]">
+          <span className="c-col-header text-t4 font-mono text-[var(--font-size-xs)]">
             {messages.length} scheduled message{messages.length !== 1 ? 's' : ''}
           </span>
           <button
             type="button"
             onClick={handleNew}
-            className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1"
-            style={{ fontSize: 'var(--font-size-xs)' }}
+            className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1 text-[var(--font-size-xs)]"
           >
             <Plus size={12} strokeWidth={2} />
             New Scheduled Message

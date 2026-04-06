@@ -55,12 +55,11 @@ const kvValueStyle: React.CSSProperties = {
 const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
   <button
     type="button"
-    className="c-btn c-btn-ghost flex items-center"
-    style={{ gap: 'var(--sp-1)', padding: 'var(--sp-1) var(--sp-2)' }}
+    className="c-btn c-btn-ghost flex items-center gap-[var(--sp-1)] py-[var(--sp-1)] px-[var(--sp-2)]"
     onClick={onClick}
   >
     <Pencil size={12} />
-    <span style={{ fontSize: 'var(--font-size-xs)' }}>Edit</span>
+    <span className="text-[var(--font-size-xs)]">Edit</span>
   </button>
 )
 
@@ -127,7 +126,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
   }
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+    <div className="flex flex-col gap-[var(--sp-4)]">
       {/* Identity card */}
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>
@@ -205,17 +204,10 @@ const ReviewStep: FC<ReviewStepProps> = ({
       {/* Error message */}
       {error && (
         <div
-          className="flex items-center"
-          style={{
-            gap: 'var(--sp-2)',
-            padding: 'var(--sp-3)',
-            background: 'var(--color-d3)',
-            borderRadius: 'var(--radius-sm)',
-            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--color-s-crit)',
-          }}
+          className="flex items-center gap-[var(--sp-2)] p-[var(--sp-3)] bg-d3 rounded-sm border border-solid border-s-crit"
         >
-          <AlertCircle size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
-          <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-s-crit)' }}>
+          <AlertCircle size={16} className="text-s-crit flex-shrink-0" />
+          <span className="text-[var(--font-size-data)] text-s-crit">
             {friendlyError(error)}
           </span>
         </div>
@@ -224,8 +216,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       {/* Create button */}
       <button
         type="button"
-        className="c-btn c-btn-primary flex items-center justify-center self-stretch"
-        style={{ gap: 'var(--sp-2)', padding: 'var(--sp-3)' }}
+        className="c-btn c-btn-primary flex items-center justify-center self-stretch gap-[var(--sp-2)] p-[var(--sp-3)]"
         onClick={onCreateLine}
         disabled={creating}
       >

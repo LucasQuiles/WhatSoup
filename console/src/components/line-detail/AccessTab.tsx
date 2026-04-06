@@ -53,39 +53,29 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
   const renderItem = (entry: AccessEntry, showActions: 'pending' | 'allowed' | 'blocked') => (
     <div
       key={entry.subjectId}
-      className="flex items-center gap-3 hover:bg-d3 c-hover"
-      style={{
-        padding: 'var(--sp-2h) var(--sp-4)',
-        borderBottom: 'var(--bw) solid var(--b1)',
-        ...(showActions === 'pending' ? { background: 'var(--s-warn-wash)' } : {}),
-        ...(showActions === 'blocked' ? { opacity: 0.6 } : {}),
-      }}
+      className={`flex items-center gap-3 hover:bg-d3 c-hover py-[var(--sp-2h)] px-[var(--sp-4)] c-border-b ${showActions === 'pending' ? 'bg-[var(--s-warn-wash)]' : ''} ${showActions === 'blocked' ? 'opacity-[var(--opacity-muted)]' : ''}`}
     >
       {/* Avatar */}
       <div
-        className="rounded-full flex items-center justify-center flex-shrink-0"
-        style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', background: 'var(--color-d5)' }}
+        className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
       >
         {statusIcon(entry.status, entry.subjectType)}
       </div>
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="font-sans font-medium text-t2" style={{ fontSize: 'var(--font-size-body)' }}>
+        <div className="font-sans font-medium text-t2 text-[var(--font-size-body)]">
           {entry.subjectName}
         </div>
-        <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-sm)' }}>
+        <div className="font-mono text-t4 text-[var(--font-size-sm)]">
           {entry.subjectId}
         </div>
       </div>
 
       {/* Status badge */}
       <span
-        className="font-mono font-medium flex-shrink-0"
+        className="font-mono font-medium flex-shrink-0 text-[var(--font-size-sm)] py-[var(--sp-0h)] px-[var(--sp-2)] rounded-sm"
         style={{
-          fontSize: 'var(--font-size-sm)',
-          padding: '2px var(--sp-2)',
-          borderRadius: 'var(--radius-sm)',
           background: statusBadge[entry.status]?.bg,
           color: statusBadge[entry.status]?.color,
         }}
@@ -99,16 +89,14 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
           <button
             type="button"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
-            className="c-btn c-btn-sm c-btn-success font-mono"
-            style={{ fontSize: 'var(--font-size-label)' }}
+            className="c-btn c-btn-sm c-btn-success font-mono text-[var(--font-size-label)]"
           >
             <UserCheck size={11} strokeWidth={1.75} /> Allow
           </button>
           <button
             type="button"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
-            className="c-btn c-btn-sm c-btn-danger font-mono"
-            style={{ fontSize: 'var(--font-size-label)' }}
+            className="c-btn c-btn-sm c-btn-danger font-mono text-[var(--font-size-label)]"
           >
             <Ban size={11} strokeWidth={1.75} /> Block
           </button>
@@ -118,8 +106,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
         <button
           type="button"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
-          className="c-btn c-btn-sm c-btn-danger font-mono"
-          style={{ fontSize: 'var(--font-size-label)' }}
+          className="c-btn c-btn-sm c-btn-danger font-mono text-[var(--font-size-label)]"
           aria-label="Block contact"
         >
           <Ban size={11} strokeWidth={1.75} />
@@ -129,8 +116,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
         <button
           type="button"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
-          className="c-btn c-btn-sm c-btn-success font-mono"
-          style={{ fontSize: 'var(--font-size-label)' }}
+          className="c-btn c-btn-sm c-btn-success font-mono text-[var(--font-size-label)]"
           aria-label="Allow contact"
         >
           <UserCheck size={11} strokeWidth={1.75} />
@@ -154,7 +140,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       )}
 
       {/* Allowed + Blocked in two columns */}
-      <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
+      <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(var(--panel-min-col), 1fr))' }}>
         <div className="c-card overflow-hidden">
           <div
             className="c-toolbar c-border-b c-col-header text-t4"
@@ -170,7 +156,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
             Blocked ({blocked.length})
           </div>
           {blocked.length === 0 ? (
-            <div className="text-t5 text-center py-6 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
+            <div className="text-t5 text-center py-6 font-mono text-[var(--font-size-data)]">
               No blocked contacts
             </div>
           ) : (

@@ -13,23 +13,12 @@ import { AXIS_TICK, formatBucketLabel } from '../lib/chart-utils.js';
 /** Stacked area chart showing fleet-wide inbound/outbound message volume. */
 export function FleetMetricsChart({ data }: { data: MessageVolumeBucket[] }) {
   return (
-    <section
-      className="c-card font-mono flex-shrink-0"
-      style={{ padding: 'var(--sp-4)', background: 'var(--color-d2)' }}
-    >
-      <div
-        className="font-mono text-t4"
-        style={{
-          fontSize: 'var(--font-size-xs)',
-          marginBottom: 'var(--sp-3)',
-          textTransform: 'uppercase',
-          letterSpacing: 'var(--tracking-label)',
-        }}
-      >
+    <section className="c-card font-mono flex-shrink-0 p-[var(--sp-4)] bg-d2">
+      <div className="font-mono text-t4 text-[var(--font-size-xs)] mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]">
         Fleet Message Volume (24h)
       </div>
-      <ResponsiveContainer width="100%" height={120}>
-        <AreaChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+      <ResponsiveContainer width="100%" height="var(--chart-height-sm)">
+        <AreaChart data={data} margin={{ top: "var(--sp-1)", right: "var(--sp-2)", left: "-var(--sp-4)", bottom: 0 }}>
           <CartesianGrid stroke="var(--b1)" vertical={false} />
           <XAxis
             dataKey="bucket"

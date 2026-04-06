@@ -23,11 +23,11 @@ export function ModeTab({
           title="Read-only Mode"
           description="Passive instances listen and store — no configuration required."
         />
-        <div className="flex justify-center" style={{ marginTop: 'var(--sp-5)' }}>
+        <div className="flex justify-center mt-[var(--sp-5)]">
           <button
+            type="button"
             onClick={onChangeMode}
-            className="c-btn"
-            style={{ fontSize: 'var(--font-size-label)' }}
+            className="c-btn text-[var(--font-size-label)]"
           >
             <GitBranch size={13} strokeWidth={1.75} /> Change Mode
           </button>
@@ -42,24 +42,23 @@ export function ModeTab({
   return (
     <div className="c-section">
       <div
-        className="flex items-center justify-between flex-wrap"
-        style={{ gap: 'var(--sp-2)', marginBottom: 'var(--sp-5)' }}
+        className="flex items-center justify-between flex-wrap gap-[var(--sp-2)] mb-[var(--sp-5)]"
       >
         <div className="c-col-header">
           {mode} Configuration
         </div>
-        <div className="flex flex-wrap" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex flex-wrap gap-[var(--sp-2)]">
           <button
+            type="button"
             onClick={onEditConfig}
-            className="c-btn"
-            style={{ fontSize: 'var(--font-size-label)' }}
+            className="c-btn text-[var(--font-size-label)]"
           >
             <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
           </button>
           <button
+            type="button"
             onClick={onChangeMode}
-            className="c-btn"
-            style={{ fontSize: 'var(--font-size-label)' }}
+            className="c-btn text-[var(--font-size-label)]"
           >
             <GitBranch size={13} strokeWidth={1.75} /> Change Mode
           </button>
@@ -67,52 +66,37 @@ export function ModeTab({
       </div>
       {/* Config entries — structured key-value grid */}
       {config.length === 0 ? (
-        <div className="text-t4" style={{ fontSize: 'var(--font-size-data)' }}>
+        <div className="text-t4 text-[var(--font-size-data)]">
           No configuration values.
         </div>
       ) : (
         <div
+          className="gap-[var(--sp-1)] bg-d1 rounded-md py-[var(--sp-3)] px-[var(--sp-4)] border border-[var(--b1)]"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'minmax(140px, auto) 1fr',
-            gap: 'var(--sp-1) var(--sp-4)',
-            background: 'var(--color-d1)',
-            borderWidth: 'var(--bw)',
-            borderStyle: 'solid',
-            borderColor: 'var(--b1)',
-            borderRadius: 'var(--radius-md)',
-            padding: 'var(--sp-3) var(--sp-4)',
+            gridTemplateColumns: 'minmax(var(--chat-name-max), auto) 1fr',
           }}
         >
           {config.map((entry) => (
             <React.Fragment key={entry.key}>
               <span
-                className="font-mono"
-                style={{
-                  fontSize: 'var(--font-size-data)',
-                  color: 'var(--color-m-cht)',
-                  paddingTop: 'var(--radius-xs)',
-                }}
+                className="font-mono text-[var(--font-size-data)] text-m-cht pt-[var(--radius-xs)]"
               >
                 {entry.key}
               </span>
               <span
-                className="font-mono"
+                className="font-mono text-[var(--font-size-data)]"
                 style={{
-                  fontSize: 'var(--font-size-data)',
                   color: TYPE_COLOR[entry.type],
                   wordBreak: 'break-word',
                 }}
               >
                 {entry.type === 'boolean' ? (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
+                  <span className="inline-flex items-center gap-[var(--sp-2)]">
                     <span
+                      className="w-[var(--dot-table)] h-[var(--dot-table)] rounded-full flex-shrink-0"
                       style={{
-                        width: 'var(--dot-table)',
-                        height: 'var(--dot-table)',
-                        borderRadius: 'var(--radius-circle)',
                         background: entry.value === 'true' ? 'var(--color-s-ok)' : 'var(--color-t5)',
-                        flexShrink: 0,
                       }}
                     />
                     {entry.value}

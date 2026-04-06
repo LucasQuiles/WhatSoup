@@ -35,19 +35,19 @@ export function ContactSearch({
   }, [query, lineName]);
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
-      <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+    <div className="flex flex-col gap-[var(--sp-2)]">
+      <div className="flex items-center gap-[var(--sp-2)]">
         <Search size={14} className="text-t5 flex-shrink-0" />
         <input
           type="text"
-          className="c-input flex-1"
+          className="c-input flex-1 py-[var(--sp-1)] px-[var(--sp-2)] text-[var(--font-size-data)]"
           placeholder="Search contacts..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-          style={{ padding: 'var(--sp-1) var(--sp-2)', fontSize: 'var(--font-size-data)' }}
         />
         <button
+          type="button"
           className="c-btn c-btn-sm c-btn-ghost"
           onClick={handleSearch}
           disabled={loading || !query.trim()}
@@ -57,23 +57,18 @@ export function ContactSearch({
       </div>
 
       {searched && results.length === 0 && (
-        <div className="text-t5 font-mono text-center" style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-2)' }}>
+        <div className="text-t5 font-mono text-center text-[var(--font-size-xs)] p-[var(--sp-2)]">
           No contacts found
         </div>
       )}
 
       {results.length > 0 && (
-        <div className="flex flex-col" style={{ gap: '1px', maxHeight: '200px', overflowY: 'auto' }}>
+        <div className="flex flex-col gap-[var(--bw)] overflow-y-auto max-h-[var(--search-results-max-h)]">
           {results.map((c) => (
             <button
               key={c.jid}
               type="button"
-              className="flex items-center gap-2 text-left c-hover cursor-pointer"
-              style={{
-                padding: 'var(--sp-1h) var(--sp-2)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 'var(--font-size-data)',
-              }}
+              className="flex items-center gap-2 text-left c-hover cursor-pointer py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm text-[var(--font-size-data)]"
               onClick={() => onSelect?.(c)}
             >
               <User size={14} className="text-t4 flex-shrink-0" />
@@ -82,7 +77,7 @@ export function ContactSearch({
                   {c.name ?? c.notify ?? c.number ?? c.jid}
                 </div>
                 {c.number && (
-                  <div className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
+                  <div className="font-mono text-t5 text-[var(--font-size-xs)]">
                     {c.number}
                   </div>
                 )}

@@ -141,7 +141,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
             size={6}
             fill={paused ? "var(--color-s-warn)" : "var(--color-s-ok)"}
             stroke="none"
-            style={{ marginLeft: "var(--sp-2)" }}
+            className="ml-[var(--sp-2)]"
           />
         </div>
 

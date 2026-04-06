@@ -44,15 +44,11 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
     return (
       <div className="relative" ref={containerRef}>
         <button
+          type="button"
           onClick={() => setOpen(!open)}
-          className="w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover"
-          style={{
-            fontSize: 'var(--font-size-body)',
-            borderBottom: 'var(--bw) solid var(--b1)',
-            minHeight: 'var(--toolbar-h)',
-          }}
+          className="w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover text-[var(--font-size-body)] c-border-b min-h-[var(--toolbar-h)]"
         >
-          <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+          <div className="flex items-center gap-[var(--sp-2)]">
             {currentLine && <StatusDot status={currentLine.status} size="sm" />}
             <span className="font-medium">{activeLine || 'Select a line'}</span>
             {currentLine && <ModeBadge mode={currentLine.mode} />}
@@ -65,29 +61,20 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
 
         {open && (
           <div
-            className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide"
+            className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide bg-d6 border border-b2 shadow-[var(--shadow-md)]"
             style={{
-              background: 'var(--color-d6)',
-              borderWidth: 'var(--bw)',
-              borderStyle: 'solid',
-              borderColor: 'var(--b2)',
-              borderTop: 'none',
+              borderTopWidth: 0,
               borderRadius: '0 0 var(--radius-md) var(--radius-md)',
-              boxShadow: 'var(--shadow-md)',
             }}
           >
             {lines.map(line => (
               <button
                 key={line.name}
+                type="button"
                 onClick={() => { onSelect(line.name); setOpen(false) }}
-                className={`w-full flex items-center text-left cursor-pointer c-dropdown-item ${
+                className={`w-full flex items-center text-left cursor-pointer c-dropdown-item py-[var(--sp-2)] px-[var(--sp-4)] gap-[var(--sp-2)] text-[var(--font-size-body)] ${
                   line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
                 }`}
-                style={{
-                  padding: 'var(--sp-2) var(--sp-4)',
-                  gap: 'var(--sp-2)',
-                  fontSize: 'var(--font-size-body)',
-                }}
               >
                 <StatusDot status={line.status} size="sm" />
                 <span className="flex-1">{line.name}</span>
@@ -105,17 +92,9 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
   return (
     <div className="relative" ref={containerRef}>
       <button
+        type="button"
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4"
-        style={{
-          fontSize: 'var(--font-size-label)',
-          letterSpacing: 'var(--tracking-pill)',
-          padding: '5px var(--sp-3)',
-          borderRadius: 'var(--radius-sm)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-        }}
+        className="flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4 text-[var(--font-size-label)] tracking-[var(--tracking-pill)] py-px px-[var(--sp-3)] rounded-sm border border-b2"
       >
         {currentLine && <StatusDot status={currentLine.status} size="sm" />}
         <span className="font-medium">
@@ -129,25 +108,16 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
 
       {open && (
         <div
-          className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto"
-          style={{
-            minWidth: 'var(--dropdown-min-w)',
-            background: 'var(--color-d6)',
-            borderWidth: 'var(--bw)',
-            borderStyle: 'solid',
-            borderColor: 'var(--b2)',
-            borderRadius: 'var(--radius-md)',
-            boxShadow: 'var(--shadow-md)',
-          }}
+          className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto min-w-[var(--dropdown-min-w)] bg-d6 border border-b2 rounded-md shadow-[var(--shadow-md)]"
         >
           {lines.map(line => (
             <button
               key={line.name}
+              type="button"
               onClick={() => { onSelect(line.name); setOpen(false) }}
-              className={`w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer c-dropdown-item ${
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer c-dropdown-item text-[var(--font-size-sm)] ${
                 line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
               }`}
-              style={{ fontSize: 'var(--font-size-sm)' }}
             >
               <StatusDot status={line.status} size="sm" />
               <span className="font-mono">{displayInstanceName(line.name)}</span>

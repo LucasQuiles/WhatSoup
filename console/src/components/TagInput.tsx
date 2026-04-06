@@ -58,36 +58,24 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
         }}
       />
       {values.length > 0 && (
-        <div className="flex flex-wrap" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
+        <div className="flex flex-wrap gap-[var(--sp-2)] mt-[var(--sp-2)]">
           {values.map((tag, i) => (
             <span
               key={tag}
-              className="inline-flex items-center font-mono font-medium"
+              className="inline-flex items-center font-mono font-medium text-[var(--font-size-label)] rounded-sm py-[var(--sp-1)] px-[var(--sp-2)] gap-[var(--sp-1)] border-[var(--bw)_solid]"
               style={{
                 background: accentColor ? `color-mix(in srgb, ${accentColor} 15%, var(--color-d4))` : 'var(--color-d4)',
                 color: accentColor ?? 'var(--color-t4)',
-                fontSize: 'var(--font-size-label)',
-                borderWidth: 'var(--bw)',
-                borderStyle: 'solid',
                 borderColor: accentColor ?? 'var(--b2)',
-                borderRadius: 'var(--radius-sm)',
-                padding: 'var(--sp-1) var(--sp-2)',
-                gap: 'var(--sp-1)',
               }}
             >
               {displayLabels?.[tag] ?? tag}
               <button
                 type="button"
                 onClick={() => removeTag(i)}
-                className="inline-flex items-center justify-center cursor-pointer c-hover"
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: 0,
-                  color: 'var(--color-t3)',
-                }}
+                className="inline-flex items-center justify-center cursor-pointer c-hover bg-none border-none p-0 text-t3"
               >
-                <X style={{ width: 'var(--sp-3)', height: 'var(--sp-3)' }} />
+                <X className="w-[var(--sp-3)] h-[var(--sp-3)]" />
               </button>
             </span>
           ))}

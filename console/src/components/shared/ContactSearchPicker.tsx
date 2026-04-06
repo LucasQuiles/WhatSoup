@@ -38,25 +38,21 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
   const selectedJids = new Set(selected.map((c) => c.jid))
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+    <div className="flex flex-col gap-[var(--sp-2)]">
       {selected.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {selected.map((c) => (
             <span
               key={c.jid}
-              className="inline-flex items-center gap-1 font-mono"
+              className="inline-flex items-center gap-1 font-mono text-[var(--font-size-xs)] bg-d1 rounded-sm border-[var(--b1)]"
               style={{
-                fontSize: 'var(--font-size-xs)',
                 padding: 'var(--bw) var(--sp-2)',
-                background: 'var(--color-d1)',
-                borderRadius: 'var(--radius-sm)',
                 borderWidth: 'var(--bw)',
                 borderStyle: 'solid',
-                borderColor: 'var(--b1)',
               }}
             >
               {c.name ?? c.notify ?? c.jid}
-              <button type="button" onClick={() => onRemove(c.jid)} className="c-btn c-btn-ghost" style={{ padding: 'var(--sp-0)' }} aria-label={`Remove ${c.name ?? c.jid}`}>
+              <button type="button" onClick={() => onRemove(c.jid)} className="c-btn c-btn-ghost p-[var(--sp-0)]" aria-label={`Remove ${c.name ?? c.jid}`}>
                 <X size={10} />
               </button>
             </span>
@@ -69,24 +65,23 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
           onChange={(e) => { setQuery(e.target.value); doSearch(e.target.value) }}
           placeholder={placeholder}
           aria-label={placeholder}
-          endAdornment={searching ? <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>...</span> : null}
+          endAdornment={searching ? <span className="font-mono text-t4 text-[var(--font-size-xs)]">...</span> : null}
         />
         {results.length > 0 && (
           <div
-            className="c-card absolute left-0 right-0 z-50 overflow-y-auto"
-            style={{ top: '100%', marginTop: 'var(--sp-1)', maxHeight: 'calc(var(--sp-10) * 5)' }}
+            className="c-card absolute left-0 right-0 z-50 overflow-y-auto mt-[var(--sp-1)]"
+            style={{ top: '100%', maxHeight: 'calc(var(--sp-10) * 5)' }}
           >
             {results.filter((r) => !selectedJids.has(r.jid)).map((contact) => (
               <button
                 key={contact.jid}
                 type="button"
-                className="w-full flex items-center gap-2 c-hover text-left"
-                style={{ padding: 'var(--sp-2) var(--sp-3)' }}
+                className="w-full flex items-center gap-2 c-hover text-left py-[var(--sp-2)] px-[var(--sp-3)]"
                 onClick={() => { onAdd(contact); setQuery(''); setResults([]) }}
               >
                 <UserPlus size={14} className="text-t4" />
-                <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{contact.name ?? contact.notify ?? contact.jid}</span>
-                {contact.number && <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>{contact.number}</span>}
+                <span className="font-mono text-t2 text-[var(--font-size-data)]">{contact.name ?? contact.notify ?? contact.jid}</span>
+                {contact.number && <span className="font-mono text-t4 text-[var(--font-size-xs)]">{contact.number}</span>}
               </button>
             ))}
           </div>

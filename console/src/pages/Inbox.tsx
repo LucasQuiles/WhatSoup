@@ -181,8 +181,7 @@ export default function Inbox() {
 
   return (
     <motion.div
-      className="flex-1 flex min-h-0 overflow-hidden"
-      style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}
+      className="flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5, ease }}
@@ -190,10 +189,7 @@ export default function Inbox() {
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden"
-        style={{
-          width: 'var(--panel-chat-list)',
-        }}
+        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--panel-chat-list)]"
       >
         {/* Line picker — toolbar pattern */}
         <LinePicker
@@ -215,8 +211,8 @@ export default function Inbox() {
             />
           ))}
           {(!chats || chats.length === 0) && (
-            <div style={{ padding: 'var(--sp-8) var(--sp-4)' }} className="text-center text-t4">
-              <span style={{ fontSize: 'var(--font-size-body)' }}>No chats found</span>
+            <div className="text-center text-t4 py-[var(--sp-8)] px-[var(--sp-4)]">
+              <span className="text-[var(--font-size-body)]">No chats found</span>
             </div>
           )}
         </div>
@@ -225,19 +221,15 @@ export default function Inbox() {
       {/* ═══ Center: Messages ═══ */}
       <div
         className="c-card flex-1 flex flex-col min-h-0 overflow-hidden"
-        style={{
-        }}
       >
         {selectedChat && currentChat ? (
           <>
             {/* Chat header */}
             <div
-              className="flex items-center bg-d3 c-toolbar"
-              style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
+              className="flex items-center bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
             >
               <div
-                className="rounded-full flex items-center justify-center flex-shrink-0"
-                style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', background: 'var(--color-d5)' }}
+                className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
               >
                 {currentChat.isGroup
                   ? <Users size={15} className="text-t3" />
@@ -245,8 +237,8 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1">
-                <div className="text-t1 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>{resolveDisplayName(currentChat.name)}</div>
-                <div className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-label)' }}>
+                <div className="text-t1 font-medium text-[var(--font-size-body)]">{resolveDisplayName(currentChat.name)}</div>
+                <div className="text-t5 font-mono text-[var(--font-size-label)]">
                   {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
               </div>
@@ -254,13 +246,7 @@ export default function Inbox() {
             </div>
 
             <div
-              className="flex items-center"
-              style={{
-                padding: 'var(--sp-3) var(--sp-4)',
-                gap: 'var(--sp-3)',
-                borderBottom: 'var(--bw) solid var(--b1)',
-                background: 'var(--color-d2)',
-              }}
+              className="flex items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b bg-d2"
             >
               <div className="relative flex-1">
                 <Search
@@ -284,9 +270,9 @@ export default function Inbox() {
                   />
                 ) : isSearchMode ? (
                   <button
+                    type="button"
                     onClick={() => setSearchInput('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 c-hover cursor-pointer text-t5 hover:text-t2"
-                    style={{ padding: 'var(--sp-1)' }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
                     title="Clear search"
                     aria-label="Clear search"
                   >
@@ -295,7 +281,7 @@ export default function Inbox() {
                 ) : null}
               </div>
               {isSearchMode && (
-                <span className="c-label" style={{ whiteSpace: 'nowrap' }}>
+                <span className="c-label whitespace-nowrap">
                   {isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`}
                 </span>
               )}
@@ -305,8 +291,7 @@ export default function Inbox() {
             {isSearchMode ? (
               <div
                 ref={searchScrollRef}
-                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0"
-                style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {searchError ? (
                   <div className="flex-1 flex items-center justify-center">
@@ -350,27 +335,20 @@ export default function Inbox() {
               <div
                 ref={scrollRef}
                 onScroll={handleScroll}
-                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative"
-                style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {messages && messages.length > 0 && hasMore && (
                   <button
+                    type="button"
                     onClick={handleLoadOlder}
                     disabled={loadingOlder}
-                    className="c-btn c-btn-ghost"
-                    style={{
-                      padding: 'var(--sp-2) 0 var(--sp-4)',
-                      gap: 'var(--sp-2)',
-                      width: '100%',
-                      justifyContent: 'center',
-                      color: 'var(--color-t5)',
-                    }}
+                    className="c-btn c-btn-ghost py-[var(--sp-2)] px-0 pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t5"
                   >
                     {loadingOlder
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
                       : <ChevronsUp size={14} strokeWidth={1.75} />
                     }
-                    <span style={{ fontSize: 'var(--font-size-sm)' }}>
+                    <span className="text-[var(--font-size-sm)]">
                       {loadingOlder ? 'Loading…' : 'Load older messages'}
                     </span>
                   </button>
@@ -406,15 +384,11 @@ export default function Inbox() {
                 )}
                 {showJump && (
                   <button
+                    type="button"
                     onClick={jumpToBottom}
-                    className="c-btn c-btn-sm"
+                    className="c-btn c-btn-sm absolute left-1/2 -translate-x-1/2 text-[var(--font-size-sm)] shadow-[var(--shadow-md)]"
                     style={{
-                      position: 'absolute',
-                      left: '50%',
                       bottom: '4rem',
-                      transform: 'translateX(-50%)',
-                      fontSize: 'var(--font-size-sm)',
-                      boxShadow: 'var(--shadow-md)',
                       zIndex: 'var(--z-float)',
                     }}
                   >
@@ -426,20 +400,14 @@ export default function Inbox() {
 
             {/* Input bar */}
             <div
-              className="flex flex-shrink-0 items-center"
-              style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: 'var(--bw) solid var(--b1)', background: 'var(--color-d2)' }}
+              className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-d2"
             >
               <textarea
                 ref={textareaRef}
-                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight"
+                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight text-[var(--font-size-body)] py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 border-[var(--bw)] border-solid border-[var(--b2)] rounded-md"
                 rows={1}
                 style={{
-                  fontSize: 'var(--font-size-body)',
-                  padding: 'var(--sp-2h) var(--sp-4)',
-                  background: 'var(--color-d1)',
-                  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
-                  borderRadius: 'var(--radius-md)',
-                  maxHeight: '120px',
+                  maxHeight: 'var(--feed-preview-max)',
                   resize: 'none',
                   overflow: 'hidden',
                 }}
@@ -449,13 +417,15 @@ export default function Inbox() {
                 onChange={e => {
                   setMsgText(e.target.value)
                   const el = e.target
+                  const maxH = parseInt(getComputedStyle(el).getPropertyValue('--feed-preview-max'))
                   el.style.height = '0'
-                  el.style.height = Math.min(el.scrollHeight, 120) + 'px'
-                  el.style.overflow = el.scrollHeight > 120 ? 'auto' : 'hidden'
+                  el.style.height = Math.min(el.scrollHeight, maxH) + 'px'
+                  el.style.overflow = el.scrollHeight > maxH ? 'auto' : 'hidden'
                 }}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
               />
               <button
+                type="button"
                 className="c-btn c-btn-primary c-btn-send flex-shrink-0"
                 onClick={handleSend}
                 disabled={isSending || !msgText.trim()}
@@ -480,21 +450,16 @@ export default function Inbox() {
 
       {/* ═══ Right: Contact details ═══ */}
       <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden"
-        style={{
-          width: 'var(--panel-contact)',
-        }}
+        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--panel-contact)]"
       >
         {currentChat ? (
           <>
             {/* Contact header */}
             <div
-              className="flex items-center bg-d3 c-toolbar"
-              style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)', gap: 'var(--sp-3)' }}
+              className="flex items-center bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
             >
               <div
-                className="rounded-full flex items-center justify-center flex-shrink-0"
-                style={{ width: 'var(--avatar-sm)', height: 'var(--avatar-sm)', background: 'var(--color-d5)' }}
+                className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
               >
                 {currentChat.isGroup
                   ? <Users size={14} className="text-t4" />
@@ -502,23 +467,18 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-t1 font-medium truncate" style={{ fontSize: 'var(--font-size-body)' }}>{resolveDisplayName(currentChat.name)}</div>
+                <div className="text-t1 font-medium truncate text-[var(--font-size-body)]">{resolveDisplayName(currentChat.name)}</div>
                 <div className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>
 
             {/* Details body */}
-            <div className="flex-1 overflow-auto scrollbar-hide" style={{ padding: 'var(--sp-4)' }}>
+            <div className="flex-1 overflow-auto scrollbar-hide p-[var(--sp-4)]">
               {/* Info card */}
-              <div style={{ marginBottom: 'var(--sp-4)' }}>
-                <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Details</div>
+              <div className="mb-[var(--sp-4)]">
+                <div className="c-col-header mb-[var(--sp-2)]">Details</div>
                 <div
-                  style={{
-                    background: 'var(--color-d2)',
-                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: 'var(--sp-3) var(--sp-4)',
-                  }}
+                  className="bg-d2 border-[var(--bw)] border-solid border-[var(--b1)] rounded-md py-[var(--sp-3)] px-[var(--sp-4)]"
                 >
                   {[
                     { label: 'Line', value: activeLine },
@@ -528,14 +488,10 @@ export default function Inbox() {
                   ].map((item, i, arr) => (
                     <div
                       key={item.label}
-                      className="flex justify-between"
-                      style={{
-                        padding: 'var(--sp-2) 0',
-                        ...(i < arr.length - 1 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}),
-                      }}
+                      className={`flex justify-between py-[var(--sp-2)] px-0 ${i < arr.length - 1 ? 'border-b-[var(--bw)] border-b-solid border-b-[var(--b1)]' : ''}`}
                     >
                       <span className="c-label">{item.label}</span>
-                      <span className="font-mono text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{item.value}</span>
+                      <span className="font-mono text-t2 text-[var(--font-size-data)]">{item.value}</span>
                     </div>
                   ))}
                 </div>
@@ -543,9 +499,10 @@ export default function Inbox() {
 
               {/* Quick actions */}
               <div>
-                <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Actions</div>
-                <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+                <div className="c-col-header mb-[var(--sp-2)]">Actions</div>
+                <div className="flex flex-col gap-[var(--sp-2)]">
                   <button
+                    type="button"
                     className="c-btn c-btn-success w-full justify-center"
                     disabled={actionBusy}
                     onClick={async () => {
@@ -564,6 +521,7 @@ export default function Inbox() {
                     <UserCheck size={14} strokeWidth={1.75} /> Allow Contact
                   </button>
                   <button
+                    type="button"
                     className="c-btn c-btn-danger w-full justify-center"
                     disabled={actionBusy}
                     onClick={async () => {
@@ -583,6 +541,7 @@ export default function Inbox() {
                   </button>
                   {!currentChat.isGroup && (
                     <button
+                      type="button"
                       className="c-btn w-full justify-center border-[var(--b2)] text-t2"
                       disabled={actionBusy}
                       onClick={async () => {
@@ -612,8 +571,8 @@ export default function Inbox() {
               </div>
 
               {/* Contact lookup */}
-              <div style={{ marginTop: 'var(--sp-4)' }}>
-                <div className="c-col-header" style={{ marginBottom: 'var(--sp-2)' }}>Find Contact</div>
+              <div className="mt-[var(--sp-4)]">
+                <div className="c-col-header mb-[var(--sp-2)]">Find Contact</div>
                 <ContactSearch
                   lineName={activeLine}
                   onSelect={(c) => toast.info(`${c.name ?? c.jid}`)}
@@ -622,8 +581,8 @@ export default function Inbox() {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center" style={{ padding: 'var(--sp-4)' }}>
-            <div className="text-center text-t5" style={{ fontSize: 'var(--font-size-sm)' }}>
+          <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]">
+            <div className="text-center text-t5 text-[var(--font-size-sm)]">
               Select a conversation to see details
             </div>
           </div>

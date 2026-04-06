@@ -40,15 +40,9 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
     <div
       role="alert"
       aria-live="polite"
-      className="flex items-center gap-2.5 font-medium"
+      className="flex items-center gap-2.5 font-medium py-[var(--sp-2h)] px-[var(--sp-4)] rounded-md text-[var(--font-size-body)] bg-d3 max-w-[var(--toast-max-w)] shadow-[var(--shadow-md)]"
       style={{
-        padding: 'var(--sp-2h) var(--sp-4)',
-        borderRadius: 'var(--radius-md)',
-        fontSize: 'var(--font-size-body)',
         borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: borderColor[variant],
-        background: 'var(--color-d3)',
-        boxShadow: 'var(--shadow-md)',
-        maxWidth: 'var(--toast-max-w)',
       }}
     >
       <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${iconColor[variant]}`} />

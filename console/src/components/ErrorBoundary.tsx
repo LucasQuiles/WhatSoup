@@ -35,8 +35,8 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
     if (!this.state.hasError) return this.props.children
 
     return (
-      <div className="flex-1 flex items-center justify-center" style={{ padding: 'var(--sp-4)' }} role="alert">
-        <div className="c-card" style={{ width: 'min(100%, 32rem)', padding: 'var(--sp-2)' }}>
+      <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]" role="alert">
+        <div className="c-card p-[var(--sp-2)]" style={{ width: 'min(100%, 32rem)' }}>
           <EmptyState
             variant="error"
             title="This page crashed"
