@@ -109,7 +109,10 @@ export class FleetDiscovery {
           // NOT in the XDG state directory. Resolve from agentOptions.cwd or homedir fallback.
           const agentOpts = typeof raw.agentOptions === 'object' && raw.agentOptions !== null && !Array.isArray(raw.agentOptions)
             ? raw.agentOptions as Record<string, unknown> : {};
-          const agentCwd = typeof agentOpts.cwd === 'string' ? agentOpts.cwd : os.homedir();
+          const rawCwd = typeof agentOpts.cwd === 'string' ? agentOpts.cwd : os.homedir();
+          // Expand leading ~ to homedir (configs often use ~/path)
+          const agentCwd = rawCwd.startsWith('~/') ? path.join(os.homedir(), rawCwd.slice(2))
+            : rawCwd === '~' ? os.homedir() : rawCwd;
           socketPath = path.join(agentCwd, '.claude', 'whatsoup.sock');
         }
 

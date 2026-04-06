@@ -116,8 +116,12 @@ export default function LineDetail() {
 
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
 
-  // Show MCP-dependent tabs only when instance has a global socket (not sandbox-per-chat)
-  const hasMcpSocket = !line.sandboxPerChat
+  // MCP-dependent tabs only for modes with a global MCP socket:
+  // - passive: always has socket in state dir
+  // - agent (non-sandbox): has socket at cwd/.claude/
+  // - chat: no MCP socket server
+  // - agent (sandbox-per-chat): per-chat sockets only, no global socket
+  const hasMcpSocket = line.mode === 'passive' || (line.mode === 'agent' && !line.sandboxPerChat)
   const tabs = hasMcpSocket ? [...BASE_TABS, ...MCP_TABS] : BASE_TABS
 
   const ease = [0.22, 1, 0.36, 1] as const

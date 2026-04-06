@@ -337,6 +337,20 @@ describe('FleetDiscovery.scan — socket path resolution', () => {
     expect(inst!.socketPath).toBe(path.join('/opt/myagent', '.claude', 'whatsoup.sock'));
   });
 
+  it('agent instances with tilde cwd expand ~ to homedir', () => {
+    writeInstanceConfig('q-agent-tilde', {
+      ...agentInstance,
+      name: 'q-agent-tilde',
+      agentOptions: { sessionScope: 'per_chat', cwd: '~/LAB/myagent' },
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    discovery.scan();
+    const inst = discovery.getInstance('q-agent-tilde');
+
+    expect(inst!.socketPath).toBe(path.join(os.homedir(), 'LAB', 'myagent', '.claude', 'whatsoup.sock'));
+  });
+
   it('chat instances have no socket path', () => {
     writeInstanceConfig('loops', chatInstance);
 

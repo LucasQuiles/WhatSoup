@@ -114,7 +114,7 @@ export async function handleGetScheduled(
   if (qs.status) args.status = qs.status;
 
   const result = await mcpCall(instance.socketPath!, 'list_scheduled', args);
-  if (result.success) jsonResponse(res, 200, result.result);
+  if (result.success) jsonResponse(res, 200, unwrapMcpResult(result.result));
   else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
 }
 
@@ -276,6 +276,11 @@ export async function handleSearchContacts(
   if (!socketCheck(instance, res)) return;
 
   const result = await mcpCall(instance.socketPath!, 'search_contacts', { query });
-  if (result.success) jsonResponse(res, 200, result.result);
+  if (result.success) {
+    // search_contacts returns {results, total} — normalize to {contacts} for console
+    const unwrapped = unwrapMcpResult(result.result) as Record<string, unknown>;
+    const contacts = unwrapped.results ?? unwrapped.contacts ?? unwrapped;
+    jsonResponse(res, 200, { contacts: Array.isArray(contacts) ? contacts : [] });
+  }
   else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
 }
