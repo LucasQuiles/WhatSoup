@@ -2134,6 +2134,10 @@ export class AgentRuntime implements Runtime {
 
     // Shutdown per_chat sessions
     if (this.sessionScope === 'per_chat') {
+      const perChatKeys = new Set<string>([
+        ...this.chatSessions.keys(),
+        ...this.chatQueues.keys(),
+      ]);
       for (const [chatJid, session] of this.chatSessions) {
         try { await session.shutdown(); } catch (err) { log.warn({ err, chatJid }, 'per_chat session shutdown failed'); }
       }
@@ -2142,6 +2146,9 @@ export class AgentRuntime implements Runtime {
       }
       this.chatSessions.clear();
       this.chatQueues.clear();
+      for (const mapKey of perChatKeys) {
+        this.cleanupPerChatState(mapKey);
+      }
     }
 
     if (this.session && this.sessionScope !== 'per_chat') {

@@ -1,34 +1,26 @@
-# PERF-02 Output
+# LEAK-03 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: PERF-02 — streaming buffer + stdout buffer + canonical map-key dedup
-- Branch: fix/perf-02-streaming-buffer-optimization
-- Commit: b17761f
-- Summary: Replaced hot-path string concatenation in outbound streaming and session stdout handling, normalized non-sandbox per-chat session/queue lookups around a single per-message canonical map key, and added regressions for the new buffering/canonical reuse paths.
+- Bead: LEAK-03 — wire per-chat cleanup into shutdown
+- Branch: fix/leak-03-wire-shutdown
+- Commit: 013c6c1
+- Summary: Routed per-chat shutdown through `cleanupPerChatState(mapKey)` for every tracked chat key after session/queue teardown, and added regressions covering helper invocation, auxiliary-state cleanup, and shutdown ordering.
 
 ## Files Changed
-- src/runtimes/agent/outbound-queue.ts
 - src/runtimes/agent/runtime.ts
-- src/runtimes/agent/session.ts
-- tests/mcp/tools/heal.test.ts
-- tests/runtimes/agent/control-timeout.test.ts
-- tests/runtimes/agent/outbound-queue.test.ts
 - tests/runtimes/agent/runtime.test.ts
-- tests/runtimes/agent/session.test.ts
-- tests/runtimes/agent/zombie-sessions.test.ts
 - bead-output.md
 
 ## Verification
-- `npx vitest run --pool=forks tests/runtimes/agent/outbound-queue.test.ts` ✅
-- `npx vitest run --pool=forks tests/runtimes/agent/session.test.ts` ✅
+- `npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts -t "per_chat shutdown"` ✅
 - `npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts` ✅
-- `npx vitest run --pool=forks tests/core/perf-prepared-statements.test.ts` ✅
 - `npm run typecheck` ✅
 - `npm run typecheck:all` ✅
-- `npx vitest run --pool=forks` ✅ (199 files, 3,747 tests)
+- `npx vitest run --pool=forks` ⚠️ blocked by pre-existing `tests/console/line-detail-ds-compliance-round2.test.ts`
+- `cd /home/q/LAB/WhatSoup && npx vitest run --pool=forks tests/console/line-detail-ds-compliance-round2.test.ts` ⚠️ same failure reproduced on repo main (`GroupDetailModal` missing `maxHeight: 'var(--modal-max-h)'`)
 
 ## Notes
-- `OutboundQueue` now accumulates streaming fragments in `streamBufferParts` and joins once per flush/abort path.
-- `SessionManager` now batches stdout chunks through `stdoutChunks`/`stdoutBufferStr`, draining complete lines and final crash/exit tails without repeated `chunk.toString()` concatenation.
-- Non-sandbox `per_chat` now resolves one canonical map key per inbound message and threads it through queue/session reuse, while continuing to rely on the existing prepared-statement cache already present in `canonicalizeChatJid`.
+- Shutdown now snapshots per-chat keys before clearing `chatSessions` / `chatQueues`, then calls `cleanupPerChatState(mapKey)` once per key.
+- The new ordering test verifies each session still sees its replay/auxiliary state during `session.shutdown()`, and cleanup only happens afterwards.
+- Global `.clear()` calls remain as a final sweep for any stale per-chat state not anchored to an active session/queue key.

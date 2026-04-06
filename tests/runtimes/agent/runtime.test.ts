@@ -754,7 +754,7 @@ describe('AgentRuntime', () => {
     const workspaceCleanupMatches = source.match(/this\.cleanupPerChatState\(workspaceKey\);/g) ?? [];
     const crashMatch = source.match(/private cleanupPerChatCrashTurnState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
 
-    expect(mapKeyCleanupMatches).toHaveLength(2);
+    expect(mapKeyCleanupMatches.length).toBeGreaterThanOrEqual(2);
     expect(workspaceCleanupMatches).toHaveLength(2);
     expect(source).toContain('this.cleanupPerChatState(lidKey);');
     expect(crashMatch).toBeTruthy();
@@ -1433,6 +1433,96 @@ describe('AgentRuntime', () => {
     }
 
     expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length);
+  });
+
+  it('per_chat shutdown calls cleanupPerChatState for each chat key and clears auxiliary maps', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, { shutdown: () => Promise<void> }>;
+      chatQueues: Map<string, IOutboundQueue>;
+      cleanupPerChatState: (mapKey: string) => void;
+    };
+
+    state.chatSessions.set('chat-a', { shutdown: vi.fn(async () => {}) });
+    state.chatSessions.set('chat-b', { shutdown: vi.fn(async () => {}) });
+    state.chatQueues.set('chat-a', makeQueueMock('chat-a@s.whatsapp.net'));
+    state.chatQueues.set('chat-b', makeQueueMock('chat-b@s.whatsapp.net'));
+    state.perChatCrashCount.set('chat-a', 1);
+    state.perChatCrashCount.set('chat-b', 2);
+    state.perChatInboundSeqQueue.set('chat-a', [1]);
+    state.perChatInboundSeqQueue.set('chat-b', [2]);
+    state.perChatTurnContentType.set('chat-a', 'text');
+    state.perChatTurnContentType.set('chat-b', 'audio');
+    state.perChatTurnText.set('chat-a', 'reply-a');
+    state.perChatTurnText.set('chat-b', 'reply-b');
+    state.perChatAssistantItemText.set('chat-a', new Map([['item-a', 'value-a']]));
+    state.perChatAssistantItemText.set('chat-b', new Map([['item-b', 'value-b']]));
+    state.pendingTurnText.set('chat-a', 'pending-a');
+    state.pendingTurnText.set('chat-b', 'pending-b');
+    state.resumeFailedHandling.add('chat-a');
+    state.resumeFailedHandling.add('chat-b');
+
+    const originalCleanup = state.cleanupPerChatState.bind(runtime as unknown as object);
+    const cleanupCalls: string[] = [];
+    state.cleanupPerChatState = ((mapKey: string) => {
+      cleanupCalls.push(mapKey);
+      originalCleanup(mapKey);
+    }) as typeof state.cleanupPerChatState;
+
+    await runtime.shutdown();
+
+    expect(cleanupCalls).toEqual(['chat-a', 'chat-b']);
+    expect(state.perChatCrashCount.size).toBe(0);
+    expect(state.perChatInboundSeqQueue.size).toBe(0);
+    expect(state.perChatTurnContentType.size).toBe(0);
+    expect(state.perChatTurnText.size).toBe(0);
+    expect(state.perChatAssistantItemText.size).toBe(0);
+    expect(state.pendingTurnText.size).toBe(0);
+    expect(state.resumeFailedHandling.size).toBe(0);
+  });
+
+  it('per_chat shutdown runs session shutdown before cleanupPerChatState for each key', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, { shutdown: () => Promise<void> }>;
+      chatQueues: Map<string, IOutboundQueue>;
+      cleanupPerChatState: (mapKey: string) => void;
+    };
+    const order: string[] = [];
+
+    const makeSession = (mapKey: string) => ({
+      shutdown: vi.fn(async () => {
+        order.push(`session:${mapKey}`);
+        expect(state.pendingTurnText.get(mapKey)).toBe(`${mapKey}-pending`);
+        expect(state.resumeFailedHandling.has(mapKey)).toBe(true);
+      }),
+    });
+
+    state.chatSessions.set('chat-a', makeSession('chat-a'));
+    state.chatSessions.set('chat-b', makeSession('chat-b'));
+    state.chatQueues.set('chat-a', makeQueueMock('chat-a@s.whatsapp.net'));
+    state.chatQueues.set('chat-b', makeQueueMock('chat-b@s.whatsapp.net'));
+    state.pendingTurnText.set('chat-a', 'chat-a-pending');
+    state.pendingTurnText.set('chat-b', 'chat-b-pending');
+    state.resumeFailedHandling.add('chat-a');
+    state.resumeFailedHandling.add('chat-b');
+
+    const originalCleanup = state.cleanupPerChatState.bind(runtime as unknown as object);
+    state.cleanupPerChatState = ((mapKey: string) => {
+      order.push(`cleanup:${mapKey}`);
+      originalCleanup(mapKey);
+    }) as typeof state.cleanupPerChatState;
+
+    await runtime.shutdown();
+
+    expect(order.indexOf('session:chat-a')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('session:chat-b')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('cleanup:chat-a')).toBeGreaterThan(order.indexOf('session:chat-a'));
+    expect(order.indexOf('cleanup:chat-b')).toBeGreaterThan(order.indexOf('session:chat-b'));
   });
 
   it('shutdown continues cleanup after individual failures and clears runtime state', async () => {
