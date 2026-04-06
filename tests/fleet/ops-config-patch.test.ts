@@ -72,6 +72,7 @@ function makeDeps(instance: DiscoveredInstance): OpsDeps {
       getInstances: vi.fn(() => new Map()),
     } as any,
     realtime: { publish: vi.fn() },
+    serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
   };
 }
 

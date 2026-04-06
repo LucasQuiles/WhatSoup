@@ -112,6 +112,7 @@ describe('handleConfigUpdate — settingsJson patch', () => {
         getInstances: vi.fn(() => new Map()),
       } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     const customSettings = {
@@ -164,6 +165,7 @@ describe('handleConfigUpdate — settingsJson patch', () => {
         getInstances: vi.fn(() => new Map()),
       } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     const req = mockReq(JSON.stringify({
@@ -212,6 +214,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     const plugins = { 'sdlc-os@sdlc-os-dev': false, 'tmup@tmup-dev': true };
@@ -251,6 +254,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     const req = mockReq(JSON.stringify({ agentOptions: { enabledPlugins: { 'foo@bar': true } } }));
@@ -285,6 +289,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     const req = mockReq(JSON.stringify({
@@ -316,6 +321,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     const req = mockReq(JSON.stringify({
@@ -355,6 +361,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const deps: OpsDeps = {
       discovery: { getInstance: vi.fn(() => instance), getInstances: vi.fn(() => new Map()) } as any,
       realtime: { publish: vi.fn() },
+      serviceManager: { restart: vi.fn(), stop: vi.fn(), disable: vi.fn(), enable: vi.fn() } as any,
     };
 
     // Send null to clear
