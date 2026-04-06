@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
 //  Scheduled message utility functions (client-side)
 // ---------------------------------------------------------------------------
+import { capitalize } from '../../lib/text-utils.js';
 
 export function statusColor(status: string): string {
   switch (status) {
@@ -14,7 +15,7 @@ export function statusColor(status: string): string {
 }
 
 export function statusLabel(status: string): string {
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  return capitalize(status);
 }
 
 export function contentTypeLabel(type: string): string {

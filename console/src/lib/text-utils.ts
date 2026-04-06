@@ -1,3 +1,8 @@
+/** Capitalize the first letter of a string. */
+export function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 /** Capitalize single-letter instance names for display. */
 export function displayInstanceName(name: string): string {
   return name.length === 1 ? name.toUpperCase() : name

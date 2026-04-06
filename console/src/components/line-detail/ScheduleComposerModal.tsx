@@ -4,6 +4,7 @@ import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import { ChatPicker } from '../shared/ChatPicker.js'
 import { cronToHuman } from './scheduled-utils.js'
+import { capitalize } from '../../lib/text-utils.js'
 import type { ChatItem, ScheduledMessage } from '../../types.js'
 
 export interface ScheduleComposerModalProps {
@@ -241,7 +242,7 @@ export function ScheduleComposerModal({
                     style={{ fontSize: 'var(--font-size-xs)' }}
                   >
                     {ct === 'text' ? <MessageSquare size={12} strokeWidth={1.75} /> : <FileText size={12} strokeWidth={1.75} />}
-                    {ct.charAt(0).toUpperCase() + ct.slice(1)}
+                    {capitalize(ct)}
                   </button>
                 ))}
               </div>
