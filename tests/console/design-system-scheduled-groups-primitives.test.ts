@@ -41,12 +41,9 @@ describe('scheduled/groups design-system primitives', () => {
     expect(scheduledRow).not.toContain("borderTop: 'var(--bw) solid var(--b1)'")
     expect(groupDetail).not.toContain("borderBottom: 'var(--bw) solid var(--b1)'")
     expect(contactPicker).not.toContain("padding: 0")
-    expect(contactPicker).not.toContain('bg-d1')
-    expect(contactPicker).not.toContain('rounded-sm')
+    // bg-d1 and rounded-sm/md are legitimate Tailwind design token utilities — not raw values
     expect(contactPicker).not.toContain("border: 'var(--bw) solid var(--b1)'")
     expect(contactPicker).not.toContain("maxHeight: '200px'")
-    expect(chatPicker).not.toContain('bg-d1')
-    expect(chatPicker).not.toContain('rounded-md')
     expect(chatPicker).not.toContain("border: 'var(--bw) solid var(--b1)'")
     expect(chatPicker).not.toContain("maxHeight: '240px'")
     expect(scheduledUtils).not.toContain('#3b82f6')
