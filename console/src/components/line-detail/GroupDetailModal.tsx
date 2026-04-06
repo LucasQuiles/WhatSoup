@@ -22,6 +22,7 @@ interface GroupDetailModalProps {
   open: boolean
   group: GroupInfo | null
   lineName: string
+  myJid?: string
   onClose: () => void
 }
 
@@ -423,7 +424,8 @@ function ParticipantsTab({
       <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
         {filtered.map(p => {
           const badge = roleBadgeStyle(p.admin)
-          const isMe = myJid ? (p.id === myJid || p.id.startsWith(myJid.split('@')[0])) : false
+          const myPhoneNum = myJid?.split('@')[0]
+          const isMe = myJid ? (p.id === myJid || (myPhoneNum ? p.id.split('@')[0] === myPhoneNum : false)) : false
           return (
             <div
               key={p.id}
@@ -770,7 +772,7 @@ function SettingsTab({
 
 // ── Main modal ────────────────────────────────────────────────────────────────
 
-export function GroupDetailModal({ open, group, lineName, onClose }: GroupDetailModalProps) {
+export function GroupDetailModal({ open, group, lineName, myJid, onClose }: GroupDetailModalProps) {
   const [activeTab, setActiveTab] = useState<TabId>('info')
   const prevGroupId = useRef<string | undefined>(undefined)
 
@@ -799,9 +801,11 @@ export function GroupDetailModal({ open, group, lineName, onClose }: GroupDetail
 
   // Determine admin status — use detail if available, fall back to group from list
   const source = detail ?? group
-  // myJid not easily available here, so we check owner/admin status broadly
-  const myParticipant = source.participants.find(p => p.admin === 'superadmin' || p.admin === 'admin')
-  const isAdmin = !!myParticipant
+  const myPhone = myJid?.split('@')[0]
+  const myParticipant = myJid
+    ? source.participants.find(p => p.id === myJid || (myPhone && p.id.split('@')[0] === myPhone))
+    : undefined
+  const isAdmin = !!myParticipant?.admin
 
   const color = avatarColor(group.id)
   const initials = getInitials(group.subject)
@@ -898,6 +902,7 @@ export function GroupDetailModal({ open, group, lineName, onClose }: GroupDetail
               detail={detail}
               lineName={lineName}
               isAdmin={isAdmin}
+              myJid={myJid}
               onRefresh={() => refetch()}
             />
           )}

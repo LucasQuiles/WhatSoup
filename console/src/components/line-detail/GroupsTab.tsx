@@ -8,7 +8,7 @@ import { GroupDetailModal } from './GroupDetailModal.js'
 import { CreateGroupModal } from './CreateGroupModal.js'
 import type { GroupInfo } from '../../types.js'
 
-export function GroupsTab({ lineName }: { lineName: string }) {
+export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: string }) {
   const queryClient = useQueryClient()
   const [selectedGroup, setSelectedGroup] = useState<GroupInfo | null>(null)
   const [showCreate, setShowCreate] = useState(false)
@@ -68,6 +68,7 @@ export function GroupsTab({ lineName }: { lineName: string }) {
                 key={group.id}
                 group={group}
                 onSelect={setSelectedGroup}
+                myJid={myJid}
               />
             ))}
           </div>
@@ -78,6 +79,7 @@ export function GroupsTab({ lineName }: { lineName: string }) {
         open={!!selectedGroup}
         group={selectedGroup}
         lineName={lineName}
+        myJid={myJid}
         onClose={() => setSelectedGroup(null)}
       />
 

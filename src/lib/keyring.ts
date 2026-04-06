@@ -31,9 +31,11 @@ export function detectKeyringBackend(): KeyringBackend {
     return _cachedBackend;
   }
 
-  // Linux / WSL: probe secret-tool directly (avoids dependency on 'which')
+  // Linux / WSL: probe secret-tool directly (avoids dependency on 'which').
+  // Note: secret-tool has no --version flag (exits 2). GLib intercepts --help
+  // before custom dispatch and exits 0, making it a reliable presence probe.
   try {
-    execFileSync('secret-tool', ['--version'], { timeout: 2_000, stdio: 'ignore' });
+    execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
   } catch {
     _cachedBackend = 'env-only';

@@ -305,7 +305,7 @@ export default function LineDetail() {
             {activeTab === 'scheduled' && (
               <ScheduledTab lineName={name || ''} />
             )}
-            {activeTab === 'groups' && <GroupsTab lineName={name || ''} />}
+            {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
           </motion.div>
         </AnimatePresence>
       </div>

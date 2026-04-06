@@ -108,8 +108,23 @@ export class MessageScheduler {
         await this.executeSend(row);
         const sentAt = Math.floor(Date.now() / 1000);
         if (row.recurrence) {
-          // Recurring: stay pending with updated next_run_at and run_count
-          const nextRun = nextCronRun(row.recurrence, sentAt);
+          // Recurring: stay pending with updated next_run_at and run_count.
+          // Wrap nextCronRun separately — if a bad cron slipped into the DB,
+          // mark it permanently failed rather than entering a send-retry loop.
+          let nextRun: number;
+          try {
+            nextRun = nextCronRun(row.recurrence, sentAt);
+          } catch (cronErr) {
+            this.db.raw
+              .prepare(
+                `UPDATE scheduled_messages
+                 SET status = 'failed', sent_at = ?, error = ?
+                 WHERE id = ?`,
+              )
+              .run(sentAt, `Invalid recurrence after send: ${cronErr instanceof Error ? cronErr.message : String(cronErr)}`, row.id);
+            log.error({ id: row.id, recurrence: row.recurrence, err: cronErr }, 'scheduler: invalid cron in DB, marked failed after send');
+            continue;
+          }
           this.db.raw
             .prepare(
               `UPDATE scheduled_messages

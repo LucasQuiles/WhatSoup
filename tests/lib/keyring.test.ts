@@ -36,9 +36,10 @@ describe('keyring', () => {
 
     it('returns secret-tool on linux when available', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
-      mockedExecFileSync.mockReturnValueOnce(Buffer.from('secret-tool 0.1'));
+      // --help is intercepted by GLib and exits 0; execFileSync returns empty buffer
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from(''));
       expect(detectKeyringBackend()).toBe('secret-tool');
-      expect(mockedExecFileSync).toHaveBeenCalledWith('secret-tool', ['--version'], expect.any(Object));
+      expect(mockedExecFileSync).toHaveBeenCalledWith('secret-tool', ['--help'], expect.any(Object));
     });
 
     it('returns env-only on linux when secret-tool unavailable', () => {

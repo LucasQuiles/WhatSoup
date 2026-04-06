@@ -241,6 +241,9 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       if (parsed.scheduled_at <= now) {
         throw new Error('scheduled_at must be a future UTC unix timestamp');
       }
+      if (parsed.recurrence) {
+        parseCron(parsed.recurrence); // validate cron expression before inserting
+      }
 
       const { contentType, payload, mediaBlob } = buildScheduledPayload(parsed, session);
       const nextRunAt = parsed.recurrence ? parsed.scheduled_at : null;
@@ -393,7 +396,16 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
         parseCron(recurrence); // throws if invalid
         updates.push('recurrence = ?');
         values.push(recurrence);
-        const nextRun = nextCronRun(recurrence, Math.floor(Date.now() / 1000) - 60);
+        // Anchor next_run_at to the new scheduled_at if both are changing,
+        // otherwise use the supplied scheduled_at or wall-clock now.
+        const base = scheduled_at ?? Math.floor(Date.now() / 1000) - 60;
+        const nextRun = nextCronRun(recurrence, base);
+        updates.push('next_run_at = ?');
+        values.push(nextRun);
+      } else if (scheduled_at !== undefined && row.recurrence) {
+        // scheduled_at changed on an already-recurring row — recompute next_run_at
+        // so the scheduler fires at the new time, not the stale next_run_at.
+        const nextRun = nextCronRun(row.recurrence, scheduled_at - 60);
         updates.push('next_run_at = ?');
         values.push(nextRun);
       }
