@@ -69,11 +69,10 @@ describe('scheduled/groups design-system primitives', () => {
   it('extends eslint custom rules for hardcoded dimension and color literals', () => {
     const eslint = read('console/eslint.config.js')
 
-    expect(eslint).toContain('Hardcoded minHeight px')
-    expect(eslint).toContain('Hardcoded maxHeight px')
-    expect(eslint).toContain('Hardcoded maxHeight viewport unit')
-    expect(eslint).toContain('Hardcoded numeric size literal')
+    expect(eslint).toContain('Hardcoded size px')
+    expect(eslint).toContain('Bare vh/vw unit')
+    expect(eslint).toContain('Raw numeric value (becomes px)')
     expect(eslint).toContain('Hardcoded hex color')
-    expect(eslint).toContain('Border edge shorthand in inline style')
+    expect(eslint).toContain('Border edge shorthand in style')
   })
 })
