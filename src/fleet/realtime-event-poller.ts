@@ -59,7 +59,9 @@ export class FleetRealtimeEventPoller {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.poll(), this.intervalMs);
+    this.timer = setInterval(() => {
+      this.poll().catch((err) => log.warn({ err }, 'realtime poll error'));
+    }, this.intervalMs);
     log.info({ intervalMs: this.intervalMs }, 'realtime poller started');
   }
 

@@ -25,7 +25,7 @@ export function publishMessageReceived(
 ): void {
   const event: WsInvalidationEvent = { type: 'message_received', instance };
   if (conversationKey) event.conversationKey = conversationKey;
-  if (messagePk) event.messagePk = messagePk;
+  if (messagePk !== undefined) event.messagePk = messagePk;
   rt.publish(event);
 }
 
