@@ -17,8 +17,9 @@ export function FleetMetricsChart({ data }: { data: MessageVolumeBucket[] }) {
       <div className="font-mono text-t4 text-[var(--font-size-xs)] mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]">
         Fleet Message Volume (24h)
       </div>
-      <ResponsiveContainer width="100%" height="var(--chart-height-sm)">
-        <AreaChart data={data} margin={{ top: "var(--sp-1)", right: "var(--sp-2)", left: "-var(--sp-4)", bottom: 0 }}>
+      <ResponsiveContainer width="100%" height={120}>
+        {/* eslint-disable-next-line no-restricted-syntax -- Recharts SVG margin, not CSS */}
+        <AreaChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
           <CartesianGrid stroke="var(--b1)" vertical={false} />
           <XAxis
             dataKey="bucket"

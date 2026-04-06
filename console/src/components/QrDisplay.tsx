@@ -16,7 +16,8 @@ const QrDisplay: FC<QrDisplayProps> = ({ value, size = 256 }) => {
       const light = styles.getPropertyValue('--color-d1').trim()
       QRCode.toCanvas(canvasRef.current, value, {
         width: size,
-        margin: 2 as const,
+        // eslint-disable-next-line no-restricted-syntax -- QRCode library option, not CSS margin
+        margin: 2,
         color: { dark, light },
       })
     }
