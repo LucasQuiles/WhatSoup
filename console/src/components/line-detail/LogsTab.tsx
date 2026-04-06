@@ -32,7 +32,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
 
       {/* Log viewer */}
       <div
-        className="c-card overflow-hidden font-mono"
+        className="overflow-hidden font-mono"
         style={{ background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
       >
         {filtered.map((log, i) => (

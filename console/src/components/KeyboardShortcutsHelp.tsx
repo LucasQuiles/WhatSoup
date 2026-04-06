@@ -20,9 +20,6 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
       className="fixed inset-0 flex items-center justify-center"
       style={{ background: 'var(--overlay)', zIndex: 'var(--z-overlay)' }}
       onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="kbd-shortcuts-title"
     >
       <div
         className="c-dialog font-mono"
@@ -31,6 +28,9 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
           maxWidth: '90vw',
           padding: 'var(--sp-5)',
         }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="kbd-shortcuts-title"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2" style={{ marginBottom: 'var(--sp-4)' }}>
