@@ -1501,6 +1501,11 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid }, 'suppressed usage-limit message from result — session will be killed');
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
             session?.shutdown();
             break;
           }
@@ -2416,6 +2421,11 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'suppressed usage-limit message from result — session will be killed');
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
             this.session?.shutdown();
             break;
           }
@@ -2492,5 +2502,47 @@ export class AgentRuntime implements Runtime {
         log.debug({ event }, 'ignored/unknown/parse_error event');
         break;
     }
+  }
+
+  private cleanupUsageLimitTurn(
+    queue: IOutboundQueue,
+    opts: {
+      inboundSeq?: number;
+      conversationKey?: string;
+      mapKey?: string;
+      clearCurrentInboundSeq?: boolean;
+    } = {},
+  ): void {
+    const { inboundSeq, conversationKey, mapKey, clearCurrentInboundSeq = false } = opts
+
+    this.activeToolNames.clear()
+    this.currentTurnChatJid = null
+    this.turnHadVisibleOutput = false
+
+    this.currentTurnInboundContentType = null
+    this.currentTurnAssistantText = ''
+    this.currentTurnAssistantItemText.clear()
+
+    if (mapKey !== undefined) {
+      this.perChatTurnContentType.delete(mapKey)
+      this.perChatTurnText.delete(mapKey)
+      this.perChatAssistantItemText.delete(mapKey)
+    }
+
+    if (this.durability && conversationKey) {
+      this.durability.upsertSessionCheckpoint(conversationKey, {
+        activeTurnId: null,
+        ...(inboundSeq !== undefined && { lastInboundSeq: inboundSeq }),
+        ...(queue.getLastOpId() !== undefined && { lastFlushedOutboundId: queue.getLastOpId() }),
+      })
+    }
+    if (this.durability && inboundSeq !== undefined) {
+      this.durability.completeInbound(inboundSeq, 'response_sent')
+    }
+    if (clearCurrentInboundSeq) {
+      this.currentInboundSeq = undefined
+    }
+
+    queue.flush().catch((err) => log.error({ err }, 'usage-limit cleanup flush failed'))
   }
 }

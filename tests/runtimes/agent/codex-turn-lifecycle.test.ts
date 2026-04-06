@@ -132,6 +132,7 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
     getDbRowId: vi.fn(() => 1),
+    setDurability: vi.fn(() => {}),
   };
 
   const mockQueue = {
@@ -295,6 +296,14 @@ async function sendAndDrain(runtime: AgentRuntime, msg: IncomingMessage): Promis
   await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 }
 
+function makeDurabilityMock() {
+  return {
+    completeInbound: vi.fn(),
+    markInboundFailed: vi.fn(),
+    upsertSessionCheckpoint: vi.fn(),
+  };
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
 describe('Codex turn lifecycle — runtime level', () => {
@@ -333,8 +342,8 @@ describe('Codex turn lifecycle — runtime level', () => {
    * Helper: trigger a message to create a per-chat session, then return the
    * captured onEvent callback for feeding events.
    */
-  async function setupSession(): Promise<(event: AgentEvent) => void> {
-    await sendAndDrain(runtime, makeMsg());
+  async function setupSession(overrides: Partial<IncomingMessage> = {}): Promise<(event: AgentEvent) => void> {
+    await sendAndDrain(runtime, makeMsg(overrides));
 
     const onEvent = capturedOnEventRef.current;
     if (!onEvent) throw new Error('onEvent callback not captured — session was not created');
@@ -472,5 +481,59 @@ describe('Codex turn lifecycle — runtime level', () => {
 
     const calls = mockQueue.enqueueStreamingText.mock.calls.map((args) => args[0] as string);
     expect(calls).toEqual(['Hello', ' world']);
+  });
+
+  it('usage-limit result in per_chat completes inbound, flushes queue, and clears dirty turn state', async () => {
+    const durability = makeDurabilityMock();
+    (runtime as any).durability = durability;
+    (runtime as any).currentTurnChatJid = 'stale@s.whatsapp.net';
+    (runtime as any).turnHadVisibleOutput = true;
+    (runtime as any).activeToolNames.set('tool-1', 'search_contacts');
+    (runtime as any).chatQueues.set('1234@s.whatsapp.net', mockQueue);
+    (runtime as any).chatSessions.set('1234@s.whatsapp.net', mockSession);
+    (runtime as any).perChatInboundSeqQueue.set('1234@s.whatsapp.net', [77]);
+
+    (runtime as any).handleEventPerChat('1234@s.whatsapp.net', {
+      type: 'result',
+      text: "You've reached your usage limit. Try again later.",
+    });
+
+    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.shutdown).toHaveBeenCalledOnce();
+    expect(mockQueue.flush).toHaveBeenCalledOnce();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+    expect(durability.completeInbound).toHaveBeenCalledWith(77, 'response_sent');
+    expect((runtime as any).activeToolNames.size).toBe(0);
+    expect((runtime as any).currentTurnChatJid).toBeNull();
+    expect((runtime as any).turnHadVisibleOutput).toBe(false);
+    expect((runtime as any).perChatInboundSeqQueue.get('1234@s.whatsapp.net')).toEqual([]);
+  });
+
+  it('usage-limit result in shared mode flushes queue, completes inbound, and resets shared turn state', () => {
+    runtime = new AgentRuntime(fakeDb, fakeMessenger, 'test', {
+      sessionScope: 'shared',
+    });
+
+    const durability = makeDurabilityMock();
+    (runtime as any).durability = durability;
+    (runtime as any).session = mockSession;
+    (runtime as any).activeChatJid = '1234@s.whatsapp.net';
+    (runtime as any).currentTurnChatJid = '1234@s.whatsapp.net';
+    (runtime as any).currentInboundSeq = 91;
+    (runtime as any).turnHadVisibleOutput = true;
+    (runtime as any).activeToolNames.set('tool-1', 'search_contacts');
+    (runtime as any).outboundQueues.set('1234@s.whatsapp.net', mockQueue);
+
+    (runtime as any).handleEvent({ type: 'result', text: "You've reached your usage limit. Try again later." });
+
+    expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
+    expect(mockSession.shutdown).toHaveBeenCalledOnce();
+    expect(mockQueue.flush).toHaveBeenCalledOnce();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+    expect(durability.completeInbound).toHaveBeenCalledWith(91, 'response_sent');
+    expect((runtime as any).currentInboundSeq).toBeUndefined();
+    expect((runtime as any).activeToolNames.size).toBe(0);
+    expect((runtime as any).currentTurnChatJid).toBeNull();
+    expect((runtime as any).turnHadVisibleOutput).toBe(false);
   });
 });
