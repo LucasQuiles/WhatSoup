@@ -607,16 +607,15 @@ describe('media implicit mention in known groups', () => {
 describe('sibling bot filter', () => {
   const SIBLING_PHONE = '15551112222';
 
-  it('MUST NOT respond to sibling bot in group (auto-respond group)', async () => {
+  it('MUST NOT respond to sibling bot in group when NOT mentioned', async () => {
     const { config: realConfig } = await import('../../src/config.ts');
-    // Temporarily add a sibling phone
     realConfig.siblingPhones.add(SIBLING_PHONE);
     try {
       const msg = makeMsg({
         chatJid: AUTO_RESPOND_GROUP,
         senderJid: `${SIBLING_PHONE}@s.whatsapp.net`,
         isGroup: true,
-        mentionedJids: [BOT_JID],
+        mentionedJids: [],
       });
       const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
       expect(result.respond).toBe(false);
@@ -626,7 +625,7 @@ describe('sibling bot filter', () => {
     }
   });
 
-  it('MUST NOT respond to sibling bot even when @mentioned in group', async () => {
+  it('MUST respond to sibling bot when explicitly @mentioned in group', async () => {
     const { config: realConfig } = await import('../../src/config.ts');
     realConfig.siblingPhones.add(SIBLING_PHONE);
     try {
@@ -637,8 +636,28 @@ describe('sibling bot filter', () => {
         mentionedJids: [BOT_JID],
       });
       const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
-      expect(result.respond).toBe(false);
-      expect(result.reason).toBe('sibling_bot');
+      expect(result.respond).toBe(true);
+      expect(result.reason).toBe('sibling_mentioned');
+    } finally {
+      realConfig.siblingPhones.delete(SIBLING_PHONE);
+    }
+  });
+
+  it('sibling bot suppressed in auto-respond group without explicit mention', async () => {
+    const { config: realConfig } = await import('../../src/config.ts');
+    realConfig.siblingPhones.add(SIBLING_PHONE);
+    try {
+      const msg = makeMsg({
+        chatJid: AUTO_RESPOND_GROUP,
+        senderJid: `${SIBLING_PHONE}@s.whatsapp.net`,
+        isGroup: true,
+        mentionedJids: [BOT_JID],
+      });
+      // Even in an auto-respond group, sibling filter runs first —
+      // but with a mention, the sibling should still respond
+      const result = shouldRespond(msg, BOT_JID, BOT_LID, db);
+      expect(result.respond).toBe(true);
+      expect(result.reason).toBe('sibling_mentioned');
     } finally {
       realConfig.siblingPhones.delete(SIBLING_PHONE);
     }

@@ -51,13 +51,7 @@ export function shouldRespond(
 
   const effectivePhone = resolvePhoneFromJid(msg.senderJid, db);
 
-  // ── Sibling bot filter (anti-echo-loop) ──
-  // In groups, silently ignore messages from other WhatSoup instances to
-  // prevent infinite reply loops between co-located bots.
-  if (msg.isGroup && config.siblingPhones?.size > 0 && config.siblingPhones.has(effectivePhone)) {
-    log.debug({ messageId: msg.messageId, phone: effectivePhone }, 'trigger: sibling bot in group — suppressed');
-    return { respond: false, reason: 'sibling_bot' };
-  }
+  const isSiblingBot = msg.isGroup && config.siblingPhones?.size > 0 && config.siblingPhones.has(effectivePhone);
   const accessMode: AccessMode = config.accessMode;
 
   // ── self_only mode (REQ-003.AC-01) ──
@@ -107,6 +101,28 @@ export function shouldRespond(
   }
 
   if (msg.isGroup) {
+    // Build set of identifiers the bot is known by (normalized — number before @)
+    const botIds = new Set<string>();
+    botIds.add(botJid);
+    botIds.add(bareNumber(botJid));
+    if (botLid) {
+      botIds.add(botLid);
+      botIds.add(bareNumber(botLid));
+    }
+
+    const mentioned = msg.mentionedJids.some(
+      (jid) => botIds.has(jid) || botIds.has(bareNumber(jid)),
+    );
+
+    // ── Sibling bot filter (anti-echo-loop) ──
+    // Siblings can see all messages (stored by ingest before this check) but
+    // only RESPOND when explicitly @mentioned. This prevents infinite reply
+    // loops while still allowing orchestrator bots to delegate via mentions.
+    if (isSiblingBot) {
+      log.debug({ messageId: msg.messageId, phone: effectivePhone, mentioned }, 'trigger: sibling bot in group');
+      return { respond: mentioned, reason: mentioned ? 'sibling_mentioned' : 'sibling_bot' };
+    }
+
     // Check if this group is set to auto-respond (access_list entry with subject_type='group', status='allowed')
     const groupEntry = lookupAccess(db, 'group', msg.chatJid);
     if (groupEntry?.status === 'allowed') {
@@ -122,19 +138,6 @@ export function shouldRespond(
       log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, contentType: msg.contentType }, 'trigger: media in known group — implicit mention');
       return { respond: true, reason: 'media_implicit_mention' };
     }
-
-    // Build set of identifiers the bot is known by (normalized — number before @)
-    const botIds = new Set<string>();
-    botIds.add(botJid);
-    botIds.add(bareNumber(botJid));
-    if (botLid) {
-      botIds.add(botLid);
-      botIds.add(bareNumber(botLid));
-    }
-
-    const mentioned = msg.mentionedJids.some(
-      (jid) => botIds.has(jid) || botIds.has(bareNumber(jid)),
-    );
 
     log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, mentioned }, 'trigger: group message');
     return { respond: mentioned, reason: mentioned ? 'mentioned' : 'not_mentioned' };
