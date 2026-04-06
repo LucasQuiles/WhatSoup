@@ -64,9 +64,9 @@ describe('OpenAI Provider', () => {
     vi.clearAllMocks();
     const MockOpenAI = vi.mocked(OpenAI);
     mockCreate = vi.fn();
-    MockOpenAI.mockImplementation(function (this: OpenAI) {
-      (this as unknown as { chat: unknown }).chat = { completions: { create: mockCreate } };
-    });
+    MockOpenAI.mockImplementation(function (this: Record<string, unknown>) {
+      this.chat = { completions: { create: mockCreate } };
+    } as unknown as () => OpenAI);
     provider = createOpenAIProvider();
   });
 

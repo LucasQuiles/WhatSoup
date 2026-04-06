@@ -43,6 +43,9 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
   return {
     pk: 1,
     chatJid: 'chat1@g.us',
+    conversationKey: 'chat1@g.us',
+    contentText: null,
+    mediaPath: null,
     senderJid: '15184194479@s.whatsapp.net',
     senderName: 'TestUser',
     messageId: 'msg-1',

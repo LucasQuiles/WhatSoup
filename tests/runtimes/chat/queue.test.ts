@@ -110,7 +110,7 @@ describe('ChatQueue — positive', () => {
       return Promise.resolve();
     };
 
-    queue.enqueue('chat-A', () => firstTask().then(() => order.push('first')));
+    queue.enqueue('chat-A', () => firstTask().then(() => { order.push('first'); }));
     queue.enqueue('chat-B', secondTask);
 
     // Second chat is blocked — slot is taken by first

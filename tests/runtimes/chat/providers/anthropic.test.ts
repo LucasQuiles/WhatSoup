@@ -58,9 +58,9 @@ describe('Anthropic Provider', () => {
     vi.clearAllMocks();
     const MockAnthropic = vi.mocked(Anthropic);
     mockCreate = vi.fn();
-    MockAnthropic.mockImplementation(function (this: Anthropic) {
-      (this as unknown as { messages: unknown }).messages = { create: mockCreate };
-    });
+    MockAnthropic.mockImplementation(function (this: Record<string, unknown>) {
+      this.messages = { create: mockCreate };
+    } as unknown as () => Anthropic);
     provider = createAnthropicProvider();
   });
 
@@ -143,7 +143,7 @@ describe('Anthropic Provider', () => {
   });
 
   it('does not return empty string as valid content', async () => {
-    mockCreate.mockResolvedValueOnce(makeSuccessResponse({ content: [{ type: 'text', text: 'non-empty' }] }));
+    mockCreate.mockResolvedValueOnce(makeSuccessResponse({ content: [{ type: 'text', text: 'non-empty', citations: [] }] }));
     const result = await provider.generate(makeRequest());
     expect(result.content).not.toBe('');
     expect(result.content.length).toBeGreaterThan(0);

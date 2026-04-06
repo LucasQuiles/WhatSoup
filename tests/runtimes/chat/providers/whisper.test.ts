@@ -34,11 +34,11 @@ describe('transcribeAudio (Whisper)', () => {
     vi.clearAllMocks();
     // Wire up the mock constructor implementation each time so the lazy
     // singleton (on first construction) gets the correct audio client shape.
-    vi.mocked(OpenAI).mockImplementation(function (this: OpenAI) {
-      (this as unknown as { audio: unknown }).audio = {
+    vi.mocked(OpenAI).mockImplementation(function (this: Record<string, unknown>) {
+      this.audio = {
         transcriptions: { create: mockTranscriptionsCreate },
       };
-    });
+    } as unknown as () => OpenAI);
   });
 
   // ── Positive tests ─────────────────────────────────────────────────────────

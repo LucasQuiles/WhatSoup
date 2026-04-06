@@ -80,10 +80,10 @@ describe('PineconeMemory', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     const MockPinecone = vi.mocked(Pinecone);
-    MockPinecone.mockImplementation(function (this: InstanceType<typeof Pinecone>) {
-      (this as unknown as { index: unknown }).index = vi.fn().mockReturnValue(mockIndex);
-      (this as unknown as { inference: unknown }).inference = { rerank: mockRerank };
-    });
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
 
@@ -327,10 +327,10 @@ describe('entity mode', () => {
     mutableConfig.pineconeRerankTopN = 6;
 
     const MockPinecone = vi.mocked(Pinecone);
-    MockPinecone.mockImplementation(function (this: InstanceType<typeof Pinecone>) {
-      (this as unknown as { index: unknown }).index = vi.fn().mockReturnValue(mockIndex);
-      (this as unknown as { inference: unknown }).inference = { rerank: mockRerank };
-    });
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
 
