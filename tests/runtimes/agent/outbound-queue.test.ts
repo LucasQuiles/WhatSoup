@@ -651,6 +651,7 @@ describe('OutboundQueue', () => {
         callCount += 1;
         throw new Error('fail');
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(alwaysFailMessenger, CHAT_JID);
@@ -709,6 +710,7 @@ describe('OutboundQueue', () => {
         noticeCalls.push(text);
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(exhaustedMessenger, CHAT_JID);
@@ -731,6 +733,7 @@ describe('OutboundQueue', () => {
         if (callCount < 3) throw new Error('transient');
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(retryMessenger, CHAT_JID);
@@ -758,6 +761,7 @@ describe('OutboundQueue', () => {
         if (callNum <= 3) throw new Error('hard fail');
         return { waMessageId: null };
       }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
 
     const queue = new OutboundQueue(alwaysFailMessenger, CHAT_JID);
