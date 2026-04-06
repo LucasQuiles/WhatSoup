@@ -25,10 +25,12 @@ vi.mock('node:os', () => ({
 function makeMockChild(pid = 12345) {
   const stdin = new EventEmitter() as EventEmitter & {
     write: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
   };
   (stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
     (_data: unknown, _enc?: unknown, cb?: (err?: Error | null) => void) => { if (typeof _enc === 'function') (_enc as (err?: Error | null) => void)(); else if (typeof cb === 'function') cb(); },
   );
+  (stdin as unknown as { end: ReturnType<typeof vi.fn> }).end = vi.fn();
 
   const stdout = new EventEmitter();
   const stderr = new EventEmitter();
@@ -229,6 +231,38 @@ describe('SessionManager', () => {
     expect(sentMessages).toHaveLength(1);
     expect(sentMessages[0].jid).toBe(CHAT_JID);
     expect(sentMessages[0].text).toContain('session ended');
+  });
+
+  it('spawn-per-turn non-zero exit invokes crash handling and notifies the user', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      provider: 'opencode-cli',
+      onEvent: vi.fn(),
+      onCrash,
+      notifyUser,
+    });
+
+    await sm.spawnSession();
+    await sm.sendTurn('hello');
+
+    mockChild._exitCb?.(1, null);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(onCrash).toHaveBeenCalledWith({
+      exitCode: 1,
+      signal: null,
+      sessionId: null,
+      dbRowId: 42,
+    });
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser.mock.calls[0][0]).toContain('exited with code 1');
   });
 
   it('getStatus returns correct state when active', async () => {

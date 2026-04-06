@@ -939,7 +939,7 @@ export class AgentRuntime implements Runtime {
         onCrash: (info) => {
           this.recordCrash();
           this.getActiveQueue()?.abortTurn();
-          this.turnHadVisibleOutput = false;
+          this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
           if (this.durability && this.currentInboundSeq !== undefined) {
             this.durability.markInboundFailed(this.currentInboundSeq);
@@ -2112,7 +2112,7 @@ export class AgentRuntime implements Runtime {
         onCrash: (info) => {
           this.recordCrash();
           this.getActiveQueue()?.abortTurn();
-          this.turnHadVisibleOutput = false;
+          this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
           if (this.durability && this.currentInboundSeq !== undefined) {
             this.durability.markInboundFailed(this.currentInboundSeq);
@@ -2164,6 +2164,7 @@ export class AgentRuntime implements Runtime {
       this.durability.markInboundFailed(inboundSeq);
       seqQueue.shift();
     }
+    this.cleanupPerChatCrashTurnState(mapKey);
     if (config.controlPeers.size > 0 && chatJid) {
       try {
         emitHealReport(this.db, this.messenger, this.durability, {
@@ -2216,6 +2217,25 @@ export class AgentRuntime implements Runtime {
         `Chat: ${mapKey}, Last exit: code=${info?.exitCode ?? '?'} signal=${info?.signal ?? 'none'}`,
       );
     }
+  }
+
+  private cleanupSharedCrashTurnState(): void {
+    this.activeToolNames.clear();
+    this.turnHadVisibleOutput = false;
+    this.currentTurnChatJid = null;
+    this.currentTurnInboundContentType = null;
+    this.currentTurnAssistantText = '';
+    this.currentTurnAssistantItemText.clear();
+  }
+
+  private cleanupPerChatCrashTurnState(mapKey: string): void {
+    this.activeToolNames.clear();
+    this.turnHadVisibleOutput = false;
+    this.currentTurnChatJid = null;
+    this.pendingTurnText.delete(mapKey);
+    this.perChatTurnContentType.delete(mapKey);
+    this.perChatTurnText.delete(mapKey);
+    this.perChatAssistantItemText.delete(mapKey);
   }
 
   /**

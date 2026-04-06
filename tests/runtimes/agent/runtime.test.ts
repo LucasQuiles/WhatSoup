@@ -7,9 +7,11 @@ import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
-const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } = vi.hoisted(() => {
+const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
   const capturedOnResumeFailedRef: { current: (() => void) | null } = { current: null };
+  const capturedOnCrashRef: { current: ((info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void) | null } = { current: null };
+  const capturedNotifyUserRef: { current: ((msg: string) => void) | null } = { current: null };
 
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
@@ -45,7 +47,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
     setDurability: vi.fn(),
   };
 
-  return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef };
+  return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
@@ -94,10 +96,17 @@ vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   // eslint-disable-next-line prefer-arrow-callback
   SessionManager: vi.fn().mockImplementation(function (
-    opts: { onEvent: (event: AgentEvent) => void; onResumeFailed?: () => void },
+    opts: {
+      onEvent: (event: AgentEvent) => void;
+      onResumeFailed?: () => void;
+      onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+      notifyUser?: (msg: string) => void;
+    },
   ) {
     capturedOnEventRef.current = opts.onEvent;
     capturedOnResumeFailedRef.current = opts.onResumeFailed ?? null;
+    capturedOnCrashRef.current = opts.onCrash ?? null;
+    capturedNotifyUserRef.current = opts.notifyUser ?? null;
     return mockSession;
   }),
   formatAge: vi.fn((isoString: string) => {
@@ -322,6 +331,8 @@ describe('AgentRuntime', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     capturedOnEventRef.current = null;
+    capturedOnCrashRef.current = null;
+    capturedNotifyUserRef.current = null;
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
     mockGetActiveSession.mockReturnValue(null);
@@ -336,9 +347,16 @@ describe('AgentRuntime', () => {
     // tests (and others) see the default mock that captures capturedOnEventRef.
     const { SessionManager: SessionManagerMock } = await import('../../../src/runtimes/agent/session.ts');
     (SessionManagerMock as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      function (opts: { onEvent: (event: AgentEvent) => void; onResumeFailed?: () => void }) {
+      function (opts: {
+        onEvent: (event: AgentEvent) => void;
+        onResumeFailed?: () => void;
+        onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+        notifyUser?: (msg: string) => void;
+      }) {
         capturedOnEventRef.current = opts.onEvent;
         capturedOnResumeFailedRef.current = opts.onResumeFailed ?? null;
+        capturedOnCrashRef.current = opts.onCrash ?? null;
+        capturedNotifyUserRef.current = opts.notifyUser ?? null;
         return mockSession;
       },
     );
@@ -427,6 +445,60 @@ describe('AgentRuntime', () => {
     await sendAndDrain(runtime, makeMsg({ content: '/new' }));
 
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('per_chat crash callbacks consume inbound seq, clear dirty turn state, and notify the user', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+
+    const durability = {
+      completeInbound: vi.fn(),
+      markInboundFailed: vi.fn(),
+      upsertSessionCheckpoint: vi.fn(),
+    };
+    (runtime as unknown as { durability: unknown }).durability = durability;
+
+    await sendAndDrain(runtime, makeMsg({ content: 'hello', inboundSeq: 77 }));
+
+    (runtime as unknown as { chatQueues: Map<string, typeof mockQueue> }).chatQueues.set('test@s.whatsapp.net', mockQueue);
+    (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set('test@s.whatsapp.net', [77]);
+    (runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.set('test@s.whatsapp.net', 'hello');
+    (runtime as unknown as { perChatTurnContentType: Map<string, string | null> }).perChatTurnContentType.set('test@s.whatsapp.net', 'text');
+    (runtime as unknown as { perChatTurnText: Map<string, string> }).perChatTurnText.set('test@s.whatsapp.net', 'partial');
+    (runtime as unknown as { perChatAssistantItemText: Map<string, Map<number, string>> }).perChatAssistantItemText.set('test@s.whatsapp.net', new Map([[1, 'tool output']]));
+    (runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.set('tool-1', 'search_contacts');
+    mockQueue.abortTurn.mockClear();
+    mockQueue.enqueueText.mockClear();
+    mockQueue.flush.mockClear();
+
+    (runtime as unknown as {
+      handlePerChatCrash: (
+        mapKey: string,
+        chatJid?: string,
+        info?: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null },
+      ) => void;
+    }).handlePerChatCrash('test@s.whatsapp.net', 'test@s.whatsapp.net', {
+      exitCode: 1,
+      signal: null,
+      sessionId: 'opencode-cli-123',
+      dbRowId: 42,
+    });
+    (runtime as unknown as {
+      handleCrashNotify: (msg: string, chatJid?: string) => void;
+    }).handleCrashNotify('Agent session ended (exited with code 1). Send any message to start a new session.', 'test@s.whatsapp.net');
+
+    expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
+    expect((durability as { markInboundFailed: ReturnType<typeof vi.fn> }).markInboundFailed).toHaveBeenCalledWith(77);
+    expect((runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
+    expect((runtime as unknown as { pendingTurnText: Map<string, string> }).pendingTurnText.has('test@s.whatsapp.net')).toBe(false);
+    expect((runtime as unknown as { perChatTurnContentType: Map<string, string | null> }).perChatTurnContentType.has('test@s.whatsapp.net')).toBe(false);
+    expect((runtime as unknown as { perChatTurnText: Map<string, string> }).perChatTurnText.has('test@s.whatsapp.net')).toBe(false);
+    expect((runtime as unknown as { perChatAssistantItemText: Map<string, Map<number, string>> }).perChatAssistantItemText.has('test@s.whatsapp.net')).toBe(false);
+    expect((runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.size).toBe(0);
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'));
+    expect(mockQueue.flush).toHaveBeenCalledTimes(1);
   });
 
   it('handleMessage /status sends status when inactive', async () => {
