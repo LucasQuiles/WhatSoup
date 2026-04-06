@@ -9,6 +9,8 @@ import { useNavigate, useLocation } from 'react-router-dom';
 interface ShortcutHandlers {
   /** Called when user triggers "search" shortcut (Cmd/Ctrl+K) */
   onSearch?: () => void;
+  /** Called when user presses ? to toggle shortcuts help */
+  onHelp?: () => void;
 }
 
 /**
@@ -42,6 +44,12 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {
 
       // Don't handle other shortcuts when typing in an input
       if (isInput) return;
+
+      // ? key — toggle shortcuts help
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        handlers.onHelp?.();
+        return;
+      }
 
       // Number keys for page navigation (no modifiers)
       if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {

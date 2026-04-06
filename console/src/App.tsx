@@ -1,6 +1,7 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState, useCallback } from 'react'
 import { Routes, Route } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
+import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
 import Nav from './components/Nav'
 import { useLines } from './hooks/use-fleet'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
@@ -31,8 +32,12 @@ export default function App() {
   const update = useUpdateCheck()
   const version = update.data?.sha ?? getStaticVersion()
 
-  // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav)
-  useKeyboardShortcuts()
+  // Keyboard shortcuts help modal
+  const [showShortcuts, setShowShortcuts] = useState(false)
+  const toggleShortcuts = useCallback(() => setShowShortcuts(p => !p), [])
+
+  // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav, ? help)
+  useKeyboardShortcuts({ onHelp: toggleShortcuts })
 
   return (
     <div className="flex flex-col h-screen bg-d0 overflow-hidden">
@@ -62,6 +67,7 @@ export default function App() {
           lines={lines ?? []}
         />
       </Suspense>
+      <KeyboardShortcutsHelp open={showShortcuts} onClose={() => setShowShortcuts(false)} />
     </div>
   )
 }

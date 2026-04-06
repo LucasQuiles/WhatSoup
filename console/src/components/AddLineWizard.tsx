@@ -339,8 +339,8 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           </AnimatePresence>
         </div>
 
-        {/* Footer — hidden on Link (step 1, has own controls) and Review (step 4, has own CTA) */}
-        {currentStep !== 1 && currentStep !== 4 && (
+        {/* Footer — hidden on Link (step 1, has own controls) */}
+        {currentStep !== 1 && (
           <div
             className="flex flex-col c-toolbar"
             style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-2)' }}
@@ -373,23 +373,26 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
               <span className="c-btn-nav-label">{currentStep > 0 ? 'Back' : 'Cancel'}</span>
               {currentStep === 0 && <X size={16} />}
             </button>
-            <button
-              className="c-btn c-btn-primary c-btn-nav"
-              onClick={handleNext}
-              disabled={creating}
-            >
-              {creating ? (
-                <>
-                  <Loader2 size={16} className="animate-spin" />
-                  <span className="c-btn-nav-label">Creating...</span>
-                </>
-              ) : (
-                <>
-                  <span className="c-btn-nav-label">Next</span>
-                  <ChevronRight size={16} />
-                </>
-              )}
-            </button>
+            {/* Hide Next on Review step — ReviewStep has its own Create button */}
+            {currentStep !== 4 && (
+              <button
+                className="c-btn c-btn-primary c-btn-nav"
+                onClick={handleNext}
+                disabled={creating}
+              >
+                {creating ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    <span className="c-btn-nav-label">Creating...</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="c-btn-nav-label">Next</span>
+                    <ChevronRight size={16} />
+                  </>
+                )}
+              </button>
+            )}
             </div>
           </div>
         )}
