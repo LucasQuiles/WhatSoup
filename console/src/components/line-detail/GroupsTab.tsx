@@ -1,10 +1,18 @@
-import { Users } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { Users, Plus } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
 import EmptyState from '../EmptyState.js'
+import { GroupCard } from './GroupCard.js'
+import { GroupDetailModal } from './GroupDetailModal.js'
+import { CreateGroupModal } from './CreateGroupModal.js'
 import type { GroupInfo } from '../../types.js'
 
 export function GroupsTab({ lineName }: { lineName: string }) {
+  const queryClient = useQueryClient()
+  const [selectedGroup, setSelectedGroup] = useState<GroupInfo | null>(null)
+  const [showCreate, setShowCreate] = useState(false)
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['groups', lineName],
     queryFn: () => api.getGroups(lineName),
@@ -28,41 +36,57 @@ export function GroupsTab({ lineName }: { lineName: string }) {
     )
   }
 
-  if (groups.length === 0) {
-    return (
-      <EmptyState
-        icon={<Users size={40} strokeWidth={1.25} />}
-        title="No groups"
-        description="Groups this instance participates in will appear here."
-      />
-    )
-  }
-
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
-      <div className="c-col-header text-t4" style={{ padding: 'var(--sp-2) var(--sp-4)' }}>
-        {groups.length} group{groups.length !== 1 ? 's' : ''}
-      </div>
-      {groups.map((group) => (
-        <div
-          key={group.jid}
-          className="c-card flex items-start gap-3"
-          style={{
-            padding: 'var(--sp-3) var(--sp-4)',
-          }}
-        >
-          <Users size={16} strokeWidth={1.75} className="text-t4 flex-shrink-0" style={{ marginTop: '2px' }} />
-          <div className="flex-1 min-w-0">
-            <div className="font-mono text-t2 truncate" style={{ fontSize: 'var(--font-size-data)' }}>
-              {group.subject}
-            </div>
-            <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px' }}>
-              {group.participants} participant{group.participants !== 1 ? 's' : ''}
-              {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}
-            </div>
-          </div>
+    <>
+      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+        {/* Header bar */}
+        <div className="flex items-center justify-between" style={{ padding: 'var(--sp-2) var(--sp-4)' }}>
+          <span className="c-col-header text-t4 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
+            {groups.length} group{groups.length !== 1 ? 's' : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="c-btn c-btn-sm c-btn-primary font-mono flex items-center gap-1"
+            style={{ fontSize: 'var(--font-size-xs)' }}
+          >
+            <Plus size={12} strokeWidth={2} />
+            Create Group
+          </button>
         </div>
-      ))}
-    </div>
+
+        {groups.length === 0 ? (
+          <EmptyState
+            icon={<Users size={40} strokeWidth={1.25} />}
+            title="No groups"
+            description="Groups this instance participates in will appear here."
+          />
+        ) : (
+          <div className="flex flex-col" style={{ gap: 'var(--sp-2)', padding: '0 var(--sp-4)' }}>
+            {groups.map(group => (
+              <GroupCard
+                key={group.id}
+                group={group}
+                onSelect={setSelectedGroup}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <GroupDetailModal
+        open={!!selectedGroup}
+        group={selectedGroup}
+        lineName={lineName}
+        onClose={() => setSelectedGroup(null)}
+      />
+
+      <CreateGroupModal
+        open={showCreate}
+        lineName={lineName}
+        onClose={() => setShowCreate(false)}
+        onCreated={() => queryClient.invalidateQueries({ queryKey: ['groups', lineName] })}
+      />
+    </>
   )
 }

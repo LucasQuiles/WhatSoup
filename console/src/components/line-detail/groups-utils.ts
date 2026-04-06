@@ -1,0 +1,47 @@
+export function roleLabel(admin?: 'admin' | 'superadmin'): string {
+  if (admin === 'superadmin') return 'Owner';
+  if (admin === 'admin') return 'Admin';
+  return 'Member';
+}
+
+export function roleBadgeStyle(admin?: 'admin' | 'superadmin'): { bg: string; color: string } | null {
+  if (admin === 'superadmin') return { bg: 'var(--s-warn-wash)', color: 'var(--color-s-warn)' };
+  if (admin === 'admin') return { bg: 'var(--s-ok-wash)', color: 'var(--color-s-ok)' };
+  return null;
+}
+
+export const EPHEMERAL_OPTIONS = [
+  { label: 'Off', seconds: 0 },
+  { label: '24 hours', seconds: 86400 },
+  { label: '7 days', seconds: 604800 },
+  { label: '90 days', seconds: 7776000 },
+] as const;
+
+export function ephemeralLabel(seconds?: number): string {
+  if (!seconds) return 'Off';
+  const opt = EPHEMERAL_OPTIONS.find(o => o.seconds === seconds);
+  return opt?.label ?? `${seconds}s`;
+}
+
+export function settingLabel(key: string): string {
+  switch (key) {
+    case 'announcement': return 'Only admins can send';
+    case 'not_announcement': return 'All participants can send';
+    case 'locked': return 'Only admins can edit info';
+    case 'unlocked': return 'All participants can edit info';
+    default: return key;
+  }
+}
+
+/** Generate initials for avatar placeholder */
+export function groupInitials(subject: string): string {
+  return subject.split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+}
+
+/** Generate a deterministic color from JID */
+export function avatarColor(jid: string): string {
+  let hash = 0;
+  for (const ch of jid) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0;
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 45%, 55%)`;
+}
