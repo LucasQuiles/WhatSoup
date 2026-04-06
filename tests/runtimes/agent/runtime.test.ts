@@ -40,6 +40,9 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef } 
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    targetChatJid: 'test@s.whatsapp.net',
+    getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef };
@@ -240,13 +243,14 @@ function makeDb(): Database {
   } as unknown as Database;
 }
 
-function makeMessenger(): { messenger: Messenger & { sendMedia?: ReturnType<typeof vi.fn> }; sentMessages: Array<{ jid: string; text: string }> } {
+function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
   const sentMessages: Array<{ jid: string; text: string }> = [];
-  const messenger: Messenger & { sendMedia?: ReturnType<typeof vi.fn> } = {
+  const messenger: Messenger = {
     sendMessage: vi.fn(async (jid: string, text: string) => {
       sentMessages.push({ jid, text });
+      return { waMessageId: null };
     }),
-    sendMedia: vi.fn(async () => {}),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
   return { messenger, sentMessages };
 }
@@ -972,6 +976,7 @@ describe('AgentRuntime', () => {
       {
         pk: 1,
         chatJid: 'user@s.whatsapp.net',
+        conversationKey: 'user_at_s.whatsapp.net',
         senderJid: 'sender@s.whatsapp.net',
         senderName: 'Alice',
         messageId: 'msg-1',
@@ -983,6 +988,8 @@ describe('AgentRuntime', () => {
         enrichmentProcessedAt: null,
         enrichmentRetries: 0,
         createdAt: new Date().toISOString(),
+        mediaPath: null,
+        contentText: null,
       },
     ]);
 
@@ -1565,7 +1572,7 @@ describe('AgentRuntime', () => {
     const { messenger, sentMessages } = makeMessenger();
 
     // Create distinct sessions per workspace key so we can tell them apart
-    const sessionsByKey = new Map<string, ReturnType<typeof vi.fn>>();
+    const sessionsByKey = new Map<string, Record<string, ReturnType<typeof vi.fn>>>();
     (MockSessionManagerCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       function (opts: { chatJid: string; onEvent: (event: AgentEvent) => void }) {
         const key = opts.chatJid.replace('@s.whatsapp.net', '');
@@ -1742,7 +1749,7 @@ describe('AgentRuntime', () => {
         }));
       }, { timeout: 500 });
 
-      expect((messenger as { sendMedia?: ReturnType<typeof vi.fn> }).sendMedia).toHaveBeenCalledWith(
+      expect(messenger.sendMedia).toHaveBeenCalledWith(
         'test@s.whatsapp.net',
         expect.objectContaining({ ptt: true, type: 'audio' }),
       );

@@ -54,6 +54,9 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
     enrichmentProcessedAt: null,
     enrichmentRetries: 0,
     createdAt: new Date().toISOString(),
+    conversationKey: 'chat1_at_g.us',
+    mediaPath: null,
+    contentText: null,
     ...overrides,
   };
 }

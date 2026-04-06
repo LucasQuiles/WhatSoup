@@ -95,6 +95,9 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
     enrichmentProcessedAt: null,
     enrichmentRetries: 0,
     createdAt: new Date().toISOString(),
+    conversationKey: 'chat1_at_g.us',
+    mediaPath: null,
+    contentText: null,
     ...overrides,
   };
 }
@@ -126,7 +129,7 @@ function makePoller(dbOverride?: ReturnType<typeof makeMockDb>) {
   const extractionProvider = mockProvider();
   const validationProvider = mockProvider();
   const poller = new EnrichmentPoller(
-    db as unknown as import('../../src/core/database.ts').Database,
+    db as unknown as import('../../../../src/core/database.ts').Database,
     pinecone,
     extractionProvider,
     validationProvider,

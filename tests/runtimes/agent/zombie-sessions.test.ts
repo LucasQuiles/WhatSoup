@@ -48,6 +48,9 @@ const { mockSession, mockQueue, callOrder } = vi.hoisted(() => {
     setInboundSeq: vi.fn(),
     markLastTerminal: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    targetChatJid: 'test@s.whatsapp.net',
+    getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
   };
 
   return { mockSession, mockQueue, callOrder };
@@ -177,7 +180,7 @@ function makeDb(): Database {
 }
 
 function makeMessenger(): Messenger {
-  return { sendMessage: vi.fn(async () => {}) };
+  return { sendMessage: vi.fn(async () => ({ waMessageId: null })), sendMedia: vi.fn(async () => ({ waMessageId: null })) };
 }
 
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
