@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
-import { Search, MessageSquare, Users, X } from 'lucide-react'
+import { MessageSquare, Users, X } from 'lucide-react'
 import type { ChatItem } from '../../types.js'
+import { SearchInput } from './SearchInput.js'
 
 interface ChatPickerProps {
   chats: ChatItem[]
@@ -39,7 +40,15 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
 
   if (selected) {
     return (
-      <div className="flex items-center gap-2" style={{ padding: 'var(--sp-2) var(--sp-3)', background: 'var(--color-d1)', borderRadius: 'var(--radius-md)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
+      <div
+        className="flex items-center gap-2 bg-d1 rounded-md"
+        style={{
+          padding: 'var(--sp-2) var(--sp-3)',
+          borderWidth: 'var(--bw)',
+          borderStyle: 'solid',
+          borderColor: 'var(--b1)',
+        }}
+      >
         {selected.isGroup ? <Users size={14} className="text-t4" /> : <MessageSquare size={14} className="text-t4" />}
         <span className="font-mono text-t2 flex-1 truncate" style={{ fontSize: 'var(--font-size-data)' }}>{selected.name}</span>
         <button type="button" onClick={onClear} className="c-btn c-btn-ghost c-btn-sm" aria-label="Clear selection">
@@ -51,22 +60,17 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
 
   return (
     <div ref={ref} className="relative">
-      <div className="flex items-center gap-2" style={{ padding: 'var(--sp-2) var(--sp-3)', background: 'var(--color-d1)', borderRadius: 'var(--radius-md)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
-        <Search size={14} className="text-t4" />
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
-          onFocus={() => setOpen(true)}
-          placeholder={placeholder}
-          className="flex-1 bg-transparent border-none outline-none font-mono text-t2"
-          style={{ fontSize: 'var(--font-size-data)' }}
-        />
-      </div>
+      <SearchInput
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
+        onFocus={() => setOpen(true)}
+        placeholder={placeholder}
+        aria-label={placeholder}
+      />
       {open && filtered.length > 0 && (
         <div
-          className="absolute left-0 right-0 z-50 overflow-y-auto"
-          style={{ top: '100%', marginTop: 'var(--sp-1)', maxHeight: '240px', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-lg)' }}
+          className="c-card absolute left-0 right-0 z-50 overflow-y-auto"
+          style={{ top: '100%', marginTop: 'var(--sp-1)', maxHeight: 'calc(var(--sp-12) * 5)' }}
         >
           {filtered.map((chat) => (
             <button

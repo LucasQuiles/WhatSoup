@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react'
-import { Search, X, UserPlus } from 'lucide-react'
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { X, UserPlus } from 'lucide-react'
 import { api } from '../../lib/api.js'
 import type { ContactResult } from '../../types.js'
+import { SearchInput } from './SearchInput.js'
 
 interface ContactSearchPickerProps {
   lineName: string
@@ -16,6 +17,10 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
   const [results, setResults] = useState<ContactResult[]>([])
   const [searching, setSearching] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current)
+  }, [])
 
   const doSearch = useCallback((q: string) => {
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -37,9 +42,19 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
       {selected.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {selected.map((c) => (
-            <span key={c.jid} className="inline-flex items-center gap-1 font-mono" style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)', background: 'var(--color-d1)', borderRadius: 'var(--radius-sm)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
+            <span
+              key={c.jid}
+              className="inline-flex items-center gap-1 font-mono bg-d1 rounded-sm"
+              style={{
+                fontSize: 'var(--font-size-xs)',
+                padding: 'var(--bw) var(--sp-2)',
+                borderWidth: 'var(--bw)',
+                borderStyle: 'solid',
+                borderColor: 'var(--b1)',
+              }}
+            >
               {c.name ?? c.notify ?? c.jid}
-              <button type="button" onClick={() => onRemove(c.jid)} className="c-btn c-btn-ghost" style={{ padding: 0 }} aria-label={`Remove ${c.name ?? c.jid}`}>
+              <button type="button" onClick={() => onRemove(c.jid)} className="c-btn c-btn-ghost" style={{ padding: 'var(--sp-0)' }} aria-label={`Remove ${c.name ?? c.jid}`}>
                 <X size={10} />
               </button>
             </span>
@@ -47,22 +62,17 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
         </div>
       )}
       <div className="relative">
-        <div className="flex items-center gap-2" style={{ padding: 'var(--sp-2) var(--sp-3)', background: 'var(--color-d1)', borderRadius: 'var(--radius-md)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)' }}>
-          <Search size={14} className="text-t4" />
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); doSearch(e.target.value) }}
-            placeholder={placeholder}
-            className="flex-1 bg-transparent border-none outline-none font-mono text-t2"
-            style={{ fontSize: 'var(--font-size-data)' }}
-          />
-          {searching && <span className="text-t4 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>...</span>}
-        </div>
+        <SearchInput
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); doSearch(e.target.value) }}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          endAdornment={searching ? <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>...</span> : null}
+        />
         {results.length > 0 && (
           <div
-            className="absolute left-0 right-0 z-50 overflow-y-auto"
-            style={{ top: '100%', marginTop: 'var(--sp-1)', maxHeight: '200px', background: 'var(--color-d2)', borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-lg)' }}
+            className="c-card absolute left-0 right-0 z-50 overflow-y-auto"
+            style={{ top: '100%', marginTop: 'var(--sp-1)', maxHeight: 'calc(var(--sp-10) * 5)' }}
           >
             {results.filter((r) => !selectedJids.has(r.jid)).map((contact) => (
               <button
