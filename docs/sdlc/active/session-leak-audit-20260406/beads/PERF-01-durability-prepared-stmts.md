@@ -2,7 +2,7 @@
 
 **BeadID:** PERF-01
 
-**Status:** pending
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

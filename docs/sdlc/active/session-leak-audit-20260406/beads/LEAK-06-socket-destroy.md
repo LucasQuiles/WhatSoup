@@ -2,7 +2,7 @@
 
 **BeadID:** LEAK-06
 
-**Status:** pending
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

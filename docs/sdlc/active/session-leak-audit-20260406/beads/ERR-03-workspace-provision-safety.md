@@ -2,7 +2,7 @@
 
 **BeadID:** ERR-03
 
-**Status:** pending
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

@@ -2,7 +2,7 @@
 
 **BeadID:** ERR-02
 
-**Status:** submitted
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

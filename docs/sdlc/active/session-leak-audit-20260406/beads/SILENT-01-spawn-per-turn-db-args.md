@@ -2,7 +2,7 @@
 
 **BeadID:** SILENT-01
 
-**Status:** running
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

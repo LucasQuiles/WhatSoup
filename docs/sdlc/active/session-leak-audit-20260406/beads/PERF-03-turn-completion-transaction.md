@@ -2,7 +2,7 @@
 
 **BeadID:** PERF-03
 
-**Status:** pending
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** PERF-01 (cached statements)

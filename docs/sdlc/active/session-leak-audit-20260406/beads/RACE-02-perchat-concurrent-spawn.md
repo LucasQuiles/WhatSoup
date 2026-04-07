@@ -2,7 +2,7 @@
 
 **BeadID:** RACE-02
 
-**Status:** pending
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

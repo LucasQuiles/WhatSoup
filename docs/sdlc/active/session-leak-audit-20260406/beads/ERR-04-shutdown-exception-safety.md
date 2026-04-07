@@ -2,7 +2,7 @@
 
 **BeadID:** ERR-04
 
-**Status:** pending
+**Status:** merged
 **Type:** implement
 **Runner:** —
 **Dependencies:** none
