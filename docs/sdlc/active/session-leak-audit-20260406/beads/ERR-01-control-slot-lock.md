@@ -2,7 +2,7 @@
 
 **BeadID:** ERR-01
 
-**Status:** pending
+**Status:** verified
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

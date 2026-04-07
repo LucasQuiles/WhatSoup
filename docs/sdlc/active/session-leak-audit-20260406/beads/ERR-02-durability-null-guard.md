@@ -2,7 +2,7 @@
 
 **BeadID:** ERR-02
 
-**Status:** submitted
+**Status:** verified
 **Type:** implement
 **Runner:** —
 **Dependencies:** none

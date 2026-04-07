@@ -547,8 +547,8 @@ function SettingsTab({
       {/* Messaging — announce */}
       <div style={rowStyle}>
         <div>
-          <div className="c-data">Messaging</div>
-          <div className="c-data text-t4">
+          <div className="font-sans text-body text-t2">Messaging</div>
+          <div className="font-sans text-body text-t4">
             {detail.announce ? 'Only admins can send' : 'All participants can send'}
           </div>
         </div>
@@ -577,8 +577,8 @@ function SettingsTab({
       {/* Edit info — locked */}
       <div style={rowStyle}>
         <div>
-          <div className="c-data">Edit group info</div>
-          <div className="c-data text-t4">
+          <div className="font-sans text-body text-t2">Edit group info</div>
+          <div className="font-sans text-body text-t4">
             {detail.locked ? 'Only admins can edit info' : 'All participants can edit info'}
           </div>
         </div>
@@ -608,8 +608,8 @@ function SettingsTab({
       {isAdmin && (
         <div style={rowStyle}>
           <div>
-            <div className="c-data">Who can add members</div>
-            <div className="c-data text-t4">
+            <div className="font-sans text-body text-t2">Who can add members</div>
+            <div className="font-sans text-body text-t4">
               {detail.memberAddMode === 'admin_add' ? 'Admins only' : 'All members'}
             </div>
           </div>
