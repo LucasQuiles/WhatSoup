@@ -351,7 +351,7 @@ Introduce a shared `ChartPanel` wrapper component (`console/src/components/Chart
 - **Error:** Inline error message with retry button (pattern from `MetricsTab.tsx:57`).
 - **Empty (no historical data):** `EmptyState` component with chart-appropriate icon and "No data yet" message. Triggered when the API returns successfully but all values in the array are zero.
 - **Valid data:** Render the chart component.
-- **Partial fleet degradation:** If the response includes `meta.failedInstances > 0`, show a non-blocking warning pill in the panel header: "{N} instance(s) unavailable" in `--s-warn` color.
+- **Partial fleet degradation:** If the response includes `meta.instancesFailed > 0`, show a non-blocking warning pill in the panel header: "{N} instance(s) unavailable" in `--s-warn` color.
 
 ### 9.2 Densification vs Empty State
 
@@ -362,10 +362,12 @@ Bucket densification always returns a full array of zero-filled buckets. To dist
   interface FleetMetricsMeta {
     instancesQueried: number;
     instancesFailed: number;
-    hasHistoricalData: boolean;  // true if any metric has at least one non-zero bucket
+    hasMessageData: boolean;   // true if messageVolume has at least one non-zero bucket
+    hasTokenData: boolean;     // true if tokenUsage has at least one non-zero bucket
+    hasSessionData: boolean;   // true if sessionActivity has at least one non-zero bucket
   }
   ```
-- Frontend uses `meta.hasHistoricalData === false` to show the EmptyState instead of a flat-zero chart.
+- Frontend uses the per-panel flags (`meta.hasMessageData`, `meta.hasTokenData`, `meta.hasSessionData`) to show EmptyState on panels with no history, while rendering charts on panels that have data.
 
 ### 9.3 Range Change Behavior
 
