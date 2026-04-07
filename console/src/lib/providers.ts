@@ -69,7 +69,7 @@ export const PROVIDER_COLORS: Record<string, { stroke: string; fill: string }> =
   'codex-cli':     { stroke: 'var(--color-s-ok)',  fill: 'var(--color-s-ok)' },
   'gemini-cli':    { stroke: 'var(--color-s-warn)', fill: 'var(--color-s-warn)' },
   'openai-api':    { stroke: 'var(--color-m-cht)', fill: 'var(--color-m-cht)' },
-  'anthropic-api': { stroke: 'var(--color-m-agt)', fill: 'var(--color-m-agt)' },
+  'anthropic-api': { stroke: 'var(--color-m-pas)', fill: 'var(--color-m-pas)' },
   'opencode-cli':  { stroke: 'var(--color-t2)',    fill: 'var(--color-t2)' },
 };
 

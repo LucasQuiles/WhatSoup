@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { TokenUsageBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 import { formatCompact } from '../lib/text-utils';
 import { getProvider, getProviderColor } from '../lib/providers';
 
@@ -51,13 +51,13 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
             tick={AXIS_TICK}
             tickLine={false}
             axisLine={false}
-            width={36}
+            width={32}
             allowDecimals={false}
             tickFormatter={(v) => formatCompact(Number(v) || 0)}
           />
           <Tooltip
             contentStyle={TOOLTIP_STYLE}
-            labelFormatter={(v) => new Date(String(v)).toLocaleString()}
+            labelFormatter={(v) => formatTooltipLabel(String(v), range)}
             formatter={(value, name) => [
               (Number(value) || 0).toLocaleString(),
               String(name),
@@ -114,13 +114,13 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
-          width={36}
+          width={32}
           allowDecimals={false}
           tickFormatter={(v) => formatCompact(Number(v) || 0)}
         />
         <Tooltip
           contentStyle={TOOLTIP_STYLE}
-          labelFormatter={(v) => new Date(String(v)).toLocaleString()}
+          labelFormatter={(v) => formatTooltipLabel(String(v), range)}
           formatter={(value, name) => [
             (Number(value) || 0).toLocaleString(),
             String(name),
@@ -130,6 +130,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           type="monotone"
           dataKey="output"
           name="Output Tokens"
+          stackId="tokens"
           stroke="var(--color-m-agt)"
           fill="var(--color-m-agt)"
           fillOpacity={0.3}
@@ -138,6 +139,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           type="monotone"
           dataKey="input"
           name="Input Tokens"
+          stackId="tokens"
           stroke="var(--color-m-agt)"
           strokeDasharray="4 2"
           fill="var(--color-m-agt)"

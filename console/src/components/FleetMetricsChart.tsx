@@ -2,13 +2,14 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Legend,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 import type { MessageVolumeBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 
 interface FleetMetricsChartProps {
   data: MessageVolumeBucket[];
@@ -33,13 +34,14 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
-          width={28}
+          width={32}
           allowDecimals={false}
         />
         <Tooltip
           contentStyle={TOOLTIP_STYLE}
-          labelFormatter={(v) => new Date(String(v)).toLocaleString()}
+          labelFormatter={(v) => formatTooltipLabel(String(v), range)}
         />
+        <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
         <Area
           type="monotone"
           dataKey="inbound"
