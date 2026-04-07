@@ -7,74 +7,67 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { MessageVolumeBucket } from '../types';
-import { AXIS_TICK, formatBucketLabel } from '../lib/chart-utils.js';
+import type { MessageVolumeBucket, MetricsRange } from '../types';
+import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
 
-/** Stacked area chart showing fleet-wide inbound/outbound message volume. */
-export function FleetMetricsChart({ data }: { data: MessageVolumeBucket[] }) {
+interface FleetMetricsChartProps {
+  data: MessageVolumeBucket[];
+  range?: MetricsRange;
+}
+
+/** Stacked area chart showing fleet-wide inbound/outbound/media message volume. */
+export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProps) {
   return (
-    <section
-      className="c-card font-mono flex-shrink-0 p-[var(--sp-4)] bg-d2"
-    >
-      <div
-        className="font-mono text-t4 uppercase tracking-[var(--tracking-label)] mb-[var(--sp-3)]"
-        style={{
-          fontSize: 'var(--font-size-xs)',
-        }}
-      >
-        Fleet Message Volume (24h)
-      </div>
-      <ResponsiveContainer width="100%" height={120}>
-        {/* eslint-disable-next-line no-restricted-syntax -- recharts margin uses raw numbers (px offsets), not CSS tokens; expires 2026-12-31 */}
-        <AreaChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
-          <CartesianGrid stroke="var(--b1)" vertical={false} />
-          <XAxis
-            dataKey="bucket"
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={{ stroke: 'var(--b1)' }}
-            minTickGap={40}
-            tickFormatter={formatBucketLabel}
-          />
-          <YAxis
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={false}
-            width={28}
-            allowDecimals={false}
-          />
-          <Tooltip
-            contentStyle={{
-              background: 'var(--color-d3)',
-              borderWidth: 'var(--bw)',
-              borderStyle: 'solid',
-              borderColor: 'var(--b2)',
-              borderRadius: 'var(--radius-md)',
-              boxShadow: 'var(--shadow-md)',
-              fontSize: 'var(--font-size-xs)',
-            }}
-            labelFormatter={(v) => new Date(String(v)).toLocaleString()}
-          />
-          <Area
-            type="monotone"
-            dataKey="inbound"
-            name="Inbound"
-            stackId="msgs"
-            stroke="var(--color-m-pas)"
-            fill="var(--color-m-pas)"
-            fillOpacity={0.3} /* --opacity-soft */
-          />
-          <Area
-            type="monotone"
-            dataKey="outbound"
-            name="Outbound"
-            stackId="msgs"
-            stroke="var(--color-m-cht)"
-            fill="var(--color-m-cht)"
-            fillOpacity={0.3} /* --opacity-soft */
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </section>
+    <ResponsiveContainer width="100%" height="100%">
+      <AreaChart data={data} margin={CHART_MARGIN}>
+        <CartesianGrid stroke="var(--b1)" vertical={false} />
+        <XAxis
+          dataKey="bucket"
+          tick={AXIS_TICK}
+          tickLine={false}
+          axisLine={{ stroke: 'var(--b1)' }}
+          minTickGap={40}
+          tickFormatter={(v) => formatBucketLabel(v, range)}
+        />
+        <YAxis
+          tick={AXIS_TICK}
+          tickLine={false}
+          axisLine={false}
+          width={28}
+          allowDecimals={false}
+        />
+        <Tooltip
+          contentStyle={TOOLTIP_STYLE}
+          labelFormatter={(v) => new Date(String(v)).toLocaleString()}
+        />
+        <Area
+          type="monotone"
+          dataKey="inbound"
+          name="Inbound"
+          stackId="msgs"
+          stroke="var(--color-m-pas)"
+          fill="var(--color-m-pas)"
+          fillOpacity={0.3}
+        />
+        <Area
+          type="monotone"
+          dataKey="outbound"
+          name="Outbound"
+          stackId="msgs"
+          stroke="var(--color-m-cht)"
+          fill="var(--color-m-cht)"
+          fillOpacity={0.3}
+        />
+        <Area
+          type="monotone"
+          dataKey="media"
+          name="Media"
+          stackId="msgs"
+          stroke="var(--color-s-warn)"
+          fill="var(--color-s-warn)"
+          fillOpacity={0.2}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
   );
 }
