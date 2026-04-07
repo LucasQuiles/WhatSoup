@@ -1196,8 +1196,7 @@ a:focus-visible {
 
 /* Chart panel expand/collapse column — flex + opacity transition for 3-up chart row */
 .c-chart-expand-col {
-  overflow: hidden;
-  transition: flex var(--dur-slow) var(--ease), opacity var(--dur-slow) var(--ease), min-width var(--dur-slow) var(--ease);
+  transition: flex var(--dur-slow) var(--ease), opacity var(--dur-slow) var(--ease), min-width var(--dur-slow) var(--ease), width var(--dur-slow) var(--ease);
 }
 
 /* Nav link hover */

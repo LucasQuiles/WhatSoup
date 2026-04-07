@@ -1,5 +1,5 @@
 import { type FC, type ReactNode } from 'react';
-import { ChevronDown, ChevronUp, BarChart3 } from 'lucide-react';
+import { BarChart3 } from 'lucide-react';
 
 export type ChartKey = 'messages' | 'tokens' | 'sessions';
 
@@ -10,7 +10,6 @@ interface ChartPanelProps {
   hasData: boolean;
   instancesFailed: number;
   expanded?: boolean;
-  onToggleExpand?: () => void;
   onRetry?: () => void;
   children: ReactNode;
 }
@@ -22,29 +21,21 @@ export const ChartPanel: FC<ChartPanelProps> = ({
   hasData,
   instancesFailed,
   expanded = false,
-  onToggleExpand,
   onRetry,
   children,
 }) => {
-  // height is dynamic (depends on expanded prop) — 120px collapsed / 200px expanded; no fixed token covers these values
   const height = expanded ? 200 : 120;
 
   return (
-    <section className="c-card font-mono flex-shrink-0 p-[var(--sp-4)] bg-d2">
+    <section className="font-mono flex-shrink-0 p-[var(--sp-3)] bg-d3 rounded-[var(--radius-md)]">
       {/* Header */}
-      <div className="flex items-center justify-between mb-[var(--sp-3)]">
-        <button
-          type="button"
-          className="font-mono text-t4 uppercase tracking-[var(--tracking-label)] cursor-pointer hover:text-t2 flex items-center gap-[var(--sp-1)]"
+      <div className="flex items-center justify-between mb-[var(--sp-2)]">
+        <span
+          className="font-mono text-t4 uppercase tracking-[var(--tracking-label)]"
           style={{ fontSize: 'var(--font-size-xs)' }}
-          onClick={onToggleExpand}
         >
           {title}
-          {onToggleExpand && (expanded
-            ? <ChevronUp size={12} strokeWidth={1.75} />
-            : <ChevronDown size={12} strokeWidth={1.75} />
-          )}
-        </button>
+        </span>
         {instancesFailed > 0 && (
           <span
             className="font-mono rounded-sm px-[var(--sp-1h)] py-[var(--sp-half)] text-s-warn bg-[var(--s-warn-wash)]"

@@ -54,8 +54,10 @@ const modeTextClass: Record<Mode, string> = {
 const RANGE_OPTIONS: MetricsRange[] = ['24h', '7d', '30d'];
 
 function chartColStyle(key: ChartKey, expanded: ChartKey | null) {
-  const active = expanded === null || expanded === key;
-  return { flex: active ? 1 : 0, opacity: active ? 1 : 0, minWidth: active ? undefined : 0 };
+  if (expanded !== null && expanded !== key) {
+    return { flex: 0, opacity: 0, minWidth: 0, width: 0, overflow: 'hidden' as const };
+  }
+  return { flex: 1, opacity: 1 };
 }
 
 const SoupKitchen: FC = () => {
@@ -94,10 +96,6 @@ const SoupKitchen: FC = () => {
     () => deriveFleetSessionSparklines(fleetMetrics?.sessionActivity),
     [fleetMetrics?.sessionActivity],
   );
-
-  const toggleExpand = useCallback((key: ChartKey) => {
-    setExpandedChart(prev => prev === key ? null : key);
-  }, []);
 
   function toggleKpi(kpiKey: KpiFilter, chartKey: ChartKey | null = null) {
     const next = activeKpi === kpiKey ? null : kpiKey;
@@ -260,79 +258,79 @@ const SoupKitchen: FC = () => {
         />
       </motion.div>
 
-      {/* Range Picker */}
-      <div className="flex items-center gap-[var(--sp-2)] flex-shrink-0">
-        <span className="c-section-label">Range</span>
-        {RANGE_OPTIONS.map((r) => (
-          <FilterPill
-            key={r}
-            label={r}
-            isActive={chartRange === r}
-            onClick={() => setChartRange(r)}
-          />
-        ))}
-      </div>
-
-      {/* Chart Row — 3-up with expansion */}
-      <div className="flex gap-[var(--sp-3)] flex-shrink-0">
-        <div
-          className="c-chart-expand-col"
-          style={chartColStyle('messages', expandedChart)}
-        >
-          <ChartPanel
-            title={`Message Volume (${chartRange})`}
-            isLoading={metricsLoading}
-            isError={metricsError}
-            hasData={meta?.hasMessageData ?? false}
-            instancesFailed={instancesFailed}
-            expanded={expandedChart === 'messages'}
-            onToggleExpand={() => toggleExpand('messages')}
-            onRetry={() => metricsRefetch()}
-          >
-            {fleetMetrics?.messageVolume && (
-              <FleetMetricsChart data={fleetMetrics.messageVolume} range={chartRange} />
-            )}
-          </ChartPanel>
+      {/* Charts Section */}
+      <div className="c-card flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
+        {/* Range Picker */}
+        <div className="flex items-center gap-[var(--sp-2)]">
+          <span className="c-section-label">Range</span>
+          {RANGE_OPTIONS.map((r) => (
+            <FilterPill
+              key={r}
+              label={r}
+              isActive={chartRange === r}
+              onClick={() => setChartRange(r)}
+            />
+          ))}
         </div>
 
-        <div
-          className="c-chart-expand-col"
-          style={chartColStyle('tokens', expandedChart)}
-        >
-          <ChartPanel
-            title={`Token Usage (${chartRange})`}
-            isLoading={metricsLoading}
-            isError={metricsError}
-            hasData={meta?.hasTokenData ?? false}
-            instancesFailed={instancesFailed}
-            expanded={expandedChart === 'tokens'}
-            onToggleExpand={() => toggleExpand('tokens')}
-            onRetry={() => metricsRefetch()}
+        {/* Chart Row — 3-up with expansion */}
+        <div className="flex" style={{ gap: expandedChart ? 0 : 'var(--sp-2)' }}>
+          <div
+            className="c-chart-expand-col"
+            style={chartColStyle('messages', expandedChart)}
           >
-            {fleetMetrics?.tokenUsage && (
-              <FleetTokenChart data={fleetMetrics.tokenUsage} range={chartRange} />
-            )}
-          </ChartPanel>
-        </div>
+            <ChartPanel
+              title={`Message Volume (${chartRange})`}
+              isLoading={metricsLoading}
+              isError={metricsError}
+              hasData={meta?.hasMessageData ?? false}
+              instancesFailed={instancesFailed}
+              expanded={expandedChart === 'messages'}
+              onRetry={() => metricsRefetch()}
+            >
+              {fleetMetrics?.messageVolume && (
+                <FleetMetricsChart data={fleetMetrics.messageVolume} range={chartRange} />
+              )}
+            </ChartPanel>
+          </div>
 
-        <div
-          className="c-chart-expand-col"
-          style={chartColStyle('sessions', expandedChart)}
-        >
-          <ChartPanel
-            title={`Session Activity (${chartRange})`}
-            isLoading={metricsLoading}
-            isError={metricsError}
-            hasData={meta?.hasSessionData ?? false}
-            instancesFailed={instancesFailed}
-            expanded={expandedChart === 'sessions'}
-            onToggleExpand={() => toggleExpand('sessions')}
-            onRetry={() => metricsRefetch()}
+          <div
+            className="c-chart-expand-col"
+            style={chartColStyle('tokens', expandedChart)}
           >
-            {fleetMetrics?.sessionActivity && (
-              <FleetSessionChart data={fleetMetrics.sessionActivity} range={chartRange} />
-            )}
-          </ChartPanel>
+            <ChartPanel
+              title={`Token Usage (${chartRange})`}
+              isLoading={metricsLoading}
+              isError={metricsError}
+              hasData={meta?.hasTokenData ?? false}
+              instancesFailed={instancesFailed}
+              expanded={expandedChart === 'tokens'}
+              onRetry={() => metricsRefetch()}
+            >
+              {fleetMetrics?.tokenUsage && (
+                <FleetTokenChart data={fleetMetrics.tokenUsage} range={chartRange} />
+              )}
+            </ChartPanel>
+          </div>
+
+          <div
+            className="c-chart-expand-col"
+            style={chartColStyle('sessions', expandedChart)}
+          >
+            <ChartPanel
+              title={`Session Activity (${chartRange})`}
+              isLoading={metricsLoading}
+              isError={metricsError}
+              hasData={meta?.hasSessionData ?? false}
+              instancesFailed={instancesFailed}
+              expanded={expandedChart === 'sessions'}
+              onRetry={() => metricsRefetch()}
+            >
+              {fleetMetrics?.sessionActivity && (
+                <FleetSessionChart data={fleetMetrics.sessionActivity} range={chartRange} />
+              )}
+            </ChartPanel>
+          </div>
         </div>
       </div>
 
