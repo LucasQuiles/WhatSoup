@@ -241,6 +241,13 @@ export const config = {
       .map((p: string) => normalizePhoneE164(p)),
   ),
 
+  // Echo guard — per-group outbound cooldown to prevent cascade floods.
+  // In-memory, resets on restart. DMs are never affected.
+  echoGuard: {
+    enabled: ((instance?.echoGuard as Record<string, unknown> | undefined)?.enabled as boolean | undefined) !== false,
+    groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? 60_000,
+  },
+
   // Media
   mediaDir,
 
