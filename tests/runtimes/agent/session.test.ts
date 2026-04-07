@@ -103,6 +103,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
   updateTranscriptPath: vi.fn(),
+  backfillSessionProvider: vi.fn(),
 }));
 
 import {
