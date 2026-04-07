@@ -5,6 +5,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import { nextCronRun } from './cron.ts';
+import { nowUnixSec } from '../fleet/time-utils.ts';
 
 const log = createChildLogger('scheduler');
 
@@ -63,7 +64,7 @@ export class MessageScheduler {
   }
 
   async tick(): Promise<void> {
-    const now = Math.floor(Date.now() / 1000);
+    const now = nowUnixSec();
 
     // Fetch pending rows whose scheduled_at (one-shot) or next_run_at (recurring)
     // has passed, then claim each by id. Fetching ids first and updating by id
@@ -106,7 +107,7 @@ export class MessageScheduler {
     for (const row of rows) {
       try {
         await this.executeSend(row);
-        const sentAt = Math.floor(Date.now() / 1000);
+        const sentAt = nowUnixSec();
         if (row.recurrence) {
           // Recurring: stay pending with updated next_run_at and run_count.
           // Wrap nextCronRun separately — if a bad cron slipped into the DB,

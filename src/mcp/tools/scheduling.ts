@@ -7,6 +7,7 @@ import type { OutboundMedia } from '../../core/types.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
+import { nowUnixSec } from '../../fleet/time-utils.ts';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
@@ -237,7 +238,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     schema: ScheduleMessageSchema,
     handler: async (params, session) => {
       const parsed = ScheduleMessageSchema.parse(params);
-      const now = Math.floor(Date.now() / 1000);
+      const now = nowUnixSec();
       if (parsed.scheduled_at <= now) {
         throw new Error('scheduled_at must be a future UTC unix timestamp');
       }
@@ -376,7 +377,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       assertSessionAccess(row.chat_jid, session);
       if (row.status !== 'pending') throw new Error(`Scheduled message ${id} is ${row.status} and cannot be updated`);
 
-      if (scheduled_at !== undefined && scheduled_at <= Math.floor(Date.now() / 1000)) {
+      if (scheduled_at !== undefined && scheduled_at <= nowUnixSec()) {
         throw new Error('scheduled_at must be a future UTC unix timestamp');
       }
 
@@ -398,7 +399,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
         values.push(recurrence);
         // Anchor next_run_at to the new scheduled_at if both are changing,
         // otherwise use the supplied scheduled_at or wall-clock now.
-        const base = scheduled_at ?? Math.floor(Date.now() / 1000) - 60;
+        const base = scheduled_at ?? nowUnixSec() - 60;
         const nextRun = nextCronRun(recurrence, base);
         updates.push('next_run_at = ?');
         values.push(nextRun);

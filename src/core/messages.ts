@@ -1,6 +1,7 @@
 import type { Database } from './database.ts';
 import { resolveDecryptionFailure } from './database.ts';
 import type { ContentType } from './types.ts';
+import { nowUnixSec } from '../fleet/time-utils.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -204,7 +205,7 @@ export function getMessageCount(db: Database): number {
  * Delete messages older than retentionDays. Returns the number of rows deleted.
  */
 export function deleteOldMessages(db: Database, retentionDays: number): number {
-  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+  const cutoff = nowUnixSec() - retentionDays * 86400;
   const result = db.raw.prepare(
     'DELETE FROM messages WHERE timestamp < ?'
   ).run(cutoff);
