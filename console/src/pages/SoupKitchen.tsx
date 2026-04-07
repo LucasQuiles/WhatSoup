@@ -26,7 +26,7 @@ import { getProvider, getProviderColor } from "../lib/providers";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
-type KpiFilter = "connected" | "attention" | "unread" | "agent" | "messages" | null;
+type KpiFilter = "connected" | "attention" | "unread" | "agent" | "sent" | "received" | "media" | null;
 type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv" | "tokens" | "sessions" | "provider" | "active" | null;
 type SortDir = "asc" | "desc";
 
@@ -149,8 +149,13 @@ const SoupKitchen: FC = () => {
       result = result.filter((l) => (l.unread ?? 0) > 0);
     else if (activeKpi === "agent")
       result = result.filter((l) => l.mode === "agent");
-    else if (activeKpi === "messages")
+    else if (activeKpi === "sent" || activeKpi === "received")
       result = result.filter((l) => (l.messagesToday ?? 0) > 0);
+    else if (activeKpi === "media")
+      result = result.filter((l) => {
+        const s = l.messageStats;
+        return s ? (s.images + s.audio + s.documents) > 0 : false;
+      });
 
     // Mode filter
     if (modeFilter !== "all")
@@ -224,16 +229,16 @@ const SoupKitchen: FC = () => {
           value={kpis.totalSent.toLocaleString()}
           label="Messages Sent"
           color="text-m-cht"
-          onClick={() => toggleKpi("messages", "messages")}
-          active={activeKpi === "messages"}
+          onClick={() => toggleKpi("sent", "messages")}
+          active={activeKpi === "sent"}
           sparkData={messageSparklines?.outbound}
         />
         <KpiCard
           value={kpis.totalReceived.toLocaleString()}
           label="Messages Received"
           color="text-t2"
-          onClick={() => toggleKpi("messages", "messages")}
-          active={activeKpi === "messages"}
+          onClick={() => toggleKpi("received", "messages")}
+          active={activeKpi === "received"}
           sparkData={messageSparklines?.inbound}
         />
         <KpiCard
@@ -255,8 +260,8 @@ const SoupKitchen: FC = () => {
           value={kpis.totalMedia.toLocaleString()}
           label="Media Processed"
           color="text-s-ok"
-          onClick={() => toggleKpi("messages", "messages")}
-          active={activeKpi === "messages"}
+          onClick={() => toggleKpi("media", "messages")}
+          active={activeKpi === "media"}
           sparkData={messageSparklines?.media}
         />
       </motion.div>

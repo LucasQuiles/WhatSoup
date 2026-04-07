@@ -36,7 +36,7 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
 }
 
 // Replicate the filter logic from SoupKitchen exactly
-type KpiFilter = 'connected' | 'attention' | 'unread' | 'agent' | 'messages' | null;
+type KpiFilter = 'connected' | 'attention' | 'unread' | 'agent' | 'sent' | 'received' | 'media' | null;
 
 function filterLines(
   lines: LineInstance[],
@@ -49,13 +49,18 @@ function filterLines(
   if (activeKpi === 'connected')
     result = result.filter((l) => l.status === 'online');
   else if (activeKpi === 'attention')
-    result = result.filter((l) => l.status === 'unreachable' || l.status === 'degraded');
+    result = result.filter((l) => l.status === 'unreachable' || l.status === 'degraded' || l.error);
   else if (activeKpi === 'unread')
     result = result.filter((l) => (l.unread ?? 0) > 0);
   else if (activeKpi === 'agent')
     result = result.filter((l) => l.mode === 'agent');
-  else if (activeKpi === 'messages')
+  else if (activeKpi === 'sent' || activeKpi === 'received')
     result = result.filter((l) => (l.messagesToday ?? 0) > 0);
+  else if (activeKpi === 'media')
+    result = result.filter((l) => {
+      const s = l.messageStats;
+      return s ? (s.images + s.audio + s.documents) > 0 : false;
+    });
 
   if (modeFilter !== 'all')
     result = result.filter((l) => l.mode === modeFilter);
@@ -323,9 +328,24 @@ describe('SoupKitchen filter logic', () => {
     expect(result.map(l => l.name)).toEqual(['bravo', 'echo']);
   });
 
-  it('filters by "messages" KPI — lines with messagesToday > 0', () => {
-    const result = filterLines(lines, 'messages', 'all', '');
+  it('filters by "sent" KPI — lines with messagesToday > 0', () => {
+    const result = filterLines(lines, 'sent', 'all', '');
     expect(result.map(l => l.name)).toEqual(['alpha', 'charlie', 'echo']);
+  });
+
+  it('filters by "received" KPI — lines with messagesToday > 0', () => {
+    const result = filterLines(lines, 'received', 'all', '');
+    expect(result.map(l => l.name)).toEqual(['alpha', 'charlie', 'echo']);
+  });
+
+  it('filters by "media" KPI — lines with media messages > 0', () => {
+    const mediaLines = [
+      makeLine({ name: 'has-media', messageStats: { sent: 0, received: 0, images: 3, audio: 0, documents: 0 } }),
+      makeLine({ name: 'no-media', messageStats: { sent: 5, received: 3, images: 0, audio: 0, documents: 0 } }),
+      makeLine({ name: 'has-docs', messageStats: { sent: 1, received: 1, images: 0, audio: 0, documents: 2 } }),
+    ];
+    const result = filterLines(mediaLines, 'media', 'all', '');
+    expect(result.map(l => l.name)).toEqual(['has-media', 'has-docs']);
   });
 
   // Mode filters
