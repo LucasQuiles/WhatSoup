@@ -1,24 +1,27 @@
-# LEAK-08 Output
+# LEAK-11 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: LEAK-08 — SIGTERM grace period with SIGKILL fallback
-- Branch: fix/leak-08-sigterm-grace
-- Commit: ea1b495
-- Summary: Added a shutdown grace timer for session children, cancelled stale escalation timers on respawn/exit across persistent and spawn-per-turn providers, and covered the new lifecycle with regressions.
+- Bead: LEAK-11 — fleet cache pruning for deleted instances
+- Branch: fix/leak-11-fleet-cache-pruning
+- Commit: 8ac4265
+- Summary: Pruned stale per-instance fleet health, realtime snapshot, and line-stat cache entries whenever discovery drops an instance, and added regressions covering each cache surface.
 
 ## Files Changed
-- src/runtimes/agent/session.ts
-- tests/runtimes/agent/session.test.ts
+- src/fleet/health-poller.ts
+- src/fleet/realtime-event-poller.ts
+- src/fleet/routes/lines.ts
+- tests/fleet/health-poller.test.ts
+- tests/fleet/realtime-event-poller.test.ts
+- tests/fleet/routes/lines.test.ts
 - bead-output.md
 
 ## Verification
-- `npx vitest run --pool=forks tests/runtimes/agent/session.test.ts` ✅
+- `npx vitest run tests/fleet/health-poller.test.ts tests/fleet/realtime-event-poller.test.ts tests/fleet/routes/lines.test.ts` ✅
 - `npm run typecheck` ✅
-- `npm run typecheck:all` ✅
-- `npx vitest run --pool=forks` ✅ (199 files, 3756 tests)
+- `npx vitest run` ✅ (199 files, 3,759 tests)
 
 ## Notes
-- `shutdown()` now sends SIGTERM, schedules a 5s SIGKILL fallback, and keeps cleanup fire-and-forget.
-- `spawnSession()` clears any pending shutdown escalation before starting a replacement child.
-- Both persistent and spawn-per-turn exit handlers clear the pending escalation timer before superseded-child guards run.
+- `HealthPoller.poll()` now deletes statuses for instances no longer returned by discovery after each poll cycle.
+- `FleetRealtimeEventPoller.poll()` now drops stale snapshots for removed instances after rebuilding current snapshots.
+- `routes/lines.ts` now prunes all five TTL caches on both list and detail requests and exposes narrow underscore-prefixed test helpers to reset/inspect cache state in unit tests.

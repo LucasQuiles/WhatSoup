@@ -137,6 +137,13 @@ export class HealthPoller {
     });
 
     await Promise.allSettled(promises);
+
+    const discoveredNames = new Set(instances.keys());
+    for (const name of this.statuses.keys()) {
+      if (!discoveredNames.has(name)) {
+        this.statuses.delete(name);
+      }
+    }
   }
 
   private updateFailure(name: string, error: string): void {

@@ -106,6 +106,13 @@ export class FleetRealtimeEventPoller {
       }
     }
 
+    const discoveredNames = new Set(instances.keys());
+    for (const name of this.snapshots.keys()) {
+      if (!discoveredNames.has(name)) {
+        this.snapshots.delete(name);
+      }
+    }
+
     // Typing indicators via health proxy
     await this.pollTyping(instances);
   }

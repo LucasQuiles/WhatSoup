@@ -89,6 +89,17 @@ function cachedQuery<T>(
   return data;
 }
 
+function pruneStaleCache<T>(
+  cache: Map<string, { data: T; cachedAt: number }>,
+  validNames: Set<string>,
+): void {
+  for (const key of cache.keys()) {
+    if (!validNames.has(key)) {
+      cache.delete(key);
+    }
+  }
+}
+
 const messageStatsCache = new Map<string, { data: MessageStats; cachedAt: number }>();
 const sessionCountCache = new Map<string, { data: number; cachedAt: number }>();
 
@@ -206,6 +217,38 @@ function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Token
 
 const lastActiveCache = new Map<string, { data: string | null; cachedAt: number }>();
 
+function pruneLineCaches(validNames: Set<string>): void {
+  pruneStaleCache(messageStatsCache, validNames);
+  pruneStaleCache(sessionCountCache, validNames);
+  pruneStaleCache(chatCountsCache, validNames);
+  pruneStaleCache(tokenStatsCache, validNames);
+  pruneStaleCache(lastActiveCache, validNames);
+}
+
+export function _getLineCachesForTests(): {
+  messageStatsCache: typeof messageStatsCache;
+  sessionCountCache: typeof sessionCountCache;
+  chatCountsCache: typeof chatCountsCache;
+  tokenStatsCache: typeof tokenStatsCache;
+  lastActiveCache: typeof lastActiveCache;
+} {
+  return {
+    messageStatsCache,
+    sessionCountCache,
+    chatCountsCache,
+    tokenStatsCache,
+    lastActiveCache,
+  };
+}
+
+export function _resetLineCaches(): void {
+  messageStatsCache.clear();
+  sessionCountCache.clear();
+  chatCountsCache.clear();
+  tokenStatsCache.clear();
+  lastActiveCache.clear();
+}
+
 /** Most recent message timestamp for an instance — 60s cache. */
 function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): string | null {
   return cachedQuery(lastActiveCache, inst.name, DAILY_CACHE_TTL, () => {
@@ -296,7 +339,8 @@ export function handleGetLines(
   res: ServerResponse,
   deps: LinesDeps,
 ): void {
-  const instances = deps.discovery.getInstances();
+  const instances = deps.discovery.getInstances() ?? new Map<string, DiscoveredInstance>();
+  pruneLineCaches(new Set(instances.keys()));
   const statuses = deps.healthPoller.getStatuses();
 
   const lines = Array.from(instances.values()).map((inst) => {
@@ -320,6 +364,8 @@ export async function handleGetLine(
   deps: LinesDeps,
   params: { name: string },
 ): Promise<void> {
+  const instances = deps.discovery.getInstances() ?? new Map<string, DiscoveredInstance>();
+  pruneLineCaches(new Set(instances.keys()));
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
