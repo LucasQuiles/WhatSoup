@@ -21,7 +21,7 @@ describe('PROVIDERS', () => {
 
 describe('getProvider', () => {
   it('returns provider by ID', () => {
-    expect(getProvider('codex-cli')?.displayName).toBe('Codex CLI');
+    expect(getProvider('codex-cli')?.displayName).toBe('Codex');
   });
 
   it('returns undefined for unknown ID', () => {

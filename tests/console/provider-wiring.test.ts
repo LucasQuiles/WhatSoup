@@ -117,7 +117,7 @@ describe('codex-cli', () => {
   it('exists in PROVIDERS with correct metadata', () => {
     const p = getProvider(id);
     expect(p).toBeDefined();
-    expect(p!.displayName).toBe('Codex CLI');
+    expect(p!.displayName).toBe('Codex');
     expect(p!.type).toBe('cli');
   });
 
@@ -132,7 +132,7 @@ describe('codex-cli', () => {
 
   it('shows provider badge', () => {
     const badge = simulateProviderBadge('agent', { agentOptions: { provider: id } });
-    expect(badge).toBe('Codex CLI');
+    expect(badge).toBe('Codex');
   });
 
   it('does NOT show badge for non-agent mode', () => {
@@ -183,7 +183,7 @@ describe('gemini-cli', () => {
   it('exists in PROVIDERS with correct metadata', () => {
     const p = getProvider(id);
     expect(p).toBeDefined();
-    expect(p!.displayName).toBe('Gemini CLI');
+    expect(p!.displayName).toBe('Gemini');
     expect(p!.type).toBe('cli');
   });
 
@@ -195,7 +195,7 @@ describe('gemini-cli', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('Gemini CLI');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('Gemini');
   });
 
   it('full E2E: select → configure → verify payload', () => {
@@ -248,7 +248,7 @@ describe('openai-api', () => {
   it('exists in PROVIDERS with correct metadata', () => {
     const p = getProvider(id);
     expect(p).toBeDefined();
-    expect(p!.displayName).toBe('OpenAI API');
+    expect(p!.displayName).toBe('OpenAI');
     expect(p!.type).toBe('api');
   });
 
@@ -279,7 +279,7 @@ describe('openai-api', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('OpenAI API');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('OpenAI');
   });
 
   it('full E2E: select → configure all fields → verify payload', () => {
@@ -338,7 +338,7 @@ describe('anthropic-api', () => {
   it('exists in PROVIDERS with correct metadata', () => {
     const p = getProvider(id);
     expect(p).toBeDefined();
-    expect(p!.displayName).toBe('Anthropic API');
+    expect(p!.displayName).toBe('Anthropic');
     expect(p!.type).toBe('api');
   });
 
@@ -370,7 +370,7 @@ describe('anthropic-api', () => {
   });
 
   it('shows provider badge', () => {
-    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('Anthropic API');
+    expect(simulateProviderBadge('agent', { agentOptions: { provider: id } })).toBe('Anthropic');
   });
 
   it('full E2E: select → configure all 4 fields → verify payload', () => {
