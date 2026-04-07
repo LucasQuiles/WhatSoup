@@ -3744,7 +3744,7 @@ describe('AgentRuntime', () => {
       expect(mockSession.shutdown).not.toHaveBeenCalled();
     });
 
-    it('single mode group skip — session spawned then shutdown', async () => {
+    it('single mode group skip — no spawn, no shutdown (Bug I2 fix)', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
 
@@ -3783,9 +3783,9 @@ describe('AgentRuntime', () => {
 
       await runtime.start();
 
-      // Session was spawned then immediately shutdown
-      expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-single-group', 3);
-      expect(mockSession.shutdown).toHaveBeenCalledWith(false);
+      // Bug I2 fix: single+group skips entirely — no spawn, no shutdown
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(mockSession.shutdown).not.toHaveBeenCalled();
       // No startup message
       expect(runtime.popStartupMessage()).toBeNull();
     });

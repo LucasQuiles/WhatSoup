@@ -1262,68 +1262,89 @@ export class AgentRuntime implements Runtime {
       // would remain typed as string | null even though we've checked it.
       const resumeChatJid: string = priorSession.chat_jid;
       const resumeSessionId: string = priorSession.session_id;
+      const isGroupChat = resumeChatJid.endsWith('@g.us');
 
-      log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
-      this.activeChatJid = resumeChatJid;
-      this.session = this.createSessionManager({
-        chatJid: resumeChatJid,
-        cwd: this.cwd,
-        onEvent: (event) => this.handleEvent(event),
-        onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
-        onCrash: (info) => {
-          this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
-          this.getActiveQueue()?.abortTurn();
-          this.cleanupSharedCrashTurnState();
-          // Mark inbound event failed so it doesn't stay stuck in processing
-          if (this.durability && this.currentInboundSeq !== undefined) {
-            this.durability.markInboundFailed(this.currentInboundSeq);
-            this.currentInboundSeq = undefined;
-          }
-          if (config.controlPeers.size > 0) {
-            try {
-              emitHealReport(this.db, this.messenger, this.durability, {
-                type: 'crash',
-                chatJid: resumeChatJid,
-                exitCode: info.exitCode ?? undefined,
-                signal: info.signal ?? undefined,
-              }, this.activeControlReportId);
-            } catch (err) {
-              log.warn({ err }, 'failed to emit heal report for session crash');
-            }
-          }
-        },
-        notifyUser: (msg) => this.handleCrashNotify(msg),
-      });
-
-      if (this.shared) {
-        const q = this.createOutboundQueue(resumeChatJid, 'startup resume shared');
-        this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
+      // ── C1/C2/I2: Hoist group check before spawn/queue creation ──────────
+      if (isGroupChat && !this.shared) {
+        // Single mode + group: session can't serve DMs, skip entirely (Bug I2 fix —
+        // previously spawned a full subprocess then immediately killed it).
+        log.info({ chatJid: resumeChatJid, sessionId: resumeSessionId }, 'skipping single-mode resume — group chat');
       } else {
-        const q = this.createOutboundQueue(resumeChatJid, 'startup resume single');
-        this.queue = q;
-      }
-
-      await this.session.spawnSession(resumeSessionId, priorSession.id);
-
-      // Defer notification until after WA connects (sending here causes a fatal crash)
-      const age = formatAge(priorSession.started_at);
-      // AE2: Suppress startup message for groups.
-      if (resumeChatJid.endsWith('@g.us')) {
-        if (!this.shared) {
-          // Single mode: kill the resumed session — can't suppress message without orphaning it
-          log.info({ chatJid: resumeChatJid }, 'skipping single-mode resume — group chat');
-          await this.session!.shutdown(false);
-          this.session = null;
-          this.queue = null;
-        } else {
-          log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
-          // Session stays alive (serves DMs too), just no unsolicited group message.
-        }
-      } else {
-        this.pendingStartupMessage = {
+        log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
+        this.activeChatJid = resumeChatJid;
+        this.session = this.createSessionManager({
           chatJid: resumeChatJid,
-          text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
-        };
+          cwd: this.cwd,
+          onEvent: (event) => this.handleEvent(event),
+          onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
+          onCrash: (info) => {
+            this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+            this.getActiveQueue()?.abortTurn();
+            this.cleanupSharedCrashTurnState();
+            // Mark inbound event failed so it doesn't stay stuck in processing
+            if (this.durability && this.currentInboundSeq !== undefined) {
+              this.durability.markInboundFailed(this.currentInboundSeq);
+              this.currentInboundSeq = undefined;
+            }
+            if (config.controlPeers.size > 0) {
+              try {
+                emitHealReport(this.db, this.messenger, this.durability, {
+                  type: 'crash',
+                  chatJid: resumeChatJid,
+                  exitCode: info.exitCode ?? undefined,
+                  signal: info.signal ?? undefined,
+                }, this.activeControlReportId);
+              } catch (err) {
+                log.warn({ err }, 'failed to emit heal report for session crash');
+              }
+            }
+          },
+          notifyUser: (msg) => this.handleCrashNotify(msg),
+        });
+
+        // Bug C2 fix: Do NOT create a group-keyed queue for shared mode — it would
+        // remain as a stale entry in outboundQueues since no startup message is sent.
+        // The queue is created on-demand via ensureOutboundQueue when a real message arrives.
+        if (!isGroupChat) {
+          if (this.shared) {
+            const q = this.createOutboundQueue(resumeChatJid, 'startup resume shared');
+            this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
+          } else {
+            const q = this.createOutboundQueue(resumeChatJid, 'startup resume single');
+            this.queue = q;
+          }
+        }
+
+        // Bug C1 fix: Wrap spawnSession in try/catch — every other call site does this.
+        // If spawn fails (bad session ID, corrupted state, claude-cli not found), clean up
+        // gracefully instead of crashing the runtime.
+        try {
+          await this.session.spawnSession(resumeSessionId, priorSession.id);
+        } catch (err) {
+          log.warn({ err, sessionId: resumeSessionId, chatJid: resumeChatJid }, 'spawnSession failed during resume — cleaning up');
+          this.session = null;
+          this.activeChatJid = null;
+          if (this.shared) {
+            this.outboundQueues.delete(canonicalizeChatJid(resumeChatJid, this.db));
+          } else {
+            this.queue = null;
+          }
+          // Fall through — runtime continues without a resumed session
+        }
+
+        // Defer notification until after WA connects (sending here causes a fatal crash)
+        if (this.session) {
+          if (isGroupChat) {
+            // Shared mode + group: session stays alive (serves DMs too), just no unsolicited group message.
+            log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
+          } else {
+            const age = formatAge(priorSession.started_at);
+            this.pendingStartupMessage = {
+              chatJid: resumeChatJid,
+              text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
+            };
+          }
+        }
       }
     }
 
