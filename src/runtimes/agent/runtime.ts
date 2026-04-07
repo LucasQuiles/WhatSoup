@@ -1228,6 +1228,13 @@ export class AgentRuntime implements Runtime {
 
     // AE2: Staleness check for shared/single mode — match per_chat's 60-minute threshold.
     let priorSession = prior;
+
+    // Guard: chat_jid may be null for legacy session rows
+    if (priorSession && !priorSession.chat_jid) {
+      log.info('skipping shared/single resume — no chat_jid on session row');
+      priorSession = null;
+    }
+
     if (priorSession && this.durability) {
       const ck = toConversationKey(priorSession.chat_jid!);
       const checkpoint = this.durability.getSessionCheckpoint(ck);
