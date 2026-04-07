@@ -13,6 +13,7 @@ import {
   incrementMessageCount,
   accumulateSessionTokens,
   insertTokenEvent,
+  accumulateTokensWithEvent,
   backfillWorkspaceKeys,
   markOrphaned,
   sweepOrphanedSessions,
@@ -420,5 +421,38 @@ describe('agent session-db', () => {
 
     expect(row.status).toBe('active');
     expect(row.ended_at).toBeNull();
+  });
+
+  it('accumulateTokensWithEvent rolls back both writes on failure', () => {
+    const id = createSession(db, 90001, '/tmp/atomic-test');
+
+    // Successful call — both session total and event row should be written
+    accumulateTokensWithEvent(db, id, 100, 50);
+    const eventCount = (db.raw.prepare(
+      'SELECT COUNT(*) AS cnt FROM agent_token_events WHERE agent_session_id = ?'
+    ).get(id) as { cnt: number }).cnt;
+    expect(eventCount).toBe(1);
+    const session = db.raw.prepare(
+      'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+    ).get(id) as { total_input_tokens: number; total_output_tokens: number };
+    expect(session.total_input_tokens).toBe(100);
+    expect(session.total_output_tokens).toBe(50);
+
+    // Force failure: use an invalid session ID that violates the FK constraint
+    expect(() => accumulateTokensWithEvent(db, 999999, 200, 75)).toThrow();
+
+    // Original session totals unchanged — the failed call targeted a different ID
+    // and rolled back, so no side effects
+    const afterFail = db.raw.prepare(
+      'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+    ).get(id) as { total_input_tokens: number; total_output_tokens: number };
+    expect(afterFail.total_input_tokens).toBe(100);
+    expect(afterFail.total_output_tokens).toBe(50);
+
+    // No extra event rows written from the failed call
+    const afterFailCount = (db.raw.prepare(
+      'SELECT COUNT(*) AS cnt FROM agent_token_events WHERE agent_session_id = ?'
+    ).get(id) as { cnt: number }).cnt;
+    expect(afterFailCount).toBe(1);
   });
 });

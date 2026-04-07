@@ -440,14 +440,15 @@ describe('SoupKitchen KPI toggle', () => {
 describe('SoupKitchen sparkline integration', () => {
   it('derives sparkline data from fleet metrics messageVolume', () => {
     const messageVolume = [
-      { bucket: '2026-04-05T00:00:00Z', inbound: 10, outbound: 20 },
-      { bucket: '2026-04-05T01:00:00Z', inbound: 5, outbound: 40 },
-      { bucket: '2026-04-05T02:00:00Z', inbound: 0, outbound: 0 },
+      { bucket: '2026-04-05T00:00:00Z', inbound: 10, outbound: 20, media: 2 },
+      { bucket: '2026-04-05T01:00:00Z', inbound: 5, outbound: 40, media: 4 },
+      { bucket: '2026-04-05T02:00:00Z', inbound: 0, outbound: 0, media: 0 },
     ];
     const sparklines = deriveFleetMessageSparklines(messageVolume);
     expect(sparklines).toBeDefined();
     expect(sparklines!.outbound).toEqual([0.5, 1, 0]);
     expect(sparklines!.inbound).toEqual([1, 0.5, 0]);
+    expect(sparklines!.media).toEqual([0.5, 1, 0]);
   });
 
   it('passes useFleetMetrics with chartRange state (default 24h)', () => {
