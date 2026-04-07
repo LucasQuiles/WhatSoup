@@ -344,6 +344,20 @@ export function resolveLid(db: Database, rawLid: string): string | null {
 }
 
 /**
+ * Resolve a raw LID (or full LID JID like '12345@lid') to its full phone JID
+ * (e.g. '12345@s.whatsapp.net'). Returns null if the LID is not mapped.
+ *
+ * Accepts both bare LID numbers and full JIDs — strips the @domain and
+ * colon-device suffix before lookup.
+ */
+export function resolveLidToJid(db: Database, rawLid: string): string | null {
+  const lid = normalizeLid(bareNumber(rawLid));
+  const phone = resolveLid(db, lid);
+  if (!phone) return null;
+  return `${phone}@${DOMAIN_PERSONAL}`;
+}
+
+/**
  * Resolve all known LID→phone pairs. Returns a map of lid → phone digits.
  * Used by fleet API to build display labels.
  */

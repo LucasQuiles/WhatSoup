@@ -68,10 +68,7 @@ export function normalizeLid(raw: string): string {
 
 // ── Canonical JID normalization ────────────────────────────────────────────
 
-type LidLookupDb = { raw: { prepare(sql: string): { get(param: string): { phone_jid: string } | undefined } } };
-
-let cachedLidLookupDb: LidLookupDb | null = null;
-let cachedLidLookupStmt: ReturnType<LidLookupDb['raw']['prepare']> | null = null;
+import { resolveLidToJid } from './lid-resolver.ts';
 
 /**
  * Normalize a chat JID to its canonical form for use as a map key.
@@ -92,20 +89,8 @@ export function canonicalizeChatJid(chatJid: string, db?: { raw: any } | null): 
   if (chatJid.endsWith(`@${DOMAIN_LID}`)) {
     if (!db) return chatJid;
     try {
-      if (cachedLidLookupDb !== db) {
-        cachedLidLookupDb = db as LidLookupDb;
-        cachedLidLookupStmt = null;
-      }
-      if (!cachedLidLookupStmt) {
-        cachedLidLookupStmt = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?');
-      }
-      const lid = normalizeLid(bareNumber(chatJid));
-      const lidLookupStmt = cachedLidLookupStmt;
-      if (!lidLookupStmt) return chatJid;
-      const row = lidLookupStmt.get(lid) as
-        | { phone_jid: string }
-        | undefined;
-      if (row?.phone_jid) return row.phone_jid;
+      const resolved = resolveLidToJid(db as any, chatJid);
+      return resolved ?? chatJid;
     } catch {
       // DB error — graceful degradation
     }
