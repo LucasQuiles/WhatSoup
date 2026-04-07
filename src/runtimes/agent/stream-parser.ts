@@ -135,8 +135,16 @@ export function parseEvent(line: string): AgentEvent | null {
     // On successful turns the response was already delivered via assistant_text events —
     // re-rendering result.result would send every reply twice.
     const isError = event['is_error'] === true;
-    const rawUsage = event['usage'] as { input_tokens?: number; output_tokens?: number } | undefined;
-    const inputTokens = typeof rawUsage?.input_tokens === 'number' ? rawUsage.input_tokens : undefined;
+    const rawUsage = event['usage'] as {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    } | undefined;
+    const baseInput = typeof rawUsage?.input_tokens === 'number' ? rawUsage.input_tokens : undefined;
+    const cacheCreation = typeof rawUsage?.cache_creation_input_tokens === 'number' ? rawUsage.cache_creation_input_tokens : 0;
+    const cacheRead = typeof rawUsage?.cache_read_input_tokens === 'number' ? rawUsage.cache_read_input_tokens : 0;
+    const inputTokens = baseInput !== undefined ? baseInput + cacheCreation + cacheRead : undefined;
     const outputTokens = typeof rawUsage?.output_tokens === 'number' ? rawUsage.output_tokens : undefined;
 
     if (!isError) {
