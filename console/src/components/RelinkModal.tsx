@@ -29,7 +29,7 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
         aria-modal="true"
         aria-labelledby="relink-dialog-title"
         onClick={(e) => e.stopPropagation()}
-        className="bg-d2 rounded-lg shadow-[var(--shadow-lg)] overflow-hidden c-border-b2 w-[var(--panel-confirm)] max-w-[90%]"
+        className="bg-d2 rounded-lg shadow-[var(--shadow-lg)] overflow-hidden c-border w-[var(--panel-confirm)] max-w-[90%]"
       >
         {/* Header */}
         <div

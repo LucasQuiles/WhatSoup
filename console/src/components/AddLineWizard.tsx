@@ -256,7 +256,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="wizard-accent-scope bg-d2 c-border-b2 rounded-lg shadow-[var(--shadow-lg)] flex flex-col overflow-hidden w-[var(--panel-wizard)] min-w-[var(--panel-wizard)] max-w-[90%] min-h-[var(--modal-min-h)] h-[var(--modal-max-h)] max-h-[var(--modal-max-h)]"
+        className="wizard-accent-scope bg-d2 c-border rounded-lg shadow-[var(--shadow-lg)] flex flex-col overflow-hidden w-[var(--panel-wizard)] min-w-[var(--panel-wizard)] max-w-[90%] min-h-[var(--modal-min-h)] h-[var(--modal-max-h)] max-h-[var(--modal-max-h)]"
         style={{
           '--wizard-accent': TYPE_ACCENT[(formData.type as string)] ?? 'var(--color-s-ok)',
         } as CSSProperties & Record<'--wizard-accent', string>}

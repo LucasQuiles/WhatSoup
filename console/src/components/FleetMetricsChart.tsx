@@ -62,7 +62,7 @@ export function FleetMetricsChart({ data }: { data: MessageVolumeBucket[] }) {
             stackId="msgs"
             stroke="var(--color-m-pas)"
             fill="var(--color-m-pas)"
-            fillOpacity="var(--opacity-soft)"
+            fillOpacity={0.3} /* --opacity-soft */
           />
           <Area
             type="monotone"
@@ -71,7 +71,7 @@ export function FleetMetricsChart({ data }: { data: MessageVolumeBucket[] }) {
             stackId="msgs"
             stroke="var(--color-m-cht)"
             fill="var(--color-m-cht)"
-            fillOpacity="var(--opacity-soft)"
+            fillOpacity={0.3} /* --opacity-soft */
           />
         </AreaChart>
       </ResponsiveContainer>

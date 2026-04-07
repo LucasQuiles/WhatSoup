@@ -282,7 +282,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         aria-modal="true"
         aria-labelledby="update-dialog-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-[var(--panel-confirm)] max-w-[90%] bg-d2 c-border-b2 rounded-lg shadow-[var(--shadow-lg)] overflow-hidden"
+        className="w-[var(--panel-confirm)] max-w-[90%] bg-d2 c-border rounded-lg shadow-[var(--shadow-lg)] overflow-hidden"
       >
         {/* Header */}
         <div
