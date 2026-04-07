@@ -197,7 +197,7 @@ function InfoTab({
                 onClick={handleCopyLink}
                 className="c-btn c-btn-xs c-btn-ghost font-mono"
               >
-                <Copy size={11} /> Copy
+                <Copy size={15} strokeWidth={1.75} /> Copy
               </button>
               {isAdmin && (
                 <button
@@ -205,7 +205,7 @@ function InfoTab({
                   onClick={() => setConfirmRevoke(true)}
                   className="c-btn c-btn-xs c-btn-danger font-mono"
                 >
-                  <X size={11} /> Revoke
+                  <X size={15} strokeWidth={1.75} /> Revoke
                 </button>
               )}
             </div>
@@ -217,7 +217,7 @@ function InfoTab({
             disabled={loadingLink}
             className="c-btn c-btn-xs c-btn-ghost font-mono"
           >
-            <Link size={11} /> {loadingLink ? 'Fetching...' : 'Fetch invite link'}
+            <Link size={15} strokeWidth={1.75} /> {loadingLink ? 'Fetching...' : 'Fetch invite link'}
           </button>
         )}
       </div>
@@ -335,7 +335,7 @@ function ParticipantsTab({
               disabled={adding}
               className="c-btn c-btn-xs c-btn-primary font-mono mt-[var(--sp-2)]"
             >
-              <UserPlus size={11} /> {adding ? 'Adding...' : `Add ${addContacts.length}`}
+              <UserPlus size={15} strokeWidth={1.75} /> {adding ? 'Adding...' : `Add ${addContacts.length}`}
             </button>
           )}
         </div>
@@ -413,7 +413,7 @@ function ParticipantsTab({
                     className="c-btn c-btn-xs c-btn-ghost font-mono"
                     title={p.admin ? 'Demote' : 'Promote to admin'}
                   >
-                    {p.admin ? <ShieldOff size={11} /> : <ShieldCheck size={11} />}
+                    {p.admin ? <ShieldOff size={15} strokeWidth={1.75} /> : <ShieldCheck size={15} strokeWidth={1.75} />}
                   </button>
                   <button
                     type="button"
@@ -421,7 +421,7 @@ function ParticipantsTab({
                     className="c-btn c-btn-xs c-btn-danger font-mono"
                     title="Remove participant"
                   >
-                    <UserMinus size={11} />
+                    <UserMinus size={15} strokeWidth={1.75} />
                   </button>
                 </div>
               )}
@@ -638,8 +638,8 @@ function SettingsTab({
       {isAdmin && (
         <div style={rowStyle}>
           <div>
-            <div className="c-data">Join approval</div>
-            <div className="c-data text-t4">
+            <div className="font-sans text-body text-t2">Join approval</div>
+            <div className="font-sans text-body text-t4">
               {detail.joinApprovalMode === 'on' ? 'Admin approval required' : 'No approval required'}
             </div>
           </div>
@@ -667,8 +667,8 @@ function SettingsTab({
       {/* Disappearing messages */}
       <div style={rowStyle}>
         <div>
-          <div className="c-data">Disappearing messages</div>
-          <div className="c-data text-t4">
+          <div className="font-sans text-body text-t2">Disappearing messages</div>
+          <div className="font-sans text-body text-t4">
             {ephemeralLabel(detail.ephemeralDuration)}
           </div>
         </div>

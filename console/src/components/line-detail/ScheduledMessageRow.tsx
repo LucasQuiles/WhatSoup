@@ -111,7 +111,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
               <>
                 <span style={metaDividerStyle}>·</span>
                 <span className="flex items-center gap-1 text-m-cht">
-                  <RefreshCw size={10} strokeWidth={2} />
+                  <RefreshCw size={10} strokeWidth={1.75} />
                   {cronToHuman(message.recurrence!)}
                 </span>
               </>
@@ -146,7 +146,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 aria-label="Edit scheduled message"
                 className="c-btn c-btn-xs c-btn-ghost font-mono"
               >
-                <Pencil size={11} strokeWidth={1.75} />
+                <Pencil size={15} strokeWidth={1.75} />
               </button>
               <button
                 type="button"
@@ -156,8 +156,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 className="c-btn c-btn-xs c-btn-danger font-mono"
               >
                 {cancelling === message.id
-                  ? <Loader2 size={11} className="animate-spin" />
-                  : <Trash2 size={11} strokeWidth={1.75} />}
+                  ? <Loader2 size={15} className="animate-spin" />
+                  : <Trash2 size={15} strokeWidth={1.75} />}
               </button>
             </>
           )}
@@ -168,7 +168,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             className="c-btn c-btn-xs c-btn-ghost font-mono"
             title="Duplicate"
           >
-            <Copy size={11} strokeWidth={1.75} />
+            <Copy size={15} strokeWidth={1.75} />
           </button>
           {/* Expand/collapse for next run + extra details */}
           {(isRecurring || message.retryCount > 0) && (
@@ -179,8 +179,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
               aria-label={expanded ? 'Collapse details' : 'Expand details'}
             >
               {expanded
-                ? <ChevronUp size={11} strokeWidth={2} />
-                : <ChevronDown size={11} strokeWidth={2} />}
+                ? <ChevronUp size={15} strokeWidth={1.75} />
+                : <ChevronDown size={15} strokeWidth={1.75} />}
             </button>
           )}
         </div>

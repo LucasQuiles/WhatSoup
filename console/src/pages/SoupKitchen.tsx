@@ -26,17 +26,17 @@ type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv"
 type SortDir = "asc" | "desc";
 
 const COLUMNS: { label: string; widthClass?: string; center: boolean; sortKey: SortKey }[] = [
-  { label: "Mode", widthClass: "w-[90px]", center: false, sortKey: "mode" },
+  { label: "Mode", widthClass: "w-[var(--sk-col-mode)]", center: false, sortKey: "mode" },
   { label: "Line", center: false, sortKey: "name" },
-  { label: "Chats", widthClass: "w-[60px]", center: true, sortKey: "chats" },
-  { label: "Groups", widthClass: "w-[64px]", center: true, sortKey: "groups" },
-  { label: "Unread", widthClass: "w-[64px]", center: true, sortKey: "unread" },
-  { label: "Sent", widthClass: "w-[68px]", center: true, sortKey: "sent" },
-  { label: "Recv", widthClass: "w-[68px]", center: true, sortKey: "recv" },
-  { label: "Tokens", widthClass: "w-[80px]", center: true, sortKey: "tokens" },
-  { label: "Sessions", widthClass: "w-[72px]", center: true, sortKey: "sessions" },
+  { label: "Chats", widthClass: "w-[var(--sk-col-chats)]", center: true, sortKey: "chats" },
+  { label: "Groups", widthClass: "w-[var(--sk-col-count)]", center: true, sortKey: "groups" },
+  { label: "Unread", widthClass: "w-[var(--sk-col-count)]", center: true, sortKey: "unread" },
+  { label: "Sent", widthClass: "w-[var(--sk-col-msg)]", center: true, sortKey: "sent" },
+  { label: "Recv", widthClass: "w-[var(--sk-col-msg)]", center: true, sortKey: "recv" },
+  { label: "Tokens", widthClass: "w-[var(--sk-col-tokens)]", center: true, sortKey: "tokens" },
+  { label: "Sessions", widthClass: "w-[var(--sk-col-sessions)]", center: true, sortKey: "sessions" },
   { label: "Tags", center: false, sortKey: null },
-  { label: "Active", widthClass: "w-[80px]", center: true, sortKey: "active" },
+  { label: "Active", widthClass: "w-[var(--sk-col-tokens)]", center: true, sortKey: "active" },
 ];
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
@@ -295,10 +295,11 @@ const SoupKitchen: FC = () => {
             </div>
 
             <button
+              type="button"
               className="c-btn c-btn-add flex-shrink-0 ml-[var(--sp-3)]"
               onClick={() => setShowAddWizard(true)}
             >
-              <Plus size={16} strokeWidth={2} />
+              <Plus size={16} strokeWidth={1.75} />
               <span className="c-btn-add-label">Add Line</span>
             </button>
           </div>
@@ -319,8 +320,8 @@ const SoupKitchen: FC = () => {
                         {h.label}
                         {sortKey === h.sortKey && (
                           sortDir === "asc"
-                            ? <ChevronUp size={12} strokeWidth={2} className="text-t3" />
-                            : <ChevronDown size={12} strokeWidth={2} className="text-t3" />
+                            ? <ChevronUp size={12} strokeWidth={1.75} className="text-t3" />
+                            : <ChevronDown size={12} strokeWidth={1.75} className="text-t3" />
                         )}
                       </span>
                     </th>
@@ -432,7 +433,7 @@ const SoupKitchen: FC = () => {
                   <tr>
                     <td
                       colSpan={11}
-                      className="text-center text-t5 font-mono py-12 text-[var(--font-size-data)]"
+                      className="text-center text-t5 font-sans py-12 text-[var(--font-size-data)]"
                     >
                       No instances match the current filters
                     </td>

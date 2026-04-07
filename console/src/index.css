@@ -128,6 +128,15 @@
   /* ═══ Text constraints ═══ */
   --chat-name-max: 140px;    /* chat list name truncation */
   --empty-max-w: 320px;      /* empty state description max */
+  --panel-access-col: 280px; /* access tab two-column min width */
+  --media-thumb-h: 200px;    /* max height for image/video thumbnails */
+  /* ═══ SoupKitchen table column widths ═══ */
+  --sk-col-mode: 90px;
+  --sk-col-chats: 60px;
+  --sk-col-count: 64px;      /* groups, unread */
+  --sk-col-msg: 68px;        /* sent, recv */
+  --sk-col-tokens: 80px;     /* tokens, active */
+  --sk-col-sessions: 72px;
   --panel-confirm: 420px;    /* confirm dialog width */
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */
@@ -351,7 +360,7 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--color-t5);
   cursor: pointer;
@@ -1098,6 +1107,7 @@ body::before {
 .c-border-b-b2   { border-bottom: var(--bw) solid var(--b2); }
 .c-border-t      { border-top: var(--bw) solid var(--b1); }
 .c-border-dashed { border: var(--bw) dashed var(--b2); }
+.c-border-r      { border-right: var(--bw) solid var(--b1); }
 
 /* Wizard accent-scoped focus ring — matches the selected line type color */
 .wizard-accent-scope input:focus-visible,

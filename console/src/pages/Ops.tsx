@@ -64,8 +64,7 @@ export default function Ops() {
 
   return (
     <motion.div
-      className="flex-1 flex min-h-0 overflow-hidden"
-      style={{ padding: 'var(--sp-4)', gap: 'var(--sp-3)' }}
+      className="flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5, ease }}
@@ -73,24 +72,20 @@ export default function Ops() {
 
       {/* ═══ LEFT: Fleet Status (swapped from right) ═══ */}
       <div
-        className="c-card flex flex-col min-h-0 overflow-hidden"
-        style={{
-          flex: 1,
-        }}
+        className="c-card flex flex-col min-h-0 overflow-hidden flex-1"
       >
         {/* Row 1: Header — matches toolbar pattern */}
         <div
-          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-          style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Fleet Status</span>
           {alerts.length > 0 ? (
-            <span className="flex items-center font-mono text-s-crit" style={{ fontSize: 'var(--font-size-label)', gap: 'var(--sp-1)' }}>
+            <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-label)' }}>
               <AlertTriangle size={12} strokeWidth={1.75} />
               {alerts.length} alert{alerts.length !== 1 ? 's' : ''}
             </span>
           ) : (
-            <span className="flex items-center font-mono text-s-ok" style={{ fontSize: 'var(--font-size-label)', gap: 'var(--sp-1)' }}>
+            <span className="flex items-center font-mono text-s-ok gap-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-label)' }}>
               <CheckCircle2 size={12} strokeWidth={1.75} />
               all healthy
             </span>
@@ -99,10 +94,9 @@ export default function Ops() {
 
         {/* Row 2: Summary stats — matches column header row */}
         <div
-          className="flex items-center justify-between flex-shrink-0 c-cell"
-          style={{ borderBottom: 'var(--bw) solid var(--b2)' }}
+          className="flex items-center justify-between flex-shrink-0 c-cell c-border-b-b2"
         >
-          <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
+          <div className="flex items-center gap-[var(--sp-3)]">
             <span className="c-label">{lines.length} instances</span>
             <span className="c-label">{lines.filter(l => l.status === 'online').length} online</span>
             {alerts.length > 0 && (
@@ -114,8 +108,8 @@ export default function Ops() {
         </div>
 
         {/* Instance cards */}
-        <div className="flex-1 overflow-auto scrollbar-hide" style={{ padding: 'var(--sp-3)' }}>
-          <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex-1 overflow-auto scrollbar-hide p-[var(--sp-3)]">
+          <div className="flex flex-col gap-[var(--sp-2)]">
             {linesLoading ? (
               <div className="text-t5 text-center py-8 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
                 Loading fleet status...
@@ -127,22 +121,17 @@ export default function Ops() {
             ) : lines.map(line => (
               <div
                 key={line.name}
-                className={`c-card c-hover cursor-pointer ${
+                className={`c-card c-hover cursor-pointer py-[var(--sp-3)] px-[var(--sp-4)] ${
                   line.name === activeLine ? 'ring-1 ring-m-cht/30' : ''
+                } ${
+                  line.status === 'unreachable' ? 'bg-[var(--s-crit-wash)]' :
+                  line.status === 'degraded' ? 'bg-[var(--s-warn-wash)]' : 'bg-d2'
                 }`}
-                style={{
-                  padding: 'var(--sp-3) var(--sp-4)',
-                  background: line.status === 'unreachable'
-                    ? 'var(--s-crit-wash)'
-                    : line.status === 'degraded'
-                    ? 'var(--s-warn-wash)'
-                    : 'var(--color-d2)',
-                }}
                 onClick={() => setSelectedLine(line.name)}
               >
                 {/* Row 1: Name + mode + phone */}
-                <div className="flex items-center justify-between" style={{ marginBottom: 'var(--sp-2)' }}>
-                  <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+                <div className="flex items-center justify-between mb-[var(--sp-2)]">
+                  <div className="flex items-center gap-[var(--sp-2)]">
                     <StatusDot status={line.status} size="sm" />
                     <span className="font-sans font-medium text-t1" style={{ fontSize: 'var(--font-size-body)' }}>
                       {displayInstanceName(line.name)}
@@ -156,7 +145,7 @@ export default function Ops() {
                 {/* Row 2: Heartbeat + runtime stats */}
                 <div className="flex items-center justify-between">
                   <HeartbeatStrip beats={line.heartbeat} />
-                  <div className="flex items-center font-mono text-t4" style={{ fontSize: 'var(--font-size-sm)', gap: 'var(--sp-3)' }}>
+                  <div className="flex items-center font-mono text-t4 gap-[var(--sp-3)]" style={{ fontSize: 'var(--font-size-sm)' }}>
                     <span>{line.messagesToday ?? 0} msgs</span>
                     {line.mode === 'passive' && (
                       <span className={(line.unread ?? 0) > 0 ? 'text-s-warn' : ''}>
@@ -181,19 +170,21 @@ export default function Ops() {
 
                 {/* Row 3: Actions for unhealthy lines */}
                 {line.status !== 'online' && (
-                  <div className="flex" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-3)', paddingTop: 'var(--sp-3)', borderTop: 'var(--bw) solid var(--b1)' }}>
+                  <div className="flex gap-[var(--sp-2)] mt-[var(--sp-3)] pt-[var(--sp-3)] c-border-t">
                     {line.linkedStatus === 'unlinked' ? (
                       <button
-                        className="c-btn"
-                        style={{ padding: 'var(--sp-1) var(--sp-3)', fontSize: 'var(--font-size-label)' }}
+                        type="button"
+                        className="c-btn py-[var(--sp-1)] px-[var(--sp-3)]"
+                        style={{ fontSize: 'var(--font-size-label)' }}
                         onClick={e => { e.stopPropagation(); setRelinkTarget(line.name) }}
                       >
-                        <Link2 size={12} strokeWidth={1.75} /> Re-link
+                        <Link2 size={15} strokeWidth={1.75} /> Re-link
                       </button>
                     ) : (
                       <button
-                        className="c-btn"
-                        style={{ padding: 'var(--sp-1) var(--sp-3)', fontSize: 'var(--font-size-label)' }}
+                        type="button"
+                        className="c-btn py-[var(--sp-1)] px-[var(--sp-3)]"
+                        style={{ fontSize: 'var(--font-size-label)' }}
                         onClick={e => {
                           e.stopPropagation()
                           toast.info(`Restarting ${line.name}...`)
@@ -202,15 +193,16 @@ export default function Ops() {
                             .catch(err => toast.error(`Failed: ${err.message}`))
                         }}
                       >
-                        <Power size={12} strokeWidth={1.75} /> Restart
+                        <Power size={15} strokeWidth={1.75} /> Restart
                       </button>
                     )}
                     <button
-                      className="c-btn"
-                      style={{ padding: 'var(--sp-1) var(--sp-3)', fontSize: 'var(--font-size-label)', color: 'var(--color-s-crit)' }}
+                      type="button"
+                      className="c-btn text-s-crit py-[var(--sp-1)] px-[var(--sp-3)]"
+                      style={{ fontSize: 'var(--font-size-label)' }}
                       onClick={e => { e.stopPropagation(); setDeleteTarget(line.name) }}
                     >
-                      <Trash2 size={12} strokeWidth={1.75} /> Delete
+                      <Trash2 size={15} strokeWidth={1.75} /> Delete
                     </button>
                   </div>
                 )}
@@ -224,16 +216,13 @@ export default function Ops() {
       {/* ═══ RIGHT: Log stream (swapped from left) ═══ */}
       <div
         className="c-card flex flex-col min-h-0 overflow-hidden"
-        style={{
-          flex: 1.6,
-        }}
+        style={{ flex: "1.6" }}
       >
         {/* Row 1: Line picker toolbar — matches c-toolbar */}
         <div
-          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-          style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
-          <div className="flex items-center" style={{ gap: 'var(--sp-3)' }}>
+          <div className="flex items-center gap-[var(--sp-3)]">
             <Terminal size={15} strokeWidth={1.75} className="text-m-agt" />
             <LinePicker
               lines={lines}
@@ -248,10 +237,9 @@ export default function Ops() {
 
         {/* Row 2: Level filter pills — matches column header row */}
         <div
-          className="flex items-center justify-between flex-shrink-0 c-cell"
-          style={{ borderBottom: 'var(--bw) solid var(--b2)' }}
+          className="flex items-center justify-between flex-shrink-0 c-cell c-border-b-b2"
         >
-          <div className="flex" style={{ gap: 'var(--sp-1)' }}>
+          <div className="flex gap-[var(--sp-1)]">
             {['all', 'error', 'warn', 'info', 'debug'].map(l => (
               <FilterPill
                 key={l}
@@ -268,25 +256,22 @@ export default function Ops() {
         </div>
 
         {/* Log stream */}
-        <div className="flex-1 overflow-auto scrollbar-hide font-mono" style={{ background: 'var(--color-d0)', fontSize: 'var(--font-size-data)' }}>
+        <div className="flex-1 overflow-auto scrollbar-hide font-mono bg-d0" style={{ fontSize: 'var(--font-size-data)' }}>
           {filteredLogs.length > 0 ? (
             filteredLogs.map((log: LogEntry, i: number) => (
               <div
                 key={`${log.timestamp}-${log.source}-${i}`}
-                className="flex items-start c-row-hover"
-                style={{ borderBottom: 'var(--bw) solid var(--b1)' }}
+                className="flex items-start c-row-hover c-border-b"
               >
                 {/* Timestamp */}
                 <div
-                  className="flex-shrink-0 text-t5"
-                  style={{ width: 'var(--log-col-time)', padding: 'var(--sp-2) var(--sp-3)', borderRight: 'var(--bw) solid var(--b1)' }}
+                  className="flex-shrink-0 text-t5 w-[var(--log-col-time)] py-[var(--sp-2)] px-[var(--sp-3)] c-border-r"
                 >
                   {formatTimeWithSeconds(log.timestamp)}
                 </div>
                 {/* Level badge */}
                 <div
-                  className="flex-shrink-0 text-center"
-                  style={{ width: 'var(--log-col-level)', padding: 'var(--sp-2)', borderRight: 'var(--bw) solid var(--b1)' }}
+                  className="flex-shrink-0 text-center w-[var(--log-col-level)] p-[var(--sp-2)] c-border-r"
                 >
                   <span
                     className={`inline-block px-1.5 py-0.5 rounded font-medium ${levelColor[log.level]}`}
@@ -297,13 +282,12 @@ export default function Ops() {
                 </div>
                 {/* Source */}
                 <div
-                  className="flex-shrink-0 text-t5 truncate"
-                  style={{ width: 'var(--log-col-source)', padding: 'var(--sp-2) var(--sp-2)', borderRight: 'var(--bw) solid var(--b1)' }}
+                  className="flex-shrink-0 text-t5 truncate w-[var(--log-col-source)] py-[var(--sp-2)] px-[var(--sp-2)] c-border-r"
                 >
                   {log.source}
                 </div>
                 {/* Message */}
-                <div className={`flex-1 ${levelColor[log.level]}`} style={{ padding: 'var(--sp-2) var(--sp-3)' }}>
+                <div className={`flex-1 py-[var(--sp-2)] px-[var(--sp-3)] ${levelColor[log.level]}`}>
                   {log.msg}
                 </div>
               </div>
@@ -319,8 +303,8 @@ export default function Ops() {
 
         {/* Status bar */}
         <div
-          className="flex items-center justify-between flex-shrink-0 font-mono text-t5"
-          style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1h) var(--sp-4)', borderTop: 'var(--bw) solid var(--b1)', background: 'var(--color-d1)' }}
+          className="flex items-center justify-between flex-shrink-0 font-mono text-t5 py-[var(--sp-1h)] px-[var(--sp-4)] c-border-t bg-d1"
+          style={{ fontSize: 'var(--font-size-xs)' }}
         >
           <span>{filteredLogs.length} entries</span>
           <span>{activeLine} — {currentLine?.mode ?? '—'}</span>
