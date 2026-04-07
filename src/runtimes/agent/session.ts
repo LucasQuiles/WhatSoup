@@ -79,7 +79,7 @@ export interface SessionManagerOptions {
  * Extend this function when adding new providers: each provider should only receive
  * its own credentials plus the system essentials below.
  */
-function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
+export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
   const env = buildBaseChildEnv();
 
   // Provider-specific credentials — each provider only receives the keys it needs.

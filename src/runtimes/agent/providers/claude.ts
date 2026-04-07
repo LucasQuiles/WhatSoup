@@ -13,7 +13,7 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { parseEvent } from '../stream-parser.ts';
-import { buildBaseChildEnv } from './child-env.ts';
+import { buildChildEnv } from '../session.ts';
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -35,33 +35,6 @@ export const claudeDescriptor: ProviderDescriptor = {
 // ---------------------------------------------------------------------------
 
 const STDIN_WRITE_TIMEOUT_MS = 30_000;
-
-// ---------------------------------------------------------------------------
-// Environment builder
-// ---------------------------------------------------------------------------
-
-/**
- * Build an explicit environment for Claude Code child processes.
- *
- * Security rationale: spawn() with no `env` option inherits process.env in full.
- * For a multi-provider system this is a security hole — Codex would receive
- * Anthropic's key, Gemini would receive OpenAI's key, etc. By constructing an
- * explicit allowlist we ensure each subprocess only gets the credentials it needs.
- */
-function buildChildEnv(): NodeJS.ProcessEnv {
-  const env = buildBaseChildEnv();
-
-  // OPENAI_API_KEY: passed because Claude Code may use it for its own features.
-  // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
-  if (process.env.OPENAI_API_KEY) {
-    env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  }
-
-  // Excluded: ANTHROPIC_API_KEY (subscription auth), PINECONE_API_KEY (parent MCP only),
-  // WHATSOUP_HEALTH_TOKEN (parent-only auth token)
-
-  return env;
-}
 
 // ---------------------------------------------------------------------------
 // ClaudeProvider
@@ -107,7 +80,7 @@ export class ClaudeProvider implements ProviderSession {
     const child = spawn('claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: buildChildEnv(),
+      env: buildChildEnv('claude-cli'),
     });
 
     this.child = child;
@@ -247,7 +220,7 @@ export class ClaudeProvider implements ProviderSession {
   }
 
   buildEnv(): NodeJS.ProcessEnv {
-    return buildChildEnv();
+    return buildChildEnv('claude-cli');
   }
 
   generateMcpConfig(socketPath: string): Record<string, unknown> | null {
