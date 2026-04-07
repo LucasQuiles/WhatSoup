@@ -111,6 +111,7 @@ function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
 }
 
 export class SessionManager {
+  private static readonly SHUTDOWN_GRACE_MS = 5_000;
   private readonly db: Database;
   private readonly messenger: Messenger;
   private readonly chatJid: string;
@@ -172,6 +173,7 @@ export class SessionManager {
 
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
+  private shutdownKillTimer: ReturnType<typeof setTimeout> | null = null;
 
   private durability: DurabilityEngine | null = null;
 
@@ -271,6 +273,13 @@ export class SessionManager {
   private resetStdoutBuffers(): void {
     this.stdoutChunks = [];
     this.stdoutBufferStr = '';
+  }
+
+  private clearShutdownKillTimer(): void {
+    if (this.shutdownKillTimer !== null) {
+      clearTimeout(this.shutdownKillTimer);
+      this.shutdownKillTimer = null;
+    }
   }
 
   private materializeStdoutChunks(): void {
@@ -500,6 +509,8 @@ export class SessionManager {
   }
 
   async spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> {
+    this.clearShutdownKillTimer();
+
     if (this.active && this.child !== null) {
       return;
     }
@@ -772,6 +783,8 @@ export class SessionManager {
 
     // Handle unexpected exit
     child.on('exit', (code, signal) => {
+      this.clearShutdownKillTimer();
+
       // Ignore exit events from superseded child processes.
       // This prevents a race where /new kills P1 and spawns P2, then P1's
       // delayed SIGTERM exit fires against P2's active state.
@@ -1040,6 +1053,8 @@ export class SessionManager {
       // Emit any remaining buffered output, then mark the turn as complete.
       // Use setImmediate to let pending stdout data chunks drain before we process.
       child.on('exit', (code, signal) => {
+        this.clearShutdownKillTimer();
+
         if (this.child !== child) return; // superseded
 
         // Defer drain to next tick — stdout 'data' events may still be queued
@@ -1246,7 +1261,17 @@ export class SessionManager {
     // Kill the child only if one is running
     if (this.child !== null) {
       const terminatedSessionId = this.sessionId;
-      this.child.kill('SIGTERM');
+      const child = this.child;
+      child.kill('SIGTERM');
+      this.shutdownKillTimer = setTimeout(() => {
+        this.shutdownKillTimer = null;
+        try {
+          child.kill('SIGKILL');
+          log.warn({ pid: child.pid ?? null, chatJid: this.chatJid }, 'child did not exit after SIGTERM, sent SIGKILL');
+        } catch (err) {
+          log.debug({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'child exited before SIGKILL escalation');
+        }
+      }, SessionManager.SHUTDOWN_GRACE_MS);
       this.child = null;
       log.info({ chatJid: this.chatJid, sessionId: terminatedSessionId, pid: currentPid }, 'claude process terminated');
     }
