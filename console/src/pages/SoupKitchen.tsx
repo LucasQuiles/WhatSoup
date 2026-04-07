@@ -263,17 +263,19 @@ const SoupKitchen: FC = () => {
 
       {/* Charts Section */}
       <div className="c-card flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
-        {/* Range Picker */}
-        <div className="flex items-center gap-[var(--sp-2)]">
-          <span className="c-section-label">Range</span>
-          {RANGE_OPTIONS.map((r) => (
-            <FilterPill
-              key={r}
-              label={r}
-              isActive={chartRange === r}
-              onClick={() => setChartRange(r)}
-            />
-          ))}
+        {/* Header — title left, range picker right */}
+        <div className="flex items-center justify-between">
+          <h2 className="c-heading-lg">Metrics</h2>
+          <div className="flex items-center gap-[var(--sp-2)]">
+            {RANGE_OPTIONS.map((r) => (
+              <FilterPill
+                key={r}
+                label={r}
+                isActive={chartRange === r}
+                onClick={() => setChartRange(r)}
+              />
+            ))}
+          </div>
         </div>
 
         {/* Chart Row — 3-up with expansion */}
