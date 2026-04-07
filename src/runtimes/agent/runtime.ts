@@ -34,7 +34,7 @@ import {
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
-import { toConversationKey } from '../../core/conversation-key.ts';
+import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
 import { toPersonalJid, canonicalizeChatJid } from '../../core/jid-constants.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
@@ -1131,6 +1131,18 @@ export class AgentRuntime implements Runtime {
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
+
+        // Skip stale sessions — don't resume conversations that have been inactive for over 60 minutes.
+        // Without this, every restart tries to resurrect days-old sessions and fires unsolicited messages.
+        const RESUME_MAX_AGE_MS = 60 * 60 * 1000;
+        if (full.updated_at) {
+          const age = Date.now() - new Date(full.updated_at + 'Z').getTime();
+          if (age > RESUME_MAX_AGE_MS) {
+            log.info({ conversationKey: cp.conversation_key, ageMinutes: Math.round(age / 60_000) }, 'skipping proactive resume — session too stale');
+            this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+            continue;
+          }
+        }
 
         // Derive chatJid from conversation_key — for DMs, append @lid; for groups, use as-is
         const chatJid = cp.conversation_key.includes('_at_')
