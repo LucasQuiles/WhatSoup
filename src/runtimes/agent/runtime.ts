@@ -21,6 +21,7 @@ import {
   accumulateSessionTokens,
   insertTokenEvent,
   accumulateTokensWithEvent,
+  backfillSessionProvider,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
@@ -1005,6 +1006,7 @@ export class AgentRuntime implements Runtime {
 
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
+    backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
