@@ -43,7 +43,7 @@ export function FleetSessionChart({ data, byProvider, providers, range = '24h' }
           <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
           <Tooltip contentStyle={TOOLTIP_STYLE} labelFormatter={(v) => new Date(String(v)).toLocaleString()} />
           <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
-          {providers.map((provider) => {
+          {providers.flatMap((provider) => {
             const color = getProviderColor(provider);
             const label = getProvider(provider)?.shortName ?? provider;
             return [
