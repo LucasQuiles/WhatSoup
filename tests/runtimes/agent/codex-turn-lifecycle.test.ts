@@ -185,6 +185,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   sweepOrphanedSessions: vi.fn(() => []),
   getResumableSessionForChat: vi.fn(() => null),
   accumulateSessionTokens: mockAccumulateSessionTokens,
+  insertTokenEvent: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({

@@ -369,8 +369,8 @@ CREATE TABLE IF NOT EXISTS agent_token_events (
   output_tokens INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX idx_agent_token_events_ts ON agent_token_events(timestamp);
-CREATE INDEX idx_agent_token_events_session_ts ON agent_token_events(agent_session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_agent_token_events_ts ON agent_token_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_agent_token_events_session_ts ON agent_token_events(agent_session_id, timestamp);
 `;
 
 // ─── Known migrations ────────────────────────────────────────────────────────

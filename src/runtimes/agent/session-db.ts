@@ -164,11 +164,13 @@ const TERMINAL_STATUSES = new Set(['ended', 'completed', 'crashed', 'resume_fail
 /** Update the status of an existing session row to any arbitrary status string. */
 export function updateSessionStatus(db: Database, rowId: number, status: string): void {
   if (TERMINAL_STATUSES.has(status)) {
+    const endedAt = new Date().toISOString();
     db.raw
       .prepare(
-        `UPDATE agent_sessions SET status = ?, ended_at = datetime('now') WHERE id = ?`,
+        `UPDATE agent_sessions SET status = ?, ended_at = ? WHERE id = ?`,
       )
-      .run(status, rowId);
+      .run(status, endedAt, rowId);
+    log.info({ agentSessionId: rowId, status, endedAt }, 'session.ended');
   } else {
     db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
   }

@@ -19,6 +19,7 @@ import {
   sweepOrphanedSessions,
   getResumableSessionForChat,
   accumulateSessionTokens,
+  insertTokenEvent,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
@@ -1891,6 +1892,7 @@ export class AgentRuntime implements Runtime {
         } else {
           if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
             accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+            insertTokenEvent(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
           }
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
@@ -1930,6 +1932,7 @@ export class AgentRuntime implements Runtime {
           const rowId = session?.getDbRowId() ?? null;
           if (rowId !== null) {
             accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+            insertTokenEvent(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
           }
         }
         break;
@@ -3072,6 +3075,7 @@ export class AgentRuntime implements Runtime {
         } else {
           if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
             accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+            insertTokenEvent(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
           }
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
@@ -3107,6 +3111,7 @@ export class AgentRuntime implements Runtime {
           const rowId = this.session?.getDbRowId() ?? null;
           if (rowId !== null) {
             accumulateSessionTokens(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
+            insertTokenEvent(this.db, rowId, event.inputTokens ?? 0, event.outputTokens ?? 0);
           }
         }
         break;

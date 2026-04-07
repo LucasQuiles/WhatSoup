@@ -96,9 +96,10 @@ const SoupKitchen: FC = () => {
 
   // KPI click: sets both activeKpi (table filter) and expandedChart (chart zoom)
   function toggleKpiWithChart(kpiKey: KpiFilter, chartKey: ChartKey | null) {
-    setActiveKpi((prev) => (prev === kpiKey ? null : kpiKey));
+    const next = activeKpi === kpiKey ? null : kpiKey;
+    setActiveKpi(next);
     if (chartKey) {
-      setExpandedChart((prev) => (prev === chartKey ? null : chartKey));
+      setExpandedChart(next === null ? null : chartKey);
     }
   }
 

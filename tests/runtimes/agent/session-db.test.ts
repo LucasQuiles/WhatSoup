@@ -393,8 +393,8 @@ describe('agent session-db', () => {
 
       expect(row.status).toBe(status);
       expect(row.ended_at).not.toBeNull();
-      // SQLite datetime('now') format: "YYYY-MM-DD HH:MM:SS"
-      expect(row.ended_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+      // ISO 8601 format from new Date().toISOString()
+      expect(row.ended_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     }
   });
 

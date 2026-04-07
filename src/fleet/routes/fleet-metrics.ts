@@ -1,7 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString } from '../../lib/http.ts';
+import { createChildLogger } from '../../logger.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import type { FleetDbReader } from '../db-reader.ts';
+
+const log = createChildLogger('fleet-metrics');
 
 export interface FleetMetricsDeps {
   discovery: FleetDiscovery;
@@ -44,6 +47,7 @@ export function handleGetFleetMetrics(
     const result = deps.dbReader.getMetrics(instance.name, instance.dbPath, { range });
     if (!result.ok) {
       instancesFailed++;
+      log.warn({ instance: instance.name, error: result.error }, 'fleet.metrics.instance_skip');
       continue;
     }
 
