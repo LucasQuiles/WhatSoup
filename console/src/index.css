@@ -872,7 +872,7 @@ body::before {
   background: var(--color-d4);
   color: var(--color-t2);
   cursor: pointer;
-  transition: all 0.15s var(--ease);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn:hover         { filter: brightness(1.1); }
 .c-btn-primary       { background: var(--color-s-ok); border-color: var(--color-s-ok); color: var(--color-d0); }
@@ -892,12 +892,12 @@ body::before {
 .c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
 .c-btn-xs      { padding: var(--sp-0h) var(--sp-2); font-size: var(--font-size-xs); }
 .c-btn-nav {
-  padding: 6px 10px;
+  padding: var(--sp-1h) var(--sp-2h);
   gap: 0;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
-  transition: padding 0.2s ease, gap 0.2s ease;
+  transition: padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease), color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease);
 }
 .c-btn-nav .c-btn-nav-label {
   max-width: 0;
@@ -906,7 +906,7 @@ body::before {
   transition: max-width 0.2s ease, opacity 0.15s ease;
 }
 .c-btn-nav:hover {
-  padding: 6px 12px;
+  padding: var(--sp-1h) var(--sp-3);
   gap: var(--sp-2);
   filter: brightness(1.15);
 }
@@ -915,7 +915,7 @@ body::before {
   opacity: 1;
 }
 .c-btn-send {
-  padding: 6px 10px;
+  padding: var(--sp-1h) var(--sp-2h);
   gap: 0;
   min-width: 0;
   overflow: hidden;
@@ -923,7 +923,7 @@ body::before {
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
   color: var(--color-d0);
-  transition: padding 0.2s ease, gap 0.2s ease;
+  transition: padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease), color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn-send .c-btn-send-label {
   max-width: 0;
@@ -932,9 +932,9 @@ body::before {
   transition: max-width 0.2s ease, opacity 0.15s ease;
 }
 .c-btn-send:hover {
-  padding: 6px 12px;
+  padding: var(--sp-1h) var(--sp-3);
   gap: var(--sp-2);
-  opacity: 1 !important;
+  opacity: 1;
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
 }
@@ -955,7 +955,7 @@ body::before {
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
   color: var(--color-d0);
-  transition: width var(--dur-norm) var(--ease), padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease);
+  transition: width var(--dur-norm) var(--ease), padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease), color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease);
 }
 .c-btn-add .c-btn-add-label {
   max-width: 0;
