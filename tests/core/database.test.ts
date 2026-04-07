@@ -675,3 +675,124 @@ describe('migration 3 — chat sync tables', () => {
     db.close();
   });
 });
+
+describe('migration 18 — agent_token_events + ended_at', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('records migration version 18 in schema_migrations', () => {
+    const row = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 18')
+      .get() as { version: number } | undefined;
+    expect(row?.version).toBe(18);
+  });
+
+  it('creates agent_token_events table with correct columns', () => {
+    const cols = db.raw
+      .prepare("PRAGMA table_info('agent_token_events')")
+      .all() as Array<{ name: string; type: string; notnull: number }>;
+    const colMap = Object.fromEntries(cols.map((c) => [c.name, c]));
+
+    expect(colMap['id']).toBeDefined();
+    expect(colMap['agent_session_id']).toBeDefined();
+    expect(colMap['agent_session_id'].notnull).toBe(1);
+    expect(colMap['timestamp']).toBeDefined();
+    expect(colMap['timestamp'].type).toBe('INTEGER');
+    expect(colMap['timestamp'].notnull).toBe(1);
+    expect(colMap['input_tokens']).toBeDefined();
+    expect(colMap['input_tokens'].type).toBe('INTEGER');
+    expect(colMap['output_tokens']).toBeDefined();
+    expect(colMap['output_tokens'].type).toBe('INTEGER');
+  });
+
+  it('creates idx_agent_token_events_ts index', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_agent_token_events_ts'")
+      .all() as Array<{ name: string }>;
+    expect(indexes).toHaveLength(1);
+  });
+
+  it('creates idx_agent_token_events_session_ts index', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_agent_token_events_session_ts'")
+      .all() as Array<{ name: string }>;
+    expect(indexes).toHaveLength(1);
+  });
+
+  it('adds ended_at column to agent_sessions', () => {
+    const cols = db.raw
+      .prepare("PRAGMA table_info('agent_sessions')")
+      .all() as Array<{ name: string; type: string }>;
+    const col = cols.find((c) => c.name === 'ended_at');
+    expect(col).toBeDefined();
+    expect(col!.type).toBe('TEXT');
+  });
+
+  it('creates idx_agent_sessions_started_epoch expression index', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_agent_sessions_started_epoch'")
+      .all() as Array<{ name: string }>;
+    expect(indexes).toHaveLength(1);
+  });
+
+  it('creates idx_agent_sessions_ended_epoch expression index', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_agent_sessions_ended_epoch'")
+      .all() as Array<{ name: string }>;
+    expect(indexes).toHaveLength(1);
+  });
+
+  it('backfills ended_at for terminal sessions', () => {
+    db.raw.prepare(`
+      INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, last_message_at, status, ended_at)
+      VALUES (1, '/tmp', '2026-04-01T10:00:00.000Z', '2026-04-01T11:00:00.000Z', 'ended', NULL)
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, last_message_at, status, ended_at)
+      VALUES (2, '/tmp', '2026-04-01T12:00:00.000Z', NULL, 'crashed', NULL)
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, status, ended_at)
+      VALUES (3, '/tmp', '2026-04-01T13:00:00.000Z', 'active', NULL)
+    `).run();
+    db.raw.prepare(`
+      INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, status, ended_at)
+      VALUES (4, '/tmp', '2026-04-01T14:00:00.000Z', 'suspended', NULL)
+    `).run();
+
+    // Re-run the backfill UPDATE (same as migration does)
+    db.raw.prepare(`
+      UPDATE agent_sessions SET ended_at = COALESCE(last_message_at, started_at)
+      WHERE status IN ('ended', 'completed', 'crashed', 'resume_failed', 'orphaned')
+        AND ended_at IS NULL
+    `).run();
+
+    const ended = db.raw.prepare(
+      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 1"
+    ).get() as { ended_at: string | null };
+    expect(ended.ended_at).toBe('2026-04-01T11:00:00.000Z');
+
+    const crashed = db.raw.prepare(
+      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 2"
+    ).get() as { ended_at: string | null };
+    expect(crashed.ended_at).toBe('2026-04-01T12:00:00.000Z');
+
+    const active = db.raw.prepare(
+      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 3"
+    ).get() as { ended_at: string | null };
+    expect(active.ended_at).toBeNull();
+
+    const suspended = db.raw.prepare(
+      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 4"
+    ).get() as { ended_at: string | null };
+    expect(suspended.ended_at).toBeNull();
+  });
+});

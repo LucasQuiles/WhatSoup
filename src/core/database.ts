@@ -358,6 +358,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_phr_active_class ON pending_heal_reports (
 // Add token columns to messages (per-response) and agent_sessions (per-session).
 // Using ALTER TABLE with idempotency guards (SQLite lacks ADD COLUMN IF NOT EXISTS).
 
+// ─── Migration 18: agent_token_events + agent_sessions.ended_at ─────────────
+
+const MIGRATION_18 = `
+CREATE TABLE IF NOT EXISTS agent_token_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_session_id INTEGER NOT NULL REFERENCES agent_sessions(id),
+  timestamp INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_agent_token_events_ts ON agent_token_events(timestamp);
+CREATE INDEX idx_agent_token_events_session_ts ON agent_token_events(agent_session_id, timestamp);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -495,6 +510,26 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
     db.exec(`ALTER TABLE scheduled_messages ADD COLUMN next_run_at INTEGER`);
     db.exec(`ALTER TABLE scheduled_messages ADD COLUMN run_count INTEGER NOT NULL DEFAULT 0`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_scheduled_next_run ON scheduled_messages(status, next_run_at) WHERE status = 'pending' AND next_run_at IS NOT NULL`);
+  }],
+  [18, (db: DatabaseSync) => {
+    db.exec(MIGRATION_18);
+
+    // Add ended_at column (idempotency guard)
+    const cols = db.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'ended_at')) {
+      db.exec('ALTER TABLE agent_sessions ADD COLUMN ended_at TEXT');
+    }
+
+    // Expression indexes for unixepoch() predicates in metrics queries
+    db.exec('CREATE INDEX IF NOT EXISTS idx_agent_sessions_started_epoch ON agent_sessions(unixepoch(started_at))');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_agent_sessions_ended_epoch ON agent_sessions(unixepoch(ended_at))');
+
+    // Backfill ended_at for existing terminal sessions
+    db.prepare(`
+      UPDATE agent_sessions SET ended_at = COALESCE(last_message_at, started_at)
+      WHERE status IN ('ended', 'completed', 'crashed', 'resume_failed', 'orphaned')
+        AND ended_at IS NULL
+    `).run();
   }],
 ]);
 
