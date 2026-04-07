@@ -9,16 +9,11 @@ import {
 } from 'recharts';
 import type { TokenUsageBucket, MetricsRange } from '../types';
 import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
+import { formatCompact } from '../lib/text-utils';
 
 interface FleetTokenChartProps {
   data: TokenUsageBucket[];
   range?: MetricsRange;
-}
-
-function formatTokenCount(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}k`;
-  return String(value);
 }
 
 /** Area chart showing fleet-wide token consumption (input + output). */
@@ -41,7 +36,7 @@ export function FleetTokenChart({ data, range = '24h' }: FleetTokenChartProps) {
           axisLine={false}
           width={36}
           allowDecimals={false}
-          tickFormatter={formatTokenCount}
+          tickFormatter={(v) => formatCompact(v)}
         />
         <Tooltip
           contentStyle={TOOLTIP_STYLE}

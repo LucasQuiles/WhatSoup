@@ -230,8 +230,7 @@ export function backfillWorkspaceKeys(db: Database, instanceCwd: string): void {
 
 /** Mark a session as orphaned (process disappeared unexpectedly). */
 export function markOrphaned(db: Database, id: number): void {
-  log.info({ id }, 'session: orphaned');
-  db.raw.prepare(`UPDATE agent_sessions SET status = 'orphaned' WHERE id = ?`).run(id);
+  updateSessionStatus(db, id, 'orphaned');
 }
 
 /**
