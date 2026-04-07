@@ -983,7 +983,7 @@ body::before {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width 0.2s ease, opacity 0.15s ease;
+  transition: max-width var(--dur-norm) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn-nav:hover {
   padding: var(--sp-1h) var(--sp-3);
@@ -1009,7 +1009,7 @@ body::before {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width 0.2s ease, opacity 0.15s ease;
+  transition: max-width var(--dur-norm) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn-send:hover {
   padding: var(--sp-1h) var(--sp-3);
