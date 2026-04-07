@@ -1,8 +1,10 @@
 /**
- * Fleet API client.
+ * Fleet API client with mock data fallback.
  *
  * - In production: fleet server serves both the SPA and /api/* routes
  * - In dev mode: Vite proxies /api/* to the fleet server
+ * - Fallback: if fleet server is unreachable, returns mock data so the
+ *   console always renders (useful for design iteration and demos)
  */
 
 import type {
@@ -51,21 +53,76 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+let fleetAvailable: boolean | null = null;
+let checkInFlight: Promise<boolean> | null = null;
+let mockDataPromise: Promise<typeof import('../mock-data.ts')> | null = null;
+
+async function loadMockData(): Promise<typeof import('../mock-data.ts')> {
+  if (!mockDataPromise) {
+    mockDataPromise = import('../mock-data.ts');
+  }
+  return mockDataPromise;
+}
+
+async function checkFleetAvailable(): Promise<boolean> {
+  if (fleetAvailable !== null) return fleetAvailable;
+  if (checkInFlight) return checkInFlight;
+  checkInFlight = (async () => {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      const res = await fetch(`${API_BASE}/api/lines`, {
+        signal: controller.signal,
+        headers: authHeaders(),
+      });
+      clearTimeout(timer);
+      fleetAvailable = res.ok;
+    } catch {
+      fleetAvailable = false;
+    }
+    checkInFlight = null;
+    setTimeout(() => { fleetAvailable = null; }, 60_000);
+    return fleetAvailable!;
+  })();
+  return checkInFlight;
+}
+
+async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
+  const available = await checkFleetAvailable();
+  if (!available) return mockFn();
+  try {
+    return await apiFn();
+  } catch {
+    fleetAvailable = null;
+    return mockFn();
+  }
+}
+
 export const api = {
-  getLines: () =>
-    apiFetch<LineInstance[]>('/api/lines'),
-  getLine: (name: string) =>
-    apiFetch<LineInstance>(`/api/lines/${encodeURIComponent(name)}`),
-  getChats: (name: string) =>
-    apiFetch<ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
-  getMessages: (name: string, conversationKey: string, beforePk?: number) =>
-    apiFetch<Message[]>(
-      `/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`
-    ),
-  getMetrics: (name: string, range: MetricsRange) =>
-    apiFetch<LineMetrics>(`/api/lines/${encodeURIComponent(name)}/metrics?range=${encodeURIComponent(range)}`),
-  getFleetMetrics: (range: MetricsRange) =>
-    apiFetch<FleetMetrics>(`/api/metrics?range=${encodeURIComponent(range)}`),
+  getLines: () => withFallback(
+    () => apiFetch<LineInstance[]>('/api/lines'),
+    async () => (await loadMockData()).getLines(),
+  ),
+  getLine: (name: string) => withFallback(
+    () => apiFetch<LineInstance>(`/api/lines/${encodeURIComponent(name)}`),
+    async () => { const line = (await loadMockData()).getLine(name); if (!line) throw new Error('Not found'); return line; },
+  ),
+  getChats: (name: string) => withFallback(
+    () => apiFetch<ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
+    async () => (await loadMockData()).getChats(name),
+  ),
+  getMessages: (name: string, conversationKey: string, beforePk?: number) => withFallback(
+    () => apiFetch<Message[]>(`/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`),
+    async () => (await loadMockData()).getMessages(name, conversationKey),
+  ),
+  getMetrics: (name: string, range: MetricsRange) => withFallback(
+    () => apiFetch<LineMetrics>(`/api/lines/${encodeURIComponent(name)}/metrics?range=${encodeURIComponent(range)}`),
+    async () => (await loadMockData()).getMetrics(name, range),
+  ),
+  getFleetMetrics: (range: MetricsRange) => withFallback(
+    () => apiFetch<FleetMetrics>(`/api/metrics?range=${encodeURIComponent(range)}`),
+    async () => (await loadMockData()).getFleetMetrics(range),
+  ),
   searchMessages: (name: string, query: string, conversationKey?: string) =>
     apiFetch<{ results: Message[]; total: number; query: string }>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
@@ -76,15 +133,23 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(contact),
     }),
-  getAccess: (name: string) =>
-    apiFetch<AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
-  getLogs: (name: string) =>
-    apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
-  getFeed: () =>
-    apiFetch<FeedEvent[]>('/api/feed'),
+  getAccess: (name: string) => withFallback(
+    () => apiFetch<AccessEntry[]>(`/api/lines/${encodeURIComponent(name)}/access`),
+    async () => (await loadMockData()).getAccess(name),
+  ),
+  getLogs: (name: string) => withFallback(
+    () => apiFetch<LogEntry[]>(`/api/lines/${encodeURIComponent(name)}/logs`),
+    async () => (await loadMockData()).getLogs(name),
+  ),
+  getFeed: () => withFallback(
+    () => apiFetch<FeedEvent[]>('/api/feed'),
+    async () => (await loadMockData()).getFeed(),
+  ),
 
-  getTyping: () =>
-    apiFetch<{ instance: string; jid: string; since: number }[]>('/api/typing').catch(() => []),
+  getTyping: () => withFallback(
+    () => apiFetch<{ instance: string; jid: string; since: number }[]>('/api/typing'),
+    async () => (await loadMockData()).getTyping(),
+  ).catch(() => []),
 
   // ── Write operations ──
 
@@ -134,11 +199,10 @@ export const api = {
 
   // ── MCP proxy operations ──
 
-  getScheduled: (name: string, status?: string) =>
-    apiFetch<{ count: number; messages: ScheduledMessage[] }>(
-      `/api/lines/${encodeURIComponent(name)}/scheduled${status ? `?status=${status}` : ''}`,
-      { signal: AbortSignal.timeout(15000) },
-    ),
+  getScheduled: (name: string, status?: string) => withFallback(
+    () => apiFetch<{ count: number; messages: ScheduledMessage[] }>(`/api/lines/${encodeURIComponent(name)}/scheduled${status ? `?status=${status}` : ''}`, { signal: AbortSignal.timeout(15000) }),
+    async () => (await loadMockData()).getScheduled(name),
+  ),
 
   cancelScheduled: (name: string, id: number) =>
     apiFetch<{ cancelled: boolean; id: number }>(
@@ -146,11 +210,15 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  getGroups: (name: string) =>
-    apiFetch<{ groups: GroupInfo[] }>(`/api/lines/${encodeURIComponent(name)}/groups`, { signal: AbortSignal.timeout(15000) }),
+  getGroups: (name: string) => withFallback(
+    () => apiFetch<{ groups: GroupInfo[] }>(`/api/lines/${encodeURIComponent(name)}/groups`, { signal: AbortSignal.timeout(15000) }),
+    async () => (await loadMockData()).getGroups(name),
+  ),
 
-  searchContacts: (name: string, query: string) =>
-    apiFetch<{ contacts: ContactResult[] }>(`/api/lines/${encodeURIComponent(name)}/contacts/search?q=${encodeURIComponent(query)}`),
+  searchContacts: (name: string, query: string) => withFallback(
+    () => apiFetch<{ contacts: ContactResult[] }>(`/api/lines/${encodeURIComponent(name)}/contacts/search?q=${encodeURIComponent(query)}`),
+    async () => (await loadMockData()).searchContacts(name, query),
+  ),
 
   // ── Scheduled messages (new) ──
 
