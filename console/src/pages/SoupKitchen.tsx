@@ -476,7 +476,7 @@ const SoupKitchen: FC = () => {
                       {/* Provider */}
                       <td className="c-cell">
                         <span className="c-data" style={{ color: getProviderColor(line.provider ?? 'claude-cli').stroke }}>
-                          {getProvider(line.provider ?? 'claude-cli')?.displayName ?? 'Claude Code'}
+                          {getProvider(line.provider ?? 'claude-cli')?.shortName ?? 'Claude'}
                         </span>
                       </td>
                       <td className="c-cell"><LineTags line={line} /></td>

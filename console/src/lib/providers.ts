@@ -6,6 +6,7 @@
 export interface ProviderDef {
   id: string;
   displayName: string;
+  shortName: string;
   type: 'cli' | 'api';
 }
 
@@ -19,12 +20,12 @@ export interface ConfigFieldDef {
 export const DEFAULT_PROVIDER_ID = 'claude-cli';
 
 export const PROVIDERS: ProviderDef[] = [
-  { id: 'claude-cli',    displayName: 'Claude Code',    type: 'cli' },
-  { id: 'codex-cli',     displayName: 'Codex CLI',      type: 'cli' },
-  { id: 'gemini-cli',    displayName: 'Gemini CLI',     type: 'cli' },
-  { id: 'opencode-cli',  displayName: 'OpenCode',       type: 'cli' },
-  { id: 'openai-api',    displayName: 'OpenAI API',     type: 'api' },
-  { id: 'anthropic-api', displayName: 'Anthropic API',  type: 'api' },
+  { id: 'claude-cli',    displayName: 'Claude Code',    shortName: 'Claude',    type: 'cli' },
+  { id: 'codex-cli',     displayName: 'Codex',          shortName: 'CDX',       type: 'cli' },
+  { id: 'gemini-cli',    displayName: 'Gemini',         shortName: 'Gemini',    type: 'cli' },
+  { id: 'opencode-cli',  displayName: 'OpenCode',       shortName: 'OC',        type: 'cli' },
+  { id: 'openai-api',    displayName: 'OpenAI',         shortName: 'OAI',       type: 'api' },
+  { id: 'anthropic-api', displayName: 'Anthropic',      shortName: 'Anth',      type: 'api' },
 ];
 
 // Precomputed maps for O(1) lookups and stable references

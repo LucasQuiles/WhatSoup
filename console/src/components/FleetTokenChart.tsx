@@ -66,13 +66,14 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
           {providers.flatMap((provider) => {
             const color = getProviderColor(provider);
-            const displayName = getProvider(provider)?.displayName ?? provider;
+            const prov = getProvider(provider);
+            const label = prov?.shortName ?? provider;
             return [
               <Area
                 key={`${provider}:output`}
                 type="monotone"
                 dataKey={`${provider}:output`}
-                name={`${displayName} Out`}
+                name={`${label} Out`}
                 stackId="output"
                 stroke={color.stroke}
                 fill={color.fill}
@@ -82,7 +83,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
                 key={`${provider}:input`}
                 type="monotone"
                 dataKey={`${provider}:input`}
-                name={`${displayName} In`}
+                name={`${label} In`}
                 stackId="input"
                 stroke={color.stroke}
                 strokeDasharray="4 2"

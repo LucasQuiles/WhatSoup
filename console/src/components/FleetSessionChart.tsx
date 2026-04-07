@@ -45,10 +45,10 @@ export function FleetSessionChart({ data, byProvider, providers, range = '24h' }
           <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
           {providers.map((provider) => {
             const color = getProviderColor(provider);
-            const displayName = getProvider(provider)?.displayName ?? provider;
+            const label = getProvider(provider)?.shortName ?? provider;
             return [
-              <Area key={`${provider}:active`} type="monotone" dataKey={`${provider}:active`} name={`${displayName} Active`} stackId="active" stroke={color.stroke} fill={color.fill} fillOpacity={0.3} />,
-              <Bar key={`${provider}:started`} dataKey={`${provider}:started`} name={`${displayName} Started`} stackId="started" fill={color.fill} fillOpacity={0.6} barSize={4} />,
+              <Area key={`${provider}:active`} type="monotone" dataKey={`${provider}:active`} name={`${label} Active`} stackId="active" stroke={color.stroke} fill={color.fill} fillOpacity={0.3} />,
+              <Bar key={`${provider}:started`} dataKey={`${provider}:started`} name={`${label} Started`} stackId="started" fill={color.fill} fillOpacity={0.6} barSize={4} />,
             ];
           })}
         </ComposedChart>
