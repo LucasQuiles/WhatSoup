@@ -1578,10 +1578,104 @@ export class AgentRuntime implements Runtime {
           const helpText =
             '*/new* — start a fresh session\n' +
             '*/status* — show current session status\n' +
+            '*/sessions* — list all active sessions _(admin)_\n' +
+            '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
             '*/help* — show this help\n' +
             '_Any other message is forwarded to Claude Code._\n' +
             'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
           this.sendDirect(chatJid, helpText);
+          break;
+        }
+
+        case 'sessions': {
+          // Admin-only
+          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+            return;
+          }
+          const entries: string[] = [];
+          let idx = 1;
+          if (this.sessionScope === 'per_chat') {
+            for (const [mapKey, sess] of this.chatSessions) {
+              const st = sess.getStatus();
+              if (!st.active) continue;
+              const isGrp = mapKey.includes('_at_g.us') || mapKey.endsWith('@g.us');
+              const label = isGrp ? 'Group' : 'DM';
+              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+              const dbRowId = sess.getDbRowId();
+              let tkStr = '0';
+              if (dbRowId !== null) {
+                const tokenRow = this.db.raw.prepare(
+                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                if (tokenRow) {
+                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                }
+              }
+              entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+              idx++;
+            }
+          } else {
+            const st = this.session?.getStatus();
+            if (st?.active) {
+              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+              const dbRowId = this.session?.getDbRowId() ?? null;
+              let tkStr = '0';
+              if (dbRowId !== null) {
+                const tokenRow = this.db.raw.prepare(
+                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                if (tokenRow) {
+                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                }
+              }
+              entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+            }
+          }
+          const sessionsText = entries.length > 0
+            ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
+            : '_No active sessions._';
+          this.sendDirect(chatJid, sessionsText);
+          break;
+        }
+
+        case 'kill-session': {
+          // Admin-only
+          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+            return;
+          }
+          const targetIdx = parseInt(classified.args ?? '', 10);
+          if (isNaN(targetIdx) || targetIdx < 1) {
+            this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.');
+            break;
+          }
+          if (this.sessionScope === 'per_chat') {
+            const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
+            if (targetIdx > activeSessions.length) {
+              this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`);
+              break;
+            }
+            const [mapKey, targetSession] = activeSessions[targetIdx - 1];
+            this.chatQueues.get(mapKey)?.abortTurn();
+            this.chatSessions.delete(mapKey);
+            this.chatQueues.delete(mapKey);
+            this.cleanupPerChatCrashTurnState(mapKey);
+            await targetSession.shutdown(false);
+            const killLabel = mapKey.includes('_at_g.us') || mapKey.endsWith('@g.us') ? 'Group' : 'DM';
+            this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`);
+          } else {
+            if (!this.session?.getStatus().active) {
+              this.sendDirect(chatJid, '_No active session to kill._');
+              break;
+            }
+            this.getActiveQueue()?.abortTurn();
+            await this.session.shutdown(false);
+            this.session = null;
+            this.queue = null;
+            this.activeChatJid = null;
+            this.sendDirect(chatJid, '_Session killed._');
+          }
           break;
         }
       }
