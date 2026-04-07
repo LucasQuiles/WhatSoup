@@ -51,6 +51,32 @@ function upsertMetric(db: Database, bucket: string, metric: MetricName, value: n
   `).run(bucket, metric, value);
 }
 
+function querySessionMetrics(
+  db: Database,
+  startSec: number,
+  endSec: number,
+): { sessionsStarted: number; sessionsActive: number } {
+  const sessionsStarted = countMessages(
+    db,
+    `SELECT COUNT(*) AS cnt
+       FROM agent_sessions
+      WHERE unixepoch(started_at) >= ? AND unixepoch(started_at) < ?`,
+    startSec,
+    endSec,
+  );
+  const sessionsActive = countMessages(
+    db,
+    `SELECT COUNT(*) AS cnt
+       FROM agent_sessions
+      WHERE unixepoch(started_at) < ?
+        AND (ended_at IS NULL OR unixepoch(ended_at) > ?)
+        AND status != 'suspended'`,
+    endSec,
+    startSec,
+  );
+  return { sessionsStarted, sessionsActive };
+}
+
 function collectMetricsForWindow(db: Database, window: HourWindow): void {
   const { bucket, startSec, endSec } = window;
 
@@ -129,27 +155,7 @@ function collectMetricsForWindow(db: Database, window: HourWindow): void {
   upsertMetric(db, bucket, 'chat_tokens_in', chatTokensIn);
   upsertMetric(db, bucket, 'chat_tokens_out', chatTokensOut);
 
-  // ── Session metrics ──
-  const sessionsStarted = countMessages(
-    db,
-    `SELECT COUNT(*) AS cnt
-       FROM agent_sessions
-      WHERE unixepoch(started_at) >= ? AND unixepoch(started_at) < ?`,
-    startSec,
-    endSec,
-  );
-
-  const sessionsActive = countMessages(
-    db,
-    `SELECT COUNT(*) AS cnt
-       FROM agent_sessions
-      WHERE unixepoch(started_at) < ?
-        AND (ended_at IS NULL OR unixepoch(ended_at) > ?)
-        AND status != 'suspended'`,
-    endSec,
-    startSec,
-  );
-
+  const { sessionsStarted, sessionsActive } = querySessionMetrics(db, startSec, endSec);
   upsertMetric(db, bucket, 'sessions_started', sessionsStarted);
   upsertMetric(db, bucket, 'sessions_active', sessionsActive);
 }
@@ -208,25 +214,7 @@ export function backfillMetrics(db: Database, days = 30, now = new Date()): void
         // Session metrics only for hours without messages.
         // Only write rows if at least one session metric is non-zero to preserve
         // the "gaps" invariant (message-only hours don't pollute the bucket list).
-        const sessionsStarted = countMessages(
-          db,
-          `SELECT COUNT(*) AS cnt
-             FROM agent_sessions
-            WHERE unixepoch(started_at) >= ? AND unixepoch(started_at) < ?`,
-          window.startSec,
-          window.endSec,
-        );
-
-        const sessionsActive = countMessages(
-          db,
-          `SELECT COUNT(*) AS cnt
-             FROM agent_sessions
-            WHERE unixepoch(started_at) < ?
-              AND (ended_at IS NULL OR unixepoch(ended_at) > ?)
-              AND status != 'suspended'`,
-          window.endSec,
-          window.startSec,
-        );
+        const { sessionsStarted, sessionsActive } = querySessionMetrics(db, window.startSec, window.endSec);
 
         if (sessionsStarted > 0 || sessionsActive > 0) {
           upsertMetric(db, window.bucket, 'sessions_started', sessionsStarted);

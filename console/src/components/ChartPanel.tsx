@@ -5,7 +5,6 @@ export type ChartKey = 'messages' | 'tokens' | 'sessions';
 
 interface ChartPanelProps {
   title: string;
-  chartKey: ChartKey;
   isLoading: boolean;
   isError: boolean;
   hasData: boolean;

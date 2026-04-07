@@ -44,7 +44,6 @@ describe('ChartPanel', () => {
 
     const element = ChartPanel({
       title: 'Test Chart',
-      chartKey: 'messages',
       isLoading: true,
       isError: false,
       hasData: false,
@@ -63,7 +62,6 @@ describe('ChartPanel', () => {
 
     const element = ChartPanel({
       title: 'Test Chart',
-      chartKey: 'tokens',
       isLoading: false,
       isError: true,
       hasData: false,
@@ -80,7 +78,6 @@ describe('ChartPanel', () => {
 
     const element = ChartPanel({
       title: 'Test Chart',
-      chartKey: 'sessions',
       isLoading: false,
       isError: false,
       hasData: false,
@@ -97,7 +94,6 @@ describe('ChartPanel', () => {
     const child = { type: 'div', props: { children: 'Chart content' }, key: null };
     const element = ChartPanel({
       title: 'Test Chart',
-      chartKey: 'messages',
       isLoading: false,
       isError: false,
       hasData: true,
@@ -114,7 +110,6 @@ describe('ChartPanel', () => {
     const child = { type: 'div', props: { children: 'Chart content' }, key: null };
     const element = ChartPanel({
       title: 'Test Chart',
-      chartKey: 'messages',
       isLoading: false,
       isError: false,
       hasData: true,

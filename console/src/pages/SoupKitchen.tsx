@@ -281,7 +281,6 @@ const SoupKitchen: FC = () => {
         >
           <ChartPanel
             title={`Message Volume (${chartRange})`}
-            chartKey="messages"
             isLoading={metricsLoading}
             isError={metricsError}
             hasData={meta?.hasMessageData ?? false}
@@ -302,7 +301,6 @@ const SoupKitchen: FC = () => {
         >
           <ChartPanel
             title={`Token Usage (${chartRange})`}
-            chartKey="tokens"
             isLoading={metricsLoading}
             isError={metricsError}
             hasData={meta?.hasTokenData ?? false}
@@ -323,7 +321,6 @@ const SoupKitchen: FC = () => {
         >
           <ChartPanel
             title={`Session Activity (${chartRange})`}
-            chartKey="sessions"
             isLoading={metricsLoading}
             isError={metricsError}
             hasData={meta?.hasSessionData ?? false}
