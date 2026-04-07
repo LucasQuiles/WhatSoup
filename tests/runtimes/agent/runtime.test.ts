@@ -3882,5 +3882,103 @@ describe('AgentRuntime', () => {
       // Checkpoint exists but updated_at is null — cannot verify freshness, must skip
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
     });
+
+    it('single-mode DM spawnSession failure — runtime continues without session (C1 error path)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+
+      mockGetActiveSession.mockReturnValue({
+        id: 6,
+        session_id: 'sess-spawn-fail-single',
+        chat_jid: 'user@s.whatsapp.net',
+        claude_pid: 0,
+        status: 'active',
+        started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+        last_message_at: null,
+        message_count: 0,
+      });
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'single' });
+
+      const mockDurability = {
+        getSessionCheckpoint: vi.fn(() => ({
+          id: 6,
+          conversation_key: 'user',
+          session_id: 'sess-spawn-fail-single',
+          transcript_path: null,
+          active_turn_id: null,
+          last_inbound_seq: null,
+          last_flushed_outbound_id: null,
+          watchdog_state: null,
+          workspace_path: null,
+          claude_pid: null,
+          session_status: 'active',
+          checkpoint_version: 1,
+          updated_at: new Date(Date.now() - 5 * 60_000).toISOString().replace('Z', ''),
+        })),
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      // Simulate spawnSession throwing
+      mockSession.spawnSession.mockRejectedValueOnce(new Error('spawn failed'));
+
+      await runtime.start();
+
+      // spawnSession was called but failed
+      expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-spawn-fail-single', 6);
+      // No startup message — session cleaned up in catch
+      expect(runtime.popStartupMessage()).toBeNull();
+      // Runtime did not throw — it continues gracefully
+    });
+
+    it('shared-mode DM spawnSession failure — runtime continues without session (C1 error path)', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+
+      mockGetActiveSession.mockReturnValue({
+        id: 7,
+        session_id: 'sess-spawn-fail-shared',
+        chat_jid: 'user@s.whatsapp.net',
+        claude_pid: 0,
+        status: 'active',
+        started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+        last_message_at: null,
+        message_count: 0,
+      });
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'shared' });
+
+      const mockDurability = {
+        getSessionCheckpoint: vi.fn(() => ({
+          id: 7,
+          conversation_key: 'user',
+          session_id: 'sess-spawn-fail-shared',
+          transcript_path: null,
+          active_turn_id: null,
+          last_inbound_seq: null,
+          last_flushed_outbound_id: null,
+          watchdog_state: null,
+          workspace_path: null,
+          claude_pid: null,
+          session_status: 'active',
+          checkpoint_version: 1,
+          updated_at: new Date(Date.now() - 5 * 60_000).toISOString().replace('Z', ''),
+        })),
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      // Simulate spawnSession throwing
+      mockSession.spawnSession.mockRejectedValueOnce(new Error('spawn failed'));
+
+      await runtime.start();
+
+      // spawnSession was called but failed
+      expect(mockSession.spawnSession).toHaveBeenCalledWith('sess-spawn-fail-shared', 7);
+      // No startup message — session cleaned up in catch
+      expect(runtime.popStartupMessage()).toBeNull();
+      // Runtime did not throw — it continues gracefully
+    });
   });
 });

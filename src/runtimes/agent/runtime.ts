@@ -35,7 +35,7 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
-import { toPersonalJid, canonicalizeChatJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, canonicalizeChatJid, JID_GROUP } from '../../core/jid-constants.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -1262,7 +1262,7 @@ export class AgentRuntime implements Runtime {
       // would remain typed as string | null even though we've checked it.
       const resumeChatJid: string = priorSession.chat_jid;
       const resumeSessionId: string = priorSession.session_id;
-      const isGroupChat = resumeChatJid.endsWith('@g.us');
+      const isGroupChat = resumeChatJid.endsWith(JID_GROUP);
 
       // ── C1/C2/I2: Hoist group check before spawn/queue creation ──────────
       if (isGroupChat && !this.shared) {
