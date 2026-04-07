@@ -31,32 +31,27 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
   currentStep,
 }) => (
   <div
-    className="flex items-center justify-center flex-shrink-0"
-    style={{ padding: 'var(--sp-4) var(--sp-5)', gap: 'var(--sp-1)', marginBottom: 'var(--sp-4)' }}
+    className="flex items-center justify-center flex-shrink-0 py-[var(--sp-4)] px-[var(--sp-5)] gap-[var(--sp-1)] mb-[var(--sp-4)]"
   >
     {steps.map((label, i) => {
       const completed = i < currentStep
       const active = i === currentStep
       return (
-        <div key={label} className="flex items-center" style={{ gap: 'var(--sp-1)' }}>
+        <div key={label} className="flex items-center gap-[var(--sp-1)]">
           {i > 0 && (
             <div
+              className="w-[var(--stepper-line-w)] h-[var(--bw)]"
               style={{
-                width: 'var(--stepper-line-w)',
-                height: 'var(--bw)',
                 background: completed ? 'var(--color-s-ok)' : 'var(--color-t5)',
                 opacity: completed ? 1 : 0.4,
                 transition: 'background var(--dur-norm) var(--ease)',
               }}
             />
           )}
-          <div className="flex flex-col items-center" style={{ gap: 'var(--sp-1)' }}>
+          <div className="flex flex-col items-center gap-[var(--sp-1)]">
             <div
-              className="flex items-center justify-center"
+              className="flex items-center justify-center w-[var(--badge-unread)] h-[var(--badge-unread)] rounded-full"
               style={{
-                width: 'var(--badge-unread)',
-                height: 'var(--badge-unread)',
-                borderRadius: 'var(--radius-circle)',
                 background: completed || active ? 'var(--color-s-ok)' : 'transparent',
                 borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: completed || active ? 'var(--color-s-ok)' : 'var(--color-t5)',
                 transition: 'all var(--dur-norm) var(--ease)',
@@ -66,10 +61,8 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
                 <Check size={11} strokeWidth={2.5} style={{ color: 'var(--color-d0)' }} />
               ) : (
                 <div
+                  className="w-[var(--stepper-dot)] h-[var(--stepper-dot)] rounded-full"
                   style={{
-                    width: 'var(--stepper-dot)',
-                    height: 'var(--stepper-dot)',
-                    borderRadius: 'var(--radius-circle)',
                     background: active ? 'var(--color-d0)' : 'var(--color-t5)',
                     opacity: active ? 1 : 0.5,
                   }}
@@ -77,10 +70,9 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
               )}
             </div>
             <span
-              className="font-mono font-medium"
+              className="font-mono font-medium tracking-[var(--tracking-label)]"
               style={{
                 fontSize: 'var(--font-size-label)',
-                letterSpacing: 'var(--tracking-label)',
                 color: active ? 'var(--color-s-ok)' : completed ? 'var(--color-t2)' : 'var(--color-t5)',
                 transition: 'color var(--dur-norm) var(--ease)',
               }}
@@ -264,34 +256,18 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="wizard-accent-scope"
+        className="wizard-accent-scope bg-d2 c-border-b2 rounded-lg shadow-[var(--shadow-lg)] flex flex-col overflow-hidden w-[var(--panel-wizard)] min-w-[var(--panel-wizard)] max-w-[90%] min-h-[var(--modal-min-h)] h-[var(--modal-max-h)] max-h-[var(--modal-max-h)]"
         style={{
           '--wizard-accent': TYPE_ACCENT[(formData.type as string)] ?? 'var(--color-s-ok)',
-          width: 'var(--panel-wizard)',
-          minWidth: 'var(--panel-wizard)',
-          maxWidth: '90%',
-          minHeight: 'var(--modal-min-h)',
-          height: 'var(--modal-max-h)',
-          maxHeight: 'var(--modal-max-h)',
-          background: 'var(--color-d2)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-          borderRadius: 'var(--radius-lg)',
-          boxShadow: 'var(--shadow-lg)',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
         } as CSSProperties & Record<'--wizard-accent', string>}
       >
         {/* Header */}
         <div
-          className="flex items-center justify-between c-toolbar"
-          style={{ borderBottom: 'var(--bw) solid var(--b1)' }}
+          className="flex items-center justify-between c-toolbar c-border-b"
         >
           <h2 id="wizard-title" className="c-heading-lg">Add New Line</h2>
-          <button onClick={handleClose} aria-label="Close wizard" className="c-btn c-btn-ghost">
-            <X size={16} />
+          <button type="button" onClick={handleClose} aria-label="Close wizard" className="c-btn c-btn-ghost">
+            <X size={16} strokeWidth={1.75} />
           </button>
         </div>
 
@@ -299,7 +275,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         <WizardStepper steps={STEPS} currentStep={currentStep} />
 
         {/* Content */}
-        <div style={{ flex: 1, overflow: 'auto', padding: 'var(--sp-6)' }}>
+        <div className="flex-1 overflow-auto p-[var(--sp-6)]">
           <AnimatePresence mode="wait">
             <motion.div
               key={currentStep}
@@ -344,53 +320,47 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
         {/* Footer — hidden on Link (step 1, has own controls) */}
         {currentStep !== 1 && (
           <div
-            className="flex flex-col c-toolbar"
-            style={{ borderTop: 'var(--bw) solid var(--b1)', gap: 'var(--sp-2)' }}
+            className="flex flex-col c-toolbar c-border-t gap-[var(--sp-2)]"
           >
             {createError && (
               <div
-                className="flex items-center"
-                style={{
-                  gap: 'var(--sp-2)',
-                  fontSize: 'var(--font-size-data)',
-                  color: 'var(--color-s-crit)',
-                  padding: 'var(--sp-2) var(--sp-3)',
-                  background: 'var(--color-d3)',
-                  borderRadius: 'var(--radius-sm)',
-                }}
+                className="flex items-center gap-[var(--sp-2)] text-s-crit py-[var(--sp-2)] px-[var(--sp-3)] bg-d3 rounded-sm"
+                style={{ fontSize: 'var(--font-size-data)' }}
               >
-                <X size={14} style={{ flexShrink: 0 }} />
+                <X size={14} strokeWidth={1.75} style={{ flexShrink: 0 }} />
                 <span>{createError}</span>
               </div>
             )}
-            <div className="flex items-center justify-end" style={{ gap: 'var(--sp-3)' }}>
+            <div className="flex items-center justify-end gap-[var(--sp-3)]">
             <button
+              type="button"
               className="c-btn c-btn-ghost c-btn-nav"
               onClick={() =>
                 currentStep > 0 ? setCurrentStep((s) => s - 1) : handleClose()
               }
               disabled={creating}
             >
-              {currentStep > 0 && <ChevronLeft size={16} />}
+              {currentStep > 0 && <ChevronLeft size={16} strokeWidth={1.75} />}
               <span className="c-btn-nav-label">{currentStep > 0 ? 'Back' : 'Cancel'}</span>
-              {currentStep === 0 && <X size={16} />}
+              {currentStep === 0 && <X size={16} strokeWidth={1.75} />}
             </button>
             {/* Hide Next on Review step — ReviewStep has its own Create button */}
             {currentStep !== 4 && (
               <button
+                type="button"
                 className="c-btn c-btn-primary c-btn-nav"
                 onClick={handleNext}
                 disabled={creating}
               >
                 {creating ? (
                   <>
-                    <Loader2 size={16} className="animate-spin" />
+                    <Loader2 size={16} strokeWidth={1.75} className="animate-spin" />
                     <span className="c-btn-nav-label">Creating...</span>
                   </>
                 ) : (
                   <>
                     <span className="c-btn-nav-label">Next</span>
-                    <ChevronRight size={16} />
+                    <ChevronRight size={16} strokeWidth={1.75} />
                   </>
                 )}
               </button>

@@ -148,21 +148,18 @@ function NodeDetailCard({
   const modeKey = modeColor === 'pas' ? 'pas' : modeColor === 'cht' ? 'cht' : 'agt'
   return (
     <div
+      className="mt-[var(--sp-3)] py-[var(--sp-3)] px-[var(--sp-4)] bg-d1 rounded-md"
       style={{
-        marginTop: 'var(--sp-3)',
-        padding: 'var(--sp-3) var(--sp-4)',
-        background: 'var(--color-d1)',
         borderWidth: 'var(--bw)',
         borderStyle: 'solid',
         borderColor: `var(--m-${modeKey}-soft)`,
-        borderRadius: 'var(--radius-md)',
       }}
     >
       <div
+        className="gap-x-[var(--sp-3)] gap-y-[var(--sp-1)]"
         style={{
           display: 'grid',
           gridTemplateColumns: 'auto 1fr',
-          gap: 'var(--sp-1) var(--sp-3)',
         }}
       >
         {details.map((d) => (

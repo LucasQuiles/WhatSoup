@@ -28,14 +28,13 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
 
   return (
     <div
-      className="absolute z-50 pointer-events-none c-card c-card--detail"
+      className="absolute z-50 pointer-events-none c-card c-card--detail mb-[var(--sp-2)]"
       style={{
         bottom: '100%',
         left: 0,
-        marginBottom: 'var(--sp-2)',
       }}
     >
-      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+      <div className="flex flex-col gap-[var(--sp-2)]">
         {[
           { label: 'Time', value: fullTime },
           { label: 'Sender', value: resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '\u2014') },
@@ -43,14 +42,14 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
           { label: 'Type', value: msg.type },
           { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
         ].map(({ label, value, muted }) => (
-          <div key={label} className="flex justify-between" style={{ gap: 'var(--sp-4)' }}>
+          <div key={label} className="flex justify-between gap-[var(--sp-4)]">
             <span className="c-label flex-shrink-0">{label}</span>
-            <span className={`c-data truncate ${muted ? 'text-t5' : ''}`} style={{ maxWidth: 'var(--tooltip-val-max)' }}>
+            <span className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-t5' : ''}`}>
               {value}
             </span>
           </div>
         ))}
-        <div style={{ borderTop: 'var(--bw) solid var(--b2)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
+        <div className="pt-[var(--sp-2)] mt-[var(--sp-1)] c-border-t-b2">
           <div className="flex justify-between">
             <span className="c-label">ID</span>
             <span className="c-data text-t5">
@@ -70,7 +69,7 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
   // Failed messages (pk === -1 sentinel) — red X with retry button
   if (msg.pk === -1) {
     return (
-      <span className="flex items-center" style={{ gap: '2px' }}>
+      <span className="flex items-center gap-[var(--bw-accent)]">
         <X size={12} strokeWidth={2.5} className="text-s-crit" />
         {onRetry && (
           <button
@@ -89,11 +88,11 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
 
   // Optimistic messages (negative pk) — pending, muted check
   if (msg.pk < 0) {
-    return <Check size={12} strokeWidth={2} className="text-t5" style={{ opacity: 0.5 }} />
+    return <Check size={12} strokeWidth={1.75} className="text-t5" style={{ opacity: 'var(--opacity-soft)' }} />
   }
 
   // Persisted messages — confirmed sent, green check
-  return <Check size={12} strokeWidth={2} className="text-s-ok" />
+  return <Check size={12} strokeWidth={1.75} className="text-s-ok" />
 }
 
 const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, highlightQuery, animate, onRetry }) => {
@@ -112,14 +111,11 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
 
   return (
     <div
-      className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}`}
-      style={animate ? {
-        animation: 'msg-slide-in 0.25s ease-out both',
-      } : undefined}
+      className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}${animate ? ' msg-slide-in' : ''}`}
     >
       {/* Sender label (incoming only) */}
       {!msg.fromMe && (
-        <div className="flex items-center" style={{ marginBottom: '2px', paddingLeft: 'var(--sp-1)', gap: 'var(--sp-2)', maxWidth: '100%' }}>
+        <div className="flex items-center mb-[var(--bw-accent)] pl-[var(--sp-1)] gap-[var(--sp-2)] max-w-full">
           <span className="c-label truncate">{resolveDisplayName(msg.senderName)}</span>
           {onCreateContact && isRawJid(msg.senderName ?? '') && (
             <button
@@ -129,7 +125,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
               aria-label="Save as contact"
               title="Save as contact"
             >
-              <UserPlus size={10} strokeWidth={2} />
+              <UserPlus size={10} strokeWidth={1.75} />
             </button>
           )}
         </div>
@@ -143,14 +139,13 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
       >
         {showDetail && <DetailCard msg={msg} />}
         <div
-          className="c-msg-bubble"
+          className={`c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-d3'}`}
           style={{
             padding: isMedia ? 'var(--sp-2) var(--sp-3)' : 'var(--sp-2h) var(--msg-pad-h)',
-            borderRadius: 'var(--radius-lg)',
             fontSize: 'var(--font-size-body)',
             ...(msg.fromMe
               ? { background: outgoingBg, borderBottomRightRadius: 'var(--radius-sm)' }
-              : { background: 'var(--color-d3)', borderBottomLeftRadius: 'var(--radius-sm)' }),
+              : { borderBottomLeftRadius: 'var(--radius-sm)' }),
           }}
         >
           <div className="text-t1 leading-relaxed" style={{ overflowWrap: 'break-word' }}>
@@ -161,8 +156,8 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
 
       {/* Timestamp + delivery status + type badge */}
       <div
-        className={`flex items-center font-mono text-t5 ${msg.fromMe ? 'justify-end' : ''}`}
-        style={{ fontSize: 'var(--font-size-xs)', marginTop: '2px', padding: '0 var(--sp-1)', gap: 'var(--sp-2)' }}
+        className={`flex items-center font-mono text-t5 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
+        style={{ fontSize: 'var(--font-size-xs)' }}
       >
         {isMedia && (
           <span className="text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>

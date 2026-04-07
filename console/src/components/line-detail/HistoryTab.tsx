@@ -125,15 +125,13 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       <div
         ref={stickyScrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto scrollbar-hide"
-        style={{ padding: 'var(--sp-4) var(--sp-5)' }}
+        className="flex-1 overflow-y-auto scrollbar-hide py-[var(--sp-4)] px-[var(--sp-5)]"
       >
         {/* Load older messages */}
         {reversed.length > 0 && (
           hasMore ? (
             <div
-              className={`flex items-center justify-center c-hover text-t5 ${loadingOlder ? '' : 'cursor-pointer hover:text-t2'}`}
-              style={{ padding: 'var(--sp-3) 0 var(--sp-4)', gap: 'var(--sp-2)' }}
+              className={`flex items-center justify-center c-hover text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)] ${loadingOlder ? '' : 'cursor-pointer hover:text-t2'}`}
               onClick={loadOlder}
             >
               {loadingOlder ? (
@@ -147,8 +145,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             </div>
           ) : (
             <div
-              className="flex items-center justify-center text-t5"
-              style={{ padding: 'var(--sp-3) 0 var(--sp-4)', gap: 'var(--sp-2)' }}
+              className="flex items-center justify-center text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
             >
               <span style={{ fontSize: 'var(--font-size-sm)' }}>No more messages</span>
             </div>
@@ -186,17 +183,10 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       {showJumpToBottom && (
         <button
           type="button"
-          className="c-btn c-btn-sm absolute flex items-center justify-center hover:text-t2 c-hover text-t5"
+          className="c-btn c-btn-sm absolute flex items-center justify-center hover:text-t2 c-hover text-t5 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
           style={{
-            left: '50%',
-            transform: 'translateX(-50%)',
-            bottom: 'var(--sp-4)',
-            padding: 'var(--sp-2) var(--sp-5)',
-            gap: 'var(--sp-2)',
             background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
-            borderRadius: 'var(--radius-md)',
             backdropFilter: 'blur(4px)',
-            zIndex: 'var(--z-float)',
           }}
           onClick={jumpToBottom}
           aria-label="Jump to newest"
@@ -209,20 +199,15 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
       {/* Input bar */}
       <div
-        className="flex flex-shrink-0 items-center"
-        style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-3)', borderTop: 'var(--bw) solid var(--b1)', background: 'var(--color-d2)' }}
+        className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-d2"
       >
         <textarea
           ref={textareaRef}
-          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight"
+          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2"
           rows={1}
           style={{
             fontSize: 'var(--font-size-body)',
-            padding: 'var(--sp-2h) var(--sp-4)',
-            background: 'var(--color-d1)',
-            borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
-            borderRadius: 'var(--radius-md)',
-            maxHeight: '120px',
+            maxHeight: 'var(--feed-preview-max)',
             resize: 'none',
             overflow: 'hidden',
           }}
@@ -239,11 +224,12 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
         />
         <button
+          type="button"
           className="c-btn c-btn-primary c-btn-send flex-shrink-0"
           onClick={handleSend}
           disabled={isSending || !msgText.trim()}
         >
-          <Send size={16} strokeWidth={2} />
+          <Send size={16} strokeWidth={1.75} />
           <span className="c-btn-send-label">Send</span>
         </button>
       </div>
@@ -257,18 +243,15 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
   const outgoingBg = mode === 'agent' ? 'var(--m-agt-soft)' : 'var(--m-cht-soft)'
   return (
     <div
-      className="flex overflow-hidden h-full"
-      style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)', borderRadius: 'var(--radius-lg)' }}
+      className="flex overflow-hidden h-full c-border rounded-lg"
     >
       {/* Chat list */}
       <div
-        className="flex-shrink-0 flex flex-col"
-        style={{ width: 'var(--panel-history)', borderRight: 'var(--bw) solid var(--b1)', background: 'var(--color-d1)' }}
+        className="flex-shrink-0 flex flex-col w-[var(--panel-history)] c-border-r bg-d1"
       >
         {/* Chat list header */}
         <div
-          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-          style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Conversations</span>
           <span className="c-label">{chats.length} chats</span>
@@ -288,7 +271,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
       </div>
 
       {/* Messages */}
-      <div className="flex-1 flex flex-col min-h-0" style={{ background: 'var(--color-d0)' }}>
+      <div className="flex-1 flex flex-col min-h-0 bg-d0">
         {selectedChat ? (
           <HistoryMessages
             messages={messages}

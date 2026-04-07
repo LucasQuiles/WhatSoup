@@ -29,36 +29,25 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
         aria-modal="true"
         aria-labelledby="relink-dialog-title"
         onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 'var(--panel-confirm)',
-          maxWidth: '90%',
-          background: 'var(--color-d2)',
-          borderWidth: 'var(--bw)',
-          borderStyle: 'solid',
-          borderColor: 'var(--b2)',
-          borderRadius: 'var(--radius-lg)',
-          boxShadow: 'var(--shadow-lg)',
-          overflow: 'hidden',
-        }}
+        className="bg-d2 rounded-lg shadow-[var(--shadow-lg)] overflow-hidden c-border-b2 w-[var(--panel-confirm)] max-w-[90%]"
       >
         {/* Header */}
         <div
-          className="flex items-center justify-between"
-          style={{ padding: 'var(--sp-4) var(--sp-5)', borderBottom: 'var(--bw) solid var(--b1)' }}
+          className="flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)] c-border-b"
         >
-          <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-            <Link2 size={16} className="text-t3" />
+          <div className="flex items-center gap-[var(--sp-2)]">
+            <Link2 size={16} strokeWidth={1.75} className="text-t3" />
             <span id="relink-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
               Re-link {lineName}
             </span>
           </div>
-          <button onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost">
-            <X size={16} />
+          <button type="button" onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost">
+            <X size={16} strokeWidth={1.75} />
           </button>
         </div>
 
         {/* LinkStep content */}
-        <div style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
+        <div className="py-[var(--sp-4)] px-[var(--sp-5)]">
           <LinkStep lineName={lineName} onComplete={onLinked} />
         </div>
       </div>

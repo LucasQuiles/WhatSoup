@@ -129,10 +129,9 @@ export function ConfigEditDialog({
             type="checkbox"
             checked={val as boolean}
             onChange={e => setField(key, e.target.checked)}
-            className="accent-current"
-            style={{ width: 'var(--feed-col-icon)', height: 'var(--feed-col-icon)' }}
+            className="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
           />
-          <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
+          <span className="font-mono text-m-agt" style={{ fontSize: 'var(--font-size-data)' }}>
             {String(val)}
           </span>
         </label>
@@ -146,8 +145,7 @@ export function ConfigEditDialog({
           type="number"
           value={val as number}
           onChange={e => setField(key, Number(e.target.value))}
-          className="c-input font-mono"
-          style={{ color: 'var(--color-s-warn)' }}
+          className="c-input font-mono text-s-warn"
         />
       )
     }
@@ -174,8 +172,8 @@ export function ConfigEditDialog({
         <textarea
           readOnly
           value={JSON.stringify(val, null, 2)}
-          className="c-input font-mono"
-          style={{ color: 'var(--color-t3)', resize: 'vertical', minHeight: 'calc(var(--sp-10) + var(--sp-5))', filter: 'brightness(0.7)' }}
+          className="c-input font-mono text-t3"
+          style={{ resize: 'vertical', minHeight: 'calc(var(--sp-10) + var(--sp-5))', filter: 'brightness(0.7)' }}
         />
       )
     }
@@ -197,7 +195,7 @@ export function ConfigEditDialog({
       }
 
       return (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex flex-col gap-[var(--sp-2)]">
           <select
             value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
             onChange={e => {
@@ -210,8 +208,7 @@ export function ConfigEditDialog({
               clearCustomEnum()
               setField(key, nextValue)
             }}
-            className="c-input font-mono cursor-pointer"
-            style={{ color: 'var(--color-m-pas)', paddingRight: 'var(--sp-8)' }}
+            className="c-input font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
           >
             {enumOpts.map(opt => (
               <option key={opt} value={opt}>{opt || '(default)'}</option>
@@ -226,8 +223,7 @@ export function ConfigEditDialog({
               value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
               onChange={e => setField(key, e.target.value)}
               placeholder="Enter custom model ID"
-              className="c-input font-mono"
-              style={{ color: 'var(--color-m-pas)' }}
+              className="c-input font-mono text-m-pas"
             />
           )}
         </div>
@@ -240,8 +236,8 @@ export function ConfigEditDialog({
         <textarea
           value={val as string}
           onChange={e => setField(key, e.target.value)}
-          className="c-input font-mono"
-          style={{ color: 'var(--color-m-pas)', resize: 'vertical', minHeight: 'calc(var(--sp-10) * 2)' }}
+          className="c-input font-mono text-m-pas"
+          style={{ resize: 'vertical', minHeight: 'calc(var(--sp-10) * 2)' }}
         />
       )
     }
@@ -252,8 +248,7 @@ export function ConfigEditDialog({
         type="text"
         value={val as string}
         onChange={e => setField(key, e.target.value)}
-        className="c-input font-mono"
-        style={{ color: 'var(--color-m-pas)' }}
+        className="c-input font-mono text-m-pas"
       />
     )
   }
@@ -273,8 +268,7 @@ export function ConfigEditDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="config-edit-dialog-title"
-        className="c-dialog flex flex-col"
-        style={{ width: 'var(--panel-config-edit)', maxHeight: 'var(--modal-max-h-sm)', maxWidth: 'var(--panel-max-inline)' }}
+        className="c-dialog flex flex-col w-[var(--panel-config-edit)] max-h-[var(--modal-max-h-sm)] max-w-[var(--panel-max-inline)]"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -282,41 +276,31 @@ export function ConfigEditDialog({
           <span id="config-edit-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
             Edit Configuration
           </span>
-          <button onClick={onClose} className="c-btn c-btn-ghost c-btn-sm" aria-label="Close dialog">
+          <button type="button" onClick={onClose} className="c-btn c-btn-ghost c-btn-sm" aria-label="Close dialog">
             <X size={18} strokeWidth={1.75} />
           </button>
         </div>
 
         {/* Restart warning */}
         <div
-          className="flex items-center gap-2 flex-shrink-0"
-          style={{
-            padding: 'var(--sp-3) var(--sp-5)',
-            background: 'var(--s-warn-wash)',
-            borderBottom: 'var(--bw) solid var(--b1)',
-            fontSize: 'var(--font-size-sm)',
-            color: 'var(--color-s-warn)',
-          }}
+          className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn"
+          style={{ fontSize: 'var(--font-size-sm)' }}
         >
           <AlertTriangle size={14} strokeWidth={1.75} />
           <span>Some changes may require a restart to take effect.</span>
         </div>
 
         {/* Body — scrollable */}
-        <div className="flex-1 overflow-y-auto" style={{ padding: 'var(--sp-4) var(--sp-5)' }}>
-          <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex-1 overflow-y-auto py-[var(--sp-4)] px-[var(--sp-5)]">
+          <div className="flex flex-col gap-[var(--sp-4)]">
             {editableEntries.map(([key, originalValue]) => (
               <div key={key}>
-                <label className="c-label" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>
+                <label className="c-label block mb-[var(--sp-1)]">
                   {key}
                   {(key in patch || key in customEnumFields) && (
                     <span
-                      className="font-mono"
-                      style={{
-                        marginLeft: 'var(--sp-2)',
-                        fontSize: 'var(--font-size-xs)',
-                        color: 'var(--color-s-warn)',
-                      }}
+                      className="font-mono ml-[var(--sp-2)] text-s-warn"
+                      style={{ fontSize: 'var(--font-size-xs)' }}
                     >
                       modified
                     </span>
@@ -324,7 +308,7 @@ export function ConfigEditDialog({
                 </label>
                 {renderField(key, originalValue)}
                 {(key in patch || key in customEnumFields) && getFieldError(key) && (
-                  <span className="font-mono" style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-s-crit)', marginTop: 'var(--sp-1)', display: 'block' }}>
+                  <span className="font-mono block text-s-crit mt-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
                     {getFieldError(key)}
                   </span>
                 )}
@@ -335,10 +319,11 @@ export function ConfigEditDialog({
 
         {/* Footer */}
         <div className="c-dialog-footer">
-          <button onClick={onClose} className="c-btn c-btn-ghost">
+          <button type="button" onClick={onClose} className="c-btn c-btn-ghost">
             Cancel
           </button>
           <button
+            type="button"
             onClick={handleSave}
             disabled={saving || !hasChanges || hasErrors}
             className={`c-btn ${hasChanges ? 'c-btn-primary' : 'c-btn-ghost'}`}

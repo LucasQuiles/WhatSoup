@@ -31,13 +31,11 @@ const EmptyState: FC<EmptyStateProps> = ({
 
   return (
     <div
-      className="flex flex-col items-center justify-center text-center"
-      style={{ padding: 'var(--sp-8) var(--sp-6)' }}
+      className="flex flex-col items-center justify-center text-center py-[var(--sp-8)] px-[var(--sp-6)]"
     >
       {resolvedIcon && (
         <motion.div
-          className={isError ? 'text-s-crit mb-4' : 'text-t5 mb-4'}
-          style={{ width: 'var(--icon-empty)', height: 'var(--icon-empty)' }}
+          className={`w-[var(--icon-empty)] h-[var(--icon-empty)] ${isError ? 'text-s-crit mb-4' : 'text-t5 mb-4'}`}
           initial={{ opacity: 0, scale: 0.8 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.4, ease }}
@@ -46,8 +44,8 @@ const EmptyState: FC<EmptyStateProps> = ({
         </motion.div>
       )}
       <motion.div
-        className={`font-sans font-semibold ${isError ? 'text-s-crit' : 'text-t3'}`}
-        style={{ fontSize: 'var(--font-size-lg)', marginBottom: 'var(--sp-1)' }}
+        className={`font-sans font-semibold mb-[var(--sp-1)] ${isError ? 'text-s-crit' : 'text-t3'}`}
+        style={{ fontSize: 'var(--font-size-lg)' }}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.4, ease, delay: 0.1 }}
@@ -56,8 +54,8 @@ const EmptyState: FC<EmptyStateProps> = ({
       </motion.div>
       {description && (
         <motion.div
-          className="text-t4 leading-relaxed"
-          style={{ fontSize: 'var(--font-size-body)', maxWidth: 'var(--empty-max-w)' }}
+          className="text-t4 leading-relaxed max-w-[var(--empty-max-w)]"
+          style={{ fontSize: 'var(--font-size-body)' }}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.4, ease, delay: 0.15 }}
@@ -67,8 +65,8 @@ const EmptyState: FC<EmptyStateProps> = ({
       )}
       {onRetry && (
         <motion.button
-          className="c-btn c-btn-primary"
-          style={{ marginTop: 'var(--sp-4)', fontSize: 'var(--font-size-sm)' }}
+          className="c-btn c-btn-primary mt-[var(--sp-4)]"
+          style={{ fontSize: 'var(--font-size-sm)' }}
           onClick={onRetry}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}

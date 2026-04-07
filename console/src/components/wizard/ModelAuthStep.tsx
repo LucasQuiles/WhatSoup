@@ -1,7 +1,7 @@
 import { type FC, useState } from 'react'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
-import { inputStyle, errorStyle, helperStyle, labelStyle, confirmCheckStyle } from './form-styles'
+import { confirmCheckStyle } from './form-styles'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -44,10 +44,7 @@ const OPENAI_ROLES: { key: ModelRole; label: string }[] = [
   { key: 'openaiValidation', label: 'Validation' },
 ]
 
-const passwordInputStyle: React.CSSProperties = {
-  ...inputStyle,
-  paddingRight: 'var(--sp-8)',
-}
+// passwordInputStyle replaced by c-input class + inline paddingRight
 
 /* -- Tabbed model/key section -- */
 
@@ -66,7 +63,7 @@ const ModelAndKeyTabs: FC<{
   const [activeTab, setActiveTab] = useState<'anthropic' | 'openai' | 'local'>('anthropic')
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+    <div className="flex flex-col gap-[var(--sp-4)]">
       {/* Tab bar */}
       <div className="flex c-border-b" role="tablist">
         <button type="button" className={`c-tab ${activeTab === 'anthropic' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'anthropic'} onClick={() => setActiveTab('anthropic')}>
@@ -82,12 +79,12 @@ const ModelAndKeyTabs: FC<{
 
       {/* Anthropic tab */}
       {activeTab === 'anthropic' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+        <div className="flex flex-col gap-[var(--sp-3)]">
           {ANTHROPIC_ROLES.map(({ key, label }) => (
-            <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-              <label className="c-label" style={labelStyle}>{label}</label>
-              <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
+            <div key={key} className="flex flex-col gap-[var(--sp-1)]">
+              <label className="c-label c-field-label">{label}</label>
+              <div className="flex items-center gap-[var(--sp-2)]">
+                <div className="flex-1 min-w-0">
                   <SelectInput
                     value={models[key]}
                     onChange={(e) => onModelChange(key, e.target.value)}
@@ -116,12 +113,12 @@ const ModelAndKeyTabs: FC<{
 
       {/* OpenAI tab */}
       {activeTab === 'openai' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+        <div className="flex flex-col gap-[var(--sp-3)]">
           {OPENAI_ROLES.map(({ key, label }) => (
-            <div key={key} className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-              <label className="c-label" style={labelStyle}>{label}</label>
-              <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
+            <div key={key} className="flex flex-col gap-[var(--sp-1)]">
+              <label className="c-label c-field-label">{label}</label>
+              <div className="flex items-center gap-[var(--sp-2)]">
+                <div className="flex-1 min-w-0">
                   <SelectInput
                     value={models[key]}
                     onChange={(e) => onModelChange(key, e.target.value)}
@@ -162,25 +159,24 @@ const ApiKeyInput: FC<{
   const filled = value.trim().length > 0
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-      <label className="c-label" style={labelStyle}>{label}</label>
-      <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-        <div className="relative" style={{ flex: 1, minWidth: 0 }}>
+    <div className="flex flex-col gap-[var(--sp-1)]">
+      <label className="c-label c-field-label">{label}</label>
+      <div className="flex items-center gap-[var(--sp-2)]">
+        <div className="relative flex-1 min-w-0">
           <input
             type={visible ? 'text' : 'password'}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             placeholder={placeholder}
-            className="w-full font-mono"
+            className="c-input w-full font-mono pr-[var(--sp-8)]"
             style={{
-              ...passwordInputStyle,
               borderColor: error ? 'var(--color-s-crit)' : filled ? 'var(--wizard-accent)' : 'var(--b2)',
             }}
           />
           <button
             type="button"
             onClick={() => setVisible((v) => !v)}
-            className="absolute cursor-pointer"
+            className="absolute cursor-pointer text-t3"
             style={{
               right: 'var(--sp-2)',
               top: '50%',
@@ -188,7 +184,6 @@ const ApiKeyInput: FC<{
               background: 'none',
               border: 'none',
               padding: 0,
-              color: 'var(--color-t3)',
             }}
           >
             {visible ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -198,8 +193,8 @@ const ApiKeyInput: FC<{
           <Check size={16} className="wizard-check" style={confirmCheckStyle} />
         )}
       </div>
-      {error && <div style={errorStyle}>{error}</div>}
-      {helper && <span style={helperStyle}>{helper}</span>}
+      {error && <div className="c-error">{error}</div>}
+      {helper && <span className="c-helper">{helper}</span>}
     </div>
   )
 }
@@ -207,7 +202,7 @@ const ApiKeyInput: FC<{
 /* -- Passive view -- */
 
 const PassiveView: FC = () => (
-  <div className="flex flex-col items-center text-center" style={{ gap: 'var(--sp-3)', padding: 'var(--sp-5) 0' }}>
+  <div className="flex flex-col items-center text-center gap-[var(--sp-3)] py-[var(--sp-5)] px-0">
     <Check size={32} className="text-s-ok" />
     <span className="c-heading">Passive lines don&apos;t require a model configuration.</span>
     <span className="c-body text-t3">
@@ -261,16 +256,13 @@ const AgentView: FC<{
   }
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+    <div className="flex flex-col gap-[var(--sp-4)]">
       {/* Auth Method — Anthropic only */}
-      <div className="flex flex-col" style={{ gap: 'var(--sp-2)' }}>
+      <div className="flex flex-col gap-[var(--sp-2)]">
         <span className="c-heading">Anthropic Auth</span>
-        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-          <div className="flex" style={{ flex: 1, minWidth: 0, gap: 'var(--sp-4)' }}>
-            <label
-              className="flex items-center cursor-pointer"
-              style={{ gap: 'var(--sp-2)', color: 'var(--color-t2)' }}
-            >
+        <div className="flex items-center gap-[var(--sp-2)]">
+          <div className="flex flex-1 min-w-0 gap-[var(--sp-4)]">
+            <label className="flex items-center cursor-pointer gap-[var(--sp-2)] text-t2">
               <input
                 type="radio"
                 name="authMethod"
@@ -280,10 +272,7 @@ const AgentView: FC<{
               />
               <span className="c-body">API Key</span>
             </label>
-            <label
-              className="flex items-center cursor-pointer"
-              style={{ gap: 'var(--sp-2)', color: 'var(--color-t2)' }}
-            >
+            <label className="flex items-center cursor-pointer gap-[var(--sp-2)] text-t2">
               <input
                 type="radio"
                 name="authMethod"
@@ -297,10 +286,7 @@ const AgentView: FC<{
           <Check size={16} className="wizard-check" style={confirmCheckStyle} />
         </div>
         {authMethod === 'oauth' && (
-          <div
-            className="c-body text-t3"
-            style={{ background: 'var(--color-d3)', borderRadius: 'var(--radius-sm)', padding: 'var(--sp-3)' }}
-          >
+          <div className="c-body text-t3 bg-d3 rounded-sm p-[var(--sp-3)]">
             Requires active Claude CLI login on this machine.
           </div>
         )}

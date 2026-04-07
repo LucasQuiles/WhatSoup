@@ -110,10 +110,24 @@
   --dot-badge: 5px;          /* mode badge dot */
   --dot-header: 10px;        /* status dot in line header */
   --avatar-sm: 32px;         /* access list, small contexts */
+  /* ═══ Avatar hue palette — 8 fixed colors for group/contact avatars ═══ */
+  --avatar-hue-0: hsl(0, 45%, 55%);
+  --avatar-hue-1: hsl(45, 45%, 55%);
+  --avatar-hue-2: hsl(90, 45%, 55%);
+  --avatar-hue-3: hsl(135, 45%, 55%);
+  --avatar-hue-4: hsl(180, 45%, 55%);
+  --avatar-hue-5: hsl(225, 45%, 55%);
+  --avatar-hue-6: hsl(270, 45%, 55%);
+  --avatar-hue-7: hsl(315, 45%, 55%);
   --avatar-md: 36px;         /* chat list items */
   --avatar-lg: 64px;         /* contact detail panel */
   --icon-empty: 40px;        /* empty state icon */
   --sparkline-h: 32px;       /* KPI sparkline height */
+  --heatmap-cell: 18px;      /* active hours heatmap cell height */
+  --heatmap-h: 64px;         /* active hours 24h bar chart height */
+  --chart-min-h: 220px;      /* metrics chart minimum height */
+  --contact-search-max-h: 200px; /* contact search results list max height */
+  --config-key-col: 140px;   /* config key-value grid key column width */
   --badge-unread: 20px;      /* chat unread count badge */
   /* ═══ Panel widths ═══ */
   --panel-chat-list: 288px;  /* inbox left panel */
@@ -128,6 +142,15 @@
   /* ═══ Text constraints ═══ */
   --chat-name-max: 140px;    /* chat list name truncation */
   --empty-max-w: 320px;      /* empty state description max */
+  --panel-access-col: 280px; /* access tab two-column min width */
+  --media-thumb-h: 200px;    /* max height for image/video thumbnails */
+  /* ═══ SoupKitchen table column widths ═══ */
+  --sk-col-mode: 90px;
+  --sk-col-chats: 60px;
+  --sk-col-count: 64px;      /* groups, unread */
+  --sk-col-msg: 68px;        /* sent, recv */
+  --sk-col-tokens: 80px;     /* tokens, active */
+  --sk-col-sessions: 72px;
   --panel-confirm: 420px;    /* confirm dialog width */
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */
@@ -241,13 +264,16 @@ body::before {
   inset: 0;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.015'/%3E%3C/svg%3E");
   pointer-events: none;
-  z-index: 9999;
+  z-index: -1;
 }
 
 #root {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  isolation: isolate;
+  position: relative;
+  z-index: 0;
 }
 
 /* Thin scrollbar — visible on panels when needed */
@@ -299,6 +325,7 @@ body::before {
   0% { opacity: 0; transform: translateY(8px); }
   100% { opacity: 1; transform: translateY(0); }
 }
+.msg-slide-in { animation: msg-slide-in 0.25s ease-out both; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Feed — operational activity surface
@@ -348,7 +375,7 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--color-t5);
   cursor: pointer;
@@ -820,6 +847,59 @@ body::before {
   padding-right: var(--sp-8);
 }
 
+/* ═══ Form primitives — wizard and form fields ═══ */
+.c-select {
+  width: 100%;
+  height: var(--input-h);
+  padding: var(--sp-1h) var(--sp-3);
+  padding-right: var(--sp-8);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-data);
+  color: var(--color-t2);
+  background: var(--color-d1);
+  border: var(--bw) solid var(--b2);
+  border-radius: var(--radius-sm);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7a90' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--sp-3) center;
+  transition:
+    border-color var(--dur-norm) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    background var(--dur-norm) var(--ease);
+}
+.c-select::placeholder { color: var(--color-t5); }
+.c-select:hover { border-color: var(--b3); }
+.c-select:focus-visible {
+  border-color: var(--color-m-cht);
+  box-shadow:
+    0 0 0 var(--bw-focus) var(--color-d1),
+    0 0 0 calc(var(--bw-focus) + var(--bw-focus-outer)) var(--m-cht-wash);
+}
+
+.c-input-number {
+  width: var(--input-number-w);
+  text-align: right;
+}
+
+.c-helper {
+  font-size: var(--font-size-data);
+  color: var(--color-t4);
+  margin-top: var(--sp-1);
+}
+
+.c-error {
+  font-size: var(--font-size-data);
+  color: var(--color-s-crit);
+  margin-top: var(--sp-1);
+}
+
+.c-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 .c-dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -833,7 +913,7 @@ body::before {
 .c-dialog {
   overflow: hidden;
   background: var(--color-d1);
-  border: var(--bw) solid var(--b2);
+  border: var(--bw) solid var(--b1);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
 }
@@ -872,7 +952,7 @@ body::before {
   background: var(--color-d4);
   color: var(--color-t2);
   cursor: pointer;
-  transition: all 0.15s var(--ease);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn:hover         { filter: brightness(1.1); }
 .c-btn-primary       { background: var(--color-s-ok); border-color: var(--color-s-ok); color: var(--color-d0); }
@@ -892,21 +972,21 @@ body::before {
 .c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
 .c-btn-xs      { padding: var(--sp-0h) var(--sp-2); font-size: var(--font-size-xs); }
 .c-btn-nav {
-  padding: 6px 10px;
+  padding: var(--sp-1h) var(--sp-2h);
   gap: 0;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
-  transition: padding 0.2s ease, gap 0.2s ease;
+  transition: padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease), color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease);
 }
 .c-btn-nav .c-btn-nav-label {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width 0.2s ease, opacity 0.15s ease;
+  transition: max-width var(--dur-norm) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn-nav:hover {
-  padding: 6px 12px;
+  padding: var(--sp-1h) var(--sp-3);
   gap: var(--sp-2);
   filter: brightness(1.15);
 }
@@ -915,7 +995,7 @@ body::before {
   opacity: 1;
 }
 .c-btn-send {
-  padding: 6px 10px;
+  padding: var(--sp-1h) var(--sp-2h);
   gap: 0;
   min-width: 0;
   overflow: hidden;
@@ -923,18 +1003,18 @@ body::before {
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
   color: var(--color-d0);
-  transition: padding 0.2s ease, gap 0.2s ease;
+  transition: padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease), color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn-send .c-btn-send-label {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width 0.2s ease, opacity 0.15s ease;
+  transition: max-width var(--dur-norm) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 .c-btn-send:hover {
-  padding: 6px 12px;
+  padding: var(--sp-1h) var(--sp-3);
   gap: var(--sp-2);
-  opacity: 1 !important;
+  opacity: 1;
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
 }
@@ -955,7 +1035,7 @@ body::before {
   background: var(--color-s-ok);
   border-color: var(--color-s-ok);
   color: var(--color-d0);
-  transition: width var(--dur-norm) var(--ease), padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease);
+  transition: width var(--dur-norm) var(--ease), padding var(--dur-norm) var(--ease), gap var(--dur-norm) var(--ease), color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease);
 }
 .c-btn-add .c-btn-add-label {
   max-width: 0;
@@ -1036,16 +1116,20 @@ body::before {
 }
 
 /* ═══ Border utilities — replace inline border triplets ═══ */
-.c-border      { border: var(--bw) solid var(--b1); }
-.c-border-b2   { border: var(--bw) solid var(--b2); }
-.c-border-b    { border-bottom: var(--bw) solid var(--b1); }
-.c-border-b-b2 { border-bottom: var(--bw) solid var(--b2); }
+.c-border        { border: var(--bw) solid var(--b1); }
+.c-border-b2     { border: var(--bw) solid var(--b2); }
+.c-border-b      { border-bottom: var(--bw) solid var(--b1); }
+.c-border-b-b2   { border-bottom: var(--bw) solid var(--b2); }
+.c-border-t      { border-top: var(--bw) solid var(--b1); }
+.c-border-dashed { border: var(--bw) dashed var(--b2); }
+.c-border-t-b2   { border-top: var(--bw) solid var(--b2); }
+.c-border-r      { border-right: var(--bw) solid var(--b1); }
 
 /* Wizard accent-scoped focus ring — matches the selected line type color */
 .wizard-accent-scope input:focus-visible,
 .wizard-accent-scope select:focus-visible,
 .wizard-accent-scope textarea:focus-visible {
-  border-color: var(--wizard-accent) !important;
+  border-color: var(--wizard-accent);
   box-shadow: 0 0 0 var(--bw-focus) color-mix(in srgb, var(--wizard-accent) 20%, transparent),
               0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent) 10%, transparent);
 }
@@ -1079,7 +1163,7 @@ textarea:focus-visible,
 a:focus-visible {
   outline: none;
   box-shadow: 0 0 0 var(--bw-focus) var(--m-cht-wash), 0 0 0 var(--bw-focus-outer) var(--m-cht-soft);
-  border-color: var(--color-m-cht) !important;
+  border-color: var(--color-m-cht);
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 

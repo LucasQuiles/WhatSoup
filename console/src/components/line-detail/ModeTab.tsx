@@ -23,8 +23,9 @@ export function ModeTab({
           title="Read-only Mode"
           description="Passive instances listen and store — no configuration required."
         />
-        <div className="flex justify-center" style={{ marginTop: 'var(--sp-5)' }}>
+        <div className="flex justify-center mt-[var(--sp-5)]">
           <button
+            type="button"
             onClick={onChangeMode}
             className="c-btn"
             style={{ fontSize: 'var(--font-size-label)' }}
@@ -42,14 +43,14 @@ export function ModeTab({
   return (
     <div className="c-section">
       <div
-        className="flex items-center justify-between flex-wrap"
-        style={{ gap: 'var(--sp-2)', marginBottom: 'var(--sp-5)' }}
+        className="flex items-center justify-between flex-wrap gap-[var(--sp-2)] mb-[var(--sp-5)]"
       >
         <div className="c-col-header">
           {mode} Configuration
         </div>
-        <div className="flex flex-wrap" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex flex-wrap gap-[var(--sp-2)]">
           <button
+            type="button"
             onClick={onEditConfig}
             className="c-btn"
             style={{ fontSize: 'var(--font-size-label)' }}
@@ -57,6 +58,7 @@ export function ModeTab({
             <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
           </button>
           <button
+            type="button"
             onClick={onChangeMode}
             className="c-btn"
             style={{ fontSize: 'var(--font-size-label)' }}
@@ -72,25 +74,20 @@ export function ModeTab({
         </div>
       ) : (
         <div
+          className="bg-d1 rounded-md border-[var(--b1)] py-[var(--sp-3)] px-[var(--sp-4)] gap-x-[var(--sp-4)] gap-y-[var(--sp-1)]"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'minmax(140px, auto) 1fr',
-            gap: 'var(--sp-1) var(--sp-4)',
-            background: 'var(--color-d1)',
+            gridTemplateColumns: 'minmax(var(--config-key-col), auto) 1fr',
             borderWidth: 'var(--bw)',
             borderStyle: 'solid',
-            borderColor: 'var(--b1)',
-            borderRadius: 'var(--radius-md)',
-            padding: 'var(--sp-3) var(--sp-4)',
           }}
         >
           {config.map((entry) => (
             <React.Fragment key={entry.key}>
               <span
-                className="font-mono"
+                className="font-mono text-m-cht"
                 style={{
                   fontSize: 'var(--font-size-data)',
-                  color: 'var(--color-m-cht)',
                   paddingTop: 'var(--radius-xs)',
                 }}
               >
@@ -105,15 +102,10 @@ export function ModeTab({
                 }}
               >
                 {entry.type === 'boolean' ? (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-2)' }}>
+                  <span className="inline-flex items-center gap-[var(--sp-2)]">
                     <span
-                      style={{
-                        width: 'var(--dot-table)',
-                        height: 'var(--dot-table)',
-                        borderRadius: 'var(--radius-circle)',
-                        background: entry.value === 'true' ? 'var(--color-s-ok)' : 'var(--color-t5)',
-                        flexShrink: 0,
-                      }}
+                      className="inline-block rounded-full flex-shrink-0 w-[var(--dot-table)] h-[var(--dot-table)]"
+                      style={{ background: entry.value === 'true' ? 'var(--color-s-ok)' : 'var(--color-t5)' }}
                     />
                     {entry.value}
                   </span>

@@ -35,8 +35,8 @@ export function settingLabel(key: string): string {
 
 /** Generate a deterministic color from JID */
 export function avatarColor(jid: string): string {
-  let hash = 0;
-  for (const ch of jid) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0;
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 45%, 55%)`;
+  let hash = 0
+  for (let i = 0; i < jid.length; i++) hash = ((hash << 5) - hash + jid.charCodeAt(i)) | 0
+  const idx = ((hash % 8) + 8) % 8
+  return `var(--avatar-hue-${idx})`
 }

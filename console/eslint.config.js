@@ -552,6 +552,31 @@ const designSystemRestrictions = [
           selector: 'JSXOpeningElement[name.name="button"]:not(:has(JSXAttribute[name.name="type"]))',
           message: '⛔ <button> missing type attribute — defaults to "submit" which causes accidental form submissions. FIX: add type="button" to the <button> tag. Only use type="submit" if the button is inside a <form> and should submit it.',
         },
+
+        // ═══ NAMED CSS COLOR KEYWORDS ═══
+
+        {
+          selector: 'Property[key.name="color"][value.value=/^(white|black|red|green|blue|gray|grey|transparent|inherit)$/i]',
+          message: '⛔ Named CSS color keyword in style. FIX: replace with token. white→var(--color-t1), black→var(--color-d0). See cheat sheet.',
+        },
+
+        // ═══ LUCIDE STROKEWIDTH ═══
+
+        {
+          selector: 'JSXAttribute[name.name="strokeWidth"][value.expression.value=2]',
+          message: '⛔ strokeWidth={2} is off-spec. FIX: use strokeWidth={1.75} (standard) or strokeWidth={1.25} (empty-state icons).',
+        },
+
+        // ═══ HARDCODED HSL() COLORS ═══
+
+        {
+          selector: 'Literal[value=/^hsl/]',
+          message: '⛔ Hardcoded hsl() color. FIX: use a CSS custom property from the token system.',
+        },
+        {
+          selector: 'TemplateLiteral:has(TemplateElement[value.raw=/^hsl/])',
+          message: '⛔ Dynamic hsl() color generation bypasses token system. FIX: define fixed avatar color tokens.',
+        },
 ]
 
 const scheduledGroupsDesignSystemRestrictions = [

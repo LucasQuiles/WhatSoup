@@ -29,7 +29,7 @@ function colorToWash(color: string): string {
 
 const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) => {
   return (
-    <div className="flex flex-wrap" style={{ gap: 'var(--sp-3)' }}>
+    <div className="flex flex-wrap gap-[var(--sp-3)]">
       {options.map(opt => {
         const isSelected = opt.value === selected
         return (
@@ -37,22 +37,18 @@ const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) =>
             key={opt.value}
             type="button"
             onClick={() => onChange(opt.value)}
-            className="cursor-pointer c-hover flex flex-col items-center text-center flex-1"
+            className="cursor-pointer c-hover flex flex-col items-center text-center flex-1 rounded-lg p-[var(--sp-4)] min-w-0 min-h-[var(--sp-12)]"
             style={{
               background: isSelected ? colorToWash(opt.color) : 'var(--color-d3)',
               border: isSelected
                 ? `var(--bw) solid ${opt.color}`
                 : 'var(--bw) solid var(--b2)',
-              borderRadius: 'var(--radius-lg)',
-              padding: 'var(--sp-4)',
-              minWidth: 0,
-              minHeight: 'var(--sp-12)',
             }}
           >
-            <div style={{ marginBottom: 'var(--sp-3)', color: opt.color }}>
+            <div className="mb-[var(--sp-3)]" style={{ color: opt.color }}>
               {opt.icon}
             </div>
-            <div className="c-heading" style={{ marginBottom: 'var(--sp-1)' }}>
+            <div className="c-heading mb-[var(--sp-1)]">
               {opt.label}
             </div>
             <div className="text-t3" style={{ fontSize: 'var(--font-size-data)' }}>
