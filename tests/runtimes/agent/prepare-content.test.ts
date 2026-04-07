@@ -150,7 +150,8 @@ vi.mock('node:fs', async (importOriginal) => {
 
 // ─── Import under test ────────────────────────────────────────────────────────
 
-import { prepareContentForAgent } from '../../../src/runtimes/agent/runtime.ts';
+import * as runtimeModule from '../../../src/runtimes/agent/runtime.ts';
+const { prepareContentForAgent } = runtimeModule;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -187,6 +188,21 @@ describe('prepareContentForAgent', () => {
     mockTranscribeAudio.mockResolvedValue('Hello world transcription.');
     mockExtractDocumentText.mockResolvedValue('Extracted document text.');
     mockUpdateMediaPath.mockReset();
+  });
+
+  it('caps createdMediaDirs at 5,000 entries and evicts the oldest directory', async () => {
+    const runtimeAny = runtimeModule as any;
+
+    runtimeAny.__resetCreatedMediaDirsForTests();
+
+    for (let i = 0; i <= 5_000; i++) {
+      runtimeAny.__rememberCreatedMediaDirForTests(`/tmp/workspace-${i}/media`);
+    }
+
+    expect(runtimeAny.__getCreatedMediaDirsSizeForTests()).toBe(5_000);
+    expect(runtimeAny.__hasCreatedMediaDirForTests('/tmp/workspace-0/media')).toBe(false);
+    expect(runtimeAny.__hasCreatedMediaDirForTests('/tmp/workspace-1/media')).toBe(true);
+    expect(runtimeAny.__hasCreatedMediaDirForTests('/tmp/workspace-5000/media')).toBe(true);
   });
 
   // ── text passthrough ──────────────────────────────────────────────────────

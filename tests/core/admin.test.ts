@@ -42,6 +42,7 @@ import {
   handleAdminCommand,
   sendApprovalRequest,
 } from '../../src/core/admin.ts';
+import * as adminModule from '../../src/core/admin.ts';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -280,6 +281,21 @@ describe('sendApprovalRequest', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
+  it('caps replayedIds at 10,000 entries and evicts the oldest id', async () => {
+    const adminAny = adminModule as any;
+
+    adminAny.__resetReplayedIdsForTests();
+
+    for (let i = 0; i <= 10_000; i++) {
+      adminAny.__rememberReplayedIdForTests(`replayed-${i}`);
+    }
+
+    expect(adminAny.__getReplayedIdsSizeForTests()).toBe(10_000);
+    expect(adminAny.__hasReplayedIdForTests('replayed-0')).toBe(false);
+    expect(adminAny.__hasReplayedIdForTests('replayed-1')).toBe(true);
+    expect(adminAny.__hasReplayedIdForTests('replayed-10000')).toBe(true);
+  });
+
   it('caps replayed messages to adminReplayMax', async () => {
     const { config } = await import('../../src/config.ts');
     (config as any).adminReplayMax = 3;

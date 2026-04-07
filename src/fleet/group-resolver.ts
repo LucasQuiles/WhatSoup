@@ -22,6 +22,41 @@ const log = createChildLogger('fleet:group-resolver');
 /** Track which groups we've already attempted (avoid repeated failures). */
 const attemptedCache = new Map<string, number>();
 const RETRY_MS = 5 * 60 * 1000;
+const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
+let lastPruneAt = 0;
+
+function pruneAttemptedCache(now: number): void {
+  for (const [cacheKey, attemptedAt] of attemptedCache) {
+    if (now - attemptedAt > RETRY_MS) {
+      attemptedCache.delete(cacheKey);
+    }
+  }
+}
+
+function rememberAttempt(cacheKey: string, now: number): void {
+  attemptedCache.set(cacheKey, now);
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __resetAttemptedCacheForTests(): void {
+  attemptedCache.clear();
+  lastPruneAt = 0;
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __setAttemptedCacheEntryForTests(cacheKey: string, attemptedAt: number): void {
+  attemptedCache.set(cacheKey, attemptedAt);
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __getAttemptedCacheKeysForTests(): string[] {
+  return [...attemptedCache.keys()];
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __pruneAttemptedCacheForTests(now: number): void {
+  pruneAttemptedCache(now);
+}
 
 /**
  * Queue background resolution for groups missing names.
@@ -34,6 +69,10 @@ export function resolveGroupNames(
   if (groupKeys.length === 0) return;
 
   const now = Date.now();
+  if (now - lastPruneAt > PRUNE_INTERVAL_MS) {
+    pruneAttemptedCache(now);
+    lastPruneAt = now;
+  }
   const pending = groupKeys.filter(key => {
     const cacheKey = `${instance.name}:${key}`;
     const last = attemptedCache.get(cacheKey);
@@ -43,7 +82,7 @@ export function resolveGroupNames(
   if (pending.length === 0) return;
 
   for (const key of pending) {
-    attemptedCache.set(`${instance.name}:${key}`, now);
+    rememberAttempt(`${instance.name}:${key}`, now);
   }
 
   backfill(instance, pending).catch(err => {

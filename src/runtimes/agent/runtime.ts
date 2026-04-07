@@ -56,7 +56,38 @@ import { writeTempFile } from '../../core/media-download.ts';
 const log = createChildLogger('agent-runtime');
 
 /** Tracks workspace media directories already created — avoids redundant mkdirSync calls. */
+const MAX_MEDIA_DIRS = 5_000;
 const createdMediaDirs = new Set<string>();
+
+function rememberCreatedMediaDir(mediaDestDir: string): void {
+  createdMediaDirs.add(mediaDestDir);
+  if (createdMediaDirs.size > MAX_MEDIA_DIRS) {
+    const oldest = createdMediaDirs.values().next().value;
+    if (oldest !== undefined) {
+      createdMediaDirs.delete(oldest);
+    }
+  }
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __resetCreatedMediaDirsForTests(): void {
+  createdMediaDirs.clear();
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __rememberCreatedMediaDirForTests(mediaDestDir: string): void {
+  rememberCreatedMediaDir(mediaDestDir);
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __getCreatedMediaDirsSizeForTests(): number {
+  return createdMediaDirs.size;
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __hasCreatedMediaDirForTests(mediaDestDir: string): boolean {
+  return createdMediaDirs.has(mediaDestDir);
+}
 
 /** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
 const CONTROL_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
@@ -197,7 +228,7 @@ function relocateMediaToWorkspace(content: string, workspacePath: string): strin
   if (!createdMediaDirs.has(mediaDestDir)) {
     try {
       mkdirSync(mediaDestDir, { recursive: true, mode: 0o700 });
-      createdMediaDirs.add(mediaDestDir);
+      rememberCreatedMediaDir(mediaDestDir);
     } catch (err) {
       log.warn({ err, mediaDestDir }, 'failed to create workspace media directory');
       return content;

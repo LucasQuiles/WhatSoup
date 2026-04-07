@@ -1,27 +1,28 @@
-# LEAK-11 Output
+# LEAK-10 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: LEAK-11 — fleet cache pruning for deleted instances
-- Branch: fix/leak-11-fleet-cache-pruning
-- Commit: 8ac4265
-- Summary: Pruned stale per-instance fleet health, realtime snapshot, and line-stat cache entries whenever discovery drops an instance, and added regressions covering each cache surface.
+- Bead: LEAK-10 — module-level Set/Map eviction
+- Branch: fix/leak-10-module-sets
+- Commit: pending
+- Summary: Added FIFO caps for replayed admin message IDs and created workspace media directories, plus opportunistic TTL pruning for group-resolution retry cache, with focused regression coverage.
 
 ## Files Changed
-- src/fleet/health-poller.ts
-- src/fleet/realtime-event-poller.ts
-- src/fleet/routes/lines.ts
-- tests/fleet/health-poller.test.ts
-- tests/fleet/realtime-event-poller.test.ts
-- tests/fleet/routes/lines.test.ts
+- src/core/admin.ts
+- src/runtimes/agent/runtime.ts
+- src/fleet/group-resolver.ts
+- tests/core/admin.test.ts
+- tests/runtimes/agent/prepare-content.test.ts
+- tests/fleet/group-resolver.test.ts
 - bead-output.md
 
 ## Verification
-- `npx vitest run tests/fleet/health-poller.test.ts tests/fleet/realtime-event-poller.test.ts tests/fleet/routes/lines.test.ts` ✅
+- `npx vitest run --pool=forks tests/core/admin.test.ts tests/runtimes/agent/prepare-content.test.ts tests/fleet/group-resolver.test.ts` ✅
 - `npm run typecheck` ✅
-- `npx vitest run` ✅ (199 files, 3,759 tests)
+- `npm run typecheck:all` ✅
+- `npx vitest run --pool=forks` ✅ (200 files, 3762 tests)
 
 ## Notes
-- `HealthPoller.poll()` now deletes statuses for instances no longer returned by discovery after each poll cycle.
-- `FleetRealtimeEventPoller.poll()` now drops stale snapshots for removed instances after rebuilding current snapshots.
-- `routes/lines.ts` now prunes all five TTL caches on both list and detail requests and exposes narrow underscore-prefixed test helpers to reset/inspect cache state in unit tests.
+- `replayedIds` now evicts oldest entries after 10,000 IDs.
+- `createdMediaDirs` now evicts oldest directory entries after 5,000 paths; redundant future `mkdirSync(..., { recursive: true })` calls remain safe.
+- `attemptedCache` now opportunistically prunes expired retry entries every 10 minutes before evaluating new group metadata backfills.

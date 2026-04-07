@@ -14,7 +14,38 @@ import { sendTracked } from './durability.ts';
 const log = createChildLogger('admin');
 
 /** Track replayed message IDs to prevent duplicate replays within this process lifetime. */
+const MAX_REPLAYED_IDS = 10_000;
 const replayedIds = new Set<string>();
+
+function rememberReplayedId(messageId: string): void {
+  replayedIds.add(messageId);
+  if (replayedIds.size > MAX_REPLAYED_IDS) {
+    const oldest = replayedIds.values().next().value;
+    if (oldest !== undefined) {
+      replayedIds.delete(oldest);
+    }
+  }
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __resetReplayedIdsForTests(): void {
+  replayedIds.clear();
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __rememberReplayedIdForTests(messageId: string): void {
+  rememberReplayedId(messageId);
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __getReplayedIdsSizeForTests(): number {
+  return replayedIds.size;
+}
+
+/** Test-only helpers for LEAK-10 coverage. */
+export function __hasReplayedIdForTests(messageId: string): boolean {
+  return replayedIds.has(messageId);
+}
 
 export async function handleAdminCommand(
   db: Database,
@@ -58,7 +89,7 @@ export async function handleAdminCommand(
       await sendTracked(messenger, adminChatJid, `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`, durability, { replayPolicy: 'safe', isTerminal: true });
 
       for (const msg of toReplay) {
-        replayedIds.add(msg.messageId);
+        rememberReplayedId(msg.messageId);
         const incomingMsg: IncomingMessage = {
           messageId: msg.messageId,
           chatJid: msg.chatJid,
