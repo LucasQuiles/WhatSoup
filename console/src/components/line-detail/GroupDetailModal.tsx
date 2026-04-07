@@ -187,7 +187,7 @@ function InfoTab({
         {inviteLink ? (
           <div className="flex flex-col gap-[var(--sp-2)]">
             <div
-              className="c-meta text-t3 truncate py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md [border:var(--bw)_solid_var(--b1)]"
+              className="c-data text-t3 truncate py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md [border:var(--bw)_solid_var(--b1)]"
             >
               {inviteLink}
             </div>

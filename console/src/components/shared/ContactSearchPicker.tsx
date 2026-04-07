@@ -44,7 +44,7 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
           {selected.map((c) => (
             <span
               key={c.jid}
-              className="inline-flex items-center gap-1 c-meta py-[var(--bw)] px-[var(--sp-2)] bg-d1 rounded-sm [border:var(--bw)_solid_var(--b1)]"
+              className="inline-flex items-center gap-1 c-label py-[var(--bw)] px-[var(--sp-2)] bg-d1 rounded-sm [border:var(--bw)_solid_var(--b1)]"
             >
               {c.name ?? c.notify ?? c.jid}
               <button type="button" onClick={() => onRemove(c.jid)} className="c-btn c-btn-ghost p-[var(--sp-0)]" aria-label={`Remove ${c.name ?? c.jid}`}>
@@ -75,7 +75,7 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
               >
                 <UserPlus size={14} className="text-t4" />
                 <span className="c-data">{contact.name ?? contact.notify ?? contact.jid}</span>
-                {contact.number && <span className="c-meta">{contact.number}</span>}
+                {contact.number && <span className="c-label">{contact.number}</span>}
               </button>
             ))}
           </div>

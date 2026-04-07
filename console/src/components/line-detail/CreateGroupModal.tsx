@@ -91,7 +91,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             <div>
               <label
                 htmlFor="create-group-subject"
-                className="c-meta block mb-[var(--sp-1)]"
+                className="c-field-label"
               >
                 Group subject <span className="text-s-crit">*</span>
               </label>
@@ -109,7 +109,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             {/* Participants */}
             <div>
               <label
-                className="c-meta block mb-[var(--sp-1)]"
+                className="c-field-label"
               >
                 Participants <span className="text-s-crit">*</span>
                 {participants.length > 0 && (
