@@ -5,7 +5,7 @@ import { unlinkSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Database } from '../../src/core/database.ts';
 import {
-  storeMessage,
+  storeMessageIfNew,
   getRecentMessages,
   getUnprocessedMessages,
   markMessagesProcessed,
@@ -63,9 +63,9 @@ describe('messages', () => {
 
   // --- positive tests ---
 
-  it('storeMessage + getRecentMessages round-trips correctly', () => {
+  it('storeMessageIfNew + getRecentMessages round-trips correctly', () => {
     const msg = makeMsg({ content: 'round trip test' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
     const results = getRecentMessages(db, 'group1_at_g.us', 10);
     expect(results).toHaveLength(1);
     const stored = results[0];
@@ -79,28 +79,31 @@ describe('messages', () => {
     expect(stored.timestamp).toBe(BASE_TS);
   });
 
-  it('upsert on conflict: same message_id updates content', () => {
+  it('INSERT OR IGNORE: duplicate message_id is ignored', () => {
     const id = `msg-${randomBytes(4).toString('hex')}`;
-    storeMessage(db, makeMsg({ messageId: id, content: 'original' }));
-    storeMessage(db, makeMsg({ messageId: id, content: 'updated' }));
+    const inserted1 = storeMessageIfNew(db, makeMsg({ messageId: id, content: 'original' }));
+    const inserted2 = storeMessageIfNew(db, makeMsg({ messageId: id, content: 'updated' }));
+
+    expect(inserted1).toBe(true);
+    expect(inserted2).toBe(false); // Second insert is ignored
 
     const results = getRecentMessages(db, 'group1_at_g.us', 10);
     expect(results).toHaveLength(1);
-    expect(results[0].content).toBe('updated');
+    expect(results[0].content).toBe('original'); // Content remains unchanged
   });
 
   it('getRecentMessages returns messages in chronological ASC order', () => {
-    storeMessage(db, makeMsg({ timestamp: BASE_TS + 2, content: 'third' }));
-    storeMessage(db, makeMsg({ timestamp: BASE_TS + 0, content: 'first' }));
-    storeMessage(db, makeMsg({ timestamp: BASE_TS + 1, content: 'second' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 2, content: 'third' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 0, content: 'first' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 1, content: 'second' }));
 
     const results = getRecentMessages(db, 'group1_at_g.us', 10);
     expect(results.map((r) => r.content)).toEqual(['first', 'second', 'third']);
   });
 
   it('getRecentMessages is scoped to the specified conversationKey', () => {
-    storeMessage(db, makeMsg({ chatJid: 'group1@g.us', conversationKey: 'group1_at_g.us', content: 'group1 msg' }));
-    storeMessage(db, makeMsg({ chatJid: 'group2@g.us', conversationKey: 'group2_at_g.us', content: 'group2 msg' }));
+    storeMessageIfNew(db, makeMsg({ chatJid: 'group1@g.us', conversationKey: 'group1_at_g.us', content: 'group1 msg' }));
+    storeMessageIfNew(db, makeMsg({ chatJid: 'group2@g.us', conversationKey: 'group2_at_g.us', content: 'group2 msg' }));
 
     const results = getRecentMessages(db, 'group1_at_g.us', 10);
     expect(results).toHaveLength(1);
@@ -108,9 +111,9 @@ describe('messages', () => {
   });
 
   it('getUnprocessedMessages returns only messages with NULL enrichment_processed_at', () => {
-    storeMessage(db, makeMsg({ content: 'unprocessed' }));
+    storeMessageIfNew(db, makeMsg({ content: 'unprocessed' }));
     const msg2 = makeMsg({ content: 'processed' });
-    storeMessage(db, msg2);
+    storeMessageIfNew(db, msg2);
     const all = getRecentMessages(db, 'group1_at_g.us', 10);
     const pk2 = all.find((m) => m.content === 'processed')!.pk;
     markMessagesProcessed(db, [pk2]);
@@ -120,7 +123,7 @@ describe('messages', () => {
   });
 
   it('markMessagesProcessed sets enrichment_processed_at', () => {
-    storeMessage(db, makeMsg({ content: 'to process' }));
+    storeMessageIfNew(db, makeMsg({ content: 'to process' }));
     const [msg] = getRecentMessages(db, 'group1_at_g.us', 10);
     expect(msg.enrichmentProcessedAt).toBeNull();
 
@@ -132,18 +135,18 @@ describe('messages', () => {
 
   it('getMessageCount returns the accurate total', () => {
     expect(getMessageCount(db)).toBe(0);
-    storeMessage(db, makeMsg());
-    storeMessage(db, makeMsg());
-    storeMessage(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
     expect(getMessageCount(db)).toBe(3);
   });
 
   it('getMessagesBySender returns inbound messages ordered ASC by timestamp', () => {
     const jid = 'bob@s.whatsapp.net';
-    storeMessage(db, makeMsg({ senderJid: jid, timestamp: BASE_TS + 10, content: 'late' }));
-    storeMessage(db, makeMsg({ senderJid: jid, timestamp: BASE_TS + 0, content: 'early' }));
+    storeMessageIfNew(db, makeMsg({ senderJid: jid, timestamp: BASE_TS + 10, content: 'late' }));
+    storeMessageIfNew(db, makeMsg({ senderJid: jid, timestamp: BASE_TS + 0, content: 'early' }));
     // Another sender — should not appear
-    storeMessage(db, makeMsg({ senderJid: 'carol@s.whatsapp.net', content: 'carol' }));
+    storeMessageIfNew(db, makeMsg({ senderJid: 'carol@s.whatsapp.net', content: 'carol' }));
 
     const results = getMessagesBySender(db, jid);
     expect(results).toHaveLength(2);
@@ -154,8 +157,8 @@ describe('messages', () => {
   // --- negative / edge-case tests ---
 
   it('getUnprocessedMessages excludes bot messages (is_from_me=1)', () => {
-    storeMessage(db, makeMsg({ isFromMe: false, content: 'inbound' }));
-    storeMessage(db, makeMsg({ isFromMe: true, content: 'bot reply' }));
+    storeMessageIfNew(db, makeMsg({ isFromMe: false, content: 'inbound' }));
+    storeMessageIfNew(db, makeMsg({ isFromMe: true, content: 'bot reply' }));
 
     const results = getUnprocessedMessages(db, 100);
     expect(results.map((m) => m.content)).toContain('inbound');
@@ -165,7 +168,7 @@ describe('messages', () => {
   });
 
   it('markMessagesProcessed with empty array is a no-op without error', () => {
-    storeMessage(db, makeMsg({ content: 'should stay unprocessed' }));
+    storeMessageIfNew(db, makeMsg({ content: 'should stay unprocessed' }));
     expect(() => markMessagesProcessed(db, [])).not.toThrow();
     const unprocessed = getUnprocessedMessages(db, 100);
     expect(unprocessed).toHaveLength(1);
@@ -176,7 +179,7 @@ describe('messages', () => {
     // so the chunking path (CHUNK_SIZE=500) must be exercised.
     const COUNT = 1500;
     for (let i = 0; i < COUNT; i++) {
-      storeMessage(db, makeMsg({ timestamp: BASE_TS + i, isFromMe: false }));
+      storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + i, isFromMe: false }));
     }
     const all = getUnprocessedMessages(db, COUNT + 10);
     expect(all.length).toBe(COUNT);
@@ -191,8 +194,8 @@ describe('messages', () => {
   it('deleteOldMessages removes messages older than retentionDays', () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const oldTs = nowSec - 31 * 86400; // 31 days ago
-    storeMessage(db, makeMsg({ timestamp: oldTs, content: 'old message' }));
-    storeMessage(db, makeMsg({ timestamp: nowSec, content: 'recent message' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: oldTs, content: 'old message' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: nowSec, content: 'recent message' }));
 
     const deleted = deleteOldMessages(db, 30);
     expect(deleted).toBe(1);
@@ -203,7 +206,7 @@ describe('messages', () => {
   it('deleteOldMessages preserves messages within retention window', () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const recentTs = nowSec - 10 * 86400; // 10 days ago
-    storeMessage(db, makeMsg({ timestamp: recentTs, content: 'recent' }));
+    storeMessageIfNew(db, makeMsg({ timestamp: recentTs, content: 'recent' }));
 
     const deleted = deleteOldMessages(db, 30);
     expect(deleted).toBe(0);
@@ -211,7 +214,7 @@ describe('messages', () => {
   });
 
   it('markMessagesWithError sets enrichment_error column', () => {
-    storeMessage(db, makeMsg({ content: 'will error' }));
+    storeMessageIfNew(db, makeMsg({ content: 'will error' }));
     const [msg] = getRecentMessages(db, 'group1_at_g.us', 10);
 
     markMessagesWithError(db, [msg.pk], 'timeout');
@@ -227,7 +230,7 @@ describe('messages', () => {
 
   it('rowToMessage exposes media_path as mediaPath', () => {
     const msg = makeMsg({ content: 'photo caption' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     // Manually set media_path
     db.raw.prepare('UPDATE messages SET media_path = ? WHERE message_id = ?')
@@ -243,7 +246,7 @@ describe('messages', () => {
 
   it('rowToMessage returns null mediaPath when column is NULL', () => {
     const msg = makeMsg({ content: 'text only' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     const rows = db.raw
       .prepare('SELECT * FROM messages WHERE message_id = ?')
@@ -257,7 +260,7 @@ describe('messages', () => {
 
   it('updateMediaPath sets the media_path column', () => {
     const msg = makeMsg({ content: 'image caption' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     updateMediaPath(db, msg.messageId, '/tmp/whatsoup-media/a1b2c3d4.jpg');
 
@@ -269,7 +272,7 @@ describe('messages', () => {
 
   it('updateMediaPath overwrites an existing media_path', () => {
     const msg = makeMsg({ content: 'image caption' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     updateMediaPath(db, msg.messageId, '/tmp/whatsoup-media/old.jpg');
     updateMediaPath(db, msg.messageId, '/tmp/whatsoup-media/new.jpg');
@@ -289,7 +292,7 @@ describe('messages', () => {
 
   it('rowToMessage exposes content_text as contentText', () => {
     const msg = makeMsg({ content: '{"type":"location","latitude":40.7}', contentType: 'location' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     // Manually set content_text
     db.raw.prepare('UPDATE messages SET content_text = ? WHERE message_id = ?')
@@ -305,7 +308,7 @@ describe('messages', () => {
 
   it('rowToMessage returns content as contentText fallback for text messages', () => {
     const msg = makeMsg({ content: 'hello world', contentType: 'text' });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     const rows = db.raw
       .prepare('SELECT * FROM messages WHERE message_id = ?')
@@ -338,7 +341,7 @@ describe('messages', () => {
       content: JSON.stringify({ type: 'audio', duration: 12, ptt: true, transcription: null }),
       contentType: 'audio',
     });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     updateTranscription(db, msg.messageId, 'Hello, this is a test');
 
@@ -356,7 +359,7 @@ describe('messages', () => {
       content: null,
       contentType: 'audio',
     });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     updateTranscription(db, msg.messageId, 'Transcribed text');
 
@@ -375,7 +378,7 @@ describe('messages', () => {
       contentType: 'audio',
       contentText: null,
     });
-    storeMessage(db, msg);
+    storeMessageIfNew(db, msg);
 
     updateTranscription(db, msg.messageId, 'searchable transcription');
 

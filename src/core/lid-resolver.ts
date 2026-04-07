@@ -243,16 +243,6 @@ export function importLidMappings(
   return imported;
 }
 
-/**
- * Export all LID mappings for cross-instance sync.
- * Returns array suitable for importLidMappings() on the receiving end.
- */
-// Unused — kept for future cross-instance LID sync
-function exportLidMappings(db: Database): Array<{ lid: string; phone_jid: string }> {
-  return db.raw.prepare(
-    'SELECT lid, phone_jid FROM lid_mappings',
-  ).all() as Array<{ lid: string; phone_jid: string }>;
-}
 
 // ── L6: Periodic reconciliation ─────────────────────────────────────────────
 
