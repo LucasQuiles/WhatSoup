@@ -1,13 +1,14 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { Download, Cpu } from 'lucide-react'
-import { FleetMetricsChart } from '../FleetMetricsChart'
+import { MetricsChart } from '../MetricsChart'
 import { FleetTokenChart } from '../FleetTokenChart'
 import { FleetSessionChart } from '../FleetSessionChart'
-import { ChartPanel } from '../ChartPanel'
 import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
+
+type DetailTab = 'tokens' | 'sessions';
 
 export function MetricsTab({
   metrics,
@@ -28,7 +29,9 @@ export function MetricsTab({
   line?: LineInstance
   onRetry?: () => void
 }) {
+  const [detailTab, setDetailTab] = useState<DetailTab>('tokens')
   const hasAnyData = metrics?.hasMessageData || metrics?.hasTokenData || metrics?.hasSessionData
+  const hasDetailData = metrics?.hasTokenData || metrics?.hasSessionData
 
   return (
     <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
@@ -74,58 +77,61 @@ export function MetricsTab({
         <EmptyState title="No metrics data" description="Metrics will appear after the instance processes messages." />
       ) : (
         <div className="flex flex-col gap-[var(--sp-4)]">
-          <ChartPanel
-            title="Message Volume"
-            isLoading={metricsLoading}
-            isError={!!metricsError}
-            hasData={!!metrics?.hasMessageData}
-
-            onRetry={onRetry}
-          >
-            <FleetMetricsChart data={metrics!.messageVolume} range={metricsRange} />
-          </ChartPanel>
-
-          {/* Token Usage time-series */}
-          {metrics?.hasTokenData && (
-            <ChartPanel
-              title="Token Usage"
-              isLoading={metricsLoading}
-              isError={!!metricsError}
-              hasData={true}
-  
-              onRetry={onRetry}
-            >
-              <FleetTokenChart
-                data={metrics.tokenUsage}
-                byProvider={metrics.tokenUsageByProvider}
-                providers={metrics.providers}
-                range={metricsRange}
-              />
-            </ChartPanel>
-          )}
-
-          {/* Session Activity */}
-          {metrics?.hasSessionData && (
-            <ChartPanel
-              title="Session Activity"
-              isLoading={metricsLoading}
-              isError={!!metricsError}
-              hasData={true}
-  
-              onRetry={onRetry}
-            >
-              <FleetSessionChart
-                data={metrics.sessionActivity}
-                byProvider={metrics.sessionActivityByProvider}
-                providers={metrics.providers}
-                range={metricsRange}
-              />
-            </ChartPanel>
+          {/* Hero: Message Volume bar chart */}
+          {metrics?.hasMessageData && (
+            <section className="c-card font-mono p-[var(--sp-4)] bg-d2 min-h-[var(--chart-min-h)]">
+              <div className="c-section-label mb-[var(--sp-3)]">Message Volume</div>
+              <MetricsChart data={metrics.messageVolume} range={metricsRange} />
+            </section>
           )}
 
           {/* Active Hours Heatmap */}
           {metrics?.activeHours && (
             <ActiveHoursHeatmap data={metrics.activeHours} range={metricsRange} />
+          )}
+
+          {/* Detail metrics — tabbed */}
+          {hasDetailData && (
+            <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+              <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-3)]">
+                {metrics?.hasTokenData && (
+                  <button
+                    type="button"
+                    className={`c-btn c-btn-sm ${detailTab === 'tokens' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                    onClick={() => setDetailTab('tokens')}
+                  >
+                    Tokens
+                  </button>
+                )}
+                {metrics?.hasSessionData && (
+                  <button
+                    type="button"
+                    className={`c-btn c-btn-sm ${detailTab === 'sessions' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                    onClick={() => setDetailTab('sessions')}
+                  >
+                    Sessions
+                  </button>
+                )}
+              </div>
+              <div className="h-[var(--chart-min-h)]">
+                {detailTab === 'tokens' && metrics?.hasTokenData && (
+                  <FleetTokenChart
+                    data={metrics.tokenUsage}
+                    byProvider={metrics.tokenUsageByProvider}
+                    providers={metrics.providers}
+                    range={metricsRange}
+                  />
+                )}
+                {detailTab === 'sessions' && metrics?.hasSessionData && (
+                  <FleetSessionChart
+                    data={metrics.sessionActivity}
+                    byProvider={metrics.sessionActivityByProvider}
+                    providers={metrics.providers}
+                    range={metricsRange}
+                  />
+                )}
+              </div>
+            </section>
           )}
 
           {/* Token Usage Card (static totals) */}
@@ -155,7 +161,6 @@ export function MetricsTab({
                   </span>
                 </div>
               </div>
-              {/* Proportional bar */}
               <div className="mt-[var(--sp-3)] h-[var(--dot-feed)] rounded-sm bg-d4 overflow-hidden flex">
                 <div
                   style={{
