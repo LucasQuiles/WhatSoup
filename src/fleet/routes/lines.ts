@@ -326,6 +326,7 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     sandboxPerChat: inst.sandboxPerChat ?? false,
     chatCounts: opts.chatCounts ?? { chats: 0, groups: 0 },
     tokenUsage: opts.tokenStats ?? { input: 0, output: 0 },
+    provider: inst.provider ?? 'claude-cli',
   };
 }
 

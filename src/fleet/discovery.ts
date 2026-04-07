@@ -33,6 +33,7 @@ export interface DiscoveredInstance {
   guiPort?: number;
   models?: InstanceModels;
   sandboxPerChat?: boolean;
+  provider?: string;
   configError?: string | null;
 }
 
@@ -132,6 +133,9 @@ export class FleetDiscovery {
           models: raw.models as InstanceModels | undefined,
           sandboxPerChat: typeof raw.agentOptions === 'object' && raw.agentOptions !== null && !Array.isArray(raw.agentOptions)
             ? ((raw.agentOptions as Record<string, unknown>).sandboxPerChat as boolean | undefined)
+            : undefined,
+          provider: typeof raw.agentOptions === 'object' && raw.agentOptions !== null && !Array.isArray(raw.agentOptions)
+            ? ((raw.agentOptions as Record<string, unknown>).provider as string | undefined) ?? undefined
             : undefined,
           configError,
         });
