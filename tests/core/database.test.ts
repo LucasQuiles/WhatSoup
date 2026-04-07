@@ -796,3 +796,32 @@ describe('migration 18 — agent_token_events + ended_at', () => {
     expect(suspended.ended_at).toBeNull();
   });
 });
+
+describe('migration 19 — agent_sessions.provider', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('records migration version 19 in schema_migrations', () => {
+    const row = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 19')
+      .get() as { version: number } | undefined;
+    expect(row?.version).toBe(19);
+  });
+
+  it('adds provider column to agent_sessions', () => {
+    const cols = db.raw
+      .prepare("PRAGMA table_info('agent_sessions')")
+      .all() as Array<{ name: string; type: string }>;
+    const col = cols.find((c) => c.name === 'provider');
+    expect(col).toBeDefined();
+    expect(col!.type).toBe('TEXT');
+  });
+});

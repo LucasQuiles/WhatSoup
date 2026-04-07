@@ -531,6 +531,12 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
         AND ended_at IS NULL
     `).run();
   }],
+  [19, (db: DatabaseSync) => {
+    const cols = db.prepare("PRAGMA table_info('agent_sessions')").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'provider')) {
+      db.exec('ALTER TABLE agent_sessions ADD COLUMN provider TEXT');
+    }
+  }],
 ]);
 
 // ─── Database class ──────────────────────────────────────────────────────────
