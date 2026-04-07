@@ -58,7 +58,7 @@ export default function LineDetail() {
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<TabId>('summary')
   const [metricsRange, setMetricsRangeRaw] = useState<MetricsRange>(
-    () => getPreference('metricsRange', '24h') as MetricsRange
+    () => getPreference('metricsRange', '7d') as MetricsRange
   )
   const setMetricsRange = (r: MetricsRange) => { setMetricsRangeRaw(r); setPreference('metricsRange', r); }
   const { data: line } = useLine(name || '')
