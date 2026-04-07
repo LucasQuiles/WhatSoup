@@ -31,7 +31,7 @@ CREATE INDEX idx_agent_token_events_ts ON agent_token_events(timestamp);
 CREATE INDEX idx_agent_token_events_session_ts ON agent_token_events(agent_session_id, timestamp);
 ```
 
-**Writer:** `src/runtimes/agent/session-db.ts` — on each `token_usage` event from the stream parser, insert a row with the current unix timestamp and the delta tokens reported. The existing accumulation onto `agent_sessions.total_input_tokens` / `total_output_tokens` continues unchanged.
+**Writer:** `src/runtimes/agent/session-db.ts` — on each `token_usage` event from the stream parser, insert a row with the current unix timestamp and the delta tokens reported. **Both the event insert and the existing session-level token accumulation (`total_input_tokens` / `total_output_tokens`) must happen in the same transaction.** The existing accumulation already participates in a durability transaction (`src/core/durability.ts:356`); the event insert must join that same transaction. If either write fails, both roll back, and a structured error log is emitted with the session ID and event payload for manual recovery.
 
 ### 2.2 Schema Change: `agent_sessions.ended_at`
 
@@ -83,7 +83,7 @@ Extend `src/core/metrics-collector.ts` to collect 6 new metrics per hour window,
 | `chat_tokens_in` | `messages` | `SUM(input_tokens) WHERE timestamp >= start AND timestamp < end AND input_tokens > 0` |
 | `chat_tokens_out` | `messages` | `SUM(output_tokens) WHERE timestamp >= start AND timestamp < end AND output_tokens > 0` |
 | `sessions_started` | `agent_sessions` | `COUNT(*) WHERE unixepoch(started_at) >= start AND unixepoch(started_at) < end` |
-| `sessions_active` | `agent_sessions` | `COUNT(*) WHERE unixepoch(started_at) < end AND (ended_at IS NULL OR unixepoch(ended_at) > start)` |
+| `sessions_active` | `agent_sessions` | `COUNT(*) WHERE unixepoch(started_at) < end AND (ended_at IS NULL OR unixepoch(ended_at) > start) AND status != 'suspended'` |
 
 All comparison timestamps are unix seconds. `started_at` and `ended_at` in `agent_sessions` are ISO TEXT strings — queries use `unixepoch()` for comparison.
 
@@ -341,7 +341,128 @@ Extract into `console/src/lib/chart-utils.ts`:
 
 ---
 
-## 9. Out of Scope
+## 9. Frontend States and Hardening
+
+### 9.1 Chart Panel Wrapper
+
+Introduce a shared `ChartPanel` wrapper component (`console/src/components/ChartPanel.tsx`) that handles title, expand/collapse toggle, and state rendering for all three charts. Each chart component receives only its data; the wrapper owns:
+
+- **Loading:** Skeleton shimmer (reuse existing `animate-shimmer` utility) at 120px height.
+- **Error:** Inline error message with retry button (pattern from `MetricsTab.tsx:57`).
+- **Empty (no historical data):** `EmptyState` component with chart-appropriate icon and "No data yet" message. Triggered when the API returns successfully but all values in the array are zero.
+- **Valid data:** Render the chart component.
+- **Partial fleet degradation:** If the response includes `meta.failedInstances > 0`, show a non-blocking warning pill in the panel header: "{N} instance(s) unavailable" in `--s-warn` color.
+
+### 9.2 Densification vs Empty State
+
+Bucket densification always returns a full array of zero-filled buckets. To distinguish "no data yet" from "data exists but happens to be zero this period":
+
+- The API response adds a `meta` field:
+  ```ts
+  interface FleetMetricsMeta {
+    instancesQueried: number;
+    instancesFailed: number;
+    hasHistoricalData: boolean;  // true if any metric has at least one non-zero bucket
+  }
+  ```
+- Frontend uses `meta.hasHistoricalData === false` to show the EmptyState instead of a flat-zero chart.
+
+### 9.3 Range Change Behavior
+
+When the user changes the range picker, the chart area shows the loading skeleton until the new data arrives. The previous range data is not shown during the transition (avoids confusing stale-data flash). TanStack Query's `placeholderData: keepPreviousData` is explicitly NOT used for range changes — only for polling refreshes within the same range.
+
+---
+
+## 10. Observability
+
+### 10.1 Backend Structured Logs
+
+All logs use Pino (existing pattern). Required structured log events:
+
+| Event | Level | Fields | When |
+|-------|-------|--------|------|
+| `metrics.collect` | info | `bucket`, `metrics` (object with all 9 values), `durationMs` | Each hourly collection run |
+| `metrics.backfill` | info | `days`, `bucketsProcessed`, `durationMs` | Migration backfill completion |
+| `metrics.backfill.skip` | debug | `bucket`, `reason` | Skipped bucket during backfill |
+| `fleet.metrics.instance_skip` | warn | `instance`, `error` | Instance query failed during fleet aggregation |
+| `token_event.write_fail` | error | `sessionId`, `agentSessionId`, `error` | Token event + accumulation transaction failed |
+| `session.ended` | info | `agentSessionId`, `status`, `endedAt` | Session terminal transition |
+
+### 10.2 API Response Metadata
+
+The fleet metrics response includes `meta`:
+
+```ts
+{
+  range: MetricsRange;
+  meta: FleetMetricsMeta;
+  messageVolume: MessageVolumeBucket[];
+  tokenUsage: TokenUsageBucket[];
+  sessionActivity: SessionActivityBucket[];
+}
+```
+
+---
+
+## 11. Verification
+
+### 11.1 Backend Tests
+
+| Test | Scope | Key assertions |
+|------|-------|----------------|
+| Migration test | `database.ts` | `agent_token_events` table created, `ended_at` column exists, expression indexes created, backfill populates `ended_at` for terminal sessions |
+| Collector test — tokens | `metrics-collector.ts` | `agent_tokens_in/out` and `chat_tokens_in/out` correctly sum from respective tables; zero when no events |
+| Collector test — sessions_active | `metrics-collector.ts` | Long-running session counted in all overlapping hours; `suspended` sessions excluded; `ended_at IS NULL` + `status = 'active'` counted |
+| Collector test — sessions_started | `metrics-collector.ts` | Sessions counted in their start hour only |
+| Backfill test — session window | `metrics-collector.ts` | Full-window iteration: session spanning hours 1-5 appears in all 5 hourly `sessions_active` buckets |
+| Densification test | `db-reader.ts` | Sparse DB data produces full zero-filled bucket array for all three ranges |
+| Fleet route test — partial failure | `fleet-metrics.ts` | One instance fails, response still returns data from healthy instances, `meta.instancesFailed = 1` |
+| Token event atomicity | `session-db.ts` | Event insert + accumulation both succeed or both roll back; verify via count + sum after forced failure |
+| Dual-write consistency | `session-db.ts` | `SUM(agent_token_events)` for a session equals `agent_sessions.total_input/output_tokens` |
+
+### 11.2 Frontend Tests
+
+| Test | Scope | Key assertions |
+|------|-------|----------------|
+| ChartPanel — loading | `ChartPanel.tsx` | Shows shimmer skeleton when query is pending |
+| ChartPanel — error | `ChartPanel.tsx` | Shows error message + retry button; retry refetches |
+| ChartPanel — empty | `ChartPanel.tsx` | Shows EmptyState when `meta.hasHistoricalData === false` |
+| ChartPanel — partial | `ChartPanel.tsx` | Shows warning pill when `meta.instancesFailed > 0` |
+| Expansion toggle | `SoupKitchen.tsx` | Click KPI → expandedChart set, chart fills width; click again → resets to 3-up; expandedChart independent of activeKpi |
+| Range picker | `SoupKitchen.tsx` | Changing range passes new value to hook; shows loading state during transition |
+| Sparkline wiring | `SoupKitchen.tsx` | Media and session KPI cards receive sparkData arrays |
+
+---
+
+## 12. File Inventory (Revised)
+
+### Backend (new/modified)
+
+| File | Action |
+|------|--------|
+| `src/core/database.ts` | New migration: `agent_token_events` table + expression indexes, `agent_sessions.ended_at` column + expression indexes, backfill terminal sessions |
+| `src/runtimes/agent/session-db.ts` | Atomic insert of `agent_token_events` within existing durability transaction; set `ended_at` on terminal transitions (ended, crashed, resume_failed, orphaned); exclude suspended from active |
+| `src/core/metrics-collector.ts` | Add 6 new metrics; full-window backfill for session metrics |
+| `src/fleet/db-reader.ts` | Read all 9 metrics; shared bucket densification; `hasHistoricalData` flag |
+| `src/fleet/routes/fleet-metrics.ts` | Extend response with `tokenUsage`, `sessionActivity`, `meta`; add `media` to `messageVolume` |
+| `src/fleet/routes/metrics.ts` | Same extension for per-line endpoint |
+
+### Frontend (new/modified)
+
+| File | Action |
+|------|--------|
+| `console/src/types.ts` | Add `TokenUsageBucket`, `SessionActivityBucket`, `FleetMetricsMeta`; extend `MessageVolumeBucket`, `FleetMetrics`, `LineMetrics` |
+| `console/src/components/ChartPanel.tsx` | **New** — shared wrapper: title, expand/collapse, loading/error/empty/partial states |
+| `console/src/components/FleetMetricsChart.tsx` | Add `media` area series in amber |
+| `console/src/components/FleetTokenChart.tsx` | **New** — token usage area chart |
+| `console/src/components/FleetSessionChart.tsx` | **New** — session activity composed chart |
+| `console/src/pages/SoupKitchen.tsx` | Add `expandedChart` state, range picker, 3-up chart row with ChartPanel wrappers, sparkline wiring |
+| `console/src/lib/chart-utils.ts` | Extract shared tooltip style, chart margin, multi-range `formatBucketLabel` |
+| `console/src/lib/metrics-sparklines.ts` | Extend sparkline derivation for media + sessions |
+
+---
+
+## 13. Out of Scope
 
 - `metrics_daily` nightly rollup — explicitly deferred
 - Token budget / cost tracking — separate feature
