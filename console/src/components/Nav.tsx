@@ -1,5 +1,5 @@
 import { type FC } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Inbox,
@@ -23,6 +23,8 @@ interface NavProps {
 
 const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick }) => {
   const { connected } = useRealtime();
+  const location = useLocation();
+  const isFleetActive = location.pathname === '/' || location.pathname.startsWith('/lines/');
   return (
     <nav
       role="navigation"
@@ -42,20 +44,20 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         <NavLink
           to="/"
           end
-          className={({ isActive }) =>
+          className={() =>
             `flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
-              isActive
+              isFleetActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
           style={{ fontSize: "var(--font-size-data)" }}
         >
-          {({ isActive }) => (
+          {() => (
             <>
               <LayoutDashboard size={18} strokeWidth={1.75} />
               <span>Soup Kitchen</span>
-              {isActive && (
+              {isFleetActive && (
                 <span
                   className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
                   style={{
