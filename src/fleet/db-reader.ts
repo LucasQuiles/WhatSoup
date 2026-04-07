@@ -279,6 +279,9 @@ export class FleetDbReader {
     hasMessageData: boolean;
     hasTokenData: boolean;
     hasSessionData: boolean;
+    tokenUsageByProvider: Record<string, { bucket: string; input: number; output: number }[]>;
+    sessionActivityByProvider: Record<string, { bucket: string; active: number; started: number }[]>;
+    providers: string[];
   }> {
     const rangeHours = opts.range === '24h' ? 24 : opts.range === '7d' ? 168 : 720;
     const cutoff = new Date(Date.now() - rangeHours * 60 * 60 * 1000).toISOString();
@@ -363,7 +366,60 @@ export class FleetDbReader {
         activeHours[row.dow][row.hour] = row.cnt;
       }
 
-      return { messageVolume, tokenUsage, sessionActivity, activeHours, hasMessageData, hasTokenData, hasSessionData };
+      // Query per-provider suffixed metrics (e.g. agent_tokens_in:claude-cli)
+      const providerRows = db.prepare(`
+        SELECT bucket, metric, value FROM metrics_hourly
+        WHERE bucket >= ? AND metric LIKE '%:%'
+        ORDER BY bucket ASC
+      `).all(cutoff) as { bucket: string; metric: string; value: number }[];
+
+      const providerTokenMap = new Map<string, Map<string, { input: number; output: number }>>();
+      const providerSessionMap = new Map<string, Map<string, { started: number; active: number }>>();
+      const providerSet = new Set<string>();
+
+      for (const row of providerRows) {
+        const colonIdx = row.metric.indexOf(':');
+        if (colonIdx === -1) continue;
+        const base = row.metric.slice(0, colonIdx);
+        const provider = row.metric.slice(colonIdx + 1);
+        providerSet.add(provider);
+
+        if (base === 'agent_tokens_in' || base === 'agent_tokens_out') {
+          if (!providerTokenMap.has(provider)) providerTokenMap.set(provider, new Map());
+          const bucketMap = providerTokenMap.get(provider)!;
+          const existing = bucketMap.get(row.bucket) ?? { input: 0, output: 0 };
+          if (base === 'agent_tokens_in') existing.input = row.value;
+          else existing.output = row.value;
+          bucketMap.set(row.bucket, existing);
+        } else if (base === 'sessions_started' || base === 'sessions_active') {
+          if (!providerSessionMap.has(provider)) providerSessionMap.set(provider, new Map());
+          const bucketMap = providerSessionMap.get(provider)!;
+          const existing = bucketMap.get(row.bucket) ?? { started: 0, active: 0 };
+          if (base === 'sessions_started') existing.started = row.value;
+          else existing.active = row.value;
+          bucketMap.set(row.bucket, existing);
+        }
+      }
+
+      const tokenUsageByProvider: Record<string, { bucket: string; input: number; output: number }[]> = {};
+      for (const [provider, bucketMap] of providerTokenMap) {
+        tokenUsageByProvider[provider] = bucketSequence.map(bucket => {
+          const vals = bucketMap.get(bucket);
+          return { bucket, input: vals?.input ?? 0, output: vals?.output ?? 0 };
+        });
+      }
+
+      const sessionActivityByProvider: Record<string, { bucket: string; active: number; started: number }[]> = {};
+      for (const [provider, bucketMap] of providerSessionMap) {
+        sessionActivityByProvider[provider] = bucketSequence.map(bucket => {
+          const vals = bucketMap.get(bucket);
+          return { bucket, active: vals?.active ?? 0, started: vals?.started ?? 0 };
+        });
+      }
+
+      const providers = Array.from(providerSet).sort();
+
+      return { messageVolume, tokenUsage, sessionActivity, activeHours, hasMessageData, hasTokenData, hasSessionData, tokenUsageByProvider, sessionActivityByProvider, providers };
     });
   }
 

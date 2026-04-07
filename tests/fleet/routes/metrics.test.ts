@@ -45,6 +45,9 @@ describe('handleGetFleetMetrics', () => {
               hasMessageData: true,
               hasTokenData: false,
               hasSessionData: false,
+              tokenUsageByProvider: {},
+              sessionActivityByProvider: {},
+              providers: [],
             },
           })
           .mockReturnValueOnce({
@@ -60,6 +63,9 @@ describe('handleGetFleetMetrics', () => {
               hasMessageData: true,
               hasTokenData: false,
               hasSessionData: false,
+              tokenUsageByProvider: {},
+              sessionActivityByProvider: {},
+              providers: [],
             },
           }),
       },
@@ -84,6 +90,7 @@ describe('handleGetFleetMetrics', () => {
       hasMessageData: true,
       hasTokenData: false,
       hasSessionData: false,
+      providers: [],
     });
   });
 

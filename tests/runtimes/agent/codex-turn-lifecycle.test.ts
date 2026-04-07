@@ -188,6 +188,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   accumulateSessionTokens: mockAccumulateSessionTokens,
   insertTokenEvent: vi.fn(),
   accumulateTokensWithEvent: mockAccumulateTokensWithEvent,
+  backfillSessionProvider: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({

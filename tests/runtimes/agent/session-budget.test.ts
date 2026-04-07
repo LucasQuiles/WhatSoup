@@ -34,6 +34,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
   updateTranscriptPath: vi.fn(),
+  backfillSessionProvider: vi.fn(),
 }));
 
 const { spawn } = await import('node:child_process');

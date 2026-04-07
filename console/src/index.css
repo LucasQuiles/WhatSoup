@@ -151,6 +151,7 @@
   --sk-col-msg: 68px;        /* sent, recv */
   --sk-col-tokens: 80px;     /* tokens, active */
   --sk-col-sessions: 72px;
+  --sk-col-provider: 100px;
   --panel-confirm: 420px;    /* confirm dialog width */
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */

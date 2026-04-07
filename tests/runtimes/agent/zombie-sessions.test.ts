@@ -93,6 +93,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   markOrphaned: vi.fn(),
   sweepOrphanedSessions: mockSweepOrphanedSessions,
   getResumableSessionForChat: mockGetResumableSessionForChat,
+  backfillSessionProvider: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({

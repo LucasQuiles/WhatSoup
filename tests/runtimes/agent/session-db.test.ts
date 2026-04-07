@@ -18,6 +18,7 @@ import {
   markOrphaned,
   sweepOrphanedSessions,
   getResumableSessionForChat,
+  backfillSessionProvider,
 } from '../../../src/runtimes/agent/session-db.ts';
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -454,5 +455,33 @@ describe('agent session-db', () => {
       'SELECT COUNT(*) AS cnt FROM agent_token_events WHERE agent_session_id = ?'
     ).get(id) as { cnt: number }).cnt;
     expect(afterFailCount).toBe(1);
+  });
+
+  it('createSession stores provider when provided', () => {
+    const id = createSession(db, 90100, '/tmp/provider-test', undefined, undefined, 'codex-cli');
+    const row = db.raw.prepare(
+      'SELECT provider FROM agent_sessions WHERE id = ?'
+    ).get(id) as { provider: string | null };
+    expect(row.provider).toBe('codex-cli');
+  });
+
+  it('createSession defaults provider to null when not provided', () => {
+    const id = createSession(db, 90101, '/tmp/no-provider');
+    const row = db.raw.prepare(
+      'SELECT provider FROM agent_sessions WHERE id = ?'
+    ).get(id) as { provider: string | null };
+    expect(row.provider).toBeNull();
+  });
+
+  it('backfillSessionProvider sets provider on null rows only', () => {
+    const id1 = createSession(db, 90102, '/tmp/backfill-1');
+    const id2 = createSession(db, 90103, '/tmp/backfill-2', undefined, undefined, 'codex-cli');
+
+    backfillSessionProvider(db, 'claude-cli');
+
+    const row1 = db.raw.prepare('SELECT provider FROM agent_sessions WHERE id = ?').get(id1) as { provider: string };
+    const row2 = db.raw.prepare('SELECT provider FROM agent_sessions WHERE id = ?').get(id2) as { provider: string };
+    expect(row1.provider).toBe('claude-cli');
+    expect(row2.provider).toBe('codex-cli');
   });
 });

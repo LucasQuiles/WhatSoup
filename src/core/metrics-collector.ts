@@ -43,7 +43,7 @@ function sumColumn(
   return row?.total ?? 0;
 }
 
-function upsertMetric(db: Database, bucket: string, metric: MetricName, value: number): void {
+function upsertMetric(db: Database, bucket: string, metric: string, value: number): void {
   db.raw.prepare(`
     INSERT INTO metrics_hourly (bucket, metric, value)
     VALUES (?, ?, ?)
@@ -75,6 +75,63 @@ function querySessionMetrics(
     startSec,
   );
   return { sessionsStarted, sessionsActive };
+}
+
+function queryTokenMetricsByProvider(
+  db: Database,
+  startSec: number,
+  endSec: number,
+): Map<string, { input: number; output: number }> {
+  const rows = db.raw.prepare(`
+    SELECT COALESCE(s.provider, 'claude-cli') AS provider,
+           COALESCE(SUM(e.input_tokens), 0) AS total_in,
+           COALESCE(SUM(e.output_tokens), 0) AS total_out
+    FROM agent_token_events e
+    JOIN agent_sessions s ON e.agent_session_id = s.id
+    WHERE e.timestamp >= ? AND e.timestamp < ?
+    GROUP BY s.provider
+  `).all(startSec, endSec) as Array<{ provider: string; total_in: number; total_out: number }>;
+
+  const map = new Map<string, { input: number; output: number }>();
+  for (const row of rows) {
+    map.set(row.provider, { input: row.total_in, output: row.total_out });
+  }
+  return map;
+}
+
+function querySessionMetricsByProvider(
+  db: Database,
+  startSec: number,
+  endSec: number,
+): Map<string, { started: number; active: number }> {
+  const startedRows = db.raw.prepare(`
+    SELECT COALESCE(provider, 'claude-cli') AS provider, COUNT(*) AS cnt
+    FROM agent_sessions
+    WHERE unixepoch(started_at) >= ? AND unixepoch(started_at) < ?
+    GROUP BY provider
+  `).all(startSec, endSec) as Array<{ provider: string; cnt: number }>;
+
+  const activeRows = db.raw.prepare(`
+    SELECT COALESCE(provider, 'claude-cli') AS provider, COUNT(*) AS cnt
+    FROM agent_sessions
+    WHERE unixepoch(started_at) < ?
+      AND (ended_at IS NULL OR unixepoch(ended_at) > ?)
+      AND status != 'suspended'
+    GROUP BY provider
+  `).all(endSec, startSec) as Array<{ provider: string; cnt: number }>;
+
+  const map = new Map<string, { started: number; active: number }>();
+  for (const row of startedRows) {
+    const existing = map.get(row.provider) ?? { started: 0, active: 0 };
+    existing.started = row.cnt;
+    map.set(row.provider, existing);
+  }
+  for (const row of activeRows) {
+    const existing = map.get(row.provider) ?? { started: 0, active: 0 };
+    existing.active = row.cnt;
+    map.set(row.provider, existing);
+  }
+  return map;
 }
 
 function collectMetricsForWindow(db: Database, window: HourWindow): void {
@@ -158,6 +215,20 @@ function collectMetricsForWindow(db: Database, window: HourWindow): void {
   const { sessionsStarted, sessionsActive } = querySessionMetrics(db, startSec, endSec);
   upsertMetric(db, bucket, 'sessions_started', sessionsStarted);
   upsertMetric(db, bucket, 'sessions_active', sessionsActive);
+
+  // ── Per-provider token metrics ──
+  const tokensByProvider = queryTokenMetricsByProvider(db, startSec, endSec);
+  for (const [provider, totals] of tokensByProvider) {
+    upsertMetric(db, bucket, `agent_tokens_in:${provider}`, totals.input);
+    upsertMetric(db, bucket, `agent_tokens_out:${provider}`, totals.output);
+  }
+
+  // ── Per-provider session metrics ──
+  const sessionsByProvider = querySessionMetricsByProvider(db, startSec, endSec);
+  for (const [provider, counts] of sessionsByProvider) {
+    upsertMetric(db, bucket, `sessions_started:${provider}`, counts.started);
+    upsertMetric(db, bucket, `sessions_active:${provider}`, counts.active);
+  }
 }
 
 /** Aggregate the current UTC hour and upsert the nine fleet metrics. */
@@ -219,6 +290,12 @@ export function backfillMetrics(db: Database, days = 30, now = new Date()): void
         if (sessionsStarted > 0 || sessionsActive > 0) {
           upsertMetric(db, window.bucket, 'sessions_started', sessionsStarted);
           upsertMetric(db, window.bucket, 'sessions_active', sessionsActive);
+
+          const sessionsByProv = querySessionMetricsByProvider(db, window.startSec, window.endSec);
+          for (const [provider, counts] of sessionsByProv) {
+            if (counts.started > 0) upsertMetric(db, window.bucket, `sessions_started:${provider}`, counts.started);
+            if (counts.active > 0) upsertMetric(db, window.bucket, `sessions_active:${provider}`, counts.active);
+          }
         }
       }
     }

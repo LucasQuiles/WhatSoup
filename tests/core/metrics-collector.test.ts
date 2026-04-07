@@ -276,7 +276,7 @@ describe('metrics collector', () => {
     collectHourlyMetrics(db, now);
 
     const rows = db.raw.prepare(
-      "SELECT metric, value FROM metrics_hourly WHERE bucket = ? AND metric LIKE 'agent_tokens_%' ORDER BY metric"
+      "SELECT metric, value FROM metrics_hourly WHERE bucket = ? AND metric IN ('agent_tokens_in', 'agent_tokens_out') ORDER BY metric"
     ).all(bucket) as Array<{ metric: string; value: number }>;
 
     expect(rows).toEqual([
@@ -379,6 +379,70 @@ describe('metrics collector', () => {
     ).get(bucket) as { value: number } | undefined;
 
     expect(row?.value).toBe(2);
+  });
+
+  it('collects per-provider agent token metrics', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z');
+    const bucket = '2026-04-05T15:00:00.000Z';
+
+    const s1 = insertAgentSession(db, { startedAt: '2026-04-05T15:00:00.000Z', status: 'active' });
+    db.raw.prepare('UPDATE agent_sessions SET provider = ? WHERE id = ?').run('claude-cli', s1);
+    insertTokenEvent(db, s1, toUnixSeconds('2026-04-05T15:05:00.000Z'), 100, 50);
+
+    const s2 = insertAgentSession(db, { startedAt: '2026-04-05T15:00:00.000Z', status: 'active' });
+    db.raw.prepare('UPDATE agent_sessions SET provider = ? WHERE id = ?').run('codex-cli', s2);
+    insertTokenEvent(db, s2, toUnixSeconds('2026-04-05T15:10:00.000Z'), 200, 75);
+
+    collectHourlyMetrics(db, now);
+
+    // Aggregate keys still written
+    const aggIn = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'agent_tokens_in'"
+    ).get(bucket) as { value: number };
+    expect(aggIn.value).toBe(300);
+
+    // Per-provider keys also written
+    const claudeIn = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'agent_tokens_in:claude-cli'"
+    ).get(bucket) as { value: number } | undefined;
+    expect(claudeIn?.value).toBe(100);
+
+    const codexIn = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'agent_tokens_in:codex-cli'"
+    ).get(bucket) as { value: number } | undefined;
+    expect(codexIn?.value).toBe(200);
+  });
+
+  it('collects per-provider session metrics', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z');
+    const bucket = '2026-04-05T15:00:00.000Z';
+
+    insertAgentSession(db, { startedAt: '2026-04-05T15:05:00.000Z', status: 'active' });
+    db.raw.prepare("UPDATE agent_sessions SET provider = 'claude-cli' WHERE id = (SELECT MAX(id) FROM agent_sessions)").run();
+
+    insertAgentSession(db, { startedAt: '2026-04-05T15:10:00.000Z', status: 'active' });
+    db.raw.prepare("UPDATE agent_sessions SET provider = 'codex-cli' WHERE id = (SELECT MAX(id) FROM agent_sessions)").run();
+
+    insertAgentSession(db, { startedAt: '2026-04-05T15:15:00.000Z', status: 'active' });
+    db.raw.prepare("UPDATE agent_sessions SET provider = 'codex-cli' WHERE id = (SELECT MAX(id) FROM agent_sessions)").run();
+
+    collectHourlyMetrics(db, now);
+
+    const claudeStarted = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'sessions_started:claude-cli'"
+    ).get(bucket) as { value: number } | undefined;
+    expect(claudeStarted?.value).toBe(1);
+
+    const codexStarted = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'sessions_started:codex-cli'"
+    ).get(bucket) as { value: number } | undefined;
+    expect(codexStarted?.value).toBe(2);
+
+    // Aggregate unchanged
+    const totalStarted = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'sessions_started'"
+    ).get(bucket) as { value: number };
+    expect(totalStarted.value).toBe(3);
   });
 
   it('backfill iterates every hour for session metrics, not just active hours', () => {

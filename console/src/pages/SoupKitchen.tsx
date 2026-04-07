@@ -21,12 +21,13 @@ import { FleetSessionChart } from "../components/FleetSessionChart";
 import LineTags from "../components/LineTags";
 import { formatRelative } from "../lib/format-time";
 import { formatPhone, displayInstanceName, formatCompact } from "../lib/text-utils";
+import { getProvider, getProviderColor } from "../lib/providers";
 
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
 type KpiFilter = "connected" | "attention" | "unread" | "agent" | "messages" | null;
-type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv" | "tokens" | "sessions" | "active" | null;
+type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv" | "tokens" | "sessions" | "provider" | "active" | null;
 type SortDir = "asc" | "desc";
 
 const COLUMNS: { label: string; widthClass?: string; center: boolean; sortKey: SortKey }[] = [
@@ -39,6 +40,7 @@ const COLUMNS: { label: string; widthClass?: string; center: boolean; sortKey: S
   { label: "Recv", widthClass: "w-[var(--sk-col-msg)]", center: true, sortKey: "recv" },
   { label: "Tokens", widthClass: "w-[var(--sk-col-tokens)]", center: true, sortKey: "tokens" },
   { label: "Sessions", widthClass: "w-[var(--sk-col-sessions)]", center: true, sortKey: "sessions" },
+  { label: "Provider", widthClass: "w-[var(--sk-col-provider)]", center: false, sortKey: "provider" },
   { label: "Tags", center: false, sortKey: null },
   { label: "Active", widthClass: "w-[var(--sk-col-tokens)]", center: true, sortKey: "active" },
 ];
@@ -180,6 +182,7 @@ const SoupKitchen: FC = () => {
           case "recv": av = a.messageStats?.received ?? 0; bv = b.messageStats?.received ?? 0; break;
           case "tokens": av = (a.tokenUsage?.input ?? 0) + (a.tokenUsage?.output ?? 0); bv = (b.tokenUsage?.input ?? 0) + (b.tokenUsage?.output ?? 0); break;
           case "sessions": av = a.totalSessions ?? 0; bv = b.totalSessions ?? 0; break;
+          case "provider": av = a.provider ?? 'claude-cli'; bv = b.provider ?? 'claude-cli'; break;
           case "active": av = a.lastActive ?? ""; bv = b.lastActive ?? ""; break;
         }
         if (av < bv) return -1 * dir;
@@ -308,7 +311,12 @@ const SoupKitchen: FC = () => {
               onRetry={() => metricsRefetch()}
             >
               {fleetMetrics?.tokenUsage && (
-                <FleetTokenChart data={fleetMetrics.tokenUsage} range={chartRange} />
+                <FleetTokenChart
+                  data={fleetMetrics.tokenUsage}
+                  byProvider={fleetMetrics.tokenUsageByProvider}
+                  providers={fleetMetrics.meta?.providers}
+                  range={chartRange}
+                />
               )}
             </ChartPanel>
           </div>
@@ -327,7 +335,12 @@ const SoupKitchen: FC = () => {
               onRetry={() => metricsRefetch()}
             >
               {fleetMetrics?.sessionActivity && (
-                <FleetSessionChart data={fleetMetrics.sessionActivity} range={chartRange} />
+                <FleetSessionChart
+                  data={fleetMetrics.sessionActivity}
+                  byProvider={fleetMetrics.sessionActivityByProvider}
+                  providers={fleetMetrics.meta?.providers}
+                  range={chartRange}
+                />
               )}
             </ChartPanel>
           </div>
@@ -460,6 +473,12 @@ const SoupKitchen: FC = () => {
                           ? <span className="c-data text-m-agt font-medium">{line.totalSessions ?? 0}</span>
                           : <span className="c-data text-t5">{String.fromCharCode(0x2014)}</span>}
                       </td>
+                      {/* Provider */}
+                      <td className="c-cell">
+                        <span className="c-data" style={{ color: getProviderColor(line.provider ?? 'claude-cli').stroke }}>
+                          {getProvider(line.provider ?? 'claude-cli')?.displayName ?? 'Claude Code'}
+                        </span>
+                      </td>
                       <td className="c-cell"><LineTags line={line} /></td>
                       <td className="c-cell text-center">
                         <span className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-t4"}`}>
@@ -471,7 +490,7 @@ const SoupKitchen: FC = () => {
                 })}
                 {filtered.length === 0 && (
                   <tr>
-                    <td colSpan={11} className="text-center text-t5 font-sans py-12 text-[var(--font-size-data)]">
+                    <td colSpan={12} className="text-center text-t5 font-sans py-12 text-[var(--font-size-data)]">
                       No instances match the current filters
                     </td>
                   </tr>

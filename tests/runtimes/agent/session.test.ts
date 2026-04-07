@@ -103,6 +103,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   updateSessionId: vi.fn(),
   updateSessionStatus: vi.fn(),
   updateTranscriptPath: vi.fn(),
+  backfillSessionProvider: vi.fn(),
 }));
 
 import {
@@ -349,7 +350,7 @@ describe('SessionManager', () => {
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
     await sm.spawnSession();
 
-    expect(createSession).toHaveBeenCalledWith(db, 12345, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID));
+    expect(createSession).toHaveBeenCalledWith(db, 12345, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID), 'claude-cli');
   });
 
   it('db failure during spawn kills the child and resets session state', async () => {
@@ -394,7 +395,7 @@ describe('SessionManager', () => {
     await sm.spawnSession();
 
     expect(spawn).toHaveBeenCalledTimes(2);
-    expect(createSession).toHaveBeenNthCalledWith(2, db, 23456, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID));
+    expect(createSession).toHaveBeenNthCalledWith(2, db, 23456, '/mock/home', CHAT_JID, toConversationKey(CHAT_JID), 'claude-cli');
     expect(mockChild2.kill).not.toHaveBeenCalled();
     expect(sm.getStatus()).toEqual({
       active: true,
@@ -426,6 +427,7 @@ describe('SessionManager', () => {
       '/agent/dir',
       CHAT_JID,
       toConversationKey(CHAT_JID),
+      'opencode-cli',
     );
   });
 

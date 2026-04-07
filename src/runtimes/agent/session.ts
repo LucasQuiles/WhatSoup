@@ -552,7 +552,7 @@ export class SessionManager {
       if (existingRowId !== undefined) {
         this.dbRowId = existingRowId;
       } else {
-        this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey);
+        this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey, this.provider);
       }
       log.info({
         provider: this.provider,
@@ -595,7 +595,7 @@ export class SessionManager {
         this.dbRowId = existingRowId;
         updateSessionStatus(this.db, existingRowId, 'active');
       } else {
-        this.dbRowId = createSession(this.db, pid, cwd, this.chatJid, workspaceKey);
+        this.dbRowId = createSession(this.db, pid, cwd, this.chatJid, workspaceKey, this.provider);
       }
     } catch (err) {
       log.error({ err, pid, chatJid: this.chatJid, existingRowId: existingRowId ?? null }, 'session: failed to persist spawned child');

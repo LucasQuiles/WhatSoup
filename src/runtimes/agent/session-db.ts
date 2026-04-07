@@ -29,6 +29,7 @@ export function ensureAgentSchema(db: Database): void {
     ['workspace_key', 'TEXT'],
     ['total_input_tokens', 'INTEGER DEFAULT 0'],
     ['total_output_tokens', 'INTEGER DEFAULT 0'],
+    ['provider', 'TEXT'],
   ] as [string, string][]) {
     try {
       db.raw.exec(`ALTER TABLE agent_sessions ADD COLUMN ${col} ${def}`);
@@ -52,14 +53,26 @@ export function createSession(
   cwd: string,
   chatJid?: string,
   workspaceKey?: string,
+  provider?: string,
 ): number {
   const result = db.raw
     .prepare(
-      `INSERT INTO agent_sessions (claude_pid, started_in_directory, chat_jid, workspace_key, started_at, status)
-       VALUES (?, ?, ?, ?, datetime('now'), 'active')`,
+      `INSERT INTO agent_sessions (claude_pid, started_in_directory, chat_jid, workspace_key, started_at, status, provider)
+       VALUES (?, ?, ?, ?, datetime('now'), 'active', ?)`,
     )
-    .run(pid, cwd, chatJid ?? null, workspaceKey ?? null) as { lastInsertRowid: number | bigint };
+    .run(pid, cwd, chatJid ?? null, workspaceKey ?? null, provider ?? null) as { lastInsertRowid: number | bigint };
   return Number(result.lastInsertRowid);
+}
+
+/** Backfill provider on existing sessions that have no provider set. Idempotent. */
+export function backfillSessionProvider(db: Database, provider: string): void {
+  const result = db.raw.prepare(
+    `UPDATE agent_sessions SET provider = ? WHERE provider IS NULL`
+  ).run(provider);
+  const changes = (result as { changes: number }).changes;
+  if (changes > 0) {
+    log.info({ provider, updated: changes }, 'backfilled session provider');
+  }
 }
 
 // NOTE: getActiveSession and getResumableSessionForChat are intentionally separate.

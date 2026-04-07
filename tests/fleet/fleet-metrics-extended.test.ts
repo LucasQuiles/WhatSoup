@@ -88,6 +88,63 @@ describe('handleGetFleetMetrics — extended', () => {
     expect(res._body.meta.hasSessionData).toBe(true);
   });
 
+  it('aggregates per-provider token and session data across instances', () => {
+    const deps: FleetMetricsDeps = {
+      discovery: {
+        getInstances: () => new Map([
+          ['inst1', { name: 'inst1', dbPath: '/tmp/1.db' }],
+          ['inst2', { name: 'inst2', dbPath: '/tmp/2.db' }],
+        ]),
+      } as any,
+      dbReader: {
+        getMetrics: vi.fn()
+          .mockReturnValueOnce({
+            ok: true,
+            data: {
+              messageVolume: [{ bucket: '2026-04-05T15:00:00.000Z', inbound: 5, outbound: 3, media: 0 }],
+              tokenUsage: [{ bucket: '2026-04-05T15:00:00.000Z', input: 100, output: 50 }],
+              sessionActivity: [{ bucket: '2026-04-05T15:00:00.000Z', active: 2, started: 1 }],
+              activeHours: [],
+              hasMessageData: true, hasTokenData: true, hasSessionData: true,
+              tokenUsageByProvider: {
+                'claude-cli': [{ bucket: '2026-04-05T15:00:00.000Z', input: 100, output: 50 }],
+              },
+              sessionActivityByProvider: {
+                'claude-cli': [{ bucket: '2026-04-05T15:00:00.000Z', active: 2, started: 1 }],
+              },
+              providers: ['claude-cli'],
+            },
+          })
+          .mockReturnValueOnce({
+            ok: true,
+            data: {
+              messageVolume: [{ bucket: '2026-04-05T15:00:00.000Z', inbound: 3, outbound: 2, media: 0 }],
+              tokenUsage: [{ bucket: '2026-04-05T15:00:00.000Z', input: 200, output: 75 }],
+              sessionActivity: [{ bucket: '2026-04-05T15:00:00.000Z', active: 1, started: 1 }],
+              activeHours: [],
+              hasMessageData: true, hasTokenData: true, hasSessionData: true,
+              tokenUsageByProvider: {
+                'codex-cli': [{ bucket: '2026-04-05T15:00:00.000Z', input: 200, output: 75 }],
+              },
+              sessionActivityByProvider: {
+                'codex-cli': [{ bucket: '2026-04-05T15:00:00.000Z', active: 1, started: 1 }],
+              },
+              providers: ['codex-cli'],
+            },
+          }),
+      } as any,
+    };
+
+    const res = mockRes();
+    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+
+    expect(res._body.meta.providers.sort()).toEqual(['claude-cli', 'codex-cli']);
+    expect(res._body.tokenUsageByProvider['claude-cli'][0].input).toBe(100);
+    expect(res._body.tokenUsageByProvider['codex-cli'][0].input).toBe(200);
+    expect(res._body.sessionActivityByProvider['claude-cli'][0].active).toBe(2);
+    expect(res._body.sessionActivityByProvider['codex-cli'][0].active).toBe(1);
+  });
+
   it('handles partial instance failure with meta.instancesFailed', () => {
     const deps: FleetMetricsDeps = {
       discovery: {
