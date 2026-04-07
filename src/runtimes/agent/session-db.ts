@@ -159,6 +159,25 @@ export function insertTokenEvent(
     .run(agentSessionId, inputTokens, outputTokens);
 }
 
+/** Atomically accumulate session tokens and record a token event in one transaction. */
+export function accumulateTokensWithEvent(
+  db: Database,
+  rowId: number,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  db.raw.exec('BEGIN IMMEDIATE');
+  try {
+    accumulateSessionTokens(db, rowId, inputTokens, outputTokens);
+    insertTokenEvent(db, rowId, inputTokens, outputTokens);
+    db.raw.exec('COMMIT');
+  } catch (err) {
+    try { db.raw.exec('ROLLBACK'); } catch { /* best-effort rollback */ }
+    log.error({ agentSessionId: rowId, inputTokens, outputTokens, err }, 'token_event.write_fail');
+    throw err;
+  }
+}
+
 const TERMINAL_STATUSES = new Set(['ended', 'completed', 'crashed', 'resume_failed', 'orphaned']);
 
 /** Update the status of an existing session row to any arbitrary status string. */

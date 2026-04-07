@@ -396,14 +396,13 @@ export class DurabilityEngine {
       this.db.raw.exec('COMMIT');
       inTransaction = false;
     } catch (err) {
-      if (params.sessionTokens) {
-        log.error({
-          agentSessionId: params.sessionTokens.dbRowId,
-          inputTokens: params.sessionTokens.inputTokens,
-          outputTokens: params.sessionTokens.outputTokens,
-          err,
-        }, 'token_event.write_fail');
-      }
+      log.error({
+        agentSessionId: params.sessionTokens?.dbRowId,
+        hasTokenWrite: params.sessionTokens !== undefined,
+        hasCheckpoint: params.checkpoint !== undefined,
+        hasInbound: params.inbound !== undefined,
+        err,
+      }, 'completeTurn.fail');
       if (inTransaction) {
         try {
           this.db.raw.exec('ROLLBACK');
