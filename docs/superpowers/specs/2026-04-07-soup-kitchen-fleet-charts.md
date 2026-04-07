@@ -40,9 +40,11 @@ ALTER TABLE agent_sessions ADD COLUMN ended_at TEXT;
 ```
 
 ```sql
-CREATE INDEX idx_agent_sessions_started ON agent_sessions(started_at);
-CREATE INDEX idx_agent_sessions_ended ON agent_sessions(ended_at);
+CREATE INDEX idx_agent_sessions_started_epoch ON agent_sessions(unixepoch(started_at));
+CREATE INDEX idx_agent_sessions_ended_epoch ON agent_sessions(unixepoch(ended_at));
 ```
+
+Expression indexes so the `unixepoch()` predicates in the collector queries are indexed. SQLite supports expression indexes since 3.9.0.
 
 **Writer:** `src/runtimes/agent/session-db.ts` — set `ended_at = new Date().toISOString()` on any terminal status transition. The canonical rule: **any status that means the session is no longer running sets `ended_at`**. The full list of terminal statuses from the live codebase:
 
@@ -335,7 +337,7 @@ Extract into `console/src/lib/chart-utils.ts`:
 | `console/src/components/FleetSessionChart.tsx` | **New** — session activity composed chart |
 | `console/src/pages/SoupKitchen.tsx` | Add `expandedChart` state, range picker, 3-up chart row with expansion, sparkline wiring |
 | `console/src/lib/chart-utils.ts` | Extract shared tooltip style, add multi-range `formatBucketLabel` |
-| `console/src/lib/compute-kpis.ts` | Extend sparkline derivation for media + sessions |
+| `console/src/lib/metrics-sparklines.ts` | Extend sparkline derivation for media + sessions (this file owns `deriveFleetMessageSparklines`) |
 
 ---
 
