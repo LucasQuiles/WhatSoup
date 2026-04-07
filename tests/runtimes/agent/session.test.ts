@@ -629,6 +629,87 @@ describe('SessionManager', () => {
     vi.useRealTimers();
   });
 
+  it('shutdown escalates from SIGTERM to SIGKILL after the grace period when the child ignores exit', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.shutdown();
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+
+    await vi.advanceTimersByTimeAsync(graceMs + 1);
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(mockChild.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+    expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('spawnSession clears a pending shutdown kill timer before arming a replacement child', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+    await sm.shutdown();
+
+    expect((sm as unknown as { shutdownKillTimer: ReturnType<typeof setTimeout> | null }).shutdownKillTimer).not.toBeNull();
+
+    const mockChild2 = makeMockChild(23456);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockChild2);
+
+    await sm.spawnSession();
+    await vi.advanceTimersByTimeAsync(graceMs + 1);
+
+    expect((sm as unknown as { shutdownKillTimer: ReturnType<typeof setTimeout> | null }).shutdownKillTimer).toBeNull();
+    expect(mockChild.kill).toHaveBeenCalledTimes(1);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(sm.getStatus().pid).toBe(23456);
+
+    vi.useRealTimers();
+  });
+
+  it('spawn-per-turn child exit after shutdown clears the pending shutdown kill timer', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+    await sm.spawnSession();
+    await sm.sendTurn('hello');
+    await sm.shutdown();
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+
+    mockChild._exitCb?.(0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(graceMs + 1);
+
+    expect(mockChild.kill).toHaveBeenCalledTimes(1);
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect((sm as unknown as { shutdownKillTimer: ReturnType<typeof setTimeout> | null }).shutdownKillTimer).toBeNull();
+
+    vi.useRealTimers();
+  });
+
   it('leaked watchdog handlers do nothing once the session is inactive', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
