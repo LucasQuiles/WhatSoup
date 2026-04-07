@@ -306,6 +306,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
   actions.push(
     <button
       key="copy"
+      type="button"
       className="fc-action"
       aria-label="Copy to clipboard"
       onClick={(e) => {
@@ -316,7 +317,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
           .catch(() => onCopyResult?.(false));
       }}
     >
-      <Copy size={12} strokeWidth={2} />
+      <Copy size={12} strokeWidth={1.75} />
       <span className="fc-action__label">copy</span>
     </button>
   );
@@ -327,6 +328,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
     actions.push(
       <button
         key="jump"
+        type="button"
         className="fc-action"
         aria-label="Open conversation"
         onClick={(e) => {
@@ -334,7 +336,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
           onNavigate(`/inbox?line=${encodeURIComponent(inst)}&chat=${encodeURIComponent(ck)}`);
         }}
       >
-        <ExternalLink size={12} strokeWidth={2} />
+        <ExternalLink size={12} strokeWidth={1.75} />
         <span className="fc-action__label">open</span>
       </button>
     );
@@ -348,11 +350,12 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       actions.push(
         <button
           key="restart"
+          type="button"
           className="fc-action"
           aria-label={`Restart ${inst}`}
           onClick={(e) => { e.stopPropagation(); onRestart(inst); }}
         >
-          <RotateCw size={12} strokeWidth={2} />
+          <RotateCw size={12} strokeWidth={1.75} />
           <span className="fc-action__label">restart</span>
         </button>
       );
@@ -367,11 +370,12 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       actions.push(
         <button
           key="stop"
+          type="button"
           className="fc-action fc-action--danger"
           aria-label={`Stop ${inst} instance`}
           onClick={(e) => { e.stopPropagation(); onStop(inst); }}
         >
-          <Square size={12} strokeWidth={2} />
+          <Square size={12} strokeWidth={1.75} />
           <span className="fc-action__label">stop</span>
         </button>
       );

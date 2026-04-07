@@ -12,11 +12,10 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
     <div className="c-card overflow-hidden flex flex-col">
       {/* Toolbar with level filter pills */}
       <div
-        className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar"
-        style={{ borderBottom: 'var(--bw) solid var(--b1)', minHeight: 'var(--toolbar-h)' }}
+        className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
       >
         <span className="c-heading">Logs</span>
-        <div className="flex" style={{ gap: 'var(--sp-1)' }}>
+        <div className="flex gap-[var(--sp-1)]">
           {levels.map(l => (
             <FilterPill
               key={l}
@@ -32,24 +31,21 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
 
       {/* Log viewer */}
       <div
-        className="overflow-hidden font-mono"
-        style={{ background: 'var(--color-d1)', fontSize: 'var(--font-size-data)' }}
+        className="overflow-hidden font-mono bg-d1"
+        style={{ fontSize: 'var(--font-size-data)' }}
       >
         {filtered.map((log, i) => (
           <div
             key={`${log.timestamp}-${log.source}-${i}`}
-            className="flex gap-0 c-row-hover leading-relaxed"
-            style={{
-              borderBottom: 'var(--bw) solid var(--b1)',
-              background: levelLineBg[log.level],
-            }}
+            className="flex gap-0 c-row-hover leading-relaxed c-border-b"
+            style={{ background: levelLineBg[log.level] }}
           >
             {/* Timestamp */}
-            <div className="px-3 py-1 text-t5 flex-shrink-0" style={{ width: 'var(--log-col-time)', minWidth: 'var(--log-col-time)' }}>
+            <div className="px-3 py-1 text-t5 flex-shrink-0 w-[var(--log-col-time)] min-w-[var(--log-col-time)]">
               {formatTime(log.timestamp)}
             </div>
             {/* Level badge */}
-            <div className="px-2 py-1 flex-shrink-0 text-center" style={{ width: 'var(--log-col-level)', minWidth: 'var(--log-col-level)' }}>
+            <div className="px-2 py-1 flex-shrink-0 text-center w-[var(--log-col-level)] min-w-[var(--log-col-level)]">
               <span
                 className={`inline-block px-1.5 py-0.5 rounded font-medium ${levelColor[log.level]}`}
                 style={{ fontSize: 'var(--font-size-sm)', background: levelBg[log.level] }}
@@ -59,8 +55,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
             </div>
             {/* Source */}
             <div
-              className="px-2 py-1 text-t5 truncate flex-shrink-0"
-              style={{ width: 'var(--log-col-source)', minWidth: 'var(--log-col-source)' }}
+              className="px-2 py-1 text-t5 truncate flex-shrink-0 w-[var(--log-col-source)] min-w-[var(--log-col-source)]"
             >
               {log.source}
             </div>

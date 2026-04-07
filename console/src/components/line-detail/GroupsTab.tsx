@@ -49,7 +49,7 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
             onClick={() => setShowCreate(true)}
             className="c-btn c-btn-sm c-btn-primary font-mono"
           >
-            <Plus size={12} strokeWidth={2} />
+            <Plus size={12} strokeWidth={1.75} />
             Create Group
           </button>
         </div>

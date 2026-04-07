@@ -110,12 +110,24 @@
   --dot-badge: 5px;          /* mode badge dot */
   --dot-header: 10px;        /* status dot in line header */
   --avatar-sm: 32px;         /* access list, small contexts */
+  /* ═══ Avatar hue palette — 8 fixed colors for group/contact avatars ═══ */
+  --avatar-hue-0: hsl(0, 45%, 55%);
+  --avatar-hue-1: hsl(45, 45%, 55%);
+  --avatar-hue-2: hsl(90, 45%, 55%);
+  --avatar-hue-3: hsl(135, 45%, 55%);
+  --avatar-hue-4: hsl(180, 45%, 55%);
+  --avatar-hue-5: hsl(225, 45%, 55%);
+  --avatar-hue-6: hsl(270, 45%, 55%);
+  --avatar-hue-7: hsl(315, 45%, 55%);
   --avatar-md: 36px;         /* chat list items */
   --avatar-lg: 64px;         /* contact detail panel */
   --icon-empty: 40px;        /* empty state icon */
   --sparkline-h: 32px;       /* KPI sparkline height */
   --heatmap-cell: 18px;      /* active hours heatmap cell height */
   --heatmap-h: 64px;         /* active hours 24h bar chart height */
+  --chart-min-h: 220px;      /* metrics chart minimum height */
+  --contact-search-max-h: 200px; /* contact search results list max height */
+  --config-key-col: 140px;   /* config key-value grid key column width */
   --badge-unread: 20px;      /* chat unread count badge */
   /* ═══ Panel widths ═══ */
   --panel-chat-list: 288px;  /* inbox left panel */

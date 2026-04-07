@@ -141,7 +141,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
             size={6}
             fill={paused ? "var(--color-s-warn)" : "var(--color-s-ok)"}
             stroke="none"
-            style={{ marginLeft: "var(--sp-2)" }}
+            className="ml-[var(--sp-2)]"
           />
         </div>
 
@@ -208,7 +208,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
         title={`Stop ${stopTarget}?`}
         confirmLabel="Stop instance"
         confirmVariant="danger"
-        confirmIcon={<Square size={14} strokeWidth={2} />}
+        confirmIcon={<Square size={14} strokeWidth={1.75} />}
         onConfirm={confirmStop}
         onCancel={() => setStopTarget(null)}
       >

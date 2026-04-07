@@ -110,7 +110,7 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
             onClick={handleNew}
             className="c-btn c-btn-sm c-btn-primary font-mono"
           >
-            <Plus size={12} strokeWidth={2} />
+            <Plus size={12} strokeWidth={1.75} />
             New Scheduled Message
           </button>
         </div>
