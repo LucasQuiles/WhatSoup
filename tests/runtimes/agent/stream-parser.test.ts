@@ -271,6 +271,52 @@ describe('parseEvent', () => {
       const result = parseEvent(line({ type: 'result', is_error: true }));
       expect(result).toEqual({ type: 'result', text: null });
     });
+
+    // Token usage extraction — including cache tokens
+
+    it('extracts inputTokens and outputTokens from usage field', () => {
+      const result = parseEvent(line({
+        type: 'result', is_error: false,
+        usage: { input_tokens: 500, output_tokens: 100 },
+      }));
+      expect(result).toMatchObject({ type: 'result', inputTokens: 500, outputTokens: 100 });
+    });
+
+    it('sums cache_creation_input_tokens into inputTokens', () => {
+      const result = parseEvent(line({
+        type: 'result', is_error: false,
+        usage: { input_tokens: 3, cache_creation_input_tokens: 33243, output_tokens: 32 },
+      }));
+      expect(result).toMatchObject({ type: 'result', inputTokens: 33246, outputTokens: 32 });
+    });
+
+    it('sums cache_read_input_tokens into inputTokens', () => {
+      const result = parseEvent(line({
+        type: 'result', is_error: false,
+        usage: { input_tokens: 3, cache_read_input_tokens: 33346, output_tokens: 5 },
+      }));
+      expect(result).toMatchObject({ type: 'result', inputTokens: 33349, outputTokens: 5 });
+    });
+
+    it('sums both cache creation and read into inputTokens', () => {
+      const result = parseEvent(line({
+        type: 'result', is_error: false,
+        usage: {
+          input_tokens: 3,
+          cache_creation_input_tokens: 20084,
+          cache_read_input_tokens: 13262,
+          output_tokens: 5,
+        },
+      }));
+      expect(result).toMatchObject({ type: 'result', inputTokens: 33349, outputTokens: 5 });
+    });
+
+    it('returns undefined tokens when usage field is absent', () => {
+      const result = parseEvent(line({ type: 'result', is_error: false }));
+      expect(result).toMatchObject({ type: 'result' });
+      expect((result as any).inputTokens).toBeUndefined();
+      expect((result as any).outputTokens).toBeUndefined();
+    });
   });
 
   describe('unknown events', () => {
