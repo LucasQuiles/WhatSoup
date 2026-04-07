@@ -13,8 +13,8 @@ const VALID_RANGES = new Set(['24h', '7d', '30d']);
 /**
  * GET /api/metrics?range=24h|7d|30d
  *
- * Aggregate message volume across ALL instances into a single time series.
- * Returns { range, messageVolume: { bucket, inbound, outbound }[] }
+ * Aggregate metrics across ALL instances into combined time series.
+ * Returns messageVolume, tokenUsage, sessionActivity, and meta.
  */
 export function handleGetFleetMetrics(
   req: IncomingMessage,
@@ -29,23 +29,64 @@ export function handleGetFleetMetrics(
   }
 
   const instances = deps.discovery.getInstances();
-  const aggregated = new Map<string, { inbound: number; outbound: number }>();
+  const msgMap = new Map<string, { inbound: number; outbound: number; media: number }>();
+  const tokMap = new Map<string, { input: number; output: number }>();
+  const sesMap = new Map<string, { active: number; started: number }>();
+
+  let instancesQueried = 0;
+  let instancesFailed = 0;
+  let hasMessageData = false;
+  let hasTokenData = false;
+  let hasSessionData = false;
 
   for (const [, instance] of instances) {
+    instancesQueried++;
     const result = deps.dbReader.getMetrics(instance.name, instance.dbPath, { range });
-    if (!result.ok) continue;
+    if (!result.ok) {
+      instancesFailed++;
+      continue;
+    }
+
+    if (result.data.hasMessageData) hasMessageData = true;
+    if (result.data.hasTokenData) hasTokenData = true;
+    if (result.data.hasSessionData) hasSessionData = true;
 
     for (const bucket of result.data.messageVolume) {
-      const existing = aggregated.get(bucket.bucket) ?? { inbound: 0, outbound: 0 };
+      const existing = msgMap.get(bucket.bucket) ?? { inbound: 0, outbound: 0, media: 0 };
       existing.inbound += bucket.inbound;
       existing.outbound += bucket.outbound;
-      aggregated.set(bucket.bucket, existing);
+      existing.media += bucket.media;
+      msgMap.set(bucket.bucket, existing);
+    }
+
+    for (const bucket of result.data.tokenUsage) {
+      const existing = tokMap.get(bucket.bucket) ?? { input: 0, output: 0 };
+      existing.input += bucket.input;
+      existing.output += bucket.output;
+      tokMap.set(bucket.bucket, existing);
+    }
+
+    for (const bucket of result.data.sessionActivity) {
+      const existing = sesMap.get(bucket.bucket) ?? { active: 0, started: 0 };
+      existing.active += bucket.active;
+      existing.started += bucket.started;
+      sesMap.set(bucket.bucket, existing);
     }
   }
 
-  const messageVolume = Array.from(aggregated.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([bucket, v]) => ({ bucket, inbound: v.inbound, outbound: v.outbound }));
+  const sortEntries = <T>(map: Map<string, T>) =>
+    Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b));
 
-  jsonResponse(res, 200, { range, messageVolume });
+  const messageVolume = sortEntries(msgMap).map(([bucket, v]) => ({ bucket, ...v }));
+  const tokenUsage = sortEntries(tokMap).map(([bucket, v]) => ({ bucket, ...v }));
+  const sessionActivity = sortEntries(sesMap).map(([bucket, v]) => ({ bucket, ...v }));
+
+  jsonResponse(res, 200, {
+    range,
+    meta: { instancesQueried, instancesFailed, hasMessageData, hasTokenData, hasSessionData },
+    messageVolume,
+    tokenUsage,
+    sessionActivity,
+  });
 }
