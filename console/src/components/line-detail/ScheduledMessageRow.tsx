@@ -144,7 +144,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 type="button"
                 onClick={() => onEdit(message)}
                 aria-label="Edit scheduled message"
-                className="c-btn c-btn-xs c-btn-ghost font-mono"
+                className="c-btn c-btn-sm c-btn-ghost font-mono"
               >
                 <Pencil size={15} strokeWidth={1.75} />
               </button>
@@ -153,7 +153,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
                 onClick={() => onCancel(message.id)}
                 disabled={cancelling === message.id}
                 aria-label={`Cancel scheduled message to ${message.chatName ?? message.chatJid}`}
-                className="c-btn c-btn-xs c-btn-danger font-mono"
+                className="c-btn c-btn-sm c-btn-danger font-mono"
               >
                 {cancelling === message.id
                   ? <Loader2 size={15} className="animate-spin" />
@@ -165,7 +165,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             type="button"
             onClick={() => onDuplicate(message)}
             aria-label="Duplicate as new scheduled message"
-            className="c-btn c-btn-xs c-btn-ghost font-mono"
+            className="c-btn c-btn-sm c-btn-ghost font-mono"
             title="Duplicate"
           >
             <Copy size={15} strokeWidth={1.75} />
@@ -175,7 +175,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
             <button
               type="button"
               onClick={() => setExpanded(!expanded)}
-              className="c-btn c-btn-xs c-btn-ghost"
+              className="c-btn c-btn-sm c-btn-ghost"
               aria-label={expanded ? 'Collapse details' : 'Expand details'}
             >
               {expanded

@@ -62,7 +62,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
 
         {open && (
           <div
-            className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide bg-d6 c-border-b2 shadow-[var(--card-shadow)]"
+            className="absolute top-full left-0 right-0 z-10 max-h-64 overflow-auto scrollbar-hide bg-d6 c-border-b2 shadow-[var(--shadow-md)]"
             style={{
               borderTop: 'none',
               borderRadius: '0 0 var(--radius-md) var(--radius-md)',
@@ -111,7 +111,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
 
       {open && (
         <div
-          className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto min-w-[var(--dropdown-min-w)] bg-d6 c-border-b2 rounded-md shadow-[var(--card-shadow)]"
+          className="absolute top-full left-0 mt-1 z-20 max-h-64 overflow-auto min-w-[var(--dropdown-min-w)] bg-d6 c-border-b2 rounded-md shadow-[var(--shadow-md)]"
         >
           {lines.map(line => (
             <button

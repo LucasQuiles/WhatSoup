@@ -333,7 +333,7 @@ function ParticipantsTab({
               type="button"
               onClick={handleAdd}
               disabled={adding}
-              className="c-btn c-btn-xs c-btn-primary font-mono mt-[var(--sp-2)]"
+              className="c-btn c-btn-sm c-btn-primary font-mono mt-[var(--sp-2)]"
             >
               <UserPlus size={15} strokeWidth={1.75} /> {adding ? 'Adding...' : `Add ${addContacts.length}`}
             </button>
@@ -354,14 +354,14 @@ function ParticipantsTab({
                 <button
                   type="button"
                   onClick={() => handleRequestAction(req.jid, 'add')}
-                  className="c-btn c-btn-xs c-btn-primary font-mono"
+                  className="c-btn c-btn-sm c-btn-primary font-mono"
                 >
                   Approve
                 </button>
                 <button
                   type="button"
                   onClick={() => handleRequestAction(req.jid, 'remove')}
-                  className="c-btn c-btn-xs c-btn-danger font-mono"
+                  className="c-btn c-btn-sm c-btn-danger font-mono"
                 >
                   Reject
                 </button>
@@ -410,7 +410,7 @@ function ParticipantsTab({
                   <button
                     type="button"
                     onClick={() => handleToggleAdmin(p)}
-                    className="c-btn c-btn-xs c-btn-ghost font-mono"
+                    className="c-btn c-btn-sm c-btn-ghost font-mono"
                     title={p.admin ? 'Demote' : 'Promote to admin'}
                   >
                     {p.admin ? <ShieldOff size={15} strokeWidth={1.75} /> : <ShieldCheck size={15} strokeWidth={1.75} />}
@@ -418,7 +418,7 @@ function ParticipantsTab({
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(p)}
-                    className="c-btn c-btn-xs c-btn-danger font-mono"
+                    className="c-btn c-btn-sm c-btn-danger font-mono"
                     title="Remove participant"
                   >
                     <UserMinus size={15} strokeWidth={1.75} />

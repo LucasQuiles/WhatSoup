@@ -41,8 +41,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
-        className="overflow-hidden bg-d2 rounded-lg shadow-[var(--shadow-lg)] w-[var(--panel-confirm)] max-w-[90%] border-[var(--b2)]"
-        style={{ borderWidth: 'var(--bw)', borderStyle: 'solid' }}
+        className="overflow-hidden bg-d2 rounded-lg shadow-[var(--shadow-lg)] w-[var(--panel-confirm)] max-w-[90%] c-border-b2"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
