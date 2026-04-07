@@ -36,13 +36,13 @@ export function FleetTokenChart({ data, range = '24h' }: FleetTokenChartProps) {
           axisLine={false}
           width={36}
           allowDecimals={false}
-          tickFormatter={(v) => formatCompact(v)}
+          tickFormatter={(v) => formatCompact(Number(v) || 0)}
         />
         <Tooltip
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => new Date(String(v)).toLocaleString()}
           formatter={(value, name) => [
-            Number(value).toLocaleString(),
+            (Number(value) || 0).toLocaleString(),
             String(name),
           ]}
         />
