@@ -3,7 +3,7 @@
 // In-memory state — resets on process restart (intentional).
 
 import { createChildLogger } from '../logger.ts';
-import { JID_GROUP } from './jid-constants.ts';
+import { isGroupJid } from './jid-constants.ts';
 
 const log = createChildLogger('echo-guard');
 
@@ -16,7 +16,7 @@ const groupCooldowns = new Map<string, number>();
 
 export function canSendToGroup(chatJid: string, cfg: EchoGuardConfig): boolean {
   if (!cfg.enabled) return true;
-  if (!chatJid.endsWith(JID_GROUP)) return true;
+  if (!isGroupJid(chatJid)) return true;
 
   const entry = groupCooldowns.get(chatJid);
   if (!entry) return true;
@@ -30,7 +30,7 @@ export function canSendToGroup(chatJid: string, cfg: EchoGuardConfig): boolean {
 }
 
 export function recordGroupOutbound(chatJid: string): void {
-  if (!chatJid.endsWith(JID_GROUP)) return;
+  if (!isGroupJid(chatJid)) return;
   groupCooldowns.set(chatJid, Date.now());
 }
 

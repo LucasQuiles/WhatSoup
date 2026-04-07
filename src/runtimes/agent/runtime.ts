@@ -35,7 +35,7 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
-import { toPersonalJid, JID_GROUP } from '../../core/jid-constants.ts';
+import { toPersonalJid, JID_GROUP, isGroupJid } from '../../core/jid-constants.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
@@ -1138,7 +1138,7 @@ export class AgentRuntime implements Runtime {
         // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
         // the ingest pipeline's sibling filter (access-policy.ts:121-124), causing
         // unsolicited messages. Group sessions start fresh on the next @mention.
-        if (cp.conversation_key.endsWith('_at_g.us')) {
+        if (isGroupConversationKey(cp.conversation_key)) {
           log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
           this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
           continue;
@@ -1270,7 +1270,7 @@ export class AgentRuntime implements Runtime {
       // would remain typed as string | null even though we've checked it.
       const resumeChatJid: string = priorSession.chat_jid;
       const resumeSessionId: string = priorSession.session_id;
-      const isGroupChat = resumeChatJid.endsWith(JID_GROUP);
+      const isGroupChat = isGroupJid(resumeChatJid);
 
       // ── C1/C2/I2: Hoist group check before spawn/queue creation ──────────
       if (isGroupChat && !this.shared) {

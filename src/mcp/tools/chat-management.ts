@@ -10,6 +10,7 @@ import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
+import { nowUnixSec } from '../../fleet/time-utils.ts';
 
 const log = createChildLogger('chat-management');
 
@@ -439,7 +440,7 @@ function makeMuteChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclarat
       }
 
       if (mute) {
-        const muteEndTime = until ?? (Date.now() / 1000 + 8 * 3600); // default 8h
+        const muteEndTime = until ?? (nowUnixSec() + 8 * 3600); // default 8h
         await sock.chatModify({ mute: muteEndTime }, jid);
       } else {
         await sock.chatModify({ mute: null }, jid);

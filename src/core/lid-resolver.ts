@@ -19,7 +19,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
-import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid } from './jid-constants.ts';
+import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
 import type { Database } from './database.ts';
 
 const log = createChildLogger('lid-resolver');
@@ -351,8 +351,7 @@ export function resolveLid(db: Database, rawLid: string): string | null {
  * colon-device suffix before lookup.
  */
 export function resolveLidToJid(db: Database, rawLid: string): string | null {
-  const lid = normalizeLid(bareNumber(rawLid));
-  const phone = resolveLid(db, lid);
+  const phone = resolveLid(db, bareNumber(rawLid));
   if (!phone) return null;
   return `${phone}@${DOMAIN_PERSONAL}`;
 }
@@ -386,19 +385,19 @@ export function getAllLidMappings(db: Database): Map<string, string> {
  * NEVER throws. If the DB lookup fails or JID is unrecognized, returns input
  * unchanged — worst case is old drift behavior, never message loss.
  */
-export function canonicalizeChatJid(chatJid: string, db?: { raw: any } | null): string {
+export function canonicalizeChatJid(chatJid: string, db?: Database | null): string {
   if (chatJid.endsWith(`@${DOMAIN_GROUP}`)) return chatJid;
   if (chatJid.endsWith(`@${DOMAIN_PERSONAL}`)) return chatJid;
 
   if (chatJid.endsWith(`@${DOMAIN_LID}`)) {
     if (!db) return chatJid;
     try {
-      const resolved = resolveLidToJid(db as any, chatJid);
+      const resolved = resolveLidToJid(db, chatJid);
       return resolved ?? chatJid;
     } catch {
       // DB error — graceful degradation
+      return chatJid;
     }
-    return chatJid;
   }
 
   return chatJid;

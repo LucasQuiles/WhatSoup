@@ -20,8 +20,6 @@ export const JID_PERSONAL = `@${DOMAIN_PERSONAL}`;
 export const JID_LID = `@${DOMAIN_LID}`;
 /** WhatsApp group chat JID suffix */
 export const JID_GROUP = `@${DOMAIN_GROUP}`;
-/** WhatsApp newsletter/channel JID suffix */
-// JID_NEWSLETTER removed — no newsletter support yet
 
 // ── JID builders ────────────────────────────────────────────────────────────
 
