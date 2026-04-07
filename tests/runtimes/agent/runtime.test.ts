@@ -79,9 +79,8 @@ const { mockGetActiveSession } = vi.hoisted(() => {
   return { mockGetActiveSession: vi.fn(() => null as ActiveSessionRow) };
 });
 
-const { mockBackfillWorkspaceKeys, mockSweepOrphanedSessions, mockGetResumableSessionForChat } = vi.hoisted(() => ({
+const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat } = vi.hoisted(() => ({
   mockBackfillWorkspaceKeys: vi.fn(),
-  mockSweepOrphanedSessions: vi.fn(() => [] as { id: number; claude_pid: number }[]),
   mockGetResumableSessionForChat: vi.fn(() => null as { id: number; session_id: string; chat_jid: string } | null),
 }));
 
@@ -95,7 +94,6 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getActiveSession: mockGetActiveSession,
   backfillWorkspaceKeys: mockBackfillWorkspaceKeys,
   markOrphaned: vi.fn(),
-  sweepOrphanedSessions: mockSweepOrphanedSessions,
   getResumableSessionForChat: mockGetResumableSessionForChat,
   backfillSessionProvider: vi.fn(),
 }));
@@ -105,7 +103,7 @@ vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
 }));
 
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   SessionManager: vi.fn().mockImplementation(function (
     opts: {
       onEvent: (event: AgentEvent) => void;
@@ -129,7 +127,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
 }));
 
 vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   OutboundQueue: vi.fn().mockImplementation(function () {
     return mockQueue;
   }),
@@ -208,7 +206,7 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
     stop: vi.fn(),
     updateDeliveryJid: vi.fn(),
   };
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   const MockWhatSoupSocketServer = vi.fn().mockImplementation(function () {
     return mockSocketServerInstance;
   });
@@ -388,7 +386,6 @@ describe('AgentRuntime', () => {
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
     mockGetActiveSession.mockReturnValue(null);
-    mockSweepOrphanedSessions.mockReturnValue([]);
     mockGetResumableSessionForChat.mockReturnValue(null);
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, chatJid: string) => {
       const key = chatJid.replace('@s.whatsapp.net', '').replace('@lid', '');
@@ -2474,7 +2471,7 @@ describe('AgentRuntime', () => {
     // Track which chatJids OutboundQueue was constructed with
     const constructedFor: string[] = [];
     // Must use 'function' (not arrow) — arrow functions cannot be constructors
-    // eslint-disable-next-line prefer-arrow-callback
+    // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
     (MockOutboundQueueCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
       _messenger: unknown,
       chatJid: string,
@@ -2503,7 +2500,7 @@ describe('AgentRuntime', () => {
 
     const constructedFor: string[] = [];
     // Must use 'function' (not arrow) — arrow functions cannot be constructors
-    // eslint-disable-next-line prefer-arrow-callback
+    // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
     (MockOutboundQueueCtor as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (
       _messenger: unknown,
       chatJid: string,

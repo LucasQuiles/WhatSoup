@@ -16,7 +16,6 @@ import {
   getActiveSession,
   backfillWorkspaceKeys,
   markOrphaned,
-  sweepOrphanedSessions,
   getResumableSessionForChat,
   accumulateSessionTokens,
   insertTokenEvent,

@@ -78,7 +78,6 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getActiveSession: vi.fn(() => null),
   backfillWorkspaceKeys: vi.fn(),
   markOrphaned: vi.fn(),
-  sweepOrphanedSessions: vi.fn(() => []),
   getResumableSessionForChat: vi.fn(() => null),
   backfillSessionProvider: vi.fn(),
 }));
