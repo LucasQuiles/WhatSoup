@@ -241,13 +241,16 @@ body::before {
   inset: 0;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.015'/%3E%3C/svg%3E");
   pointer-events: none;
-  z-index: 9999;
+  z-index: -1;
 }
 
 #root {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  isolation: isolate;
+  position: relative;
+  z-index: 0;
 }
 
 /* Thin scrollbar — visible on panels when needed */
@@ -833,7 +836,7 @@ body::before {
 .c-dialog {
   overflow: hidden;
   background: var(--color-d1);
-  border: var(--bw) solid var(--b2);
+  border: var(--bw) solid var(--b1);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
 }
@@ -1045,7 +1048,7 @@ body::before {
 .wizard-accent-scope input:focus-visible,
 .wizard-accent-scope select:focus-visible,
 .wizard-accent-scope textarea:focus-visible {
-  border-color: var(--wizard-accent) !important;
+  border-color: var(--wizard-accent);
   box-shadow: 0 0 0 var(--bw-focus) color-mix(in srgb, var(--wizard-accent) 20%, transparent),
               0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent) 10%, transparent);
 }
@@ -1079,7 +1082,7 @@ textarea:focus-visible,
 a:focus-visible {
   outline: none;
   box-shadow: 0 0 0 var(--bw-focus) var(--m-cht-wash), 0 0 0 var(--bw-focus-outer) var(--m-cht-soft);
-  border-color: var(--color-m-cht) !important;
+  border-color: var(--color-m-cht);
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 
