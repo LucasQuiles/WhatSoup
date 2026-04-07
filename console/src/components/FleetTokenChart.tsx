@@ -46,9 +46,9 @@ export function FleetTokenChart({ data, range = '24h' }: FleetTokenChartProps) {
         <Tooltip
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => new Date(String(v)).toLocaleString()}
-          formatter={(value: number, name: string) => [
-            value.toLocaleString(),
-            name,
+          formatter={(value, name) => [
+            Number(value).toLocaleString(),
+            String(name),
           ]}
         />
         <Area

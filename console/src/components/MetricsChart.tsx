@@ -35,7 +35,7 @@ export function MetricsChart({ data }: { data: MessageVolumeBucket[] }) {
             tickLine={false}
             axisLine={{ stroke: 'var(--b1)' }}
             minTickGap={24}
-            tickFormatter={formatBucketLabel}
+            tickFormatter={(v) => formatBucketLabel(v)}
           />
           <YAxis
             tick={AXIS_TICK}
