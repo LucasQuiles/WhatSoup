@@ -149,8 +149,10 @@ const SoupKitchen: FC = () => {
       result = result.filter((l) => (l.unread ?? 0) > 0);
     else if (activeKpi === "agent")
       result = result.filter((l) => l.mode === "agent");
-    else if (activeKpi === "sent" || activeKpi === "received")
-      result = result.filter((l) => (l.messagesToday ?? 0) > 0);
+    else if (activeKpi === "sent")
+      result = result.filter((l) => (l.messageStats?.sent ?? 0) > 0);
+    else if (activeKpi === "received")
+      result = result.filter((l) => (l.messageStats?.received ?? 0) > 0);
     else if (activeKpi === "media")
       result = result.filter((l) => {
         const s = l.messageStats;
