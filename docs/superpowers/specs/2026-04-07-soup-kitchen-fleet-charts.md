@@ -44,11 +44,27 @@ CREATE INDEX idx_agent_sessions_started ON agent_sessions(started_at);
 CREATE INDEX idx_agent_sessions_ended ON agent_sessions(ended_at);
 ```
 
-**Writer:** `src/runtimes/agent/session-db.ts` — set `ended_at = new Date().toISOString()` on terminal status transitions (`completed`, `crashed`, `timeout`, `cancelled`). Null means session is still active.
+**Writer:** `src/runtimes/agent/session-db.ts` — set `ended_at = new Date().toISOString()` on any terminal status transition. The canonical rule: **any status that means the session is no longer running sets `ended_at`**. The full list of terminal statuses from the live codebase:
+
+| Status | Source | Sets `ended_at`? |
+|--------|--------|-----------------|
+| `ended` | `session.ts` normal completion | Yes |
+| `completed` | legacy alias | Yes |
+| `crashed` | unhandled error | Yes |
+| `resume_failed` | resume attempt failed | Yes |
+| `orphaned` | PID gone, no clean exit | Yes |
+| `suspended` | user-initiated pause | **No** — session may resume, leave `ended_at` null |
+| `active` | running | No (initial state) |
+
+If a `suspended` session later transitions to `ended` or `crashed`, `ended_at` is set at that point. If a suspended session resumes (back to `active`), `ended_at` remains null.
 
 ### 2.3 Migration
 
-Add a new migration entry in `src/core/database.ts` at the next schema version. The migration creates the `agent_token_events` table with indexes and adds the `ended_at` column + indexes to `agent_sessions`.
+Add a new migration entry in `src/core/database.ts` at the next schema version. The migration:
+1. Creates the `agent_token_events` table with both indexes.
+2. Adds the `ended_at TEXT` column to `agent_sessions`.
+3. Creates both `agent_sessions` indexes (`started_at`, `ended_at`).
+4. Backfills `ended_at` for all existing terminal-status sessions: `UPDATE agent_sessions SET ended_at = COALESCE(last_message_at, started_at) WHERE status IN ('ended', 'completed', 'crashed', 'resume_failed', 'orphaned') AND ended_at IS NULL`.
 
 ---
 
@@ -56,22 +72,32 @@ Add a new migration entry in `src/core/database.ts` at the next schema version. 
 
 ### 3.1 Extended Hourly Collector
 
-Extend `src/core/metrics-collector.ts` to collect 5 new metrics per hour window, in addition to the existing 3 (`messages_in`, `messages_out`, `messages_media`):
+Extend `src/core/metrics-collector.ts` to collect 6 new metrics per hour window, in addition to the existing 3 (`messages_in`, `messages_out`, `messages_media`):
 
 | Metric | Source | Query |
 |--------|--------|-------|
-| `tokens_in` | `agent_token_events` | `SUM(input_tokens) WHERE timestamp >= start AND timestamp < end` |
-| `tokens_out` | `agent_token_events` | `SUM(output_tokens) WHERE timestamp >= start AND timestamp < end` |
-| `sessions_started` | `agent_sessions` | `COUNT(*) WHERE started_at >= start AND started_at < end` |
-| `sessions_active` | `agent_sessions` | `COUNT(*) WHERE started_at < end AND (ended_at IS NULL OR ended_at > start)` |
+| `agent_tokens_in` | `agent_token_events` | `SUM(input_tokens) WHERE timestamp >= start AND timestamp < end` |
+| `agent_tokens_out` | `agent_token_events` | `SUM(output_tokens) WHERE timestamp >= start AND timestamp < end` |
+| `chat_tokens_in` | `messages` | `SUM(input_tokens) WHERE timestamp >= start AND timestamp < end AND input_tokens > 0` |
+| `chat_tokens_out` | `messages` | `SUM(output_tokens) WHERE timestamp >= start AND timestamp < end AND output_tokens > 0` |
+| `sessions_started` | `agent_sessions` | `COUNT(*) WHERE unixepoch(started_at) >= start AND unixepoch(started_at) < end` |
+| `sessions_active` | `agent_sessions` | `COUNT(*) WHERE unixepoch(started_at) < end AND (ended_at IS NULL OR unixepoch(ended_at) > start)` |
 
-All timestamps are unix seconds. `started_at` and `last_message_at` in `agent_sessions` are stored as ISO TEXT strings. Queries must use `unixepoch(started_at)` for comparison. The new `ended_at` column should also be TEXT (ISO string) for consistency with the existing schema, not INTEGER.
+All comparison timestamps are unix seconds. `started_at` and `ended_at` in `agent_sessions` are ISO TEXT strings — queries use `unixepoch()` for comparison.
 
-`messages_media` is already collected but not read. No collector change needed for it.
+`messages_media` is already collected but not read by `db-reader.ts`. No collector change needed for it.
+
+**Token chart scope:** The token chart represents **total fleet token consumption** — both agent tokens (from `agent_token_events`) and chat tokens (from `messages.input_tokens` / `messages.output_tokens`). The API sums `agent_tokens_in + chat_tokens_in` into `input` and `agent_tokens_out + chat_tokens_out` into `output` in the `TokenUsageBucket` response. This matches the existing fleet token totals shown elsewhere in the UI (which combine both runtimes in `src/fleet/routes/lines.ts:189`).
 
 ### 3.2 Backfill
 
-Extend `backfillMetrics()` to also backfill the new metrics for historical hours. The backfill should scan `agent_token_events.timestamp` and `agent_sessions.started_at` for hour buckets with activity, same pattern as the existing message backfill.
+Extend `backfillMetrics()` to backfill the new metrics. The backfill strategy differs by metric type:
+
+**Message and token metrics** (`messages_in/out/media`, `agent_tokens_in/out`, `chat_tokens_in/out`): Scan source tables for hours with activity (existing pattern — only materialize hours that have data).
+
+**Session metrics** (`sessions_started`, `sessions_active`): **Iterate every hour in the lookback window**, not just hours with detected activity. This is required because `sessions_active` is an overlap calculation — a session running from 01:00 to 05:00 must register as active in hours 02, 03, and 04 even if no events occurred in those hours. Skipping empty hours would produce false zeroes after densification.
+
+The backfill runs inside a transaction (existing pattern). For session metrics, the full-window iteration means up to 720 hours for a 30-day backfill — acceptable since the queries are indexed.
 
 ### 3.3 Deferred: `metrics_daily`
 
@@ -83,7 +109,7 @@ Nightly rollup of hourly buckets into daily aggregates. **Explicitly deferred** 
 
 ### 4.1 Extended Response
 
-Extend `GET /api/metrics?range=24h|7d|30d` in `src/fleet/routes/fleet-metrics.ts`. The handler already iterates instances and sums `messages_in` / `messages_out` per bucket. Extend to also sum `messages_media`, `tokens_in`, `tokens_out`, `sessions_started`, `sessions_active`.
+Extend `GET /api/metrics?range=24h|7d|30d` in `src/fleet/routes/fleet-metrics.ts`. The handler already iterates instances and sums `messages_in` / `messages_out` per bucket. Extend to also sum `messages_media`, `agent_tokens_in + chat_tokens_in`, `agent_tokens_out + chat_tokens_out`, `sessions_started`, `sessions_active`.
 
 **Response shape:**
 
@@ -104,8 +130,8 @@ interface MessageVolumeBucket {
 
 interface TokenUsageBucket {
   bucket: string;
-  input: number;      // tokens_in
-  output: number;     // tokens_out
+  input: number;      // agent_tokens_in + chat_tokens_in
+  output: number;     // agent_tokens_out + chat_tokens_out
 }
 
 interface SessionActivityBucket {
@@ -117,23 +143,35 @@ interface SessionActivityBucket {
 
 ### 4.2 Bucket Densification
 
-The current `db-reader.ts` query returns only buckets that have data. The API must emit zero-filled buckets for the full selected range:
+**Owned by `src/fleet/db-reader.ts`** so both fleet and per-line routes share it. The reader returns zero-filled buckets for the full selected range:
 
 - `24h`: 24 hourly buckets ending at the current hour
 - `7d`: 168 hourly buckets (7 x 24)
 - `30d`: 720 hourly buckets (30 x 24)
 
-Generate the full bucket sequence in the handler, left-join with the DB results, default missing values to 0. This ensures charts render continuous lines without gaps.
+Implementation: generate the full bucket sequence, build a `Map<string, values>` from DB results, iterate the sequence and emit DB values or zeroes. This replaces the current sparse-return behavior.
 
 ### 4.3 Per-Line Metrics
 
-The per-line endpoint `GET /api/lines/:name/metrics` in `src/fleet/routes/metrics.ts` should also be extended with the same new fields. This is not required for the Soup Kitchen charts but maintains API consistency.
+The per-line endpoint `GET /api/lines/:name/metrics` in `src/fleet/routes/metrics.ts` gains the same new response fields. `LineMetrics` type must also be extended:
+
+```ts
+interface LineMetrics {
+  range: MetricsRange;
+  messageVolume: MessageVolumeBucket[];
+  tokenUsage: TokenUsageBucket[];            // NEW
+  sessionActivity: SessionActivityBucket[];  // NEW
+  activeHours: number[][];                   // existing
+}
+```
+
+Densification is shared from `db-reader.ts`.
 
 ---
 
 ## 5. Frontend: Types
 
-Update `src/types.ts`:
+Update `console/src/types.ts`:
 
 ```ts
 // Extend existing
@@ -164,6 +202,15 @@ interface FleetMetrics {
   tokenUsage: TokenUsageBucket[];           // NEW
   sessionActivity: SessionActivityBucket[]; // NEW
 }
+
+// Extend existing
+interface LineMetrics {
+  range: MetricsRange;
+  messageVolume: MessageVolumeBucket[];
+  tokenUsage: TokenUsageBucket[];           // NEW
+  sessionActivity: SessionActivityBucket[]; // NEW
+  activeHours: number[][];
+}
 ```
 
 ---
@@ -189,6 +236,7 @@ New state: `expandedChart: 'messages' | 'tokens' | 'sessions' | null`. Separate 
 - Clicking a KPI card associated with a chart sets `expandedChart` to that chart's key. The associated chart expands to full width; the other two collapse to zero width with a CSS transition.
 - Clicking the same KPI card again (or clicking the expanded chart's collapse button) resets `expandedChart` to `null`, restoring the 3-up row.
 - The expanded chart gets more height (200px) for detail.
+- Each chart panel header is also clickable to toggle expansion (for the token chart which has no KPI card).
 
 **KPI-to-chart mapping:**
 
@@ -202,11 +250,9 @@ New state: `expandedChart: 'messages' | 'tokens' | 'sessions' | null`. Separate 
 | Unread | none | — |
 | Media Processed | Message Volume | `'messages'` |
 
-Token Usage has no KPI card currently. Options: (a) add a "Tokens Used" KPI card, or (b) token chart expands only via direct click on the chart panel header. Going with (b) — no new KPI card. Each chart panel has a clickable header that toggles expansion.
-
 ### 6.3 Range Picker
 
-A row of filter pills (`24h`, `7d`, `30d`) positioned above the chart row. Reuse the `FilterPill` component pattern from MetricsTab. State: `chartRange: MetricsRange` defaulting to `'24h'`. Passed to `useFleetMetrics(chartRange)`.
+A row of filter pills (`24h`, `7d`, `30d`) positioned above the chart row. Reuse the `FilterPill` component pattern from `console/src/components/line-detail/MetricsTab.tsx:28`. State: `chartRange: MetricsRange` defaulting to `'24h'`. Passed to `useFleetMetrics(chartRange)`.
 
 ### 6.4 Sparklines on KPI Cards
 
@@ -243,7 +289,7 @@ Extend existing component to accept `media` field. Add a third `<Area>` series f
 
 ### 7.3 FleetTokenChart (New)
 
-New component: `src/components/FleetTokenChart.tsx`
+New component: `console/src/components/FleetTokenChart.tsx`
 
 - `AreaChart` with two series: output tokens (violet solid) and input tokens (violet dashed, lower opacity)
 - Same axis configuration as `FleetMetricsChart` (shared `AXIS_TICK`, `formatBucketLabel`)
@@ -251,7 +297,7 @@ New component: `src/components/FleetTokenChart.tsx`
 
 ### 7.4 FleetSessionChart (New)
 
-New component: `src/components/FleetSessionChart.tsx`
+New component: `console/src/components/FleetSessionChart.tsx`
 
 - Composite chart: `ComposedChart` with `<Area>` for active session count (green fill) and `<Bar>` for sessions started (green bars, narrower)
 - Same axis configuration
@@ -259,7 +305,7 @@ New component: `src/components/FleetSessionChart.tsx`
 
 ### 7.5 Shared Chart Infrastructure
 
-Extract into `chart-utils.ts`:
+Extract into `console/src/lib/chart-utils.ts`:
 - Shared tooltip content style object (currently inlined in each chart)
 - Chart margin constant
 - `formatBucketLabel` already exists — extend for 7d/30d ranges (show "Mon", "Tue" or "Mar 29" instead of hour-only)
@@ -272,31 +318,30 @@ Extract into `chart-utils.ts`:
 
 | File | Action |
 |------|--------|
-| `src/core/database.ts` | New migration: `agent_token_events` table + indexes, `agent_sessions.ended_at` column + indexes |
-| `src/runtimes/agent/session-db.ts` | Insert `agent_token_events` row on `token_usage` events; set `ended_at` on terminal transitions |
-| `src/core/metrics-collector.ts` | Add `tokens_in`, `tokens_out`, `sessions_started`, `sessions_active` collection + backfill |
-| `src/fleet/db-reader.ts` | Extend metrics query to read all 7 metrics; add bucket densification |
+| `src/core/database.ts` | New migration: `agent_token_events` table + indexes, `agent_sessions.ended_at` column + indexes, backfill existing terminal sessions |
+| `src/runtimes/agent/session-db.ts` | Insert `agent_token_events` row on `token_usage` events; set `ended_at` on terminal transitions (ended, crashed, resume_failed, orphaned) |
+| `src/core/metrics-collector.ts` | Add `agent_tokens_in/out`, `chat_tokens_in/out`, `sessions_started`, `sessions_active` collection; full-window backfill for session metrics |
+| `src/fleet/db-reader.ts` | Extend metrics query to read all 9 metrics; add shared bucket densification |
 | `src/fleet/routes/fleet-metrics.ts` | Extend response with `tokenUsage`, `sessionActivity`; add `media` to `messageVolume` |
-| `src/fleet/routes/metrics.ts` | Same extension for per-line endpoint (consistency) |
+| `src/fleet/routes/metrics.ts` | Same extension for per-line endpoint |
 
 ### Frontend (new/modified)
 
 | File | Action |
 |------|--------|
-| `src/types.ts` | Add `TokenUsageBucket`, `SessionActivityBucket`; extend `MessageVolumeBucket` with `media`; extend `FleetMetrics` |
-| `src/components/FleetMetricsChart.tsx` | Add `media` area series in amber |
-| `src/components/FleetTokenChart.tsx` | **New** — token usage area chart |
-| `src/components/FleetSessionChart.tsx` | **New** — session activity composed chart |
-| `src/pages/SoupKitchen.tsx` | Add `expandedChart` state, range picker, 3-up chart row with expansion, sparkline wiring |
-| `src/lib/chart-utils.ts` | Extract shared tooltip style, add multi-range `formatBucketLabel` |
-| `src/lib/compute-kpis.ts` | Add `totalTokens` KPI from fleet metrics (optional) |
-| `src/hooks/use-metrics.ts` | No change needed — `useFleetMetrics` already accepts `MetricsRange` |
+| `console/src/types.ts` | Add `TokenUsageBucket`, `SessionActivityBucket`; extend `MessageVolumeBucket` with `media`; extend `FleetMetrics` and `LineMetrics` |
+| `console/src/components/FleetMetricsChart.tsx` | Add `media` area series in amber |
+| `console/src/components/FleetTokenChart.tsx` | **New** — token usage area chart |
+| `console/src/components/FleetSessionChart.tsx` | **New** — session activity composed chart |
+| `console/src/pages/SoupKitchen.tsx` | Add `expandedChart` state, range picker, 3-up chart row with expansion, sparkline wiring |
+| `console/src/lib/chart-utils.ts` | Extract shared tooltip style, add multi-range `formatBucketLabel` |
+| `console/src/lib/compute-kpis.ts` | Extend sparkline derivation for media + sessions |
 
 ---
 
 ## 9. Out of Scope
 
-- `metrics_daily` nightly rollup — deferred to a future phase
+- `metrics_daily` nightly rollup — explicitly deferred
 - Token budget / cost tracking — separate feature
-- Per-line token/session charts on the LineDetail page — natural follow-up but not this phase
+- Per-line token/session charts on LineDetail page — natural follow-up but not this phase
 - Fleet-wide `activeHours` heatmap aggregation — separate feature
