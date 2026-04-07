@@ -310,7 +310,7 @@ export default function LineDetail() {
                 setMetricsRange={setMetricsRange}
                 lineName={name}
                 line={line}
-                onRetry={() => refetchMetrics()}
+                onRetry={refetchMetrics}
               />
             )}
             {activeTab === 'scheduled' && (

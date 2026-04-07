@@ -41,9 +41,6 @@ export function formatTooltipLabel(bucket: string, range?: MetricsRange): string
   const d = new Date(bucket);
   if (isNaN(d.getTime())) return String(bucket);
   switch (range) {
-    case '24h':
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-        ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     case '7d':
       return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     case '30d':
