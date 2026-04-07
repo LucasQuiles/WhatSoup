@@ -4,14 +4,15 @@ import { deriveFleetMessageSparklines } from '../../console/src/lib/metrics-spar
 describe('deriveFleetMessageSparklines', () => {
   it('sorts buckets and normalizes inbound/outbound series independently', () => {
     const result = deriveFleetMessageSparklines([
-      { bucket: '2026-04-05T19:00:00.000Z', inbound: 2, outbound: 3 },
-      { bucket: '2026-04-05T17:00:00.000Z', inbound: 1, outbound: 6 },
-      { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 0 },
+      { bucket: '2026-04-05T19:00:00.000Z', inbound: 2, outbound: 3, media: 0 },
+      { bucket: '2026-04-05T17:00:00.000Z', inbound: 1, outbound: 6, media: 2 },
+      { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 0, media: 1 },
     ]);
 
     expect(result).toEqual({
       inbound: [0.25, 1, 0.5],
       outbound: [1, 0, 0.5],
+      media: [1, 0.5, 0],
     });
   });
 

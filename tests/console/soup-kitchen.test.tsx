@@ -450,9 +450,10 @@ describe('SoupKitchen sparkline integration', () => {
     expect(sparklines!.inbound).toEqual([1, 0.5, 0]);
   });
 
-  it('passes useFleetMetrics with 24h range by default', () => {
+  it('passes useFleetMetrics with chartRange state (default 24h)', () => {
     const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain("useFleetMetrics('24h')");
+    expect(source).toContain("useFleetMetrics(chartRange)");
+    expect(source).toContain('useState<MetricsRange>("24h")');
   });
 });
 
@@ -499,7 +500,10 @@ describe('SoupKitchen structural composition', () => {
     expect(source).toContain('className="flex flex-1 min-h-0 gap-[var(--sp-3)]"');
     expect(source).toContain('className="c-card flex flex-col min-h-0 overflow-hidden basis-0 grow-[3]"');
     expect(source).toContain('className="c-card flex flex-col min-h-0 overflow-hidden basis-0 flex-1 min-w-[var(--feed-min-w)]"');
-    expect(source).not.toContain('style={{');
+    // Dynamic chart expansion uses inline style for runtime-computed flex/opacity/minWidth
+    // Only allowed in the chart row expansion containers
+    const styleMatches = (source.match(/style=\{\{/g) ?? []).length;
+    expect(styleMatches).toBeLessThanOrEqual(3); // 3 chart expansion containers
   });
 
   it('navigates to line detail on row click', () => {
