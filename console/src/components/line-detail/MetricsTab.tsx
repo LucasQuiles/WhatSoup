@@ -1,6 +1,9 @@
 import React from 'react'
 import { Download, Cpu } from 'lucide-react'
-import { MetricsChart } from '../MetricsChart'
+import { FleetMetricsChart } from '../FleetMetricsChart'
+import { FleetTokenChart } from '../FleetTokenChart'
+import { FleetSessionChart } from '../FleetSessionChart'
+import { ChartPanel } from '../ChartPanel'
 import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
@@ -14,6 +17,7 @@ export function MetricsTab({
   setMetricsRange,
   lineName,
   line,
+  onRetry,
 }: {
   metrics: LineMetrics | undefined
   metricsLoading: boolean
@@ -24,6 +28,8 @@ export function MetricsTab({
   line?: LineInstance
   onRetry?: () => void
 }) {
+  const hasAnyData = metrics?.hasMessageData || metrics?.hasTokenData || metrics?.hasSessionData
+
   return (
     <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
       {/* Range selector */}
@@ -64,35 +70,76 @@ export function MetricsTab({
           description={metricsError.message}
           onRetry={onRetry}
         />
-      ) : metrics?.messageVolume && metrics.messageVolume.length > 0 ? (
+      ) : !hasAnyData ? (
+        <EmptyState title="No metrics data" description="Metrics will appear after the instance processes messages." />
+      ) : (
         <div className="flex flex-col gap-[var(--sp-4)]">
-          <MetricsChart data={metrics.messageVolume} />
-          {metrics.activeHours && (
+          {/* Message Volume */}
+          <ChartPanel
+            title="Message Volume"
+            isLoading={false}
+            isError={false}
+            hasData={!!metrics?.hasMessageData}
+            instancesFailed={0}
+          >
+            <FleetMetricsChart data={metrics!.messageVolume} range={metricsRange} />
+          </ChartPanel>
+
+          {/* Token Usage time-series */}
+          {metrics?.hasTokenData && (
+            <ChartPanel
+              title="Token Usage"
+              isLoading={false}
+              isError={false}
+              hasData={true}
+              instancesFailed={0}
+            >
+              <FleetTokenChart
+                data={metrics.tokenUsage}
+                byProvider={metrics.tokenUsageByProvider}
+                providers={metrics.providers}
+                range={metricsRange}
+              />
+            </ChartPanel>
+          )}
+
+          {/* Session Activity */}
+          {metrics?.hasSessionData && (
+            <ChartPanel
+              title="Session Activity"
+              isLoading={false}
+              isError={false}
+              hasData={true}
+              instancesFailed={0}
+            >
+              <FleetSessionChart
+                data={metrics.sessionActivity}
+                byProvider={metrics.sessionActivityByProvider}
+                providers={metrics.providers}
+                range={metricsRange}
+              />
+            </ChartPanel>
+          )}
+
+          {/* Active Hours Heatmap */}
+          {metrics?.activeHours && (
             <ActiveHoursHeatmap data={metrics.activeHours} range={metricsRange} />
           )}
 
-          {/* Token Usage Card */}
+          {/* Token Usage Card (static totals) */}
           {line?.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0) && (
-            <section
-              className="c-card font-mono p-[var(--sp-4)] bg-d2"
-            >
-              <div className="c-section-label mb-[var(--sp-3)]">
-                Token Usage
-              </div>
+            <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+              <div className="c-section-label mb-[var(--sp-3)]">Token Usage</div>
               <div className="flex items-center gap-[var(--sp-5)]">
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <div
-                    className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-pas)]"
-                  />
+                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)] opacity-50" />
                   <span style={{ fontSize: 'var(--font-size-data)' }} className="text-t3">Input</span>
                   <span className="font-medium text-t1" style={{ fontSize: 'var(--font-size-data)' }}>
                     {line.tokenUsage.input.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <div
-                    className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-cht)]"
-                  />
+                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)]" />
                   <span style={{ fontSize: 'var(--font-size-data)' }} className="text-t3">Output</span>
                   <span className="font-medium text-t1" style={{ fontSize: 'var(--font-size-data)' }}>
                     {line.tokenUsage.output.toLocaleString()}
@@ -107,49 +154,32 @@ export function MetricsTab({
                 </div>
               </div>
               {/* Proportional bar */}
-              <div
-                className="mt-[var(--sp-3)] h-[var(--dot-feed)] rounded-sm bg-d4 overflow-hidden flex"
-              >
+              <div className="mt-[var(--sp-3)] h-[var(--dot-feed)] rounded-sm bg-d4 overflow-hidden flex">
                 <div
                   style={{
                     width: `${(line.tokenUsage.input / (line.tokenUsage.input + line.tokenUsage.output)) * 100}%`,
                     height: '100%',
                   }}
-                  className="bg-[var(--color-m-pas)]"
+                  className="bg-[var(--color-m-agt)] opacity-50"
                 />
-                <div
-                  className="flex-1 bg-[var(--color-m-cht)]"
-                  style={{
-                    height: '100%',
-                  }}
-                />
+                <div className="flex-1 bg-[var(--color-m-agt)]" style={{ height: '100%' }} />
               </div>
             </section>
           )}
 
           {/* Model Configuration Card */}
           {line?.models && (
-            <section
-              className="c-card font-mono p-[var(--sp-4)] bg-d2"
-            >
-              <div className="c-section-label mb-[var(--sp-3)]">
-                Model Configuration
-              </div>
+            <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+              <div className="c-section-label mb-[var(--sp-3)]">Model Configuration</div>
               <div
                 className="grid gap-y-[var(--sp-1)] gap-x-[var(--sp-3)]"
-                style={{
-                  gridTemplateColumns: 'auto 1fr',
-                }}
+                style={{ gridTemplateColumns: 'auto 1fr' }}
               >
                 {Object.entries(line.models).map(([role, model]) =>
                   model ? (
                     <React.Fragment key={role}>
-                      <span style={{ fontSize: 'var(--font-size-data)' }} className="text-t4 capitalize">
-                        {role}
-                      </span>
-                      <span style={{ fontSize: 'var(--font-size-data)' }} className="text-m-pas">
-                        {model}
-                      </span>
+                      <span style={{ fontSize: 'var(--font-size-data)' }} className="text-t4 capitalize">{role}</span>
+                      <span style={{ fontSize: 'var(--font-size-data)' }} className="text-m-pas">{model}</span>
                     </React.Fragment>
                   ) : null
                 )}
@@ -157,8 +187,6 @@ export function MetricsTab({
             </section>
           )}
         </div>
-      ) : (
-        <EmptyState title="No metrics data" description="Metrics will appear after the instance processes messages." />
       )}
     </div>
   )
