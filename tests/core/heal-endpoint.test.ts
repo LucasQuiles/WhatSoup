@@ -185,7 +185,7 @@ describe('POST /heal', () => {
     const payload = JSON.stringify({ type: 'service_crash' });
     const { status, body } = await httpReq(port, '/heal', 'POST', payload);
     expect(status).toBe(401);
-    expect(JSON.parse(body)).toMatchObject({ error: 'unauthorized' });
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
   });
 
   // ── 7.2.3  auth — wrong token ───────────────────────────────────────────
@@ -196,7 +196,7 @@ describe('POST /heal', () => {
       authorization: 'Bearer wrong-token',
     });
     expect(status).toBe(401);
-    expect(JSON.parse(body)).toMatchObject({ error: 'unauthorized' });
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
   });
 
   // ── 7.2.4  dedupe ────────────────────────────────────────────────────────

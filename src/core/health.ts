@@ -71,18 +71,22 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
   };
 }
 
+function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
+  const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
+  const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
+  if (!verifyBearer(authHeader, expectedToken)) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return false;
+  }
+  return true;
+}
+
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
-      // Shared-secret Authorization header check
-      const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-      const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-      if (!verifyBearer(authHeader, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Unauthorized' }));
-        return;
-      }
+      if (!requireAuth(req, res)) return;
 
       const MAX_BODY_BYTES = 64 * 1024; // 64 KB
       let body = '';
@@ -132,14 +136,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        // Auth check — same pattern as /send
-        const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-        const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-        if (!verifyBearer(authHeader, expectedToken)) {
-          res.writeHead(401, jsonHeaders);
-          res.end(JSON.stringify({ error: 'unauthorized' }));
-          return;
-        }
+        if (!requireAuth(req, res)) return;
 
         // Parse body
         let rawBody = '';
@@ -208,14 +205,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };
 
-        // Auth — same pattern as /send and /heal
-        const authHeader = (req.headers as Record<string, string | undefined>)['authorization'];
-        const expectedToken = process.env.WHATSOUP_HEALTH_TOKEN;
-        if (!verifyBearer(authHeader, expectedToken)) {
-          res.writeHead(401, jsonHeaders);
-          res.end(JSON.stringify({ error: 'unauthorized' }));
-          return;
-        }
+        if (!requireAuth(req, res)) return;
 
         // Parse body (with size limit matching /send)
         const MAX_BODY_BYTES = 64 * 1024;
