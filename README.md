@@ -22,9 +22,15 @@ A React dashboard for managing the entire fleet from a browser. Runs on the same
 
 ### Fleet Overview
 
-KPI cards, connection table, heartbeat strips, and live activity feed across all instances.
+KPI cards with sparklines, three fleet-wide charts (message volume, token usage by provider, session activity by provider), instance table with provider column, and live activity feed.
 
 ![Fleet Overview](docs/screenshots/fleet-overview.png)
+
+### Line Detail — Metrics
+
+Per-instance metrics with stacked bar chart, active hours heatmap, and tabbed token/session detail views.
+
+![Line Detail Metrics](docs/screenshots/line-detail-metrics.png)
 
 ### Operations
 
