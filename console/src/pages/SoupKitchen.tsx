@@ -143,7 +143,7 @@ const SoupKitchen: FC = () => {
       result = result.filter((l) => l.status === "online");
     else if (activeKpi === "attention")
       result = result.filter(
-        (l) => l.status === "unreachable" || l.status === "degraded"
+        (l) => l.status === "unreachable" || l.status === "degraded" || l.error
       );
     else if (activeKpi === "unread")
       result = result.filter((l) => (l.unread ?? 0) > 0);
