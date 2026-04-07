@@ -63,6 +63,19 @@ export function getProviderConfigFields(providerId: string): ConfigFieldDef[] {
   return fields;
 }
 
+export const PROVIDER_COLORS: Record<string, { stroke: string; fill: string }> = {
+  'claude-cli':    { stroke: 'var(--color-m-agt)', fill: 'var(--color-m-agt)' },
+  'codex-cli':     { stroke: 'var(--color-s-ok)',  fill: 'var(--color-s-ok)' },
+  'gemini-cli':    { stroke: 'var(--color-s-warn)', fill: 'var(--color-s-warn)' },
+  'openai-api':    { stroke: 'var(--color-m-cht)', fill: 'var(--color-m-cht)' },
+  'anthropic-api': { stroke: 'var(--color-m-agt)', fill: 'var(--color-m-agt)' },
+  'opencode-cli':  { stroke: 'var(--color-t2)',    fill: 'var(--color-t2)' },
+};
+
+export function getProviderColor(id: string): { stroke: string; fill: string } {
+  return PROVIDER_COLORS[id] ?? { stroke: 'var(--color-t3)', fill: 'var(--color-t3)' };
+}
+
 function modelPlaceholder(providerId: string): string {
   switch (providerId) {
     case 'codex-cli':     return 'gpt-5.4';

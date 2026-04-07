@@ -9,6 +9,7 @@ export interface LineInstance {
   name: string;
   phone: string;
   mode: Mode;
+  provider?: string;
   status: Status;
   accessMode: string;
   healthPort: number;
@@ -116,6 +117,7 @@ export interface FleetMetricsMeta {
   hasMessageData: boolean;
   hasTokenData: boolean;
   hasSessionData: boolean;
+  providers: string[];
 }
 
 export interface LineMetrics {
@@ -123,6 +125,8 @@ export interface LineMetrics {
   messageVolume: MessageVolumeBucket[];
   tokenUsage: TokenUsageBucket[];
   sessionActivity: SessionActivityBucket[];
+  tokenUsageByProvider: Record<string, TokenUsageBucket[]>;
+  sessionActivityByProvider: Record<string, SessionActivityBucket[]>;
   activeHours: number[][];
   hasMessageData: boolean;
   hasTokenData: boolean;
@@ -135,6 +139,8 @@ export interface FleetMetrics {
   messageVolume: MessageVolumeBucket[];
   tokenUsage: TokenUsageBucket[];
   sessionActivity: SessionActivityBucket[];
+  tokenUsageByProvider: Record<string, TokenUsageBucket[]>;
+  sessionActivityByProvider: Record<string, SessionActivityBucket[]>;
 }
 
 export interface AccessEntry {
