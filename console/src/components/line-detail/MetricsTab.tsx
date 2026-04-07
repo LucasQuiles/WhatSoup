@@ -22,6 +22,7 @@ export function MetricsTab({
   setMetricsRange: (r: MetricsRange) => void
   lineName?: string
   line?: LineInstance
+  onRetry?: () => void
 }) {
   return (
     <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
@@ -61,7 +62,7 @@ export function MetricsTab({
           variant="error"
           title="Failed to load metrics"
           description={metricsError.message}
-          onRetry={() => setMetricsRange(metricsRange)}
+          onRetry={onRetry}
         />
       ) : metrics?.messageVolume && metrics.messageVolume.length > 0 ? (
         <div className="flex flex-col gap-[var(--sp-4)]">
