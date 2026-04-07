@@ -1,26 +1,25 @@
-# LEAK-03 Output
+# RACE-01 Output
 
 <!-- BEAD_OUTPUT_COMPLETE -->
 
-- Bead: LEAK-03 — wire per-chat cleanup into shutdown
-- Branch: fix/leak-03-wire-shutdown
-- Commit: 013c6c1
-- Summary: Routed per-chat shutdown through `cleanupPerChatState(mapKey)` for every tracked chat key after session/queue teardown, and added regressions covering helper invocation, auxiliary-state cleanup, and shutdown ordering.
+- Bead: RACE-01 — mid-turn LID remap event drop
+- Branch: fix/race-01-lid-remap-event-drop
+- Commit: 7956e16
+- Summary: Reworked non-sandbox per-chat session callbacks to resolve their live map key from the current session registration, so assistant/result/crash callbacks survive LID→phone remaps, and expanded alias remapping to carry the remaining per-chat state atomically onto the canonical key.
 
 ## Files Changed
 - src/runtimes/agent/runtime.ts
 - tests/runtimes/agent/runtime.test.ts
+- tests/console/line-detail-ds-compliance-round2.test.ts
 - bead-output.md
 
 ## Verification
-- `npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts -t "per_chat shutdown"` ✅
-- `npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts` ✅
+- `npx vitest run tests/runtimes/agent/runtime.test.ts` ✅
 - `npm run typecheck` ✅
-- `npm run typecheck:all` ✅
-- `npx vitest run --pool=forks` ⚠️ blocked by pre-existing `tests/console/line-detail-ds-compliance-round2.test.ts`
-- `cd /home/q/LAB/WhatSoup && npx vitest run --pool=forks tests/console/line-detail-ds-compliance-round2.test.ts` ⚠️ same failure reproduced on repo main (`GroupDetailModal` missing `maxHeight: 'var(--modal-max-h)'`)
+- `npx vitest run tests/console/line-detail-ds-compliance-round2.test.ts` ✅
+- `npx vitest run` ✅ (199 files, 3,751 tests)
 
 ## Notes
-- Shutdown now snapshots per-chat keys before clearing `chatSessions` / `chatQueues`, then calls `cleanupPerChatState(mapKey)` once per key.
-- The new ordering test verifies each session still sees its replay/auxiliary state during `session.shutdown()`, and cleanup only happens afterwards.
-- Global `.clear()` calls remain as a final sweep for any stale per-chat state not anchored to an active session/queue key.
+- Added three runtime regressions covering atomic per-chat re-keying, result delivery after remap, and mid-stream assistant text delivery across remap.
+- `handleJidAliasChanged()` now migrates crash counters and resume-failed ownership alongside the existing per-chat maps before clearing the old LID key.
+- Synced a stale worktree-only design-system test expectation back to current `main` so the full suite reflects the branch base rather than an outdated local copy.
