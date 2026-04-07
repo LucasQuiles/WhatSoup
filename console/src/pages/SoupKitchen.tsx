@@ -6,14 +6,18 @@ import { motion } from "framer-motion";
 import { useLines, useFeed } from "../hooks/use-fleet";
 import { useFleetMetrics } from "../hooks/use-metrics";
 import { computeKpis } from "../lib/compute-kpis";
-import { deriveFleetMessageSparklines } from "../lib/metrics-sparklines";
-import type { Mode } from "../types";
+import { deriveFleetMessageSparklines, deriveFleetSessionSparklines } from "../lib/metrics-sparklines";
+import type { Mode, MetricsRange } from "../types";
+import type { ChartKey } from "../components/ChartPanel";
 import KpiCard from "../components/KpiCard";
 import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import ModeBadge from "../components/ModeBadge";
 import FilterPill from "../components/FilterPill";
+import { ChartPanel } from "../components/ChartPanel";
 import { FleetMetricsChart } from "../components/FleetMetricsChart";
+import { FleetTokenChart } from "../components/FleetTokenChart";
+import { FleetSessionChart } from "../components/FleetSessionChart";
 import LineTags from "../components/LineTags";
 import { formatRelative } from "../lib/format-time";
 import { formatPhone, displayInstanceName, formatCompact } from "../lib/text-utils";
@@ -47,6 +51,14 @@ const modeTextClass: Record<Mode, string> = {
   agent: "text-m-agt",
 };
 
+const RANGE_OPTIONS: MetricsRange[] = ['24h', '7d', '30d'];
+
+function chartColStyle(key: ChartKey, expanded: ChartKey | null) {
+  if (expanded !== null && expanded !== key) {
+    return { flex: 0, opacity: 0, minWidth: 0, width: 0, overflow: 'hidden' as const };
+  }
+  return { flex: 1, opacity: 1 };
+}
 
 const SoupKitchen: FC = () => {
   const { data: lines = [] } = useLines();
@@ -54,6 +66,8 @@ const SoupKitchen: FC = () => {
   const navigate = useNavigate();
 
   const [activeKpi, setActiveKpi] = useState<KpiFilter>(null);
+  const [expandedChart, setExpandedChart] = useState<ChartKey | null>(null);
+  const [chartRange, setChartRange] = useState<MetricsRange>("24h");
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [search, setSearch] = useState("");
   const [showAddWizard, setShowAddWizard] = useState(false);
@@ -73,11 +87,23 @@ const SoupKitchen: FC = () => {
   }, []);
 
   const kpis = useMemo(() => computeKpis(lines), [lines]);
-  const { data: fleetMetrics } = useFleetMetrics('24h');
+  const { data: fleetMetrics, isLoading: metricsLoading, isError: metricsError, refetch: metricsRefetch } = useFleetMetrics(chartRange);
   const messageSparklines = useMemo(
     () => deriveFleetMessageSparklines(fleetMetrics?.messageVolume),
     [fleetMetrics?.messageVolume],
   );
+  const sessionSparklines = useMemo(
+    () => deriveFleetSessionSparklines(fleetMetrics?.sessionActivity),
+    [fleetMetrics?.sessionActivity],
+  );
+
+  function toggleKpi(kpiKey: KpiFilter, chartKey: ChartKey | null = null) {
+    const next = activeKpi === kpiKey ? null : kpiKey;
+    setActiveKpi(next);
+    if (chartKey) {
+      setExpandedChart(next === null ? null : chartKey);
+    }
+  }
 
   // Derive alerts from lines
   const alerts = useMemo(
@@ -165,13 +191,12 @@ const SoupKitchen: FC = () => {
     return result;
   }, [lines, activeKpi, modeFilter, search, sortKey, sortDir]);
 
-  function toggleKpi(key: KpiFilter) {
-    setActiveKpi((prev) => (prev === key ? null : key));
-  }
+  const meta = fleetMetrics?.meta;
+  const instancesFailed = meta?.instancesFailed ?? 0;
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]">
-      {/* KPI Strip — Grafana-style stat cards with sparklines */}
+      {/* KPI Strip */}
       <motion.div
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
@@ -196,7 +221,7 @@ const SoupKitchen: FC = () => {
           value={kpis.totalSent.toLocaleString()}
           label="Messages Sent"
           color="text-m-cht"
-          onClick={() => toggleKpi("messages")}
+          onClick={() => toggleKpi("messages", "messages")}
           active={activeKpi === "messages"}
           sparkData={messageSparklines?.outbound}
         />
@@ -204,7 +229,7 @@ const SoupKitchen: FC = () => {
           value={kpis.totalReceived.toLocaleString()}
           label="Messages Received"
           color="text-t2"
-          onClick={() => toggleKpi("messages")}
+          onClick={() => toggleKpi("messages", "messages")}
           active={activeKpi === "messages"}
           sparkData={messageSparklines?.inbound}
         />
@@ -212,8 +237,9 @@ const SoupKitchen: FC = () => {
           value={kpis.agentSessions}
           label="Agent Sessions"
           color="text-m-agt"
-          onClick={() => toggleKpi("agent")}
+          onClick={() => toggleKpi("agent", "sessions")}
           active={activeKpi === "agent"}
+          sparkData={sessionSparklines?.active}
         />
         <KpiCard
           value={kpis.unread}
@@ -226,20 +252,92 @@ const SoupKitchen: FC = () => {
           value={kpis.totalMedia.toLocaleString()}
           label="Media Processed"
           color="text-s-ok"
-          onClick={() => toggleKpi("messages")}
+          onClick={() => toggleKpi("messages", "messages")}
           active={activeKpi === "messages"}
+          sparkData={messageSparklines?.media}
         />
       </motion.div>
 
-      {/* Fleet Metrics Chart */}
-      {fleetMetrics?.messageVolume && fleetMetrics.messageVolume.length > 0 && (
-        <FleetMetricsChart data={fleetMetrics.messageVolume} />
-      )}
+      {/* Charts Section */}
+      <div className="c-card flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
+        {/* Range Picker */}
+        <div className="flex items-center gap-[var(--sp-2)]">
+          <span className="c-section-label">Range</span>
+          {RANGE_OPTIONS.map((r) => (
+            <FilterPill
+              key={r}
+              label={r}
+              isActive={chartRange === r}
+              onClick={() => setChartRange(r)}
+            />
+          ))}
+        </div>
+
+        {/* Chart Row — 3-up with expansion */}
+        <div className="flex" style={{ gap: expandedChart ? 0 : 'var(--sp-2)' }}>
+          <div
+            className="c-chart-expand-col"
+            style={chartColStyle('messages', expandedChart)}
+          >
+            <ChartPanel
+              title={`Message Volume (${chartRange})`}
+              isLoading={metricsLoading}
+              isError={metricsError}
+              hasData={meta?.hasMessageData ?? false}
+              instancesFailed={instancesFailed}
+              expanded={expandedChart === 'messages'}
+              onRetry={() => metricsRefetch()}
+            >
+              {fleetMetrics?.messageVolume && (
+                <FleetMetricsChart data={fleetMetrics.messageVolume} range={chartRange} />
+              )}
+            </ChartPanel>
+          </div>
+
+          <div
+            className="c-chart-expand-col"
+            style={chartColStyle('tokens', expandedChart)}
+          >
+            <ChartPanel
+              title={`Token Usage (${chartRange})`}
+              isLoading={metricsLoading}
+              isError={metricsError}
+              hasData={meta?.hasTokenData ?? false}
+              instancesFailed={instancesFailed}
+              expanded={expandedChart === 'tokens'}
+              onRetry={() => metricsRefetch()}
+            >
+              {fleetMetrics?.tokenUsage && (
+                <FleetTokenChart data={fleetMetrics.tokenUsage} range={chartRange} />
+              )}
+            </ChartPanel>
+          </div>
+
+          <div
+            className="c-chart-expand-col"
+            style={chartColStyle('sessions', expandedChart)}
+          >
+            <ChartPanel
+              title={`Session Activity (${chartRange})`}
+              isLoading={metricsLoading}
+              isError={metricsError}
+              hasData={meta?.hasSessionData ?? false}
+              instancesFailed={instancesFailed}
+              expanded={expandedChart === 'sessions'}
+              onRetry={() => metricsRefetch()}
+            >
+              {fleetMetrics?.sessionActivity && (
+                <FleetSessionChart data={fleetMetrics.sessionActivity} range={chartRange} />
+              )}
+            </ChartPanel>
+          </div>
+        </div>
+      </div>
 
       {/* Alert Banner */}
       <AlertBanner alerts={alerts} />
 
-      {/* Main area */}
+      {/* Main area — instances table + activity feed */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -251,11 +349,7 @@ const SoupKitchen: FC = () => {
           {/* Toolbar */}
           <div className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b">
             <div className="flex items-center gap-4">
-              <h2
-                className="c-heading-lg"
-              >
-                Instances
-              </h2>
+              <h2 className="c-heading-lg">Instances</h2>
 
               {/* Mode filter pills */}
               <div className="flex gap-[var(--sp-1h)]">
@@ -277,7 +371,7 @@ const SoupKitchen: FC = () => {
               </div>
             </div>
 
-            {/* Search — fills remaining toolbar width */}
+            {/* Search */}
             <div className="relative flex-1 ml-[var(--sp-4)]">
               <Search
                 size={13}
@@ -340,101 +434,44 @@ const SoupKitchen: FC = () => {
                       onClick={() => navigate(`/lines/${line.name}`)}
                       className={`cursor-pointer c-row-hover c-border-b ${isError ? "bg-[var(--s-crit-wash)]" : isDegraded ? "bg-[var(--s-warn-wash)]" : ""}`}
                     >
-                      {/* Mode */}
-                      <td className="c-cell">
-                        <ModeBadge mode={line.mode} />
-                      </td>
-
-                      {/* Line name + phone */}
+                      <td className="c-cell"><ModeBadge mode={line.mode} /></td>
                       <td className="c-cell">
                         <div className="flex flex-col">
-                          <span
-                            className="font-sans font-medium text-t1 text-[var(--font-size-body)]"
-                          >
-                            {displayInstanceName(line.name)}
-                          </span>
-                          <span className="c-label">
-                            {formatPhone(line.phone)}
-                          </span>
+                          <span className="font-sans font-medium text-t1 text-[var(--font-size-body)]">{displayInstanceName(line.name)}</span>
+                          <span className="c-label">{formatPhone(line.phone)}</span>
                         </div>
                       </td>
-
-                      {/* Chats */}
+                      <td className="c-cell text-center"><span className="c-data text-t2">{line.chatCounts?.chats ?? 0}</span></td>
+                      <td className="c-cell text-center"><span className="c-data text-t4">{line.chatCounts?.groups ?? 0}</span></td>
                       <td className="c-cell text-center">
-                        <span className="c-data text-t2">{line.chatCounts?.chats ?? 0}</span>
+                        {(line.unread ?? 0) > 0
+                          ? <span className="c-data text-s-warn font-medium">{line.unread}</span>
+                          : <span className="c-data text-t5">0</span>}
                       </td>
-
-                      {/* Groups */}
+                      <td className="c-cell text-center"><span className="c-data text-s-ok">{String.fromCharCode(0x2191)}{sent}</span></td>
+                      <td className="c-cell text-center"><span className="c-data text-m-cht">{String.fromCharCode(0x2193)}{recv}</span></td>
                       <td className="c-cell text-center">
-                        <span className="c-data text-t4">{line.chatCounts?.groups ?? 0}</span>
+                        {(line.tokenUsage?.input ?? 0) > 0
+                          ? <span className="c-data text-t2" title={`${(line.tokenUsage?.input ?? 0).toLocaleString()} in / ${(line.tokenUsage?.output ?? 0).toLocaleString()} out`}>{formatCompact((line.tokenUsage?.input ?? 0) + (line.tokenUsage?.output ?? 0))}</span>
+                          : <span className="c-data text-t5">{String.fromCharCode(0x2014)}</span>}
                       </td>
-
-                      {/* Unread */}
                       <td className="c-cell text-center">
-                        {(line.unread ?? 0) > 0 ? (
-                          <span className="c-data text-s-warn font-medium">
-                            {line.unread}
-                          </span>
-                        ) : (
-                          <span className="c-data text-t5">0</span>
-                        )}
+                        {line.mode === 'agent'
+                          ? <span className="c-data text-m-agt font-medium">{line.totalSessions ?? 0}</span>
+                          : <span className="c-data text-t5">{String.fromCharCode(0x2014)}</span>}
                       </td>
-
-                      {/* Sent (today) */}
+                      <td className="c-cell"><LineTags line={line} /></td>
                       <td className="c-cell text-center">
-                        <span className="c-data text-s-ok">↑{sent}</span>
-                      </td>
-
-                      {/* Received (today) */}
-                      <td className="c-cell text-center">
-                        <span className="c-data text-m-cht">↓{recv}</span>
-                      </td>
-
-                      {/* Tokens (lifetime) */}
-                      <td className="c-cell text-center">
-                        {(line.tokenUsage?.input ?? 0) > 0 ? (
-                          <span className="c-data text-t2" title={`${(line.tokenUsage?.input ?? 0).toLocaleString()} in / ${(line.tokenUsage?.output ?? 0).toLocaleString()} out`}>
-                            {formatCompact((line.tokenUsage?.input ?? 0) + (line.tokenUsage?.output ?? 0))}
-                          </span>
-                        ) : (
-                          <span className="c-data text-t5">—</span>
-                        )}
-                      </td>
-
-                      {/* Sessions (lifetime, agent lines only) */}
-                      <td className="c-cell text-center">
-                        {line.mode === 'agent' ? (
-                          <span className="c-data text-m-agt font-medium">
-                            {line.totalSessions ?? 0}
-                          </span>
-                        ) : (
-                          <span className="c-data text-t5">—</span>
-                        )}
-                      </td>
-
-                      {/* Tags */}
-                      <td className="c-cell">
-                        <LineTags line={line} />
-                      </td>
-
-                      {/* Last Active */}
-                      <td className="c-cell text-center">
-                        <span
-                          className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-t4"}`}
-                        >
-                          {line.lastActive ? formatRelative(line.lastActive) : "—"}
+                        <span className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-t4"}`}>
+                          {line.lastActive ? formatRelative(line.lastActive) : String.fromCharCode(0x2014)}
                         </span>
                       </td>
                     </tr>
                   );
                 })}
-
                 {filtered.length === 0 && (
                   <tr>
-                    <td
-                      colSpan={11}
-                      className="text-center text-t5 font-sans py-12 text-[var(--font-size-data)]"
-                    >
+                    <td colSpan={11} className="text-center text-t5 font-sans py-12 text-[var(--font-size-data)]">
                       No instances match the current filters
                     </td>
                   </tr>

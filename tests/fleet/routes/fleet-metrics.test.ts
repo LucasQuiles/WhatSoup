@@ -21,13 +21,25 @@ function mockRes(): ServerResponse & { _status: number; _body: string } {
   return res as any;
 }
 
+function emptyData() {
+  return {
+    messageVolume: [],
+    tokenUsage: [],
+    sessionActivity: [],
+    activeHours: [],
+    hasMessageData: false,
+    hasTokenData: false,
+    hasSessionData: false,
+  };
+}
+
 function makeDeps(overrides: Partial<FleetMetricsDeps> = {}): FleetMetricsDeps {
   return {
     discovery: {
       getInstances: vi.fn(() => new Map()),
     } as any,
     dbReader: {
-      getMetrics: vi.fn(() => ({ ok: true, data: { messageVolume: [], activeHours: [] } })),
+      getMetrics: vi.fn(() => ({ ok: true, data: emptyData() })),
     } as any,
     ...overrides,
   };
@@ -61,20 +73,30 @@ describe('handleGetFleetMetrics', () => {
             ok: true,
             data: {
               messageVolume: [
-                { bucket: '2026-04-05T17:00:00.000Z', inbound: 2, outbound: 3 },
-                { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 1 },
+                { bucket: '2026-04-05T17:00:00.000Z', inbound: 2, outbound: 3, media: 0 },
+                { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 1, media: 1 },
               ],
+              tokenUsage: [],
+              sessionActivity: [],
               activeHours: [],
+              hasMessageData: true,
+              hasTokenData: false,
+              hasSessionData: false,
             },
           })
           .mockReturnValueOnce({
             ok: true,
             data: {
               messageVolume: [
-                { bucket: '2026-04-05T17:00:00.000Z', inbound: 5, outbound: 2 },
-                { bucket: '2026-04-05T19:00:00.000Z', inbound: 1, outbound: 6 },
+                { bucket: '2026-04-05T17:00:00.000Z', inbound: 5, outbound: 2, media: 0 },
+                { bucket: '2026-04-05T19:00:00.000Z', inbound: 1, outbound: 6, media: 0 },
               ],
+              tokenUsage: [],
+              sessionActivity: [],
               activeHours: [],
+              hasMessageData: true,
+              hasTokenData: false,
+              hasSessionData: false,
             },
           }),
       } as any,
@@ -84,13 +106,21 @@ describe('handleGetFleetMetrics', () => {
     handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
 
     expect(res._status).toBe(200);
-    expect(JSON.parse(res._body)).toEqual({
-      range: '24h',
-      messageVolume: [
-        { bucket: '2026-04-05T17:00:00.000Z', inbound: 7, outbound: 5 },
-        { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 1 },
-        { bucket: '2026-04-05T19:00:00.000Z', inbound: 1, outbound: 6 },
-      ],
+    const body = JSON.parse(res._body);
+    expect(body.range).toBe('24h');
+    expect(body.messageVolume).toEqual([
+      { bucket: '2026-04-05T17:00:00.000Z', inbound: 7, outbound: 5, media: 0 },
+      { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 1, media: 1 },
+      { bucket: '2026-04-05T19:00:00.000Z', inbound: 1, outbound: 6, media: 0 },
+    ]);
+    expect(body.tokenUsage).toEqual([]);
+    expect(body.sessionActivity).toEqual([]);
+    expect(body.meta).toEqual({
+      instancesQueried: 2,
+      instancesFailed: 0,
+      hasMessageData: true,
+      hasTokenData: false,
+      hasSessionData: false,
     });
   });
 
@@ -110,9 +140,14 @@ describe('handleGetFleetMetrics', () => {
             ok: true,
             data: {
               messageVolume: [
-                { bucket: '2026-04-05T19:00:00.000Z', inbound: 3, outbound: 4 },
+                { bucket: '2026-04-05T19:00:00.000Z', inbound: 3, outbound: 4, media: 0 },
               ],
+              tokenUsage: [],
+              sessionActivity: [],
               activeHours: [],
+              hasMessageData: true,
+              hasTokenData: false,
+              hasSessionData: false,
             },
           }),
       } as any,
@@ -122,11 +157,16 @@ describe('handleGetFleetMetrics', () => {
     handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
 
     expect(res._status).toBe(200);
-    expect(JSON.parse(res._body)).toEqual({
-      range: '24h',
-      messageVolume: [
-        { bucket: '2026-04-05T19:00:00.000Z', inbound: 3, outbound: 4 },
-      ],
+    const body = JSON.parse(res._body);
+    expect(body.messageVolume).toEqual([
+      { bucket: '2026-04-05T19:00:00.000Z', inbound: 3, outbound: 4, media: 0 },
+    ]);
+    expect(body.meta).toEqual({
+      instancesQueried: 2,
+      instancesFailed: 1,
+      hasMessageData: true,
+      hasTokenData: false,
+      hasSessionData: false,
     });
   });
 });

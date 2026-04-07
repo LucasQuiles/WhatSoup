@@ -33,6 +33,60 @@ function insertMessage(db: Database, opts: {
   )
 }
 
+function insertAgentSession(db: Database, opts: {
+  startedAt: string;
+  endedAt?: string | null;
+  status?: string;
+  lastMessageAt?: string | null;
+}): number {
+  const result = db.raw.prepare(`
+    INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, ended_at, status, last_message_at)
+    VALUES (1, '/tmp', ?, ?, ?, ?)
+  `).run(
+    opts.startedAt,
+    opts.endedAt ?? null,
+    opts.status ?? 'active',
+    opts.lastMessageAt ?? null,
+  ) as { lastInsertRowid: number | bigint };
+  return Number(result.lastInsertRowid);
+}
+
+function insertTokenEvent(db: Database, sessionId: number, timestamp: number, inputTokens: number, outputTokens: number) {
+  db.raw.prepare(`
+    INSERT INTO agent_token_events (agent_session_id, timestamp, input_tokens, output_tokens)
+    VALUES (?, ?, ?, ?)
+  `).run(sessionId, timestamp, inputTokens, outputTokens);
+}
+
+function insertMessageWithTokens(db: Database, opts: {
+  timestamp: number;
+  fromMe?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  messageId?: string;
+}) {
+  db.raw.prepare(`
+    INSERT INTO messages (
+      chat_jid, conversation_key, sender_jid, sender_name, message_id,
+      content, content_type, is_from_me, timestamp, content_text,
+      input_tokens, output_tokens
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'chat@s.whatsapp.net',
+    'chat',
+    '15550001111@s.whatsapp.net',
+    'Tester',
+    opts.messageId ?? `msg-${opts.timestamp}-${Math.random()}`,
+    'hello',
+    'text',
+    opts.fromMe ? 1 : 0,
+    opts.timestamp,
+    'hello',
+    opts.inputTokens ?? 0,
+    opts.outputTokens ?? 0,
+  );
+}
+
 describe('metrics collector', () => {
   let db: Database
 
@@ -74,9 +128,15 @@ describe('metrics collector', () => {
     ).all(bucket) as Array<{ bucket: string; metric: string; value: number }>
 
     expect(rows).toEqual([
+      { bucket, metric: 'agent_tokens_in', value: 0 },
+      { bucket, metric: 'agent_tokens_out', value: 0 },
+      { bucket, metric: 'chat_tokens_in', value: 0 },
+      { bucket, metric: 'chat_tokens_out', value: 0 },
       { bucket, metric: 'messages_in', value: 2 },
       { bucket, metric: 'messages_media', value: 1 },
       { bucket, metric: 'messages_out', value: 1 },
+      { bucket, metric: 'sessions_active', value: 0 },
+      { bucket, metric: 'sessions_started', value: 0 },
     ])
 
     insertMessage(db, { timestamp: toUnixSeconds('2026-04-05T15:30:00.000Z'), fromMe: true, contentType: 'text', messageId: 'out-2' })
@@ -88,9 +148,15 @@ describe('metrics collector', () => {
     ).all(bucket) as Array<{ bucket: string; metric: string; value: number }>
 
     expect(rows).toEqual([
+      { bucket, metric: 'agent_tokens_in', value: 0 },
+      { bucket, metric: 'agent_tokens_out', value: 0 },
+      { bucket, metric: 'chat_tokens_in', value: 0 },
+      { bucket, metric: 'chat_tokens_out', value: 0 },
       { bucket, metric: 'messages_in', value: 2 },
       { bucket, metric: 'messages_media', value: 1 },
       { bucket, metric: 'messages_out', value: 2 },
+      { bucket, metric: 'sessions_active', value: 0 },
+      { bucket, metric: 'sessions_started', value: 0 },
     ])
   })
 
@@ -108,12 +174,24 @@ describe('metrics collector', () => {
     ).all() as Array<{ bucket: string; metric: string; value: number }>
 
     expect(rows).toEqual([
+      { bucket: '2026-04-05T14:00:00.000Z', metric: 'agent_tokens_in', value: 0 },
+      { bucket: '2026-04-05T14:00:00.000Z', metric: 'agent_tokens_out', value: 0 },
+      { bucket: '2026-04-05T14:00:00.000Z', metric: 'chat_tokens_in', value: 0 },
+      { bucket: '2026-04-05T14:00:00.000Z', metric: 'chat_tokens_out', value: 0 },
       { bucket: '2026-04-05T14:00:00.000Z', metric: 'messages_in', value: 0 },
       { bucket: '2026-04-05T14:00:00.000Z', metric: 'messages_media', value: 1 },
       { bucket: '2026-04-05T14:00:00.000Z', metric: 'messages_out', value: 1 },
+      { bucket: '2026-04-05T14:00:00.000Z', metric: 'sessions_active', value: 0 },
+      { bucket: '2026-04-05T14:00:00.000Z', metric: 'sessions_started', value: 0 },
+      { bucket: '2026-04-05T15:00:00.000Z', metric: 'agent_tokens_in', value: 0 },
+      { bucket: '2026-04-05T15:00:00.000Z', metric: 'agent_tokens_out', value: 0 },
+      { bucket: '2026-04-05T15:00:00.000Z', metric: 'chat_tokens_in', value: 0 },
+      { bucket: '2026-04-05T15:00:00.000Z', metric: 'chat_tokens_out', value: 0 },
       { bucket: '2026-04-05T15:00:00.000Z', metric: 'messages_in', value: 1 },
       { bucket: '2026-04-05T15:00:00.000Z', metric: 'messages_media', value: 0 },
       { bucket: '2026-04-05T15:00:00.000Z', metric: 'messages_out', value: 0 },
+      { bucket: '2026-04-05T15:00:00.000Z', metric: 'sessions_active', value: 0 },
+      { bucket: '2026-04-05T15:00:00.000Z', metric: 'sessions_started', value: 0 },
     ])
   })
 
@@ -129,9 +207,15 @@ describe('metrics collector', () => {
     ).all('2026-04-05T16:00:00.000Z') as Array<{ bucket: string; metric: string; value: number }>
 
     expect(rows).toEqual([
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'agent_tokens_in', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'agent_tokens_out', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'chat_tokens_in', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'chat_tokens_out', value: 0 },
       { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_in', value: 0 },
       { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_media', value: 0 },
       { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_out', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'sessions_active', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'sessions_started', value: 0 },
     ])
   })
 
@@ -149,9 +233,15 @@ describe('metrics collector', () => {
     ).all('2026-04-05T16:00:00.000Z') as Array<{ bucket: string; metric: string; value: number }>
 
     expect(rows).toEqual([
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'agent_tokens_in', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'agent_tokens_out', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'chat_tokens_in', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'chat_tokens_out', value: 0 },
       { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_in', value: 1 },
       { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_media', value: 1 },
       { bucket: '2026-04-05T16:00:00.000Z', metric: 'messages_out', value: 1 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'sessions_active', value: 0 },
+      { bucket: '2026-04-05T16:00:00.000Z', metric: 'sessions_started', value: 0 },
     ])
   })
 
@@ -172,4 +262,153 @@ describe('metrics collector', () => {
       { bucket: '2026-04-05T18:00:00.000Z' },
     ])
   })
+
+  it('collects agent_tokens_in and agent_tokens_out from agent_token_events', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z');
+    const bucket = '2026-04-05T15:00:00.000Z';
+    const sessionId = insertAgentSession(db, { startedAt: '2026-04-05T15:00:00.000Z', status: 'active' });
+
+    insertTokenEvent(db, sessionId, toUnixSeconds('2026-04-05T15:05:00.000Z'), 100, 50);
+    insertTokenEvent(db, sessionId, toUnixSeconds('2026-04-05T15:30:00.000Z'), 200, 75);
+    // Outside window — should NOT be counted
+    insertTokenEvent(db, sessionId, toUnixSeconds('2026-04-05T14:59:00.000Z'), 999, 999);
+
+    collectHourlyMetrics(db, now);
+
+    const rows = db.raw.prepare(
+      "SELECT metric, value FROM metrics_hourly WHERE bucket = ? AND metric LIKE 'agent_tokens_%' ORDER BY metric"
+    ).all(bucket) as Array<{ metric: string; value: number }>;
+
+    expect(rows).toEqual([
+      { metric: 'agent_tokens_in', value: 300 },
+      { metric: 'agent_tokens_out', value: 125 },
+    ]);
+  });
+
+  it('collects chat_tokens_in and chat_tokens_out from messages table', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z');
+    const bucket = '2026-04-05T15:00:00.000Z';
+
+    insertMessageWithTokens(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:05:00.000Z'),
+      fromMe: true,
+      inputTokens: 80,
+      outputTokens: 40,
+      messageId: 'chat-tok-1',
+    });
+    insertMessageWithTokens(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:20:00.000Z'),
+      fromMe: true,
+      inputTokens: 120,
+      outputTokens: 60,
+      messageId: 'chat-tok-2',
+    });
+    // Zero-token message — should NOT be counted
+    insertMessageWithTokens(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:25:00.000Z'),
+      fromMe: false,
+      inputTokens: 0,
+      outputTokens: 0,
+      messageId: 'chat-tok-3',
+    });
+
+    collectHourlyMetrics(db, now);
+
+    const rows = db.raw.prepare(
+      "SELECT metric, value FROM metrics_hourly WHERE bucket = ? AND metric LIKE 'chat_tokens_%' ORDER BY metric"
+    ).all(bucket) as Array<{ metric: string; value: number }>;
+
+    expect(rows).toEqual([
+      { metric: 'chat_tokens_in', value: 200 },
+      { metric: 'chat_tokens_out', value: 100 },
+    ]);
+  });
+
+  it('collects sessions_active counting overlapping sessions excluding suspended', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z');
+    const bucket = '2026-04-05T15:00:00.000Z';
+
+    // Session spanning the entire hour (started before, still active)
+    insertAgentSession(db, {
+      startedAt: '2026-04-05T14:00:00.000Z',
+      endedAt: null,
+      status: 'active',
+    });
+    // Session that started and ended within the hour
+    insertAgentSession(db, {
+      startedAt: '2026-04-05T15:10:00.000Z',
+      endedAt: '2026-04-05T15:40:00.000Z',
+      status: 'ended',
+    });
+    // Suspended session — should NOT be counted
+    insertAgentSession(db, {
+      startedAt: '2026-04-05T15:00:00.000Z',
+      endedAt: null,
+      status: 'suspended',
+    });
+    // Session that ended before the hour — should NOT be counted
+    insertAgentSession(db, {
+      startedAt: '2026-04-05T13:00:00.000Z',
+      endedAt: '2026-04-05T14:30:00.000Z',
+      status: 'ended',
+    });
+
+    collectHourlyMetrics(db, now);
+
+    const row = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'sessions_active'"
+    ).get(bucket) as { value: number } | undefined;
+
+    expect(row?.value).toBe(2);
+  });
+
+  it('collects sessions_started counting only sessions starting in the hour', () => {
+    const now = new Date('2026-04-05T15:42:00.000Z');
+    const bucket = '2026-04-05T15:00:00.000Z';
+
+    // Started inside the hour
+    insertAgentSession(db, { startedAt: '2026-04-05T15:05:00.000Z', status: 'active' });
+    insertAgentSession(db, { startedAt: '2026-04-05T15:30:00.000Z', status: 'ended', endedAt: '2026-04-05T15:45:00.000Z' });
+    // Started outside the hour — should NOT be counted
+    insertAgentSession(db, { startedAt: '2026-04-05T14:55:00.000Z', status: 'active' });
+
+    collectHourlyMetrics(db, now);
+
+    const row = db.raw.prepare(
+      "SELECT value FROM metrics_hourly WHERE bucket = ? AND metric = 'sessions_started'"
+    ).get(bucket) as { value: number } | undefined;
+
+    expect(row?.value).toBe(2);
+  });
+
+  it('backfill iterates every hour for session metrics, not just active hours', () => {
+    const now = new Date('2026-04-05T18:30:00.000Z');
+
+    // Session spanning hours 15-17 (no messages in hours 16-17)
+    insertAgentSession(db, {
+      startedAt: '2026-04-05T15:00:00.000Z',
+      endedAt: '2026-04-05T17:30:00.000Z',
+      status: 'ended',
+    });
+
+    // A single message in hour 15 to give the backfill something for message metrics
+    insertMessage(db, {
+      timestamp: toUnixSeconds('2026-04-05T15:05:00.000Z'),
+      fromMe: false,
+      contentType: 'text',
+      messageId: 'backfill-session-msg',
+    });
+
+    backfillMetrics(db, 1, now);
+
+    // sessions_active should appear in hours 15, 16, and 17
+    const activeRows = db.raw.prepare(
+      "SELECT bucket, value FROM metrics_hourly WHERE metric = 'sessions_active' AND value > 0 ORDER BY bucket"
+    ).all() as Array<{ bucket: string; value: number }>;
+
+    expect(activeRows.length).toBeGreaterThanOrEqual(3);
+    expect(activeRows.map(r => r.bucket)).toContain('2026-04-05T15:00:00.000Z');
+    expect(activeRows.map(r => r.bucket)).toContain('2026-04-05T16:00:00.000Z');
+    expect(activeRows.map(r => r.bucket)).toContain('2026-04-05T17:00:00.000Z');
+  });
 })

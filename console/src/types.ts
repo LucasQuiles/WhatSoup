@@ -95,17 +95,46 @@ export interface MessageVolumeBucket {
   bucket: string;
   inbound: number;
   outbound: number;
+  media: number;
+}
+
+export interface TokenUsageBucket {
+  bucket: string;
+  input: number;
+  output: number;
+}
+
+export interface SessionActivityBucket {
+  bucket: string;
+  active: number;
+  started: number;
+}
+
+export interface FleetMetricsMeta {
+  instancesQueried: number;
+  instancesFailed: number;
+  hasMessageData: boolean;
+  hasTokenData: boolean;
+  hasSessionData: boolean;
 }
 
 export interface LineMetrics {
   range: MetricsRange;
   messageVolume: MessageVolumeBucket[];
+  tokenUsage: TokenUsageBucket[];
+  sessionActivity: SessionActivityBucket[];
   activeHours: number[][];
+  hasMessageData: boolean;
+  hasTokenData: boolean;
+  hasSessionData: boolean;
 }
 
 export interface FleetMetrics {
   range: MetricsRange;
+  meta: FleetMetricsMeta;
   messageVolume: MessageVolumeBucket[];
+  tokenUsage: TokenUsageBucket[];
+  sessionActivity: SessionActivityBucket[];
 }
 
 export interface AccessEntry {

@@ -156,8 +156,9 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
   return { mockSession, mockQueue, capturedOnEventRef };
 });
 
-const { mockAccumulateSessionTokens } = vi.hoisted(() => ({
+const { mockAccumulateSessionTokens, mockAccumulateTokensWithEvent } = vi.hoisted(() => ({
   mockAccumulateSessionTokens: vi.fn(),
+  mockAccumulateTokensWithEvent: vi.fn(),
 }));
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -185,6 +186,8 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   sweepOrphanedSessions: vi.fn(() => []),
   getResumableSessionForChat: vi.fn(() => null),
   accumulateSessionTokens: mockAccumulateSessionTokens,
+  insertTokenEvent: vi.fn(),
+  accumulateTokensWithEvent: mockAccumulateTokensWithEvent,
 }));
 
 vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
@@ -368,8 +371,8 @@ describe('Codex turn lifecycle — runtime level', () => {
     // Feed a token_usage event (from thread/tokenUsage/updated)
     onEvent({ type: 'token_usage', inputTokens: 500, outputTokens: 100 });
 
-    // Token accumulation should have been called
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 500, 100);
+    // Token accumulation should have been called (transactional helper)
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 500, 100);
 
     // Turn-completion side effects must NOT have fired
     expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
@@ -397,8 +400,8 @@ describe('Codex turn lifecycle — runtime level', () => {
     onEvent({ type: 'token_usage', inputTokens: 1000, outputTokens: 200 });
     onEvent({ type: 'result', text: null });
 
-    // token_usage should have recorded tokens
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 1000, 200);
+    // token_usage should have recorded tokens (transactional helper)
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 1000, 200);
 
     // Turn completion should have fired exactly once (from result, not token_usage)
     expect(mockSession.clearTurnWatchdog).toHaveBeenCalledOnce();
@@ -436,8 +439,8 @@ describe('Codex turn lifecycle — runtime level', () => {
     // Late token_usage arrives after turn already completed
     onEvent({ type: 'token_usage', inputTokens: 800, outputTokens: 150 });
 
-    // Tokens should still be recorded
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 800, 150);
+    // Tokens should still be recorded (transactional helper)
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 800, 150);
 
     // No additional turn-completion side effects
     expect(mockSession.clearTurnWatchdog).not.toHaveBeenCalled();
@@ -465,12 +468,12 @@ describe('Codex turn lifecycle — runtime level', () => {
     expect(mockQueue.flush).toHaveBeenCalledTimes(3);
     expect(mockQueue.markLastTerminal).toHaveBeenCalledTimes(3);
 
-    // Token accumulation: 3 from token_usage events
+    // Token accumulation: 3 from token_usage events (transactional helper)
     // (result events here have no token fields, so they don't accumulate)
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledTimes(3);
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 100, 20);
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 200, 40);
-    expect(mockAccumulateSessionTokens).toHaveBeenCalledWith(fakeDb, 1, 300, 60);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledTimes(3);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 100, 20);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 200, 40);
+    expect(mockAccumulateTokensWithEvent).toHaveBeenCalledWith(fakeDb, 1, 300, 60);
   });
 
   it('does not double-enqueue a completed agent message after streaming deltas', async () => {

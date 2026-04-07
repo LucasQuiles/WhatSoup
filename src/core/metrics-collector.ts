@@ -6,7 +6,12 @@ interface HourWindow {
   endSec: number;
 }
 
-const METRIC_NAMES = ['messages_in', 'messages_out', 'messages_media'] as const;
+const METRIC_NAMES = [
+  'messages_in', 'messages_out', 'messages_media',
+  'agent_tokens_in', 'agent_tokens_out',
+  'chat_tokens_in', 'chat_tokens_out',
+  'sessions_started', 'sessions_active',
+] as const;
 type MetricName = typeof METRIC_NAMES[number];
 
 function toHourWindow(now: Date): HourWindow {
@@ -29,6 +34,15 @@ function countMessages(
   return row?.cnt ?? 0;
 }
 
+function sumColumn(
+  db: Database,
+  sql: string,
+  ...params: Array<number | string>
+): number {
+  const row = db.raw.prepare(sql).get(...params) as { total: number | null } | undefined;
+  return row?.total ?? 0;
+}
+
 function upsertMetric(db: Database, bucket: string, metric: MetricName, value: number): void {
   db.raw.prepare(`
     INSERT INTO metrics_hourly (bucket, metric, value)
@@ -37,9 +51,36 @@ function upsertMetric(db: Database, bucket: string, metric: MetricName, value: n
   `).run(bucket, metric, value);
 }
 
+function querySessionMetrics(
+  db: Database,
+  startSec: number,
+  endSec: number,
+): { sessionsStarted: number; sessionsActive: number } {
+  const sessionsStarted = countMessages(
+    db,
+    `SELECT COUNT(*) AS cnt
+       FROM agent_sessions
+      WHERE unixepoch(started_at) >= ? AND unixepoch(started_at) < ?`,
+    startSec,
+    endSec,
+  );
+  const sessionsActive = countMessages(
+    db,
+    `SELECT COUNT(*) AS cnt
+       FROM agent_sessions
+      WHERE unixepoch(started_at) < ?
+        AND (ended_at IS NULL OR unixepoch(ended_at) > ?)
+        AND status != 'suspended'`,
+    endSec,
+    startSec,
+  );
+  return { sessionsStarted, sessionsActive };
+}
+
 function collectMetricsForWindow(db: Database, window: HourWindow): void {
   const { bucket, startSec, endSec } = window;
 
+  // ── Message metrics (existing) ──
   const messagesIn = countMessages(
     db,
     `SELECT COUNT(*) AS cnt
@@ -71,22 +112,73 @@ function collectMetricsForWindow(db: Database, window: HourWindow): void {
   upsertMetric(db, bucket, 'messages_in', messagesIn);
   upsertMetric(db, bucket, 'messages_out', messagesOut);
   upsertMetric(db, bucket, 'messages_media', messagesMedia);
+
+  // ── Token metrics ──
+  const agentTokensIn = sumColumn(
+    db,
+    `SELECT SUM(input_tokens) AS total
+       FROM agent_token_events
+      WHERE timestamp >= ? AND timestamp < ?`,
+    startSec,
+    endSec,
+  );
+
+  const agentTokensOut = sumColumn(
+    db,
+    `SELECT SUM(output_tokens) AS total
+       FROM agent_token_events
+      WHERE timestamp >= ? AND timestamp < ?`,
+    startSec,
+    endSec,
+  );
+
+  const chatTokensIn = sumColumn(
+    db,
+    `SELECT SUM(input_tokens) AS total
+       FROM messages
+      WHERE timestamp >= ? AND timestamp < ? AND input_tokens > 0`,
+    startSec,
+    endSec,
+  );
+
+  const chatTokensOut = sumColumn(
+    db,
+    `SELECT SUM(output_tokens) AS total
+       FROM messages
+      WHERE timestamp >= ? AND timestamp < ? AND output_tokens > 0`,
+    startSec,
+    endSec,
+  );
+
+  upsertMetric(db, bucket, 'agent_tokens_in', agentTokensIn);
+  upsertMetric(db, bucket, 'agent_tokens_out', agentTokensOut);
+  upsertMetric(db, bucket, 'chat_tokens_in', chatTokensIn);
+  upsertMetric(db, bucket, 'chat_tokens_out', chatTokensOut);
+
+  const { sessionsStarted, sessionsActive } = querySessionMetrics(db, startSec, endSec);
+  upsertMetric(db, bucket, 'sessions_started', sessionsStarted);
+  upsertMetric(db, bucket, 'sessions_active', sessionsActive);
 }
 
-/** Aggregate the current UTC hour and upsert the three Phase 5 baseline metrics. */
+/** Aggregate the current UTC hour and upsert the nine fleet metrics. */
 export function collectHourlyMetrics(db: Database, now = new Date()): void {
   collectMetricsForWindow(db, toHourWindow(now));
 }
 
 /**
  * Backfill historical hourly buckets for the requested lookback window.
- * Only hours containing at least one message are materialized.
+ *
+ * Message and token metrics: only hours containing messages are materialized.
+ * Session metrics: every hour in the window is iterated (sessions_active is
+ * an overlap calculation — a long-running session must appear in every hour).
+ * For hours without messages, session metrics are only written if non-zero.
  */
 export function backfillMetrics(db: Database, days = 30, now = new Date()): void {
   const currentHour = toHourWindow(now);
   const lookbackHours = Math.max(1, Math.floor(days * 24));
   const lookbackStartSec = currentHour.startSec - ((lookbackHours - 1) * 60 * 60);
 
+  // Discover hours with message activity (for message + token metrics)
   const hourRows = db.raw.prepare(`
     SELECT DISTINCT CAST(timestamp / 3600 AS INTEGER) AS hour_bucket
       FROM messages
@@ -94,17 +186,41 @@ export function backfillMetrics(db: Database, days = 30, now = new Date()): void
      ORDER BY hour_bucket
   `).all(lookbackStartSec, currentHour.endSec) as Array<{ hour_bucket: number }>;
 
-  if (hourRows.length === 0) return;
+  // Build set of message-active hours
+  const messageHours = new Set(hourRows.map(r => r.hour_bucket));
+
+  // Full-window iteration: every hour for session metrics
+  const allHourBuckets: number[] = [];
+  for (let sec = lookbackStartSec; sec <= currentHour.startSec; sec += 3600) {
+    allHourBuckets.push(Math.floor(sec / 3600));
+  }
+
+  if (allHourBuckets.length === 0 && messageHours.size === 0) return;
 
   db.raw.exec('BEGIN');
   try {
-    for (const row of hourRows) {
-      const bucketStartSec = row.hour_bucket * 3600;
-      collectMetricsForWindow(db, {
+    for (const hourBucket of allHourBuckets) {
+      const bucketStartSec = hourBucket * 3600;
+      const window: HourWindow = {
         bucket: new Date(bucketStartSec * 1000).toISOString(),
         startSec: bucketStartSec,
         endSec: bucketStartSec + 3600,
-      });
+      };
+
+      if (messageHours.has(hourBucket)) {
+        // Full collection: messages + tokens + sessions
+        collectMetricsForWindow(db, window);
+      } else {
+        // Session metrics only for hours without messages.
+        // Only write rows if at least one session metric is non-zero to preserve
+        // the "gaps" invariant (message-only hours don't pollute the bucket list).
+        const { sessionsStarted, sessionsActive } = querySessionMetrics(db, window.startSec, window.endSec);
+
+        if (sessionsStarted > 0 || sessionsActive > 0) {
+          upsertMetric(db, window.bucket, 'sessions_started', sessionsStarted);
+          upsertMetric(db, window.bucket, 'sessions_active', sessionsActive);
+        }
+      }
     }
     db.raw.exec('COMMIT');
   } catch (err) {

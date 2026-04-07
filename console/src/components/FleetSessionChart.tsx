@@ -1,25 +1,26 @@
 import {
   Area,
-  AreaChart,
+  Bar,
   CartesianGrid,
+  ComposedChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
-import type { MessageVolumeBucket, MetricsRange } from '../types';
+import type { SessionActivityBucket, MetricsRange } from '../types';
 import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
 
-interface FleetMetricsChartProps {
-  data: MessageVolumeBucket[];
+interface FleetSessionChartProps {
+  data: SessionActivityBucket[];
   range?: MetricsRange;
 }
 
-/** Stacked area chart showing fleet-wide inbound/outbound/media message volume. */
-export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProps) {
+/** Composed chart with area (active sessions) + bar (sessions started). */
+export function FleetSessionChart({ data, range = '24h' }: FleetSessionChartProps) {
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart data={data} margin={CHART_MARGIN}>
+      <ComposedChart data={data} margin={CHART_MARGIN}>
         <CartesianGrid stroke="var(--b1)" vertical={false} />
         <XAxis
           dataKey="bucket"
@@ -42,32 +43,20 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
         />
         <Area
           type="monotone"
-          dataKey="inbound"
-          name="Inbound"
-          stackId="msgs"
-          stroke="var(--color-m-pas)"
-          fill="var(--color-m-pas)"
+          dataKey="active"
+          name="Active Sessions"
+          stroke="var(--color-s-ok)"
+          fill="var(--color-s-ok)"
           fillOpacity={0.3}
         />
-        <Area
-          type="monotone"
-          dataKey="outbound"
-          name="Outbound"
-          stackId="msgs"
-          stroke="var(--color-m-cht)"
-          fill="var(--color-m-cht)"
-          fillOpacity={0.3}
+        <Bar
+          dataKey="started"
+          name="Sessions Started"
+          fill="var(--color-s-ok)"
+          fillOpacity={0.6}
+          barSize={4}
         />
-        <Area
-          type="monotone"
-          dataKey="media"
-          name="Media"
-          stackId="msgs"
-          stroke="var(--color-s-warn)"
-          fill="var(--color-s-warn)"
-          fillOpacity={0.2}
-        />
-      </AreaChart>
+      </ComposedChart>
     </ResponsiveContainer>
   );
 }

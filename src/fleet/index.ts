@@ -507,8 +507,9 @@ export function createFleetServer(deps: FleetDeps) {
       healthPoller.start();
       updateChecker.start();
       realtimePoller.start();
-      server.listen(port, '127.0.0.1', () => {
-        log.info({ port, ws: true }, 'fleet server listening');
+      const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
+      server.listen(port, host, () => {
+        log.info({ port, host, ws: true }, 'fleet server listening');
       });
     },
     stop(): void {

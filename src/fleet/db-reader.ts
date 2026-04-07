@@ -271,31 +271,83 @@ export class FleetDbReader {
     name: string,
     dbPath: string,
     opts: { range: '24h' | '7d' | '30d' },
-  ): DbResult<{ messageVolume: { bucket: string; inbound: number; outbound: number }[]; activeHours: number[][] }> {
+  ): DbResult<{
+    messageVolume: { bucket: string; inbound: number; outbound: number; media: number }[];
+    tokenUsage: { bucket: string; input: number; output: number }[];
+    sessionActivity: { bucket: string; active: number; started: number }[];
+    activeHours: number[][];
+    hasMessageData: boolean;
+    hasTokenData: boolean;
+    hasSessionData: boolean;
+  }> {
     const rangeHours = opts.range === '24h' ? 24 : opts.range === '7d' ? 168 : 720;
     const cutoff = new Date(Date.now() - rangeHours * 60 * 60 * 1000).toISOString();
 
     return this.query(name, dbPath, (db) => {
-      // Message volume from metrics_hourly buckets
-      const volumeRows = db.prepare(`
+      // Read all 9 metrics from metrics_hourly
+      const allRows = db.prepare(`
         SELECT bucket, metric, value FROM metrics_hourly
-        WHERE bucket >= ? AND metric IN ('messages_in', 'messages_out')
+        WHERE bucket >= ? AND metric IN (
+          'messages_in', 'messages_out', 'messages_media',
+          'agent_tokens_in', 'agent_tokens_out', 'chat_tokens_in', 'chat_tokens_out',
+          'sessions_started', 'sessions_active'
+        )
         ORDER BY bucket ASC
       `).all(cutoff) as { bucket: string; metric: string; value: number }[];
 
-      // Group by bucket
-      const bucketMap = new Map<string, { inbound: number; outbound: number }>();
-      for (const row of volumeRows) {
-        const existing = bucketMap.get(row.bucket) ?? { inbound: 0, outbound: 0 };
-        if (row.metric === 'messages_in') existing.inbound = row.value;
-        if (row.metric === 'messages_out') existing.outbound = row.value;
-        bucketMap.set(row.bucket, existing);
+      // Build a map of bucket -> metric -> value
+      const dataMap = new Map<string, Map<string, number>>();
+      for (const row of allRows) {
+        let metrics = dataMap.get(row.bucket);
+        if (!metrics) {
+          metrics = new Map();
+          dataMap.set(row.bucket, metrics);
+        }
+        metrics.set(row.metric, row.value);
       }
-      const messageVolume = Array.from(bucketMap.entries()).map(([bucket, v]) => ({
-        bucket, inbound: v.inbound, outbound: v.outbound,
-      }));
 
-      // Active hours heatmap (7 days × 24 hours) from raw messages
+      // Generate full bucket sequence (densification)
+      const nowHour = new Date(Date.now());
+      nowHour.setUTCMinutes(0, 0, 0);
+      const bucketSequence: string[] = [];
+      for (let i = rangeHours - 1; i >= 0; i--) {
+        const t = new Date(nowHour.getTime() - i * 60 * 60 * 1000);
+        bucketSequence.push(t.toISOString());
+      }
+
+      // Helper to read a metric from the map
+      const getVal = (bucket: string, metric: string): number => {
+        return dataMap.get(bucket)?.get(metric) ?? 0;
+      };
+
+      // Densify into arrays
+      let hasMessageData = false;
+      let hasTokenData = false;
+      let hasSessionData = false;
+
+      const messageVolume = bucketSequence.map(bucket => {
+        const inbound = getVal(bucket, 'messages_in');
+        const outbound = getVal(bucket, 'messages_out');
+        const media = getVal(bucket, 'messages_media');
+        if (inbound > 0 || outbound > 0 || media > 0) hasMessageData = true;
+        return { bucket, inbound, outbound, media };
+      });
+
+      const tokenUsage = bucketSequence.map(bucket => {
+        const input = getVal(bucket, 'agent_tokens_in') + getVal(bucket, 'chat_tokens_in');
+        const output = getVal(bucket, 'agent_tokens_out') + getVal(bucket, 'chat_tokens_out');
+        if (input > 0 || output > 0) hasTokenData = true;
+        return { bucket, input, output };
+      });
+
+      const sessionActivity = bucketSequence.map(bucket => {
+        const active = getVal(bucket, 'sessions_active');
+        const started = getVal(bucket, 'sessions_started');
+        if (active > 0 || started > 0) hasSessionData = true;
+        return { bucket, active, started };
+      });
+
+      // Active hours heatmap (7 days x 24 hours) from raw messages
       const heatmapRows = db.prepare(`
         SELECT
           CAST(strftime('%w', timestamp, 'unixepoch') AS INTEGER) AS dow,
@@ -311,7 +363,7 @@ export class FleetDbReader {
         activeHours[row.dow][row.hour] = row.cnt;
       }
 
-      return { messageVolume, activeHours };
+      return { messageVolume, tokenUsage, sessionActivity, activeHours, hasMessageData, hasTokenData, hasSessionData };
     });
   }
 

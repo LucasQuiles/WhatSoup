@@ -144,9 +144,55 @@ export function accumulateSessionTokens(
     .run(inputTokens, outputTokens, rowId);
 }
 
+/** Record a timestamped token usage event for granular metrics. */
+export function insertTokenEvent(
+  db: Database,
+  agentSessionId: number,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  db.raw
+    .prepare(
+      `INSERT INTO agent_token_events (agent_session_id, timestamp, input_tokens, output_tokens)
+       VALUES (?, unixepoch('now'), ?, ?)`,
+    )
+    .run(agentSessionId, inputTokens, outputTokens);
+}
+
+/** Atomically accumulate session tokens and record a token event in one transaction. */
+export function accumulateTokensWithEvent(
+  db: Database,
+  rowId: number,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  db.raw.exec('BEGIN IMMEDIATE');
+  try {
+    accumulateSessionTokens(db, rowId, inputTokens, outputTokens);
+    insertTokenEvent(db, rowId, inputTokens, outputTokens);
+    db.raw.exec('COMMIT');
+  } catch (err) {
+    try { db.raw.exec('ROLLBACK'); } catch { /* best-effort rollback */ }
+    log.error({ agentSessionId: rowId, inputTokens, outputTokens, err }, 'token_event.write_fail');
+    throw err;
+  }
+}
+
+const TERMINAL_STATUSES = new Set(['ended', 'completed', 'crashed', 'resume_failed', 'orphaned']);
+
 /** Update the status of an existing session row to any arbitrary status string. */
 export function updateSessionStatus(db: Database, rowId: number, status: string): void {
-  db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
+  if (TERMINAL_STATUSES.has(status)) {
+    const endedAt = new Date().toISOString();
+    db.raw
+      .prepare(
+        `UPDATE agent_sessions SET status = ?, ended_at = ? WHERE id = ?`,
+      )
+      .run(status, endedAt, rowId);
+    log.info({ agentSessionId: rowId, status, endedAt }, 'session.ended');
+  } else {
+    db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
+  }
 }
 
 /** Persist the local transcript file path on an existing session row. */
@@ -203,8 +249,7 @@ export function backfillWorkspaceKeys(db: Database, instanceCwd: string): void {
 
 /** Mark a session as orphaned (process disappeared unexpectedly). */
 export function markOrphaned(db: Database, id: number): void {
-  log.info({ id }, 'session: orphaned');
-  db.raw.prepare(`UPDATE agent_sessions SET status = 'orphaned' WHERE id = ?`).run(id);
+  updateSessionStatus(db, id, 'orphaned');
 }
 
 /**

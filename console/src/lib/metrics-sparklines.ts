@@ -1,4 +1,4 @@
-import type { MessageVolumeBucket } from '../types.js';
+import type { MessageVolumeBucket, SessionActivityBucket } from '../types.js';
 
 function normalize(values: number[]): number[] {
   if (values.length === 0) return [];
@@ -9,6 +9,11 @@ function normalize(values: number[]): number[] {
 export interface FleetMessageSparklines {
   inbound: number[];
   outbound: number[];
+  media: number[];
+}
+
+export interface FleetSessionSparklines {
+  active: number[];
 }
 
 export function deriveFleetMessageSparklines(
@@ -20,5 +25,17 @@ export function deriveFleetMessageSparklines(
   return {
     inbound: normalize(buckets.map((bucket) => bucket.inbound)),
     outbound: normalize(buckets.map((bucket) => bucket.outbound)),
+    media: normalize(buckets.map((bucket) => bucket.media)),
+  };
+}
+
+export function deriveFleetSessionSparklines(
+  sessionActivity: SessionActivityBucket[] | undefined,
+): FleetSessionSparklines | undefined {
+  if (!sessionActivity || sessionActivity.length === 0) return undefined;
+
+  const buckets = [...sessionActivity].sort((a, b) => a.bucket.localeCompare(b.bucket));
+  return {
+    active: normalize(buckets.map((bucket) => bucket.active)),
   };
 }

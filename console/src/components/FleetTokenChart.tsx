@@ -7,16 +7,17 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { MessageVolumeBucket, MetricsRange } from '../types';
+import type { TokenUsageBucket, MetricsRange } from '../types';
 import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
+import { formatCompact } from '../lib/text-utils';
 
-interface FleetMetricsChartProps {
-  data: MessageVolumeBucket[];
+interface FleetTokenChartProps {
+  data: TokenUsageBucket[];
   range?: MetricsRange;
 }
 
-/** Stacked area chart showing fleet-wide inbound/outbound/media message volume. */
-export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProps) {
+/** Area chart showing fleet-wide token consumption (input + output). */
+export function FleetTokenChart({ data, range = '24h' }: FleetTokenChartProps) {
   return (
     <ResponsiveContainer width="100%" height="100%">
       <AreaChart data={data} margin={CHART_MARGIN}>
@@ -33,39 +34,34 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
-          width={28}
+          width={36}
           allowDecimals={false}
+          tickFormatter={(v) => formatCompact(v)}
         />
         <Tooltip
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => new Date(String(v)).toLocaleString()}
+          formatter={(value, name) => [
+            Number(value).toLocaleString(),
+            String(name),
+          ]}
         />
         <Area
           type="monotone"
-          dataKey="inbound"
-          name="Inbound"
-          stackId="msgs"
-          stroke="var(--color-m-pas)"
-          fill="var(--color-m-pas)"
+          dataKey="output"
+          name="Output Tokens"
+          stroke="var(--color-m-agt)"
+          fill="var(--color-m-agt)"
           fillOpacity={0.3}
         />
         <Area
           type="monotone"
-          dataKey="outbound"
-          name="Outbound"
-          stackId="msgs"
-          stroke="var(--color-m-cht)"
-          fill="var(--color-m-cht)"
-          fillOpacity={0.3}
-        />
-        <Area
-          type="monotone"
-          dataKey="media"
-          name="Media"
-          stackId="msgs"
-          stroke="var(--color-s-warn)"
-          fill="var(--color-s-warn)"
-          fillOpacity={0.2}
+          dataKey="input"
+          name="Input Tokens"
+          stroke="var(--color-m-agt)"
+          strokeDasharray="4 2"
+          fill="var(--color-m-agt)"
+          fillOpacity={0.15}
         />
       </AreaChart>
     </ResponsiveContainer>
