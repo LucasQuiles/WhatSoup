@@ -11,10 +11,10 @@ describe('design system compliance — Shannon slice', () => {
 
     expect(source).toMatch(/left:\s*["']var\(--sp-3\)["']/)
     expect(source).toMatch(/right:\s*["']var\(--sp-3\)["']/)
-    expect(source).toMatch(/height:\s*["']var\(--bw-accent\)["']/)
-    expect(source).toMatch(/minWidth:\s*["']var\(--sp-4\)["']/)
-    expect(source).toMatch(/padding:\s*["']1px var\(--sp-1\)["']/)
-    expect(source).toMatch(/padding:\s*["']2px var\(--sp-1h\)["']/)
+    expect(source).toContain('h-[var(--bw-accent)]')
+    expect(source).toContain('min-w-[var(--sp-4)]')
+    expect(source).toContain('py-[var(--sp-0h)] px-[var(--sp-1)]')
+    expect(source).toContain('py-[var(--sp-1h)] px-[var(--sp-3)]')
     expect(source).not.toContain('left: "12px"')
     expect(source).not.toContain('right: "12px"')
     expect(source).not.toContain('height: "2px"')
@@ -32,7 +32,7 @@ describe('design system compliance — Shannon slice', () => {
     expect(heatmap).toContain("fontSize: 'var(--font-size-xs)'")
 
     expect(tags).not.toContain("gap: '3px'")
-    expect(tags).toContain("gap: 'var(--sp-0h)'")
+    expect(tags).toContain("gap-[var(--sp-0h)]")
 
     expect(content).not.toContain("maxHeight: '48px'")
     expect(content).toContain("maxHeight: 'var(--sp-12)'")
@@ -42,7 +42,7 @@ describe('design system compliance — Shannon slice', () => {
     const source = read('console/src/components/line-detail/HistoryTab.tsx')
 
     expect(source).toContain('c-btn c-btn-sm')
-    expect(source).toContain("zIndex: 'var(--z-float)'")
+    expect(source).toContain("z-[var(--z-float)]")
     expect(source).toContain('aria-label="Type a reply"')
   })
 
@@ -84,9 +84,9 @@ describe('design system compliance — Shannon slice', () => {
     const inbox = read('console/src/pages/Inbox.tsx')
 
     expect((inbox.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
-    expect(inbox).toContain('className="c-btn c-btn-ghost"')
-    expect(inbox).toContain('className="c-btn c-btn-sm"')
-    expect(inbox).toContain("zIndex: 'var(--z-float)'")
+    expect(inbox).toContain('c-btn c-btn-ghost')
+    expect(inbox).toContain('c-btn c-btn-sm')
+    expect(inbox).toContain('z-[var(--z-float)]')
     expect(inbox).toContain('aria-label="Type a message"')
     expect(inbox).toContain('aria-label="Clear search"')
   })

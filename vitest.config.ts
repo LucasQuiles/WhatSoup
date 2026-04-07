@@ -9,10 +9,11 @@ export default defineConfig({
   resolve: {
     alias: {
       // Force single React instance to avoid duplicate-React hooks errors
-      'react': path.resolve(__dirname, 'node_modules/react'),
-      'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
-      'react/jsx-runtime': path.resolve(__dirname, 'node_modules/react/jsx-runtime'),
-      'react/jsx-dev-runtime': path.resolve(__dirname, 'node_modules/react/jsx-dev-runtime'),
+      // Use console/node_modules/react since worktree node_modules is minimal
+      'react': path.resolve(__dirname, 'console/node_modules/react'),
+      'react-dom': path.resolve(__dirname, 'console/node_modules/react-dom'),
+      'react/jsx-runtime': path.resolve(__dirname, 'console/node_modules/react/jsx-runtime'),
+      'react/jsx-dev-runtime': path.resolve(__dirname, 'console/node_modules/react/jsx-dev-runtime'),
       // Allow console component tests to resolve console workspace deps
       '@tanstack/react-query': path.resolve(__dirname, 'console/node_modules/@tanstack/react-query'),
       'react-router-dom': path.resolve(__dirname, 'console/node_modules/react-router-dom'),
