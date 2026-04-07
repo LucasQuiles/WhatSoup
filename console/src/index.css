@@ -712,7 +712,7 @@ body::before {
   display: block;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
-  color: var(--color-t4);
+  color: var(--color-t3);
   margin-bottom: var(--sp-1);
 }
 
