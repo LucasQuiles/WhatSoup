@@ -823,6 +823,59 @@ body::before {
   padding-right: var(--sp-8);
 }
 
+/* ═══ Form primitives — wizard and form fields ═══ */
+.c-select {
+  width: 100%;
+  height: var(--input-h);
+  padding: var(--sp-1h) var(--sp-3);
+  padding-right: var(--sp-8);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-data);
+  color: var(--color-t2);
+  background: var(--color-d1);
+  border: var(--bw) solid var(--b2);
+  border-radius: var(--radius-sm);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7a90' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--sp-3) center;
+  transition:
+    border-color var(--dur-norm) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    background var(--dur-norm) var(--ease);
+}
+.c-select::placeholder { color: var(--color-t5); }
+.c-select:hover { border-color: var(--b3); }
+.c-select:focus-visible {
+  border-color: var(--color-m-cht);
+  box-shadow:
+    0 0 0 var(--bw-focus) var(--color-d1),
+    0 0 0 calc(var(--bw-focus) + var(--bw-focus-outer)) var(--m-cht-wash);
+}
+
+.c-input-number {
+  width: var(--input-number-w);
+  text-align: right;
+}
+
+.c-helper {
+  font-size: var(--font-size-data);
+  color: var(--color-t4);
+  margin-top: var(--sp-1);
+}
+
+.c-error {
+  font-size: var(--font-size-data);
+  color: var(--color-s-crit);
+  margin-top: var(--sp-1);
+}
+
+.c-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 .c-dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -1039,10 +1092,12 @@ body::before {
 }
 
 /* ═══ Border utilities — replace inline border triplets ═══ */
-.c-border      { border: var(--bw) solid var(--b1); }
-.c-border-b2   { border: var(--bw) solid var(--b2); }
-.c-border-b    { border-bottom: var(--bw) solid var(--b1); }
-.c-border-b-b2 { border-bottom: var(--bw) solid var(--b2); }
+.c-border        { border: var(--bw) solid var(--b1); }
+.c-border-b2     { border: var(--bw) solid var(--b2); }
+.c-border-b      { border-bottom: var(--bw) solid var(--b1); }
+.c-border-b-b2   { border-bottom: var(--bw) solid var(--b2); }
+.c-border-t      { border-top: var(--bw) solid var(--b1); }
+.c-border-dashed { border: var(--bw) dashed var(--b2); }
 
 /* Wizard accent-scoped focus ring — matches the selected line type color */
 .wizard-accent-scope input:focus-visible,

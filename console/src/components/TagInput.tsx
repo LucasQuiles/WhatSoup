@@ -1,6 +1,6 @@
 import { type FC, useState, useCallback, useRef, type KeyboardEvent } from 'react'
 import { X } from 'lucide-react'
-import { inputStyle } from './wizard/form-styles'
+// inputStyle replaced by c-input CSS class
 
 interface TagInputProps {
   values: string[]
@@ -51,18 +51,17 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
         onKeyDown={handleKeyDown}
         onBlur={() => addTag(input)}
         placeholder={placeholder ? `${placeholder} (press Enter to add)` : 'Press Enter to add'}
-        className="w-full font-mono"
+        className="c-input w-full font-mono"
         style={{
-          ...inputStyle,
           borderColor: (accentColor && values.length > 0) ? accentColor : 'var(--b2)',
         }}
       />
       {values.length > 0 && (
-        <div className="flex flex-wrap" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
+        <div className="flex flex-wrap gap-[var(--sp-2)] mt-[var(--sp-2)]">
           {values.map((tag, i) => (
             <span
               key={tag}
-              className="inline-flex items-center font-mono font-medium"
+              className="inline-flex items-center font-mono font-medium rounded-sm py-[var(--sp-1)] px-[var(--sp-2)] gap-[var(--sp-1)]"
               style={{
                 background: accentColor ? `color-mix(in srgb, ${accentColor} 15%, var(--color-d4))` : 'var(--color-d4)',
                 color: accentColor ?? 'var(--color-t4)',
@@ -70,24 +69,20 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
                 borderWidth: 'var(--bw)',
                 borderStyle: 'solid',
                 borderColor: accentColor ?? 'var(--b2)',
-                borderRadius: 'var(--radius-sm)',
-                padding: 'var(--sp-1) var(--sp-2)',
-                gap: 'var(--sp-1)',
               }}
             >
               {displayLabels?.[tag] ?? tag}
               <button
                 type="button"
                 onClick={() => removeTag(i)}
-                className="inline-flex items-center justify-center cursor-pointer c-hover"
+                className="inline-flex items-center justify-center cursor-pointer c-hover text-t3"
                 style={{
                   background: 'none',
                   border: 'none',
                   padding: 0,
-                  color: 'var(--color-t3)',
                 }}
               >
-                <X style={{ width: 'var(--sp-3)', height: 'var(--sp-3)' }} />
+                <X className="w-[var(--sp-3)] h-[var(--sp-3)]" />
               </button>
             </span>
           ))}

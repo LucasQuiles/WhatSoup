@@ -3,7 +3,7 @@ import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
-import { helperStyle, labelStyle } from './form-styles'
+// form-styles static exports replaced by CSS classes (c-field-label, c-helper)
 import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 
@@ -97,13 +97,7 @@ const ACCESS_OPTIONS = [
   },
 ]
 
-const detailPanelStyle: React.CSSProperties = {
-  background: 'var(--color-d3)',
-  borderRadius: 'var(--radius-md)',
-  padding: 'var(--sp-4)',
-  marginTop: 'var(--sp-3)',
-  transition: 'opacity var(--dur-norm) var(--ease)',
-}
+// detailPanelStyle replaced by Tailwind classes: bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]
 
 const SEARCH_MODES = ['Memory', 'Entity'] as const
 
@@ -304,7 +298,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+    <div className="flex flex-col gap-[var(--sp-4)]">
       {/* Tab bar */}
       <div className="flex c-border-b" role="tablist">
         <button type="button" className={`c-tab ${activeTab === 'access' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'access'} onClick={() => setActiveTab('access')}>Access</button>
@@ -320,12 +314,12 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 1. Access */}
       {activeTab === 'access' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex flex-col gap-[var(--sp-4)]">
           <div>
-            <label className="c-label" style={labelStyle}>
-              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+            <label className="c-label c-field-label">
+              <span className="inline-flex items-center gap-[var(--sp-1)]">
                 Access Mode
-                <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                <Check size={14} className="flex-none" style={{ color: 'var(--wizard-accent)' }} />
               </span>
             </label>
             <CardSelector
@@ -336,18 +330,18 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </div>
 
           {accessMode === 'self_only' && (
-            <div style={detailPanelStyle}>
+            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Admin Only</span>
               <p className="c-body text-t3">Only phone numbers listed as admin can interact with this line. All other messages are silently ignored. This is the most restrictive and secure setting.</p>
             </div>
           )}
 
           {accessMode === 'allowlist' && (
-            <div style={detailPanelStyle}>
+            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Allowlist</span>
               <p className="c-body text-t3">Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.</p>
-              <div style={{ marginTop: 'var(--sp-3)' }}>
-                <label className="c-label" style={labelStyle}>Pre-approved contacts</label>
+              <div className="mt-[var(--sp-3)]">
+                <label className="c-label c-field-label">Pre-approved contacts</label>
                 <TagInput
                   values={allowedContacts}
                   onChange={(values) => onChange({ allowedContacts: values.map(v => v.replace(/\D/g, '')) })}
@@ -355,20 +349,20 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                   validate={validatePhone}
                   accentColor={allowedContacts.length > 0 ? 'var(--wizard-accent)' : undefined}
                 />
-                <div style={helperStyle}>These contacts will be automatically approved when they first message.</div>
+                <div className="c-helper">These contacts will be automatically approved when they first message.</div>
               </div>
             </div>
           )}
 
           {accessMode === 'open_dm' && (
-            <div style={detailPanelStyle}>
-              <span className="c-heading" style={{ color: 'var(--color-s-warn)' }}>Open DMs — Use Caution</span>
+            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
+              <span className="c-heading text-s-warn">Open DMs — Use Caution</span>
               <p className="c-body text-t3">Anyone can send a direct message and the agent will respond. The agent has access to its configured tools and workspace. Only use this if you trust all potential contacts or have strict sandbox restrictions in the Permissions tab.</p>
             </div>
           )}
 
           {accessMode === 'groups_only' && (
-            <div style={detailPanelStyle}>
+            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Groups Only</span>
               <p className="c-body text-t3">This line only responds in group chats when mentioned. Direct messages are ignored. Useful for shared team bots.</p>
             </div>
@@ -378,7 +372,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 2. Behavior */}
       {activeTab === 'behavior' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex flex-col gap-[var(--sp-4)]">
           {/* System Prompt — hidden for passive lines */}
           {type !== 'passive' && (
             <Field label="System Prompt" error={errors.systemPrompt} confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}>
@@ -398,34 +392,21 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
           {/* CLAUDE.md */}
           <div>
-            <label className="c-label" style={labelStyle}>
-              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+            <label className="c-label c-field-label">
+              <span className="inline-flex items-center gap-[var(--sp-1)]">
                 CLAUDE.md Instructions
                 {claudeMd.trim().length > 0 && (
-                  <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                  <Check size={14} className="flex-none" style={{ color: 'var(--wizard-accent)' }} />
                 )}
               </span>
             </label>
-            <div
-              className="flex items-center justify-center cursor-pointer"
-              style={{
-                borderWidth: 'var(--bw)', borderStyle: 'dashed', borderColor: 'var(--b2)',
-                borderRadius: 'var(--radius-sm)',
-                padding: 'var(--sp-4)',
-                background: 'var(--color-d3)',
-                marginBottom: 'var(--sp-2)',
-              }}
-            >
+            <div className="flex items-center justify-center cursor-pointer rounded-sm p-[var(--sp-4)] bg-d3 mb-[var(--sp-2)] c-border-dashed">
               <input
                 type="file"
                 accept=".md,.txt"
                 onChange={handleFileUpload}
-                style={{
-                  width: '100%',
-                  cursor: 'pointer',
-                  fontSize: 'var(--font-size-data)',
-                  color: 'var(--color-t3)',
-                }}
+                className="w-full cursor-pointer text-t3"
+                style={{ fontSize: 'var(--font-size-data)' }}
               />
             </div>
             <TextArea
@@ -441,7 +422,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 3. Permissions — only for agent type */}
       {activeTab === 'permissions' && type === 'agent' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}>
             {(id) => (
               <TextInput
@@ -572,24 +553,23 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           />
 
           {/* Plugin selection */}
-          <div style={{ ...detailPanelStyle, marginTop: 'var(--sp-2)' }}>
-            <label className="c-label" style={labelStyle}>
-              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+          <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-2)]">
+            <label className="c-label c-field-label">
+              <span className="inline-flex items-center gap-[var(--sp-1)]">
                 Enabled Plugins
                 {agentOptions.enabledPlugins && (
-                  <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                  <Check size={14} className="flex-none" style={{ color: 'var(--wizard-accent)' }} />
                 )}
               </span>
             </label>
-            <div style={helperStyle}>
+            <div className="c-helper">
               Select which plugins this instance loads. Disabled plugins save context tokens. Heavy plugins like SDLC-OS add ~66K tokens to every session.
             </div>
-            <div className="flex items-center" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)', marginBottom: 'var(--sp-1)' }}>
+            <div className="flex items-center gap-[var(--sp-2)] mt-[var(--sp-2)] mb-[var(--sp-1)]">
               {agentOptions.enabledPlugins && Object.keys(agentOptions.enabledPlugins).length > 0 && (
                 <button
                   type="button"
-                  className="c-btn c-btn-ghost"
-                  style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)' }}
+                  className="c-btn c-btn-ghost c-btn-xs"
                   onClick={() => handleAgentOption('enabledPlugins', {})}
                 >
                   Reset to global defaults
@@ -597,8 +577,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               )}
               <button
                 type="button"
-                className="c-btn c-btn-ghost"
-                style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)' }}
+                className="c-btn c-btn-ghost c-btn-xs"
                 onClick={() => {
                   const all: Record<string, boolean> = {}
                   ALL_PLUGINS.forEach(p => { all[p.key] = true })
@@ -609,8 +588,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               </button>
               <button
                 type="button"
-                className="c-btn c-btn-ghost"
-                style={{ fontSize: 'var(--font-size-xs)', padding: 'var(--sp-1) var(--sp-2)' }}
+                className="c-btn c-btn-ghost c-btn-xs"
                 onClick={() => {
                   const core: Record<string, boolean> = {}
                   ALL_PLUGINS.forEach(p => { core[p.key] = p.category === 'core' })
@@ -624,8 +602,8 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               const plugins = ALL_PLUGINS.filter(p => p.category === cat)
               if (plugins.length === 0) return null
               return (
-                <div key={cat} style={{ marginTop: 'var(--sp-3)' }}>
-                  <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t4)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-wide)', marginBottom: 'var(--sp-1)' }}>
+                <div key={cat} className="mt-[var(--sp-3)]">
+                  <div className="text-t4 uppercase tracking-[var(--tracking-wide)] mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
                     {catLabel}
                   </div>
                   {plugins.map(plugin => {
@@ -634,8 +612,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                     return (
                       <label
                         key={plugin.key}
-                        className="flex items-start cursor-pointer"
-                        style={{ gap: 'var(--sp-2)', padding: 'var(--sp-1) 0' }}
+                        className="flex items-start cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1)] px-0"
                       >
                         <input
                           type="checkbox"
@@ -644,13 +621,13 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                             const updated = { ...current, [plugin.key]: e.target.checked }
                             handleAgentOption('enabledPlugins', updated)
                           }}
-                          style={{ marginTop: '3px' }}
+                          className="mt-[var(--sp-0h)]"
                         />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 'var(--font-size-data)', color: isEnabled ? 'var(--color-t1)' : 'var(--color-t4)' }}>
+                        <div className="flex-1 min-w-0">
+                          <div className={isEnabled ? 'text-t1' : 'text-t4'} style={{ fontSize: 'var(--font-size-data)' }}>
                             {plugin.label}
                           </div>
-                          <div style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-t5)' }}>
+                          <div className="text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
                             {plugin.description}
                           </div>
                         </div>
@@ -663,16 +640,16 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </div>
 
           {/* Settings JSON — permissions for Claude Code */}
-          <div style={{ ...detailPanelStyle, marginTop: 'var(--sp-2)' }}>
-            <label className="c-label" style={labelStyle}>
-              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+          <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-2)]">
+            <label className="c-label c-field-label">
+              <span className="inline-flex items-center gap-[var(--sp-1)]">
                 Claude Code Permissions (settings.json)
                 {(data.settingsJson as Record<string, unknown> | undefined) && (
-                  <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                  <Check size={14} className="flex-none" style={{ color: 'var(--wizard-accent)' }} />
                 )}
               </span>
             </label>
-            <div style={helperStyle}>
+            <div className="c-helper">
               Controls which tools Claude Code is allowed to use. Default grants full bypass with standard MCP wildcards.
             </div>
             <Field label="Template" confirmed>
@@ -696,7 +673,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             </Field>
             {(data.settingsJsonMode as string) === 'custom' && (
               <>
-                <div style={{ marginTop: 'var(--sp-2)' }}>
+                <div className="mt-[var(--sp-2)]">
                   <input
                     type="file"
                     accept=".json"
@@ -714,13 +691,8 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       }
                       reader.readAsText(file)
                     }}
-                    style={{
-                      width: '100%',
-                      cursor: 'pointer',
-                      fontSize: 'var(--font-size-data)',
-                      color: 'var(--color-t3)',
-                      marginBottom: 'var(--sp-2)',
-                    }}
+                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)]"
+                    style={{ fontSize: 'var(--font-size-data)' }}
                   />
                 </div>
                 <TextArea
@@ -761,7 +733,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 4. Limits */}
       {activeTab === 'limits' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Messages per hour" confirmed>
             {(id) => (
               <NumberInput
@@ -815,7 +787,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 5. RAG */}
       {activeTab === 'rag' && (
-        <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+        <div className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Pinecone Index Name" confirmed={pineconeIndex.trim().length > 0}>
             {(id) => (
               <TextInput
@@ -828,32 +800,29 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             )}
           </Field>
           <div>
-            <label className="c-label" style={labelStyle}>
-              <span className="inline-flex items-center" style={{ gap: 'var(--sp-1)' }}>
+            <label className="c-label c-field-label">
+              <span className="inline-flex items-center gap-[var(--sp-1)]">
                 Search Mode
-                <Check size={14} style={{ color: 'var(--wizard-accent)', flexShrink: 0 }} />
+                <Check size={14} className="flex-none" style={{ color: 'var(--wizard-accent)' }} />
               </span>
             </label>
-            <div className="flex" style={{ gap: 0 }}>
+            <div className="flex">
               {SEARCH_MODES.map((mode) => (
                 <button
                   key={mode}
                   type="button"
-                  className="c-btn"
+                  className="c-btn cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)]"
                   onClick={() => onChange({ pineconeSearchMode: mode })}
                   style={{
                     background:
                       pineconeSearchMode === mode ? 'var(--wizard-accent)' : 'var(--color-d3)',
                     color:
                       pineconeSearchMode === mode ? 'var(--color-d0)' : 'var(--color-t3)',
-                    borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
                     borderRadius:
                       mode === 'Memory'
                         ? 'var(--radius-sm) 0 0 var(--radius-sm)'
                         : '0 var(--radius-sm) var(--radius-sm) 0',
-                    padding: 'var(--sp-2) var(--sp-4)',
                     fontSize: 'var(--font-size-data)',
-                    cursor: 'pointer',
                     transition: 'background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease)',
                   }}
                 >
@@ -892,12 +861,11 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       )}
       {/* Skip — sticky at bottom, right-aligned */}
       {onSkip && (
-        <div className="flex justify-end" style={{ marginTop: 'var(--sp-4)', paddingTop: 'var(--sp-3)', borderTopWidth: 'var(--bw)', borderTopStyle: 'solid', borderTopColor: 'var(--b1)' }}>
+        <div className="flex justify-end mt-[var(--sp-4)] pt-[var(--sp-3)] c-border-t">
           <button
             type="button"
-            className="c-btn c-btn-ghost"
+            className="c-btn c-btn-ghost c-btn-sm"
             onClick={onSkip}
-            style={{ fontSize: 'var(--font-size-data)' }}
           >
             Skip — Use Defaults
           </button>

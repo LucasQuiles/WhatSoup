@@ -1,6 +1,6 @@
 import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode, useId } from 'react'
 import { Check } from 'lucide-react'
-import { inputStyle, selectStyle, numberInputStyle, labelStyle, helperStyle, errorStyle, checkboxRowStyle, getBorderColor, confirmCheckStyle } from './form-styles'
+import { getBorderColor, confirmCheckStyle } from './form-styles'
 
 // ── Form field wrapper ──
 
@@ -16,15 +16,15 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, childre
   const id = useId()
   return (
     <div>
-      <label htmlFor={id} className="c-heading" style={labelStyle}>{label}</label>
-      <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>{children(id)}</div>
+      <label htmlFor={id} className="c-heading c-field-label">{label}</label>
+      <div className="flex items-center gap-[var(--sp-2)]">
+        <div className="flex-1 min-w-0">{children(id)}</div>
         {!error && confirmed && (
           <Check size={16} className="wizard-check" style={confirmCheckStyle} />
         )}
       </div>
-      {error && <div style={errorStyle}>{error}</div>}
-      {!error && helper && <div style={helperStyle}>{helper}</div>}
+      {error && <div className="c-error">{error}</div>}
+      {!error && helper && <div className="c-helper">{helper}</div>}
     </div>
   )
 }
@@ -39,8 +39,8 @@ interface TextInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'st
 export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ...props }) => (
   <input
     {...props}
-    className={`font-mono ${className ?? ''}`}
-    style={{ ...inputStyle, borderColor: getBorderColor(error, confirmed) }}
+    className={`c-input font-mono ${className ?? ''}`}
+    style={{ borderColor: getBorderColor(error, confirmed) }}
   />
 )
 
@@ -53,8 +53,8 @@ export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className,
   <input
     type="number"
     {...props}
-    className={`font-mono ${className ?? ''}`}
-    style={{ ...numberInputStyle, borderColor: getBorderColor(error, confirmed) }}
+    className={`c-input c-input-number font-mono ${className ?? ''}`}
+    style={{ borderColor: getBorderColor(error, confirmed) }}
   />
 )
 
@@ -66,8 +66,8 @@ interface SelectInputProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>,
 export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, className, ...props }) => (
   <select
     {...props}
-    className={className ?? ''}
-    style={{ ...selectStyle, borderColor: getBorderColor(error, confirmed) }}
+    className={`c-input c-select ${className ?? ''}`}
+    style={{ borderColor: getBorderColor(error, confirmed) }}
   >
     {children}
   </select>
@@ -82,9 +82,8 @@ interface TextAreaProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>
 export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, className, ...props }) => (
   <textarea
     {...props}
-    className={`font-mono ${className ?? ''}`}
+    className={`c-input font-mono ${className ?? ''}`}
     style={{
-      ...inputStyle,
       minHeight: minHeight ?? 80,
       resize: 'vertical',
       borderColor: getBorderColor(error, confirmed),
@@ -101,15 +100,15 @@ interface CheckboxFieldProps {
 
 export const CheckboxField: FC<CheckboxFieldProps> = ({ label, checked, onChange, helper }) => (
   <div>
-    <label style={checkboxRowStyle}>
+    <label className="c-checkbox-row">
       <input
         type="checkbox"
         checked={checked}
         onChange={e => onChange(e.target.checked)}
         /* accentColor set globally in index.css */
       />
-      <span style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-t2)' }}>{label}</span>
+      <span className="text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{label}</span>
     </label>
-    {helper && <div style={{ ...helperStyle, marginLeft: 'var(--sp-5)' }}>{helper}</div>}
+    {helper && <div className="c-helper ml-[var(--sp-5)]">{helper}</div>}
   </div>
 )

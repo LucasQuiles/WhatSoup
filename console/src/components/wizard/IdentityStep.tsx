@@ -3,7 +3,7 @@ import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
-import { errorStyle, helperStyle, labelStyle, inputStyle, confirmCheckStyle } from './form-styles'
+import { confirmCheckStyle } from './form-styles'
 import { validatePhone } from '../../lib/validation'
 
 interface IdentityStepProps {
@@ -98,10 +98,10 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   }, [name])
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-4)' }}>
+    <div className="flex flex-col gap-[var(--sp-4)]">
       {/* Type — first so it drives the rest of the wizard */}
       <div>
-        <label className="c-heading" style={labelStyle}>
+        <label className="c-heading c-field-label">
           Type
         </label>
         <CardSelector
@@ -109,62 +109,60 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           selected={type}
           onChange={(value) => onChange({ type: value })}
         />
-        {errors.type && <div style={errorStyle}>{errors.type}</div>}
+        {errors.type && <div className="c-error">{errors.type}</div>}
       </div>
 
       {/* Name */}
       <div>
-        <label className="c-heading" style={labelStyle}>
+        <label className="c-heading c-field-label">
           Name
         </label>
-        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex items-center gap-[var(--sp-2)]">
           <input
             type="text"
             value={name}
             onChange={(e) => onChange({ name: slugify(e.target.value) })}
             placeholder="my-line"
-            className="font-mono"
+            className={`c-input font-mono${nameLocked ? ' opacity-[var(--opacity-muted)] cursor-not-allowed' : ''}`}
             disabled={nameLocked}
             style={{
-              ...inputStyle,
               borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' || nameLocked ? 'var(--wizard-accent)' : 'var(--b2)',
-              ...(nameLocked ? { opacity: 0.7, cursor: 'not-allowed' } : {}),
             }}
           />
           {!nameLocked && nameStatus === 'checking' && (
-            <Loader2 size={16} className="animate-spin" style={{ color: 'var(--color-t4)', flexShrink: 0 }} />
+            <Loader2 size={16} className="animate-spin text-t4 flex-none" />
           )}
           {(nameStatus === 'available' || nameLocked) && (
             <Check size={16} className="wizard-check" style={confirmCheckStyle} />
           )}
           {!nameLocked && nameStatus === 'taken' && (
-            <X size={16} style={{ color: 'var(--color-s-crit)', flexShrink: 0 }} />
+            <X size={16} className="text-s-crit flex-none" />
           )}
         </div>
         {nameLocked && (
-          <div style={helperStyle}>Name is locked — instance already provisioned</div>
+          <div className="c-helper">Name is locked — instance already provisioned</div>
         )}
         {!nameLocked && nameStatus === 'taken' && (
-          <div style={errorStyle}>Name already exists</div>
+          <div className="c-error">Name already exists</div>
         )}
         {errors.name && (
-          <div style={errorStyle}>{errors.name}</div>
+          <div className="c-error">{errors.name}</div>
         )}
       </div>
 
       {/* Description */}
       <div>
-        <label className="c-heading" style={labelStyle}>
-          Description <span style={{ color: 'var(--color-t5)' }}>(optional)</span>
+        <label className="c-heading c-field-label">
+          Description <span className="text-t5">(optional)</span>
         </label>
-        <div className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex items-center gap-[var(--sp-2)]">
         <input
           type="text"
           value={description}
           onChange={(e) => onChange({ description: e.target.value })}
           placeholder="What this line is for"
+          className="c-input"
           style={{
-            ...inputStyle,
             borderColor: showConfirmed && description.trim() ? 'var(--wizard-accent)' : 'var(--b2)',
           }}
         />
@@ -176,16 +174,16 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
 
       {/* Admin Phones */}
       <div>
-        <label className="c-heading" style={{ display: 'block', marginBottom: 'var(--sp-1)' }}>Admin Phones</label>
-        <div style={helperStyle}>{
+        <label className="c-heading block mb-[var(--sp-1)]">Admin Phones</label>
+        <div className="c-helper">{
           adminPhones.length === 0
             ? 'Phone numbers with full admin access to this line. Use international format without the +.'
             : adminPhones.length === 1
               ? 'Add another number for shared admin access, or continue with one.'
               : `${adminPhones.length} admin numbers configured.`
         }</div>
-        <div className="flex items-start" style={{ gap: 'var(--sp-2)', marginTop: 'var(--sp-2)' }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="flex items-start gap-[var(--sp-2)] mt-[var(--sp-2)]">
+          <div className="flex-1 min-w-0">
             <TagInput
               values={adminPhones}
               onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
@@ -195,10 +193,10 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             />
           </div>
           {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} className="wizard-check" style={{ ...confirmCheckStyle, marginTop: 'var(--sp-2)' }} />
+            <Check size={16} className="wizard-check mt-[var(--sp-2)]" style={confirmCheckStyle} />
           )}
         </div>
-        {errors.adminPhones && <div style={errorStyle}>{errors.adminPhones}</div>}
+        {errors.adminPhones && <div className="c-error">{errors.adminPhones}</div>}
       </div>
     </div>
   )
