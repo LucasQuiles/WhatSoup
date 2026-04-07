@@ -1225,12 +1225,33 @@ export class AgentRuntime implements Runtime {
     // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
     // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
     const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat') ? null : getActiveSession(this.db);
-    if (prior?.session_id && prior?.chat_jid) {
+
+    // AE2: Staleness check for shared/single mode — match per_chat's 60-minute threshold.
+    let priorSession = prior;
+    if (priorSession && this.durability) {
+      const ck = toConversationKey(priorSession.chat_jid!);
+      const checkpoint = this.durability.getSessionCheckpoint(ck);
+      if (checkpoint?.updated_at) {
+        const ageMs = Date.now() - new Date(checkpoint.updated_at + 'Z').getTime();
+        if (ageMs > 60 * 60 * 1000) {
+          log.info({ chatJid: priorSession.chat_jid, ageMinutes: Math.round(ageMs / 60_000) },
+            'skipping shared/single resume — session too stale');
+          this.durability.upsertSessionCheckpoint(ck, { sessionStatus: 'ended' });
+          priorSession = null;
+        }
+      } else {
+        // No checkpoint or updated_at absent — cannot verify freshness, skip resume
+        log.info({ chatJid: priorSession?.chat_jid }, 'skipping shared/single resume — no checkpoint or no updated_at');
+        priorSession = null;
+      }
+    }
+
+    if (priorSession?.session_id && priorSession?.chat_jid) {
       // Capture narrowed values before closures — TypeScript does not propagate
-      // if-guard narrowing into lambdas, so prior.chat_jid inside the closure
+      // if-guard narrowing into lambdas, so priorSession.chat_jid inside the closure
       // would remain typed as string | null even though we've checked it.
-      const resumeChatJid: string = prior.chat_jid;
-      const resumeSessionId: string = prior.session_id;
+      const resumeChatJid: string = priorSession.chat_jid;
+      const resumeSessionId: string = priorSession.session_id;
 
       log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
       this.activeChatJid = resumeChatJid;
@@ -1272,14 +1293,28 @@ export class AgentRuntime implements Runtime {
         this.queue = q;
       }
 
-      await this.session.spawnSession(resumeSessionId, prior.id);
+      await this.session.spawnSession(resumeSessionId, priorSession.id);
 
       // Defer notification until after WA connects (sending here causes a fatal crash)
-      const age = formatAge(prior.started_at);
-      this.pendingStartupMessage = {
-        chatJid: resumeChatJid,
-        text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
-      };
+      const age = formatAge(priorSession.started_at);
+      // AE2: Suppress startup message for groups.
+      if (resumeChatJid.endsWith('@g.us')) {
+        if (!this.shared) {
+          // Single mode: kill the resumed session — can't suppress message without orphaning it
+          log.info({ chatJid: resumeChatJid }, 'skipping single-mode resume — group chat');
+          await this.session!.shutdown(false);
+          this.session = null;
+          this.queue = null;
+        } else {
+          log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
+          // Session stays alive (serves DMs too), just no unsolicited group message.
+        }
+      } else {
+        this.pendingStartupMessage = {
+          chatJid: resumeChatJid,
+          text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
+        };
+      }
     }
 
     // Register emit_heal_result MCP tool (once, for control-plane repair completion).
