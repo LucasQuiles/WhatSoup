@@ -96,9 +96,25 @@ export function extractTokenCounts(usage: unknown): {
     ['tokenUsage', 'outputTokens'],
   ] as const;
 
+  // Cache token paths — same prefix as input but with cache-specific keys.
+  // When present, these are added to the base input count.
+  const cachePaths = [
+    { creation: ['cache_creation_input_tokens'], read: ['cache_read_input_tokens'] },
+    { creation: ['usage', 'cache_creation_input_tokens'], read: ['usage', 'cache_read_input_tokens'] },
+  ] as const;
+
   for (const path of inputPaths) {
-    const inputTokens = getNestedNumber(usage, path);
+    let inputTokens = getNestedNumber(usage, path);
     if (inputTokens !== undefined) {
+      // Add cache tokens if present at a matching depth
+      for (const cp of cachePaths) {
+        const creation = getNestedNumber(usage, cp.creation) ?? 0;
+        const read = getNestedNumber(usage, cp.read) ?? 0;
+        if (creation > 0 || read > 0) {
+          inputTokens += creation + read;
+          break;
+        }
+      }
       for (const outputPath of outputPaths) {
         const outputTokens = getNestedNumber(usage, outputPath);
         if (outputTokens !== undefined) {

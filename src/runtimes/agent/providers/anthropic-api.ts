@@ -369,10 +369,17 @@ export class AnthropicApiProvider implements ProviderSession {
             case 'message_start': {
               const message = event['message'] as Record<string, unknown> | undefined;
               const usage = message?.['usage'] as
-                | { input_tokens?: number; output_tokens?: number }
+                | {
+                    input_tokens?: number;
+                    output_tokens?: number;
+                    cache_creation_input_tokens?: number;
+                    cache_read_input_tokens?: number;
+                  }
                 | undefined;
               if (typeof usage?.input_tokens === 'number') {
-                inputTokens = usage.input_tokens;
+                const cacheCreation = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0;
+                const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0;
+                inputTokens = usage.input_tokens + cacheCreation + cacheRead;
               }
               if (typeof usage?.output_tokens === 'number') {
                 outputTokens = usage.output_tokens;
