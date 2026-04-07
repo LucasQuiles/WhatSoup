@@ -134,7 +134,7 @@ function InfoTab({
             className="c-input font-mono text-t2"
           />
         ) : (
-          <div className="c-data">{detail.subject}</div>
+          <div className="c-body">{detail.subject}</div>
         )}
       </div>
 
@@ -153,7 +153,7 @@ function InfoTab({
             className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)+var(--sp-6)))] h-auto"
           />
         ) : (
-          <div className="c-data text-t3">
+          <div className="c-body text-t3">
             {detail.desc || <span className="text-t4">No description</span>}
           </div>
         )}
@@ -175,7 +175,7 @@ function InfoTab({
         )}
         <div className="flex items-center gap-2">
           <span className="c-label" style={metaLabelStyle}>Group JID</span>
-          <span className="c-meta">{detail.id}</span>
+          <span className="c-data text-t4">{detail.id}</span>
         </div>
       </div>
 
@@ -195,7 +195,7 @@ function InfoTab({
               <button
                 type="button"
                 onClick={handleCopyLink}
-                className="c-btn c-btn-xs c-btn-ghost font-mono"
+                className="c-btn c-btn-sm c-btn-ghost font-mono"
               >
                 <Copy size={15} strokeWidth={1.75} /> Copy
               </button>
@@ -203,7 +203,7 @@ function InfoTab({
                 <button
                   type="button"
                   onClick={() => setConfirmRevoke(true)}
-                  className="c-btn c-btn-xs c-btn-danger font-mono"
+                  className="c-btn c-btn-sm c-btn-danger font-mono"
                 >
                   <X size={15} strokeWidth={1.75} /> Revoke
                 </button>
@@ -215,7 +215,7 @@ function InfoTab({
             type="button"
             onClick={handleFetchInviteLink}
             disabled={loadingLink}
-            className="c-btn c-btn-xs c-btn-ghost font-mono"
+            className="c-btn c-btn-sm c-btn-ghost font-mono"
           >
             <Link size={15} strokeWidth={1.75} /> {loadingLink ? 'Fetching...' : 'Fetch invite link'}
           </button>
