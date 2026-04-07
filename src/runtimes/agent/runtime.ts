@@ -35,7 +35,7 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
-import { toPersonalJid, JID_GROUP, isGroupJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
