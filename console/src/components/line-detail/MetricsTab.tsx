@@ -74,13 +74,14 @@ export function MetricsTab({
         <EmptyState title="No metrics data" description="Metrics will appear after the instance processes messages." />
       ) : (
         <div className="flex flex-col gap-[var(--sp-4)]">
-          {/* Message Volume */}
+          {/* Message Volume — loading/error handled by outer ternary above */}
           <ChartPanel
             title="Message Volume"
-            isLoading={false}
-            isError={false}
+            isLoading={metricsLoading}
+            isError={!!metricsError}
             hasData={!!metrics?.hasMessageData}
             instancesFailed={0}
+            onRetry={onRetry}
           >
             <FleetMetricsChart data={metrics!.messageVolume} range={metricsRange} />
           </ChartPanel>
@@ -89,10 +90,11 @@ export function MetricsTab({
           {metrics?.hasTokenData && (
             <ChartPanel
               title="Token Usage"
-              isLoading={false}
-              isError={false}
+              isLoading={metricsLoading}
+              isError={!!metricsError}
               hasData={true}
               instancesFailed={0}
+              onRetry={onRetry}
             >
               <FleetTokenChart
                 data={metrics.tokenUsage}
@@ -107,10 +109,11 @@ export function MetricsTab({
           {metrics?.hasSessionData && (
             <ChartPanel
               title="Session Activity"
-              isLoading={false}
-              isError={false}
+              isLoading={metricsLoading}
+              isError={!!metricsError}
               hasData={true}
               instancesFailed={0}
+              onRetry={onRetry}
             >
               <FleetSessionChart
                 data={metrics.sessionActivity}
