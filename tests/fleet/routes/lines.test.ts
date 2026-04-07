@@ -1,9 +1,14 @@
 /**
  * Tests for src/fleet/routes/lines.ts
  */
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { handleGetLines, handleGetLine } from '../../../src/fleet/routes/lines.ts';
+import {
+  _getLineCachesForTests,
+  _resetLineCaches,
+  handleGetLines,
+  handleGetLine,
+} from '../../../src/fleet/routes/lines.ts';
 import type { LinesDeps } from '../../../src/fleet/routes/lines.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import type { InstanceStatus } from '../../../src/fleet/health-poller.ts';
@@ -83,6 +88,10 @@ function makeDeps(overrides: Partial<LinesDeps> = {}): LinesDeps {
     ...overrides,
   };
 }
+
+beforeEach(() => {
+  _resetLineCaches();
+});
 
 // ---------------------------------------------------------------------------
 // handleGetLines
@@ -196,6 +205,51 @@ describe('handleGetLines', () => {
     const body = JSON.parse(res._body);
     expect(body[0]).not.toHaveProperty('dbStats');
   });
+
+  it('prunes stale line caches for deleted instances before responding', () => {
+    const caches = _getLineCachesForTests();
+    const staleCachedAt = Date.now();
+    caches.messageStatsCache.set('alpha', {
+      data: { sent: 1, received: 2, images: 0, audio: 0, documents: 0 },
+      cachedAt: staleCachedAt,
+    });
+    caches.sessionCountCache.set('alpha', { data: 3, cachedAt: staleCachedAt });
+    caches.chatCountsCache.set('alpha', { data: { chats: 4, groups: 1 }, cachedAt: staleCachedAt });
+    caches.tokenStatsCache.set('alpha', { data: { input: 5, output: 6 }, cachedAt: staleCachedAt });
+    caches.lastActiveCache.set('alpha', { data: '2026-04-01T00:00:00.000Z', cachedAt: staleCachedAt });
+
+    caches.messageStatsCache.set('ghost', {
+      data: { sent: 9, received: 9, images: 9, audio: 9, documents: 9 },
+      cachedAt: staleCachedAt,
+    });
+    caches.sessionCountCache.set('ghost', { data: 9, cachedAt: staleCachedAt });
+    caches.chatCountsCache.set('ghost', { data: { chats: 9, groups: 9 }, cachedAt: staleCachedAt });
+    caches.tokenStatsCache.set('ghost', { data: { input: 9, output: 9 }, cachedAt: staleCachedAt });
+    caches.lastActiveCache.set('ghost', { data: '2026-04-02T00:00:00.000Z', cachedAt: staleCachedAt });
+
+    const inst = fakeInstance({ name: 'alpha' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['alpha', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+
+    handleGetLines(mockReq(), res, deps);
+
+    expect(caches.messageStatsCache.has('alpha')).toBe(true);
+    expect(caches.sessionCountCache.has('alpha')).toBe(true);
+    expect(caches.chatCountsCache.has('alpha')).toBe(true);
+    expect(caches.tokenStatsCache.has('alpha')).toBe(true);
+    expect(caches.lastActiveCache.has('alpha')).toBe(true);
+
+    expect(caches.messageStatsCache.has('ghost')).toBe(false);
+    expect(caches.sessionCountCache.has('ghost')).toBe(false);
+    expect(caches.chatCountsCache.has('ghost')).toBe(false);
+    expect(caches.tokenStatsCache.has('ghost')).toBe(false);
+    expect(caches.lastActiveCache.has('ghost')).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -245,6 +299,7 @@ describe('handleGetLine', () => {
       discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
       dbReader: {
         getSummaryStats: vi.fn(() => ({ ok: false, error: 'db locked' })),
+        query: vi.fn(() => ({ ok: true, data: [] })),
       } as any,
     });
 

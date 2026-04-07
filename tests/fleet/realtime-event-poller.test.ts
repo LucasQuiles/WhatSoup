@@ -101,4 +101,32 @@ describe('FleetRealtimeEventPoller', () => {
     // Double stop should not throw
     poller.stop();
   });
+
+  it('prunes stale snapshots for instances removed from discovery', async () => {
+    const instances = new Map(Object.entries({
+      alpha: { name: 'alpha', dbPath: '/tmp/alpha.db', healthPort: 0 },
+      beta: { name: 'beta', dbPath: '/tmp/beta.db', healthPort: 0 },
+    }));
+    const discovery = { getInstances: () => instances } as any;
+    const dbReader = {
+      getLatestMarkers: vi.fn((name: string) => ({
+        ok: true,
+        data: {
+          latestMessagePk: name === 'alpha' ? 1 : 2,
+          latestAccessMarker: `${name}-marker`,
+        },
+      })),
+    } as any;
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    await poller.poll();
+    expect((poller as any).snapshots.has('alpha')).toBe(true);
+    expect((poller as any).snapshots.has('beta')).toBe(true);
+
+    instances.delete('beta');
+    await poller.poll();
+
+    expect((poller as any).snapshots.has('alpha')).toBe(true);
+    expect((poller as any).snapshots.has('beta')).toBe(false);
+  });
 });

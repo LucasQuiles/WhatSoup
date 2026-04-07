@@ -213,6 +213,32 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('prunes statuses for instances removed from discovery', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ status: 'healthy' }),
+    });
+
+    const instances = makeInstances(
+      ['self', makeInstance({ name: 'self' })],
+      ['remote-a', makeInstance({ name: 'remote-a', healthPort: 9101 })],
+      ['remote-b', makeInstance({ name: 'remote-b', healthPort: 9102 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({ status: 'healthy' });
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+
+    await (poller as any).poll();
+    expect(poller.getStatus('remote-a')).toBeDefined();
+    expect(poller.getStatus('remote-b')).toBeDefined();
+
+    instances.delete('remote-b');
+    await (poller as any).poll();
+
+    expect(poller.getStatus('self')).toBeDefined();
+    expect(poller.getStatus('remote-a')).toBeDefined();
+    expect(poller.getStatus('remote-b')).toBeUndefined();
+  });
+
   it('non-ok HTTP response records failure', async () => {
     mockFetch.mockResolvedValue({
       ok: false,
