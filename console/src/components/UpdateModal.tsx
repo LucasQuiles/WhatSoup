@@ -1,7 +1,7 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api } from '../lib/api'
+import { api, getFleetToken } from '../lib/api'
 import type { LineInstance } from '../types'
 
 interface UpdateModalProps {
@@ -163,11 +163,8 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   const startUpdate = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'updating' })
 
-    const token = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]')?.content
-    const headers: Record<string, string> = {}
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
-    }
+    const token = getFleetToken()
+    const headers: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {}
 
     // Abort controller so handleClose can cancel the in-flight fetch (RES-006)
     const controller = new AbortController()

@@ -65,7 +65,7 @@ export default function LineDetail() {
   const { data: chats } = useChats(name || '')
   const { data: access } = useAccess(name || '')
   const { data: logs } = useLogs(name || '')
-  const { data: metrics, isLoading: metricsLoading, error: metricsError } = useMetrics(name || '', metricsRange)
+  const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics } = useMetrics(name || '', metricsRange)
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
     new Set((typingData ?? []).filter(t => t.instance === name).map(t => t.jid)),
@@ -310,6 +310,7 @@ export default function LineDetail() {
                 setMetricsRange={setMetricsRange}
                 lineName={name}
                 line={line}
+                onRetry={refetchMetrics}
               />
             )}
             {activeTab === 'scheduled' && (

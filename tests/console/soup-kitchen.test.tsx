@@ -36,7 +36,7 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
 }
 
 // Replicate the filter logic from SoupKitchen exactly
-type KpiFilter = 'connected' | 'attention' | 'unread' | 'agent' | 'messages' | null;
+type KpiFilter = 'connected' | 'attention' | 'unread' | 'agent' | 'sent' | 'received' | 'media' | null;
 
 function filterLines(
   lines: LineInstance[],
@@ -49,13 +49,20 @@ function filterLines(
   if (activeKpi === 'connected')
     result = result.filter((l) => l.status === 'online');
   else if (activeKpi === 'attention')
-    result = result.filter((l) => l.status === 'unreachable' || l.status === 'degraded');
+    result = result.filter((l) => l.status === 'unreachable' || l.status === 'degraded' || l.error);
   else if (activeKpi === 'unread')
     result = result.filter((l) => (l.unread ?? 0) > 0);
   else if (activeKpi === 'agent')
     result = result.filter((l) => l.mode === 'agent');
-  else if (activeKpi === 'messages')
-    result = result.filter((l) => (l.messagesToday ?? 0) > 0);
+  else if (activeKpi === 'sent')
+    result = result.filter((l) => (l.messageStats?.sent ?? 0) > 0);
+  else if (activeKpi === 'received')
+    result = result.filter((l) => (l.messageStats?.received ?? 0) > 0);
+  else if (activeKpi === 'media')
+    result = result.filter((l) => {
+      const s = l.messageStats;
+      return s ? (s.images + s.audio + s.documents) > 0 : false;
+    });
 
   if (modeFilter !== 'all')
     result = result.filter((l) => l.mode === modeFilter);
@@ -295,11 +302,11 @@ describe('SoupKitchen error state handling', () => {
 
 describe('SoupKitchen filter logic', () => {
   const lines: LineInstance[] = [
-    makeLine({ name: 'alpha', status: 'online', mode: 'passive', unread: 5, messagesToday: 10 }),
-    makeLine({ name: 'bravo', status: 'online', mode: 'agent', unread: 0, messagesToday: 0 }),
-    makeLine({ name: 'charlie', status: 'degraded', mode: 'chat', unread: 2, messagesToday: 3 }),
-    makeLine({ name: 'delta', status: 'unreachable', mode: 'passive', unread: 0, messagesToday: 0 }),
-    makeLine({ name: 'echo', status: 'online', mode: 'agent', unread: 0, messagesToday: 7, phone: '+15559999999' }),
+    makeLine({ name: 'alpha', status: 'online', mode: 'passive', unread: 5, messagesToday: 10, messageStats: { sent: 6, received: 4, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'bravo', status: 'online', mode: 'agent', unread: 0, messagesToday: 0, messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'charlie', status: 'degraded', mode: 'chat', unread: 2, messagesToday: 3, messageStats: { sent: 2, received: 1, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'delta', status: 'unreachable', mode: 'passive', unread: 0, messagesToday: 0, messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'echo', status: 'online', mode: 'agent', unread: 0, messagesToday: 7, phone: '+15559999999', messageStats: { sent: 4, received: 3, images: 0, audio: 0, documents: 0 } }),
   ];
 
   // KPI filters
@@ -323,9 +330,24 @@ describe('SoupKitchen filter logic', () => {
     expect(result.map(l => l.name)).toEqual(['bravo', 'echo']);
   });
 
-  it('filters by "messages" KPI — lines with messagesToday > 0', () => {
-    const result = filterLines(lines, 'messages', 'all', '');
+  it('filters by "sent" KPI — lines with messageStats.sent > 0', () => {
+    const result = filterLines(lines, 'sent', 'all', '');
     expect(result.map(l => l.name)).toEqual(['alpha', 'charlie', 'echo']);
+  });
+
+  it('filters by "received" KPI — lines with messageStats.received > 0', () => {
+    const result = filterLines(lines, 'received', 'all', '');
+    expect(result.map(l => l.name)).toEqual(['alpha', 'charlie', 'echo']);
+  });
+
+  it('filters by "media" KPI — lines with media messages > 0', () => {
+    const mediaLines = [
+      makeLine({ name: 'has-media', messageStats: { sent: 0, received: 0, images: 3, audio: 0, documents: 0 } }),
+      makeLine({ name: 'no-media', messageStats: { sent: 5, received: 3, images: 0, audio: 0, documents: 0 } }),
+      makeLine({ name: 'has-docs', messageStats: { sent: 1, received: 1, images: 0, audio: 0, documents: 2 } }),
+    ];
+    const result = filterLines(mediaLines, 'media', 'all', '');
+    expect(result.map(l => l.name)).toEqual(['has-media', 'has-docs']);
   });
 
   // Mode filters

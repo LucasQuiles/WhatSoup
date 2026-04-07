@@ -36,18 +36,6 @@ describe('line-detail tab components', () => {
 });
 
 // ---------------------------------------------------------------------------
-// MetricsChart component
-// ---------------------------------------------------------------------------
-
-describe('MetricsChart', () => {
-  it('is exported from components/MetricsChart', async () => {
-    const mod = await import('../../console/src/components/MetricsChart.tsx');
-    expect(mod.MetricsChart).toBeDefined();
-    expect(typeof mod.MetricsChart).toBe('function');
-  });
-});
-
-// ---------------------------------------------------------------------------
 // ActiveHoursHeatmap component
 // ---------------------------------------------------------------------------
 

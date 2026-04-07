@@ -8,7 +8,7 @@ interface ChartPanelProps {
   isLoading: boolean;
   isError: boolean;
   hasData: boolean;
-  instancesFailed: number;
+  instancesFailed?: number;
   expanded?: boolean;
   onRetry?: () => void;
   children: ReactNode;
@@ -19,7 +19,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
   isLoading,
   isError,
   hasData,
-  instancesFailed,
+  instancesFailed = 0,
   expanded = false,
   onRetry,
   children,

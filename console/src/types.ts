@@ -131,6 +131,7 @@ export interface LineMetrics {
   hasMessageData: boolean;
   hasTokenData: boolean;
   hasSessionData: boolean;
+  providers: string[];
 }
 
 export interface FleetMetrics {

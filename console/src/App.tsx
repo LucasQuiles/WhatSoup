@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useCallback } from 'react'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
 import Nav from './components/Nav'
@@ -56,6 +56,7 @@ export default function App() {
             <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
             <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
             <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>
       </main>
