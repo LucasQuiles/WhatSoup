@@ -3568,4 +3568,74 @@ describe('AgentRuntime', () => {
       }, { timeout: 500 });
     });
   });
+
+  // ─── AE1: Group Resume Suppression ───────────────────────────────────────────
+  describe('AE1 — group resume suppression', () => {
+    it('skips proactive resume for group checkpoints and marks them ended, resumes DMs normally', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      mockSession.spawnSession.mockImplementation(() => new Promise<void>(() => {}));
+
+      const mockDurability = {
+        getResumableCheckpoints: vi.fn(() => [
+          { conversation_key: '120363406689931730_at_g.us' },
+          { conversation_key: '18459780919' },
+        ]),
+        getSessionCheckpoint: vi.fn((key: string) => {
+          if (key === '120363406689931730_at_g.us') return { session_id: 'group-sess-1' };
+          if (key === '18459780919') return { session_id: 'dm-sess-1' };
+          return null;
+        }),
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      await runtime.start();
+
+      // Group checkpoint must be tombstoned as 'ended'
+      expect(mockDurability.upsertSessionCheckpoint).toHaveBeenCalledWith(
+        '120363406689931730_at_g.us',
+        { sessionStatus: 'ended' },
+      );
+
+      // DM must have triggered spawnSession (session was created)
+      expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+
+      // Group must NOT have triggered spawnSession
+      const spawnCalls = mockSession.spawnSession.mock.calls;
+      // spawnSession is called on a SessionManager instance, not with the key directly —
+      // verify it was called exactly once (for the DM) and not twice (which would mean group was also resumed)
+      expect(spawnCalls).toHaveLength(1);
+    });
+
+    it('DM-only resume works normally when no group checkpoints present', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      mockSession.spawnSession.mockImplementation(() => new Promise<void>(() => {}));
+
+      const mockDurability = {
+        getResumableCheckpoints: vi.fn(() => [
+          { conversation_key: '18459780919' },
+        ]),
+        getSessionCheckpoint: vi.fn((_key: string) => ({ session_id: 'dm-sess-2' })),
+        upsertSessionCheckpoint: vi.fn(),
+      };
+      (runtime as unknown as { durability: unknown }).durability = mockDurability;
+
+      await runtime.start();
+
+      // DM checkpoint must have spawned a session
+      expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
+
+      // No tombstoning should have occurred for DMs
+      expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalledWith(
+        '18459780919',
+        { sessionStatus: 'ended' },
+      );
+    });
+  });
 });

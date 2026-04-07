@@ -1133,6 +1133,16 @@ export class AgentRuntime implements Runtime {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
 
+        // AE1: Skip group conversations — groups should not be proactively resumed.
+        // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
+        // the ingest pipeline's sibling filter (access-policy.ts:121-124), causing
+        // unsolicited messages. Group sessions start fresh on the next @mention.
+        if (cp.conversation_key.endsWith('_at_g.us')) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
+          this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+          continue;
+        }
+
         // Skip stale sessions — don't resume conversations that have been inactive for over 60 minutes.
         // Without this, every restart tries to resurrect days-old sessions and fires unsolicited messages.
         const RESUME_MAX_AGE_MS = 60 * 60 * 1000;
