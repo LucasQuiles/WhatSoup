@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import type { RecoveryStats } from '../../src/core/durability.ts';
-import { canonicalizeChatJid } from '../../src/core/jid-constants.ts';
+import { canonicalizeChatJid } from '../../src/core/lid-resolver.ts';
 
 function makeDb(): Database {
   const db = new Database(':memory:');

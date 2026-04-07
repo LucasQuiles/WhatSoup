@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
-import { storeMessage } from '../../../src/core/messages.ts';
+import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { config } from '../../../src/config.ts';
@@ -12,11 +12,11 @@ function openDb(): Database {
   return db;
 }
 
-type StoreInput = Parameters<typeof storeMessage>[1];
+type StoreInput = Parameters<typeof storeMessageIfNew>[1];
 
 /** Wrapper that auto-fills conversationKey from chatJid. */
 function store(db: Database, msg: Omit<StoreInput, 'conversationKey'>): void {
-  storeMessage(db, { ...msg, conversationKey: toConversationKey(msg.chatJid) });
+  storeMessageIfNew(db, { ...msg, conversationKey: toConversationKey(msg.chatJid) });
 }
 
 // Base unix timestamp (seconds): far in the past so no window-extension triggers

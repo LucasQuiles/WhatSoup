@@ -76,9 +76,8 @@ const { mockGetActiveSession } = vi.hoisted(() => ({
   mockGetActiveSession: vi.fn(() => null as null),
 }));
 
-const { mockBackfillWorkspaceKeys, mockSweepOrphanedSessions, mockGetResumableSessionForChat } = vi.hoisted(() => ({
+const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat } = vi.hoisted(() => ({
   mockBackfillWorkspaceKeys: vi.fn(),
-  mockSweepOrphanedSessions: vi.fn(() => [] as { id: number; claude_pid: number }[]),
   mockGetResumableSessionForChat: vi.fn(() => null as null),
 }));
 
@@ -91,13 +90,12 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getActiveSession: mockGetActiveSession,
   backfillWorkspaceKeys: mockBackfillWorkspaceKeys,
   markOrphaned: vi.fn(),
-  sweepOrphanedSessions: mockSweepOrphanedSessions,
   getResumableSessionForChat: mockGetResumableSessionForChat,
   backfillSessionProvider: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   SessionManager: vi.fn().mockImplementation(function (
     _opts: { onEvent: (event: AgentEvent) => void; onResumeFailed?: () => void },
   ) {
@@ -107,7 +105,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
 }));
 
 vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   OutboundQueue: vi.fn().mockImplementation(function () {
     return mockQueue;
   }),
@@ -227,7 +225,6 @@ describe('zombie session fix — sendTurnToSession', () => {
     mockSession.spawnSession.mockImplementation(async () => { callOrder.push('spawnSession'); });
     mockSession.shutdown.mockImplementation(async () => { callOrder.push('shutdown'); });
     mockGetActiveSession.mockReturnValue(null);
-    mockSweepOrphanedSessions.mockReturnValue([]);
     mockGetResumableSessionForChat.mockReturnValue(null);
   });
 

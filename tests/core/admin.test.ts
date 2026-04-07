@@ -36,7 +36,7 @@ vi.mock('../../src/logger.ts', () => ({
 // Imports
 // ---------------------------------------------------------------------------
 import { Database } from '../../src/core/database.ts';
-import { storeMessage } from '../../src/core/messages.ts';
+import { storeMessageIfNew } from '../../src/core/messages.ts';
 import { insertPending, lookupAccess } from '../../src/core/access-list.ts';
 import {
   handleAdminCommand,
@@ -91,7 +91,7 @@ describe('handleAdminCommand ALLOW phone', () => {
     const db = openDb();
     const messenger = makeMockMessenger();
 
-    storeMessage(db, {
+    storeMessageIfNew(db, {
       chatJid: '15184194479@s.whatsapp.net',
       conversationKey: '15184194479',
       senderJid: '15184194479@s.whatsapp.net',
@@ -306,7 +306,7 @@ describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
 
     // Store 6 messages — only last 3 should replay
     for (let i = 0; i < 6; i++) {
-      storeMessage(db, {
+      storeMessageIfNew(db, {
         chatJid: '15559990001@s.whatsapp.net',
         conversationKey: '15559990001',
         senderJid: '15559990001@s.whatsapp.net',
@@ -338,7 +338,7 @@ describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
     const db = openDb();
     const messenger = makeMockMessenger();
 
-    storeMessage(db, {
+    storeMessageIfNew(db, {
       chatJid: '15559990002@s.whatsapp.net',
       conversationKey: '15559990002',
       senderJid: '15559990002@s.whatsapp.net',
@@ -372,7 +372,7 @@ describe('handleAdminCommand ALLOW — SP4 replay hardening', () => {
     const messenger = makeMockMessenger();
 
     for (let i = 0; i < 3; i++) {
-      storeMessage(db, {
+      storeMessageIfNew(db, {
         chatJid: '15559990003@s.whatsapp.net',
         conversationKey: '15559990003',
         senderJid: '15559990003@s.whatsapp.net',

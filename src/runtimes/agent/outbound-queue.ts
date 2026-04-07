@@ -6,6 +6,8 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { jitteredDelay } from '../../core/retry.ts';
+import { canSendToGroup, recordGroupOutbound } from '../../core/echo-guard.ts';
+import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
@@ -602,8 +604,13 @@ export class OutboundQueue implements IOutboundQueue {
       const wait = MIN_SEND_GAP_MS - elapsed;
       await new Promise<void>((resolve) => setTimeout(resolve, wait));
     }
+    // AE4: Echo guard — suppress group messages during cooldown
+    if (!canSendToGroup(this.chatJid, config.echoGuard)) {
+      return; // silently drop
+    }
     await this.sendWithRetry(text);
     this.lastSentAt = Date.now();
+    recordGroupOutbound(this.chatJid);
   }
 
   private async sendWithRetry(text: string): Promise<void> {

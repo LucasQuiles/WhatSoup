@@ -99,6 +99,34 @@ describe('classifyInput', () => {
     });
   });
 
+  describe('session admin commands (AE5)', () => {
+    it('/sessions returns local command "sessions"', () => {
+      expect(classifyInput('/sessions')).toEqual({ type: 'local', command: 'sessions' });
+    });
+
+    it('/kill-session 2 returns local command with args', () => {
+      expect(classifyInput('/kill-session 2')).toEqual({
+        type: 'local', command: 'kill-session', args: '2',
+      });
+    });
+
+    it('/kill-session without args returns local command with undefined args', () => {
+      expect(classifyInput('/kill-session')).toEqual({
+        type: 'local', command: 'kill-session',
+      });
+    });
+
+    it('/SESSIONS (uppercase) is treated as local command', () => {
+      expect(classifyInput('/SESSIONS')).toEqual({ type: 'local', command: 'sessions' });
+    });
+
+    it('/Kill-Session 5 (mixed case) returns local with args', () => {
+      expect(classifyInput('/Kill-Session 5')).toEqual({
+        type: 'local', command: 'kill-session', args: '5',
+      });
+    });
+  });
+
   describe('edge cases', () => {
     it('bare slash "/" returns forwarded (no command name)', () => {
       // "/" → commandName is "" which is not a local command
@@ -108,7 +136,7 @@ describe('classifyInput', () => {
 
     it('command name is extracted from first whitespace-delimited token', () => {
       // "/new extra" — "new" is local even with trailing args
-      expect(classifyInput('/new start fresh')).toEqual({ type: 'local', command: 'new' });
+      expect(classifyInput('/new start fresh')).toEqual({ type: 'local', command: 'new', args: 'start fresh' });
     });
   });
 });

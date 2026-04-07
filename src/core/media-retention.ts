@@ -7,6 +7,7 @@ import { readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
+import { nowUnixSec } from '../fleet/time-utils.ts';
 
 const log = createChildLogger('media:retention');
 
@@ -123,7 +124,7 @@ export async function runCleanup(
  * Returns the number of rows deleted.
  */
 export function purgeFailedScheduledMessages(db: Database, maxAgeDays = 7): number {
-  const cutoff = Math.floor(Date.now() / 1000) - maxAgeDays * 24 * 60 * 60;
+  const cutoff = nowUnixSec() - maxAgeDays * 24 * 60 * 60;
   const result = db.raw
     .prepare(`DELETE FROM scheduled_messages WHERE status = 'failed' AND created_at < ?`)
     .run(cutoff);

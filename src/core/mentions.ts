@@ -4,7 +4,7 @@
 import { resolvePhoneFromJid, extractLocal } from './access-list.ts';
 import type { Database } from './database.ts';
 import type { DatabaseSync } from 'node:sqlite';
-import { toPersonalJid, toLidJid, isLidJid } from './jid-constants.ts';
+import { toPersonalJid, toLidJid, isLidJid, bareNumber } from './jid-constants.ts';
 
 /**
  * Result of formatting + extracting mentions from a text string.
@@ -191,7 +191,7 @@ export function buildLidMappings(db: Database | DatabaseSync): LidMappings {
   const phoneToLid = new Map<string, string>();
   const lidToPhone = new Map<string, string>();
   for (const row of rows) {
-    const phone = row.phone_jid.split('@')[0];
+    const phone = bareNumber(row.phone_jid);
     if (phone && row.lid) {
       phoneToLid.set(phone, row.lid);
       lidToPhone.set(row.lid, phone);

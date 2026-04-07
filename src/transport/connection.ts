@@ -20,6 +20,7 @@ import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
 import { WhatSoupError } from '../errors.ts';
+import { nowUnixSec } from '../fleet/time-utils.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { bareNumber, isLidJid } from '../core/jid-constants.ts';
@@ -981,7 +982,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             id: msg.key.id!,
             fromMe: msg.key.fromMe ?? false,
           },
-          timestamp: msg.messageTimestamp != null ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000),
+          timestamp: msg.messageTimestamp != null ? Number(msg.messageTimestamp) : nowUnixSec(),
         });
         continue;
       }
@@ -1425,7 +1426,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   // --- Timestamp ---
   const timestamp =
-    msg.messageTimestamp != null ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000);
+    msg.messageTimestamp != null ? Number(msg.messageTimestamp) : nowUnixSec();
 
   // --- Sender resolution ---
   // Groups: participant field carries the real sender JID

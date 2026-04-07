@@ -3,7 +3,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid, bareNumber } from './jid-constants.ts';
+import { toPersonalJid, toLidJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
 import { isAdminPhone } from '../lib/phone.ts';
@@ -147,11 +147,8 @@ function resolveAdminChatJid(db: Database): string | null {
   }
 
   // Search by LIDs that map to admin phones (scans lid_mappings — typically small table)
-  const lidRows = db.raw.prepare(
-    'SELECT lid, phone_jid FROM lid_mappings',
-  ).all() as { lid: string; phone_jid: string }[];
-  for (const { lid, phone_jid } of lidRows) {
-    const mappedPhone = bareNumber(phone_jid);
+  const lidMap = getAllLidMappings(db);
+  for (const [lid, mappedPhone] of lidMap) {
     if (isAdminPhone(mappedPhone, config.adminPhones)) {
       const row = msgStmt.get(`${lid}%`) as { chat_jid: string } | undefined;
       if (row) return row.chat_jid;

@@ -59,7 +59,7 @@ vi.mock('../../../src/runtimes/chat/context.ts', () => ({
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
-  storeMessage: vi.fn(),
+  storeMessageIfNew: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/chat/rate-limits-db.ts', () => ({
@@ -105,7 +105,7 @@ vi.mock('../../../src/logger.ts', () => {
 import { checkRateLimit } from '../../../src/runtimes/chat/rate-limiter.ts';
 import { loadConversationWindow } from '../../../src/runtimes/chat/window.ts';
 import { loadContext } from '../../../src/runtimes/chat/context.ts';
-import { storeMessage } from '../../../src/core/messages.ts';
+import { storeMessageIfNew } from '../../../src/core/messages.ts';
 import { recordResponse } from '../../../src/runtimes/chat/rate-limits-db.ts';
 import { processMedia } from '../../../src/runtimes/chat/media/processor.ts';
 import { ConversationHandler } from '../../../src/runtimes/chat/runtime.ts';
@@ -132,7 +132,7 @@ function mockLogInfo(): ReturnType<typeof vi.fn> {
 const mockCheckRateLimit = vi.mocked(checkRateLimit);
 const mockLoadConversationWindow = vi.mocked(loadConversationWindow);
 const mockLoadContext = vi.mocked(loadContext);
-const mockStoreMessage = vi.mocked(storeMessage);
+const mockStoreMessage = vi.mocked(storeMessageIfNew);
 const mockRecordResponse = vi.mocked(recordResponse);
 const mockProcessMedia = vi.mocked(processMedia);
 

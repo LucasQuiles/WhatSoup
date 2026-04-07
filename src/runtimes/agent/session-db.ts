@@ -266,18 +266,6 @@ export function markOrphaned(db: Database, id: number): void {
 }
 
 /**
- * Return all active sessions for orphan-sweep checking.
- * The runtime should verify each PID is still alive and call markOrphaned() if not.
- */
-export function sweepOrphanedSessions(db: Database): { id: number; claude_pid: number }[] {
-  return db.raw
-    .prepare(
-      `SELECT id, claude_pid FROM agent_sessions WHERE status = 'active'`,
-    )
-    .all() as { id: number; claude_pid: number }[];
-}
-
-/**
  * Return the newest suspended or orphaned session for a given workspace key,
  * or null if none exists.
  */

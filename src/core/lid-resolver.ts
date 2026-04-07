@@ -19,7 +19,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
-import { DOMAIN_PERSONAL, bareNumber, normalizeLid, isLidJid, isPnJid } from './jid-constants.ts';
+import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
 import type { Database } from './database.ts';
 
 const log = createChildLogger('lid-resolver');
@@ -243,16 +243,6 @@ export function importLidMappings(
   return imported;
 }
 
-/**
- * Export all LID mappings for cross-instance sync.
- * Returns array suitable for importLidMappings() on the receiving end.
- */
-// Unused — kept for future cross-instance LID sync
-function exportLidMappings(db: Database): Array<{ lid: string; phone_jid: string }> {
-  return db.raw.prepare(
-    'SELECT lid, phone_jid FROM lid_mappings',
-  ).all() as Array<{ lid: string; phone_jid: string }>;
-}
 
 // ── L6: Periodic reconciliation ─────────────────────────────────────────────
 
@@ -354,6 +344,19 @@ export function resolveLid(db: Database, rawLid: string): string | null {
 }
 
 /**
+ * Resolve a raw LID (or full LID JID like '12345@lid') to its full phone JID
+ * (e.g. '12345@s.whatsapp.net'). Returns null if the LID is not mapped.
+ *
+ * Accepts both bare LID numbers and full JIDs — strips the @domain and
+ * colon-device suffix before lookup.
+ */
+export function resolveLidToJid(db: Database, rawLid: string): string | null {
+  const phone = resolveLid(db, bareNumber(rawLid));
+  if (!phone) return null;
+  return `${phone}@${DOMAIN_PERSONAL}`;
+}
+
+/**
  * Resolve all known LID→phone pairs. Returns a map of lid → phone digits.
  * Used by fleet API to build display labels.
  */
@@ -366,4 +369,36 @@ export function getAllLidMappings(db: Database): Map<string, string> {
     map.set(row.lid, bareNumber(row.phone_jid));
   }
   return map;
+}
+
+// ── Canonical JID normalization ────────────────────────────────────────────
+
+/**
+ * Normalize a chat JID to its canonical form for use as a map key.
+ *
+ * Canonical form:
+ *   - Groups:   unchanged (e.g. `120363406689931730@g.us`)
+ *   - Phone DMs: unchanged (e.g. `18459780919@s.whatsapp.net`)
+ *   - LID DMs:  resolved to `phone@s.whatsapp.net` via lid_mappings if known;
+ *               returned unchanged if unmapped (graceful degradation)
+ *
+ * NEVER throws. If the DB lookup fails or JID is unrecognized, returns input
+ * unchanged — worst case is old drift behavior, never message loss.
+ */
+export function canonicalizeChatJid(chatJid: string, db?: Database | null): string {
+  if (chatJid.endsWith(`@${DOMAIN_GROUP}`)) return chatJid;
+  if (chatJid.endsWith(`@${DOMAIN_PERSONAL}`)) return chatJid;
+
+  if (chatJid.endsWith(`@${DOMAIN_LID}`)) {
+    if (!db) return chatJid;
+    try {
+      const resolved = resolveLidToJid(db, chatJid);
+      return resolved ?? chatJid;
+    } catch {
+      // DB error — graceful degradation
+      return chatJid;
+    }
+  }
+
+  return chatJid;
 }

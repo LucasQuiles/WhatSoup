@@ -1,6 +1,7 @@
 import type { Database } from './database.ts';
 import { resolveDecryptionFailure } from './database.ts';
 import type { ContentType } from './types.ts';
+import { nowUnixSec } from '../fleet/time-utils.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -121,31 +122,6 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
 }
 
 /**
- * Upsert a message. Uses ON CONFLICT(message_id) DO UPDATE so re-delivering
- * the same message_id is idempotent. Content fields are updated on conflict so
- * edits (content changes) are reflected.
- */
-export function storeMessage(db: Database, msg: StoreMessageInput): void {
-  db.raw.prepare(`
-    INSERT INTO messages
-      (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type,
-       is_from_me, timestamp, quoted_message_id, raw_message, content_text)
-    VALUES
-      (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
-       @is_from_me, @timestamp, @quoted_message_id, @raw_message, @content_text)
-    ON CONFLICT(message_id) DO UPDATE SET
-      sender_name       = COALESCE(excluded.sender_name, sender_name),
-      content           = excluded.content,
-      content_type      = excluded.content_type,
-      is_from_me        = excluded.is_from_me,
-      timestamp         = excluded.timestamp,
-      quoted_message_id = COALESCE(excluded.quoted_message_id, quoted_message_id),
-      raw_message       = COALESCE(excluded.raw_message, raw_message),
-      content_text      = excluded.content_text
-  `).run(toInsertParams(msg));
-}
-
-/**
  * Insert a message only if no row with the same message_id exists.
  * Uses INSERT OR IGNORE for an atomic check-and-insert.
  * Returns true if the row was inserted, false if it already existed.
@@ -225,11 +201,19 @@ export function getMessageCount(db: Database): number {
   return row.cnt;
 }
 
+/** Count of messages pending enrichment (not yet processed). */
+export function getUnprocessedCount(db: Database): number {
+  const row = db.raw.prepare(
+    'SELECT COUNT(*) AS cnt FROM messages WHERE enrichment_processed_at IS NULL AND is_from_me = 0',
+  ).get() as { cnt: number };
+  return row.cnt;
+}
+
 /**
  * Delete messages older than retentionDays. Returns the number of rows deleted.
  */
 export function deleteOldMessages(db: Database, retentionDays: number): number {
-  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+  const cutoff = nowUnixSec() - retentionDays * 86400;
   const result = db.raw.prepare(
     'DELETE FROM messages WHERE timestamp < ?'
   ).run(cutoff);

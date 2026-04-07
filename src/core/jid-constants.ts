@@ -20,8 +20,6 @@ export const JID_PERSONAL = `@${DOMAIN_PERSONAL}`;
 export const JID_LID = `@${DOMAIN_LID}`;
 /** WhatsApp group chat JID suffix */
 export const JID_GROUP = `@${DOMAIN_GROUP}`;
-/** WhatsApp newsletter/channel JID suffix */
-// JID_NEWSLETTER removed — no newsletter support yet
 
 // ── JID builders ────────────────────────────────────────────────────────────
 
@@ -47,7 +45,10 @@ export function isPnJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_PERSONAL);
 }
 
-// isGroupJid removed — use isGroupConversationKey from conversation-key.ts instead
+/** Check if a raw JID (not a conversation key) is a group JID. */
+export function isGroupJid(jid: string): boolean {
+  return jid.endsWith(JID_GROUP);
+}
 
 // ── JID parsing ─────────────────────────────────────────────────────────────
 
@@ -66,51 +67,3 @@ export function normalizeLid(raw: string): string {
   return colon >= 0 ? raw.slice(0, colon) : raw;
 }
 
-// ── Canonical JID normalization ────────────────────────────────────────────
-
-type LidLookupDb = { raw: { prepare(sql: string): { get(param: string): { phone_jid: string } | undefined } } };
-
-let cachedLidLookupDb: LidLookupDb | null = null;
-let cachedLidLookupStmt: ReturnType<LidLookupDb['raw']['prepare']> | null = null;
-
-/**
- * Normalize a chat JID to its canonical form for use as a map key.
- *
- * Canonical form:
- *   - Groups:   unchanged (e.g. `120363406689931730@g.us`)
- *   - Phone DMs: unchanged (e.g. `18459780919@s.whatsapp.net`)
- *   - LID DMs:  resolved to `phone@s.whatsapp.net` via lid_mappings if known;
- *               returned unchanged if unmapped (graceful degradation)
- *
- * NEVER throws. If the DB lookup fails or JID is unrecognized, returns input
- * unchanged — worst case is old drift behavior, never message loss.
- */
-export function canonicalizeChatJid(chatJid: string, db?: { raw: any } | null): string {
-  if (chatJid.endsWith(`@${DOMAIN_GROUP}`)) return chatJid;
-  if (chatJid.endsWith(`@${DOMAIN_PERSONAL}`)) return chatJid;
-
-  if (chatJid.endsWith(`@${DOMAIN_LID}`)) {
-    if (!db) return chatJid;
-    try {
-      if (cachedLidLookupDb !== db) {
-        cachedLidLookupDb = db as LidLookupDb;
-        cachedLidLookupStmt = null;
-      }
-      if (!cachedLidLookupStmt) {
-        cachedLidLookupStmt = db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?');
-      }
-      const lid = normalizeLid(bareNumber(chatJid));
-      const lidLookupStmt = cachedLidLookupStmt;
-      if (!lidLookupStmt) return chatJid;
-      const row = lidLookupStmt.get(lid) as
-        | { phone_jid: string }
-        | undefined;
-      if (row?.phone_jid) return row.phone_jid;
-    } catch {
-      // DB error — graceful degradation
-    }
-    return chatJid;
-  }
-
-  return chatJid;
-}

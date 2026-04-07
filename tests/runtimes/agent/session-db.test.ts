@@ -16,7 +16,6 @@ import {
   accumulateTokensWithEvent,
   backfillWorkspaceKeys,
   markOrphaned,
-  sweepOrphanedSessions,
   getResumableSessionForChat,
   backfillSessionProvider,
 } from '../../../src/runtimes/agent/session-db.ts';
@@ -260,23 +259,6 @@ describe('agent session-db', () => {
       .prepare('SELECT status FROM agent_sessions WHERE id = ?')
       .get(id) as { status: string } | undefined;
     expect(row?.status).toBe('orphaned');
-  });
-
-  it('sweepOrphanedSessions returns only active rows', () => {
-    const activeId = createSession(db, 40001, '/tmp/sweep-active');
-    const crashedId = createSession(db, 40002, '/tmp/sweep-crashed');
-    updateSessionStatus(db, crashedId, 'crashed');
-    const endedId = createSession(db, 40003, '/tmp/sweep-ended');
-    updateSessionStatus(db, endedId, 'ended');
-
-    const results = sweepOrphanedSessions(db);
-    const ids = results.map((r) => r.id);
-    expect(ids).toContain(activeId);
-    expect(ids).not.toContain(crashedId);
-    expect(ids).not.toContain(endedId);
-    // Verify PID is returned
-    const found = results.find((r) => r.id === activeId);
-    expect(found?.claude_pid).toBe(40001);
   });
 
   it('getResumableSessionForChat returns newest suspended or orphaned row', () => {

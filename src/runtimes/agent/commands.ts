@@ -3,12 +3,12 @@
 // or a regular message to be passed through to the agent.
 
 export type CommandResult =
-  | { type: 'local'; command: 'new' | 'status' | 'help' }
+  | { type: 'local'; command: 'new' | 'status' | 'help' | 'sessions' | 'kill-session'; args?: string }
   | { type: 'forwarded'; text: string }
   | { type: 'message'; text: string };
 
 /** Commands handled locally by the bot runtime. */
-const LOCAL_COMMANDS = new Set(['new', 'status', 'help']);
+const LOCAL_COMMANDS = new Set(['new', 'status', 'help', 'sessions', 'kill-session']);
 
 /**
  * Classify a user input string.
@@ -25,10 +25,16 @@ export function classifyInput(text: string): CommandResult {
   // Extract the command name: the word directly after the leading slash,
   // lowercased. E.g. "/Compact arg" → "compact".
   const rest = text.slice(1);
-  const commandName = rest.split(/\s+/)[0].toLowerCase();
+  const parts = rest.split(/\s+/);
+  const commandName = parts[0].toLowerCase();
 
   if (LOCAL_COMMANDS.has(commandName)) {
-    return { type: 'local', command: commandName as 'new' | 'status' | 'help' };
+    const args = parts.length > 1 ? parts.slice(1).join(' ') : undefined;
+    return {
+      type: 'local',
+      command: commandName as 'new' | 'status' | 'help' | 'sessions' | 'kill-session',
+      args,
+    };
   }
 
   return { type: 'forwarded', text };

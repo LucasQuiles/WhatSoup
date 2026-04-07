@@ -838,3 +838,13 @@ Instance ports: primary-line=9094, sandbox-agent=9091, operator-agent=9092, chat
 - `heal_reports` table: circuit breaker state per error class
 - `control_messages` table: audit trail of all control traffic
 - `pending_heal_reports` table: the operator agent's temporary dedupe state for Type 3
+
+### Orchestrated groups — access control convention
+
+Groups used for multi-agent orchestration (where a conductor agent like Q coordinates work across multiple coding agents) should **NOT** have `status='allowed'` in the agent instances' `access_list` tables. The `allowed` status triggers `group_auto_respond`, causing every agent to respond to every non-sibling message independently.
+
+**Correct configuration:** Agents in orchestrated groups respond only when explicitly @mentioned. This is the default behavior when no `access_list` entry exists for the group. The sibling filter (`access-policy.ts:121-124`) handles agent-to-agent echo suppression via `siblingPhones` in each instance's config.
+
+**To check:** `sqlite3 <instance>/bot.db "SELECT * FROM access_list WHERE subject_type='group';"`
+
+**To fix:** `DELETE FROM access_list WHERE subject_type='group' AND subject_id='<group_jid>';`

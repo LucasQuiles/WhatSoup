@@ -4,7 +4,7 @@ import { registerAdvancedTools } from '../../../src/mcp/tools/advanced.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
 import { Database } from '../../../src/core/database.ts';
-import { storeMessage, type StoreMessageInput } from '../../../src/core/messages.ts';
+import { storeMessageIfNew, type StoreMessageInput } from '../../../src/core/messages.ts';
 import { randomBytes } from 'node:crypto';
 
 vi.mock('../../../src/config.ts', () => ({
@@ -773,8 +773,8 @@ describe('reset_enrichment_errors', () => {
   });
 
   it('resets all messages with enrichment errors when pks omitted', async () => {
-    storeMessage(db, makeMsg());
-    storeMessage(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
     const pks = db.raw
       .prepare('SELECT pk FROM messages ORDER BY pk')
       .all() as { pk: number }[];
@@ -793,8 +793,8 @@ describe('reset_enrichment_errors', () => {
   });
 
   it('resets only specific pks when pks array is supplied', async () => {
-    storeMessage(db, makeMsg());
-    storeMessage(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
     const pks = db.raw
       .prepare('SELECT pk FROM messages ORDER BY pk')
       .all() as { pk: number }[];
@@ -820,7 +820,7 @@ describe('reset_enrichment_errors', () => {
   });
 
   it('returns reset:0 when pks array is empty', async () => {
-    storeMessage(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
     const result = await registry.call(
       'reset_enrichment_errors',
       { pks: [] },
@@ -832,14 +832,14 @@ describe('reset_enrichment_errors', () => {
   });
 
   it('returns reset:0 when no messages have errors', async () => {
-    storeMessage(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
     const result = await registry.call('reset_enrichment_errors', {}, globalSession());
     const data = JSON.parse(result.content[0].text) as { reset: number };
     expect(data.reset).toBe(0);
   });
 
   it('result message describes the count of reset messages', async () => {
-    storeMessage(db, makeMsg());
+    storeMessageIfNew(db, makeMsg());
     const [{ pk }] = db.raw
       .prepare('SELECT pk FROM messages ORDER BY pk')
       .all() as { pk: number }[];

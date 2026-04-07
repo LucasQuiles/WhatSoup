@@ -16,7 +16,6 @@ import {
   getActiveSession,
   backfillWorkspaceKeys,
   markOrphaned,
-  sweepOrphanedSessions,
   getResumableSessionForChat,
   accumulateSessionTokens,
   insertTokenEvent,
@@ -36,7 +35,8 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
-import { toPersonalJid, canonicalizeChatJid } from '../../core/jid-constants.ts';
+import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -1134,6 +1134,16 @@ export class AgentRuntime implements Runtime {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
         if (!full?.session_id) continue;
 
+        // AE1: Skip group conversations — groups should not be proactively resumed.
+        // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
+        // the ingest pipeline's sibling filter (access-policy.ts:121-124), causing
+        // unsolicited messages. Group sessions start fresh on the next @mention.
+        if (isGroupConversationKey(cp.conversation_key)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
+          this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
+          continue;
+        }
+
         // Skip stale sessions — don't resume conversations that have been inactive for over 60 minutes.
         // Without this, every restart tries to resurrect days-old sessions and fires unsolicited messages.
         const RESUME_MAX_AGE_MS = 60 * 60 * 1000;
@@ -1216,61 +1226,134 @@ export class AgentRuntime implements Runtime {
     // Without this guard, per_chat + !sandboxPerChat would set this.session to a stale session
     // that no subsequent handleMessage call routes to (they use chatSessions maps instead).
     const prior = (this.sandboxPerChat || this.sessionScope === 'per_chat') ? null : getActiveSession(this.db);
-    if (prior?.session_id && prior?.chat_jid) {
-      // Capture narrowed values before closures — TypeScript does not propagate
-      // if-guard narrowing into lambdas, so prior.chat_jid inside the closure
-      // would remain typed as string | null even though we've checked it.
-      const resumeChatJid: string = prior.chat_jid;
-      const resumeSessionId: string = prior.session_id;
 
-      log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
-      this.activeChatJid = resumeChatJid;
-      this.session = this.createSessionManager({
-        chatJid: resumeChatJid,
-        cwd: this.cwd,
-        onEvent: (event) => this.handleEvent(event),
-        onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
-        onCrash: (info) => {
-          this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
-          this.getActiveQueue()?.abortTurn();
-          this.cleanupSharedCrashTurnState();
-          // Mark inbound event failed so it doesn't stay stuck in processing
-          if (this.durability && this.currentInboundSeq !== undefined) {
-            this.durability.markInboundFailed(this.currentInboundSeq);
-            this.currentInboundSeq = undefined;
-          }
-          if (config.controlPeers.size > 0) {
-            try {
-              emitHealReport(this.db, this.messenger, this.durability, {
-                type: 'crash',
-                chatJid: resumeChatJid,
-                exitCode: info.exitCode ?? undefined,
-                signal: info.signal ?? undefined,
-              }, this.activeControlReportId);
-            } catch (err) {
-              log.warn({ err }, 'failed to emit heal report for session crash');
-            }
-          }
-        },
-        notifyUser: (msg) => this.handleCrashNotify(msg),
-      });
+    // AE2: Staleness check for shared/single mode — match per_chat's 60-minute threshold.
+    let priorSession = prior;
 
-      if (this.shared) {
-        const q = this.createOutboundQueue(resumeChatJid, 'startup resume shared');
-        this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
+    // Guard: chat_jid may be null for legacy session rows
+    if (priorSession && !priorSession.chat_jid) {
+      log.info('skipping shared/single resume — no chat_jid on session row');
+      priorSession = null;
+    }
+
+    if (priorSession && this.durability) {
+      const ck = toConversationKey(priorSession.chat_jid!);
+      const checkpoint = this.durability.getSessionCheckpoint(ck);
+      if (checkpoint?.updated_at) {
+        const ageMs = Date.now() - new Date(checkpoint.updated_at + 'Z').getTime();
+        if (ageMs > 60 * 60 * 1000) {
+          log.info({ chatJid: priorSession.chat_jid, ageMinutes: Math.round(ageMs / 60_000) },
+            'skipping shared/single resume — session too stale');
+          this.durability.upsertSessionCheckpoint(ck, { sessionStatus: 'ended' });
+          priorSession = null;
+        }
       } else {
-        const q = this.createOutboundQueue(resumeChatJid, 'startup resume single');
-        this.queue = q;
+        // No checkpoint or updated_at absent — cannot verify freshness, skip resume
+        log.info({ chatJid: priorSession?.chat_jid }, 'skipping shared/single resume — no checkpoint or no updated_at');
+        priorSession = null;
       }
+    }
 
-      await this.session.spawnSession(resumeSessionId, prior.id);
+    // AE2 fallback: when durability is absent, use started_at directly
+    if (priorSession && !this.durability && priorSession.started_at) {
+      const ageMs = Date.now() - new Date(priorSession.started_at).getTime();
+      if (ageMs > 60 * 60 * 1000) {
+        log.info({ chatJid: priorSession.chat_jid, ageMinutes: Math.round(ageMs / 60_000) },
+          'skipping shared/single resume — stale (no durability)');
+        priorSession = null;
+      }
+    }
 
-      // Defer notification until after WA connects (sending here causes a fatal crash)
-      const age = formatAge(prior.started_at);
-      this.pendingStartupMessage = {
-        chatJid: resumeChatJid,
-        text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
-      };
+    if (priorSession?.session_id && priorSession?.chat_jid) {
+      // Capture narrowed values before closures — TypeScript does not propagate
+      // if-guard narrowing into lambdas, so priorSession.chat_jid inside the closure
+      // would remain typed as string | null even though we've checked it.
+      const resumeChatJid: string = priorSession.chat_jid;
+      const resumeSessionId: string = priorSession.session_id;
+      const isGroupChat = isGroupJid(resumeChatJid);
+
+      // ── C1/C2/I2: Hoist group check before spawn/queue creation ──────────
+      if (isGroupChat && !this.shared) {
+        // Single mode + group: session can't serve DMs, skip entirely (Bug I2 fix —
+        // previously spawned a full subprocess then immediately killed it).
+        log.info({ chatJid: resumeChatJid, sessionId: resumeSessionId }, 'skipping single-mode resume — group chat');
+      } else {
+        log.info({ sessionId: resumeSessionId, chatJid: resumeChatJid }, 'resuming prior session');
+        this.activeChatJid = resumeChatJid;
+        this.session = this.createSessionManager({
+          chatJid: resumeChatJid,
+          cwd: this.cwd,
+          onEvent: (event) => this.handleEvent(event),
+          onResumeFailed: () => this.handleResumeFailed(resumeChatJid),
+          onCrash: (info) => {
+            this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+            this.getActiveQueue()?.abortTurn();
+            this.cleanupSharedCrashTurnState();
+            // Mark inbound event failed so it doesn't stay stuck in processing
+            if (this.durability && this.currentInboundSeq !== undefined) {
+              this.durability.markInboundFailed(this.currentInboundSeq);
+              this.currentInboundSeq = undefined;
+            }
+            if (config.controlPeers.size > 0) {
+              try {
+                emitHealReport(this.db, this.messenger, this.durability, {
+                  type: 'crash',
+                  chatJid: resumeChatJid,
+                  exitCode: info.exitCode ?? undefined,
+                  signal: info.signal ?? undefined,
+                }, this.activeControlReportId);
+              } catch (err) {
+                log.warn({ err }, 'failed to emit heal report for session crash');
+              }
+            }
+          },
+          notifyUser: (msg) => this.handleCrashNotify(msg),
+        });
+
+        // Bug C2 fix: Do NOT create a group-keyed queue for shared mode — it would
+        // remain as a stale entry in outboundQueues since no startup message is sent.
+        // The queue is created on-demand via ensureOutboundQueue when a real message arrives.
+        if (!isGroupChat) {
+          if (this.shared) {
+            const q = this.createOutboundQueue(resumeChatJid, 'startup resume shared');
+            this.outboundQueues.set(canonicalizeChatJid(resumeChatJid, this.db), q);
+          } else {
+            const q = this.createOutboundQueue(resumeChatJid, 'startup resume single');
+            this.queue = q;
+          }
+        }
+
+        // Bug C1 fix: Wrap spawnSession in try/catch — every other call site does this.
+        // If spawn fails (bad session ID, corrupted state, claude-cli not found), clean up
+        // gracefully instead of crashing the runtime.
+        try {
+          await this.session.spawnSession(resumeSessionId, priorSession.id);
+        } catch (err) {
+          log.warn({ err, sessionId: resumeSessionId, chatJid: resumeChatJid }, 'spawnSession failed during resume — cleaning up');
+          this.session = null;
+          this.activeChatJid = null;
+          if (this.shared) {
+            this.outboundQueues.delete(canonicalizeChatJid(resumeChatJid, this.db));
+          } else {
+            this.queue = null;
+          }
+          // Fall through — runtime continues without a resumed session
+        }
+
+        // Defer notification until after WA connects (sending here causes a fatal crash)
+        if (this.session) {
+          if (isGroupChat) {
+            // Shared mode + group: session stays alive (serves DMs too), just no unsolicited group message.
+            log.info({ chatJid: resumeChatJid }, 'suppressing startup message — shared-mode group chat');
+          } else {
+            const age = formatAge(priorSession.started_at);
+            this.pendingStartupMessage = {
+              chatJid: resumeChatJid,
+              text: `_Resuming session_ from *${age}*. Send a message to continue, or /new to start fresh.`,
+            };
+          }
+        }
+      }
     }
 
     // Register emit_heal_result MCP tool (once, for control-plane repair completion).
@@ -1534,10 +1617,104 @@ export class AgentRuntime implements Runtime {
           const helpText =
             '*/new* — start a fresh session\n' +
             '*/status* — show current session status\n' +
+            '*/sessions* — list all active sessions _(admin)_\n' +
+            '*/kill-session <N>* — terminate a session by number _(admin)_\n' +
             '*/help* — show this help\n' +
             '_Any other message is forwarded to Claude Code._\n' +
             'Other slash commands (e.g. `/compact`) are passed directly to Claude Code.';
           this.sendDirect(chatJid, helpText);
+          break;
+        }
+
+        case 'sessions': {
+          // Admin-only
+          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+            return;
+          }
+          const entries: string[] = [];
+          let idx = 1;
+          if (this.sessionScope === 'per_chat') {
+            for (const [mapKey, sess] of this.chatSessions) {
+              const st = sess.getStatus();
+              if (!st.active) continue;
+              const isGrp = isGroupConversationKey(mapKey);
+              const label = isGrp ? 'Group' : 'DM';
+              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+              const dbRowId = sess.getDbRowId();
+              let tkStr = '0';
+              if (dbRowId !== null) {
+                const tokenRow = this.db.raw.prepare(
+                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                if (tokenRow) {
+                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                }
+              }
+              entries.push(`${idx}. ${mapKey} (${label}) — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+              idx++;
+            }
+          } else {
+            const st = this.session?.getStatus();
+            if (st?.active) {
+              const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
+              const dbRowId = this.session?.getDbRowId() ?? null;
+              let tkStr = '0';
+              if (dbRowId !== null) {
+                const tokenRow = this.db.raw.prepare(
+                  'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+                ).get(dbRowId) as { total_input_tokens: number | null; total_output_tokens: number | null } | undefined;
+                if (tokenRow) {
+                  const tkTotal = (tokenRow.total_input_tokens ?? 0) + (tokenRow.total_output_tokens ?? 0);
+                  tkStr = tkTotal > 1000 ? `${(tkTotal / 1000).toFixed(1)}k` : String(tkTotal);
+                }
+              }
+              entries.push(`1. ${this.activeChatJid ?? 'unknown'} — ${ageStr}, ${st.messageCount} msgs, ${tkStr} tokens`);
+            }
+          }
+          const sessionsText = entries.length > 0
+            ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
+            : '_No active sessions._';
+          this.sendDirect(chatJid, sessionsText, true);
+          break;
+        }
+
+        case 'kill-session': {
+          // Admin-only
+          if (!isAdminPhone(resolvePhoneFromJid(msg.senderJid, this.db), config.adminPhones)) {
+            return;
+          }
+          const targetIdx = parseInt(classified.args ?? '', 10);
+          if (isNaN(targetIdx) || targetIdx < 1) {
+            this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
+            break;
+          }
+          if (this.sessionScope === 'per_chat') {
+            const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
+            if (targetIdx > activeSessions.length) {
+              this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
+              break;
+            }
+            const [mapKey, targetSession] = activeSessions[targetIdx - 1];
+            this.chatQueues.get(mapKey)?.abortTurn();
+            this.chatSessions.delete(mapKey);
+            this.chatQueues.delete(mapKey);
+            this.cleanupPerChatState(mapKey);
+            await targetSession.shutdown(false);
+            const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
+            this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
+          } else {
+            if (!this.session?.getStatus().active) {
+              this.sendDirect(chatJid, '_No active session to kill._', true);
+              break;
+            }
+            this.getActiveQueue()?.abortTurn();
+            await this.session.shutdown(false);
+            this.session = null;
+            this.queue = null;
+            this.activeChatJid = null;
+            this.sendDirect(chatJid, '_Session killed._', true);
+          }
           break;
         }
       }
@@ -2370,7 +2547,14 @@ export class AgentRuntime implements Runtime {
     return this.queue;
   }
 
-  private sendDirect(chatJid: string, text: string): void {
+  private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
+    if (bypassEchoGuard) {
+      // Bypass queue entirely — direct send for admin responses
+      this.messenger.sendMessage(chatJid, text).catch((err) =>
+        log.error({ err }, 'sendDirect bypass failed'),
+      );
+      return;
+    }
     const queue = this.getQueueForChat(chatJid);
     if (queue) {
       queue.enqueueText(text);
