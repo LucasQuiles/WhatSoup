@@ -1,7 +1,7 @@
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { Database } from '../../../core/database.ts';
-import { getUnprocessedMessages, markMessagesProcessed, markMessagesWithError, incrementEnrichmentRetries } from '../../../core/messages.ts';
+import { getUnprocessedMessages, markMessagesProcessed, markMessagesWithError, incrementEnrichmentRetries, getUnprocessedCount } from '../../../core/messages.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
@@ -22,13 +22,7 @@ export class EnrichmentPoller {
 
   /** Count of messages pending enrichment (not yet processed). */
   get unprocessedCount(): number {
-    const row = this.db.raw
-      .prepare(
-        `SELECT COUNT(*) AS cnt FROM messages
-         WHERE enrichment_processed_at IS NULL AND is_from_me = 0`,
-      )
-      .get() as { cnt: number } | undefined;
-    return row?.cnt ?? 0;
+    return getUnprocessedCount(this.db);
   }
 
   constructor(

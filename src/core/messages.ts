@@ -201,6 +201,14 @@ export function getMessageCount(db: Database): number {
   return row.cnt;
 }
 
+/** Count of messages pending enrichment (not yet processed). */
+export function getUnprocessedCount(db: Database): number {
+  const row = db.raw.prepare(
+    'SELECT COUNT(*) AS cnt FROM messages WHERE enrichment_processed_at IS NULL AND is_from_me = 0',
+  ).get() as { cnt: number };
+  return row.cnt;
+}
+
 /**
  * Delete messages older than retentionDays. Returns the number of rows deleted.
  */

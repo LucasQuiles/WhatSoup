@@ -5,7 +5,7 @@ import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
-import { deleteOldMessages, getMessagesBySender, getMessageCount } from './core/messages.ts';
+import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
@@ -555,10 +555,7 @@ const healthServer = startHealthServer({
     const runtimeDegraded = snap.status === 'degraded' || snap.status === 'unhealthy';
     let unprocessed = 0;
     try {
-      const row = db.raw.prepare(
-        'SELECT COUNT(*) AS cnt FROM messages WHERE enrichment_processed_at IS NULL AND is_from_me = 0',
-      ).get() as { cnt: number };
-      unprocessed = row.cnt;
+      unprocessed = getUnprocessedCount(db);
     } catch (err) { log.warn({ err }, 'failed to get enrichment stats'); }
     return { lastRun, unprocessed, runtimeDegraded };
   },
