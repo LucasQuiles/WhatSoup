@@ -53,6 +53,11 @@ const modeTextClass: Record<Mode, string> = {
 
 const RANGE_OPTIONS: MetricsRange[] = ['24h', '7d', '30d'];
 
+function chartColStyle(key: ChartKey, expanded: ChartKey | null) {
+  const active = expanded === null || expanded === key;
+  return { flex: active ? 1 : 0, opacity: active ? 1 : 0, minWidth: active ? undefined : 0 };
+}
+
 const SoupKitchen: FC = () => {
   const { data: lines = [] } = useLines();
   const { data: feed = [] } = useFeed();
@@ -94,17 +99,12 @@ const SoupKitchen: FC = () => {
     setExpandedChart(prev => prev === key ? null : key);
   }, []);
 
-  // KPI click: sets both activeKpi (table filter) and expandedChart (chart zoom)
-  function toggleKpiWithChart(kpiKey: KpiFilter, chartKey: ChartKey | null) {
+  function toggleKpi(kpiKey: KpiFilter, chartKey: ChartKey | null = null) {
     const next = activeKpi === kpiKey ? null : kpiKey;
     setActiveKpi(next);
     if (chartKey) {
       setExpandedChart(next === null ? null : chartKey);
     }
-  }
-
-  function toggleKpi(key: KpiFilter) {
-    setActiveKpi((prev) => (prev === key ? null : key));
   }
 
   // Derive alerts from lines
@@ -223,7 +223,7 @@ const SoupKitchen: FC = () => {
           value={kpis.totalSent.toLocaleString()}
           label="Messages Sent"
           color="text-m-cht"
-          onClick={() => toggleKpiWithChart("messages", "messages")}
+          onClick={() => toggleKpi("messages", "messages")}
           active={activeKpi === "messages"}
           sparkData={messageSparklines?.outbound}
         />
@@ -231,7 +231,7 @@ const SoupKitchen: FC = () => {
           value={kpis.totalReceived.toLocaleString()}
           label="Messages Received"
           color="text-t2"
-          onClick={() => toggleKpiWithChart("messages", "messages")}
+          onClick={() => toggleKpi("messages", "messages")}
           active={activeKpi === "messages"}
           sparkData={messageSparklines?.inbound}
         />
@@ -239,7 +239,7 @@ const SoupKitchen: FC = () => {
           value={kpis.agentSessions}
           label="Agent Sessions"
           color="text-m-agt"
-          onClick={() => toggleKpiWithChart("agent", "sessions")}
+          onClick={() => toggleKpi("agent", "sessions")}
           active={activeKpi === "agent"}
           sparkData={sessionSparklines?.active}
         />
@@ -254,7 +254,7 @@ const SoupKitchen: FC = () => {
           value={kpis.totalMedia.toLocaleString()}
           label="Media Processed"
           color="text-s-ok"
-          onClick={() => toggleKpiWithChart("messages", "messages")}
+          onClick={() => toggleKpi("messages", "messages")}
           active={activeKpi === "messages"}
           sparkData={messageSparklines?.media}
         />
@@ -277,11 +277,7 @@ const SoupKitchen: FC = () => {
       <div className="flex gap-[var(--sp-3)] flex-shrink-0">
         <div
           className="c-chart-expand-col"
-          style={{
-            flex: expandedChart === null ? 1 : expandedChart === 'messages' ? 1 : 0,
-            opacity: expandedChart === null || expandedChart === 'messages' ? 1 : 0,
-            minWidth: expandedChart === null || expandedChart === 'messages' ? undefined : 0,
-          }}
+          style={chartColStyle('messages', expandedChart)}
         >
           <ChartPanel
             title={`Message Volume (${chartRange})`}
@@ -302,11 +298,7 @@ const SoupKitchen: FC = () => {
 
         <div
           className="c-chart-expand-col"
-          style={{
-            flex: expandedChart === null ? 1 : expandedChart === 'tokens' ? 1 : 0,
-            opacity: expandedChart === null || expandedChart === 'tokens' ? 1 : 0,
-            minWidth: expandedChart === null || expandedChart === 'tokens' ? undefined : 0,
-          }}
+          style={chartColStyle('tokens', expandedChart)}
         >
           <ChartPanel
             title={`Token Usage (${chartRange})`}
@@ -327,11 +319,7 @@ const SoupKitchen: FC = () => {
 
         <div
           className="c-chart-expand-col"
-          style={{
-            flex: expandedChart === null ? 1 : expandedChart === 'sessions' ? 1 : 0,
-            opacity: expandedChart === null || expandedChart === 'sessions' ? 1 : 0,
-            minWidth: expandedChart === null || expandedChart === 'sessions' ? undefined : 0,
-          }}
+          style={chartColStyle('sessions', expandedChart)}
         >
           <ChartPanel
             title={`Session Activity (${chartRange})`}

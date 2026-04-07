@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MessageVolumeBucket } from '../types';
-import { AXIS_TICK, formatBucketLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel } from '../lib/chart-utils.js';
 
 export function MetricsChart({ data }: { data: MessageVolumeBucket[] }) {
   return (
@@ -26,8 +26,7 @@ export function MetricsChart({ data }: { data: MessageVolumeBucket[] }) {
       </div>
 
       <ResponsiveContainer width="100%" height={180}>
-        {/* eslint-disable-next-line no-restricted-syntax -- recharts margin uses raw numbers (px offsets), not CSS tokens; expires 2026-12-31 */}
-        <BarChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+        <BarChart data={data} margin={CHART_MARGIN}>
           <CartesianGrid stroke="var(--b1)" vertical={false} />
           <XAxis
             dataKey="bucket"
@@ -45,15 +44,7 @@ export function MetricsChart({ data }: { data: MessageVolumeBucket[] }) {
             allowDecimals={false}
           />
           <Tooltip
-            contentStyle={{
-              background: 'var(--color-d3)',
-              borderWidth: 'var(--bw)',
-              borderStyle: 'solid',
-              borderColor: 'var(--b2)',
-              borderRadius: 'var(--radius-md)',
-              boxShadow: 'var(--shadow-md)',
-              fontSize: 'var(--font-size-xs)',
-            }}
+            contentStyle={TOOLTIP_STYLE}
             labelFormatter={(value) => new Date(String(value)).toLocaleString()}
           />
           <Legend
