@@ -2201,7 +2201,7 @@ describe('AgentRuntime', () => {
       chat_jid: 'user@s.whatsapp.net',
       claude_pid: 0,
       status: 'active',
-      started_at: new Date(Date.now() - 3_600_000).toISOString(),
+      started_at: new Date(Date.now() - 1_800_000).toISOString(),
       last_message_at: null,
       message_count: 0,
     });
@@ -2239,7 +2239,7 @@ describe('AgentRuntime', () => {
       chat_jid: 'user@s.whatsapp.net',
       claude_pid: 0,
       status: 'active',
-      started_at: new Date(Date.now() - 3_600_000).toISOString(),
+      started_at: new Date(Date.now() - 1_800_000).toISOString(),
       last_message_at: null,
       message_count: 0,
     });
@@ -2309,7 +2309,7 @@ describe('AgentRuntime', () => {
       chat_jid: 'user@s.whatsapp.net',
       claude_pid: 0,
       status: 'active',
-      started_at: new Date(Date.now() - 3_600_000).toISOString(),
+      started_at: new Date(Date.now() - 1_800_000).toISOString(),
       last_message_at: null,
       message_count: 0,
     });

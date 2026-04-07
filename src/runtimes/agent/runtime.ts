@@ -1246,6 +1246,16 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    // AE2 fallback: when durability is absent, use started_at directly
+    if (priorSession && !this.durability && priorSession.started_at) {
+      const ageMs = Date.now() - new Date(priorSession.started_at).getTime();
+      if (ageMs > 60 * 60 * 1000) {
+        log.info({ chatJid: priorSession.chat_jid, ageMinutes: Math.round(ageMs / 60_000) },
+          'skipping shared/single resume — stale (no durability)');
+        priorSession = null;
+      }
+    }
+
     if (priorSession?.session_id && priorSession?.chat_jid) {
       // Capture narrowed values before closures — TypeScript does not propagate
       // if-guard narrowing into lambdas, so priorSession.chat_jid inside the closure
@@ -1636,7 +1646,7 @@ export class AgentRuntime implements Runtime {
           const sessionsText = entries.length > 0
             ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
             : '_No active sessions._';
-          this.sendDirect(chatJid, sessionsText);
+          this.sendDirect(chatJid, sessionsText, true);
           break;
         }
 
@@ -1647,26 +1657,26 @@ export class AgentRuntime implements Runtime {
           }
           const targetIdx = parseInt(classified.args ?? '', 10);
           if (isNaN(targetIdx) || targetIdx < 1) {
-            this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.');
+            this.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
             break;
           }
           if (this.sessionScope === 'per_chat') {
             const activeSessions = [...this.chatSessions.entries()].filter(([, s]) => s.getStatus().active);
             if (targetIdx > activeSessions.length) {
-              this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`);
+              this.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
               break;
             }
             const [mapKey, targetSession] = activeSessions[targetIdx - 1];
             this.chatQueues.get(mapKey)?.abortTurn();
             this.chatSessions.delete(mapKey);
             this.chatQueues.delete(mapKey);
-            this.cleanupPerChatCrashTurnState(mapKey);
+            this.cleanupPerChatState(mapKey);
             await targetSession.shutdown(false);
             const killLabel = mapKey.includes('_at_g.us') || mapKey.endsWith('@g.us') ? 'Group' : 'DM';
-            this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`);
+            this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
           } else {
             if (!this.session?.getStatus().active) {
-              this.sendDirect(chatJid, '_No active session to kill._');
+              this.sendDirect(chatJid, '_No active session to kill._', true);
               break;
             }
             this.getActiveQueue()?.abortTurn();
@@ -1674,7 +1684,7 @@ export class AgentRuntime implements Runtime {
             this.session = null;
             this.queue = null;
             this.activeChatJid = null;
-            this.sendDirect(chatJid, '_Session killed._');
+            this.sendDirect(chatJid, '_Session killed._', true);
           }
           break;
         }
@@ -2508,7 +2518,14 @@ export class AgentRuntime implements Runtime {
     return this.queue;
   }
 
-  private sendDirect(chatJid: string, text: string): void {
+  private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
+    if (bypassEchoGuard) {
+      // Bypass queue entirely — direct send for admin responses
+      this.messenger.sendMessage(chatJid, text).catch((err) =>
+        log.error({ err }, 'sendDirect bypass failed'),
+      );
+      return;
+    }
     const queue = this.getQueueForChat(chatJid);
     if (queue) {
       queue.enqueueText(text);
