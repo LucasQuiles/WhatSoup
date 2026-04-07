@@ -145,4 +145,67 @@ describe('FleetDbReader.getMetrics — densification', () => {
     expect(result.data.tokenUsage).toHaveLength(720);
     expect(result.data.sessionActivity).toHaveLength(720);
   });
+
+  it('returns tokenUsageByProvider with per-provider densified buckets', () => {
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'agent_tokens_in:claude-cli', 100);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'agent_tokens_out:claude-cli', 50);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'agent_tokens_in:codex-cli', 200);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'agent_tokens_out:codex-cli', 75);
+
+    const now = new Date('2026-04-05T18:30:00.000Z').getTime();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+
+    const result = reader.getMetrics('self', '', { range: '24h' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.data.tokenUsageByProvider).toBeDefined();
+    expect(result.data.tokenUsageByProvider['claude-cli']).toHaveLength(24);
+    expect(result.data.tokenUsageByProvider['codex-cli']).toHaveLength(24);
+
+    const claudeBucket = result.data.tokenUsageByProvider['claude-cli']!.find(b => b.bucket.includes('T15:00'));
+    expect(claudeBucket?.input).toBe(100);
+    expect(claudeBucket?.output).toBe(50);
+
+    const codexBucket = result.data.tokenUsageByProvider['codex-cli']!.find(b => b.bucket.includes('T15:00'));
+    expect(codexBucket?.input).toBe(200);
+    expect(codexBucket?.output).toBe(75);
+  });
+
+  it('returns sessionActivityByProvider with per-provider densified buckets', () => {
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'sessions_started:claude-cli', 1);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'sessions_active:claude-cli', 2);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'sessions_started:codex-cli', 3);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'sessions_active:codex-cli', 1);
+
+    const now = new Date('2026-04-05T18:30:00.000Z').getTime();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+
+    const result = reader.getMetrics('self', '', { range: '24h' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.data.sessionActivityByProvider).toBeDefined();
+    const claudeSes = result.data.sessionActivityByProvider['claude-cli']!.find(b => b.bucket.includes('T15:00'));
+    expect(claudeSes?.started).toBe(1);
+    expect(claudeSes?.active).toBe(2);
+
+    const codexSes = result.data.sessionActivityByProvider['codex-cli']!.find(b => b.bucket.includes('T15:00'));
+    expect(codexSes?.started).toBe(3);
+    expect(codexSes?.active).toBe(1);
+  });
+
+  it('returns providers list', () => {
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'agent_tokens_in:claude-cli', 100);
+    insertMetric(db, '2026-04-05T15:00:00.000Z', 'sessions_active:codex-cli', 1);
+
+    const now = new Date('2026-04-05T18:30:00.000Z').getTime();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+
+    const result = reader.getMetrics('self', '', { range: '24h' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.data.providers.sort()).toEqual(['claude-cli', 'codex-cli']);
+  });
 });
