@@ -11,6 +11,8 @@ import {
   updateSessionId,
   updateSessionStatus,
   incrementMessageCount,
+  accumulateSessionTokens,
+  insertTokenEvent,
   backfillWorkspaceKeys,
   markOrphaned,
   sweepOrphanedSessions,
@@ -40,6 +42,7 @@ afterAll(() => {
 
 describe('agent session-db', () => {
   beforeEach(() => {
+    db.raw.prepare('DELETE FROM agent_token_events').run();
     db.raw.prepare('DELETE FROM agent_sessions').run();
   });
 
@@ -337,5 +340,85 @@ describe('agent session-db', () => {
 
     const result = getResumableSessionForChat(db, wk);
     expect(result).toBeNull();
+  });
+
+  it('insertTokenEvent inserts a row in agent_token_events', () => {
+    const id = createSession(db, 80001, '/tmp/token-event');
+    insertTokenEvent(db, id, 100, 50);
+
+    const row = db.raw.prepare(
+      'SELECT agent_session_id, input_tokens, output_tokens, timestamp FROM agent_token_events WHERE agent_session_id = ?'
+    ).get(id) as { agent_session_id: number; input_tokens: number; output_tokens: number; timestamp: number } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row!.agent_session_id).toBe(id);
+    expect(row!.input_tokens).toBe(100);
+    expect(row!.output_tokens).toBe(50);
+    expect(row!.timestamp).toBeGreaterThan(0);
+  });
+
+  it('accumulateSessionTokens and insertTokenEvent together maintain consistency', () => {
+    const id = createSession(db, 80002, '/tmp/token-dual');
+
+    insertTokenEvent(db, id, 100, 50);
+    accumulateSessionTokens(db, id, 100, 50);
+    insertTokenEvent(db, id, 200, 75);
+    accumulateSessionTokens(db, id, 200, 75);
+    insertTokenEvent(db, id, 50, 25);
+    accumulateSessionTokens(db, id, 50, 25);
+
+    const eventSum = db.raw.prepare(
+      'SELECT SUM(input_tokens) AS total_in, SUM(output_tokens) AS total_out FROM agent_token_events WHERE agent_session_id = ?'
+    ).get(id) as { total_in: number; total_out: number };
+
+    const session = db.raw.prepare(
+      'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?'
+    ).get(id) as { total_input_tokens: number; total_output_tokens: number };
+
+    expect(eventSum.total_in).toBe(session.total_input_tokens);
+    expect(eventSum.total_out).toBe(session.total_output_tokens);
+    expect(eventSum.total_in).toBe(350);
+    expect(eventSum.total_out).toBe(150);
+  });
+
+  it('updateSessionStatus sets ended_at for terminal statuses', () => {
+    const terminalStatuses = ['ended', 'crashed', 'resume_failed', 'orphaned'];
+    for (const status of terminalStatuses) {
+      const id = createSession(db, 80010 + terminalStatuses.indexOf(status), `/tmp/terminal-${status}`);
+      updateSessionStatus(db, id, status);
+
+      const row = db.raw.prepare(
+        'SELECT ended_at, status FROM agent_sessions WHERE id = ?'
+      ).get(id) as { ended_at: string | null; status: string };
+
+      expect(row.status).toBe(status);
+      expect(row.ended_at).not.toBeNull();
+      // SQLite datetime('now') format: "YYYY-MM-DD HH:MM:SS"
+      expect(row.ended_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    }
+  });
+
+  it('updateSessionStatus does NOT set ended_at for suspended status', () => {
+    const id = createSession(db, 80020, '/tmp/suspended-no-ended');
+    updateSessionStatus(db, id, 'suspended');
+
+    const row = db.raw.prepare(
+      'SELECT ended_at, status FROM agent_sessions WHERE id = ?'
+    ).get(id) as { ended_at: string | null; status: string };
+
+    expect(row.status).toBe('suspended');
+    expect(row.ended_at).toBeNull();
+  });
+
+  it('updateSessionStatus does NOT set ended_at for active status', () => {
+    const id = createSession(db, 80021, '/tmp/active-no-ended');
+    updateSessionStatus(db, id, 'active');
+
+    const row = db.raw.prepare(
+      'SELECT ended_at, status FROM agent_sessions WHERE id = ?'
+    ).get(id) as { ended_at: string | null; status: string };
+
+    expect(row.status).toBe('active');
+    expect(row.ended_at).toBeNull();
   });
 });

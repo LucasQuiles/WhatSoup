@@ -144,9 +144,34 @@ export function accumulateSessionTokens(
     .run(inputTokens, outputTokens, rowId);
 }
 
+/** Record a timestamped token usage event for granular metrics. */
+export function insertTokenEvent(
+  db: Database,
+  agentSessionId: number,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  db.raw
+    .prepare(
+      `INSERT INTO agent_token_events (agent_session_id, timestamp, input_tokens, output_tokens)
+       VALUES (?, unixepoch('now'), ?, ?)`,
+    )
+    .run(agentSessionId, inputTokens, outputTokens);
+}
+
+const TERMINAL_STATUSES = new Set(['ended', 'completed', 'crashed', 'resume_failed', 'orphaned']);
+
 /** Update the status of an existing session row to any arbitrary status string. */
 export function updateSessionStatus(db: Database, rowId: number, status: string): void {
-  db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
+  if (TERMINAL_STATUSES.has(status)) {
+    db.raw
+      .prepare(
+        `UPDATE agent_sessions SET status = ?, ended_at = datetime('now') WHERE id = ?`,
+      )
+      .run(status, rowId);
+  } else {
+    db.raw.prepare('UPDATE agent_sessions SET status = ? WHERE id = ?').run(status, rowId);
+  }
 }
 
 /** Persist the local transcript file path on an existing session row. */

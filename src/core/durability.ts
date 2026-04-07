@@ -131,6 +131,7 @@ type DurabilityStatements = {
   markToolExecuting: PreparedStatement;
   markToolComplete: PreparedStatement;
   accumulateSessionTokens: PreparedStatement;
+  insertTokenEvent: PreparedStatement;
   upsertSessionCheckpoint: PreparedStatement;
   getSessionCheckpoint: PreparedStatement;
   getAllActiveCheckpoints: PreparedStatement;
@@ -216,6 +217,10 @@ export class DurabilityEngine {
          SET total_input_tokens = total_input_tokens + ?,
              total_output_tokens = total_output_tokens + ?
          WHERE id = ?`,
+      ),
+      insertTokenEvent: prepare(
+        `INSERT INTO agent_token_events (agent_session_id, timestamp, input_tokens, output_tokens)
+         VALUES (?, unixepoch('now'), ?, ?)`,
       ),
       upsertSessionCheckpoint: prepare(`
         INSERT INTO session_checkpoints (conversation_key, session_id, transcript_path, active_turn_id,
@@ -371,6 +376,11 @@ export class DurabilityEngine {
           params.sessionTokens.inputTokens,
           params.sessionTokens.outputTokens,
           params.sessionTokens.dbRowId,
+        );
+        this.statements.insertTokenEvent.run(
+          params.sessionTokens.dbRowId,
+          params.sessionTokens.inputTokens,
+          params.sessionTokens.outputTokens,
         );
       }
       if (params.checkpoint) {

@@ -26,7 +26,7 @@ describe('prepared statement caching', () => {
     const prepareSpy = vi.spyOn(db.raw, 'prepare');
     const engine = new DurabilityEngine(db);
 
-    expect(prepareSpy).toHaveBeenCalledTimes(41);
+    expect(prepareSpy).toHaveBeenCalledTimes(42);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -92,6 +92,12 @@ describe('prepared statement caching', () => {
     engine.markSessionOrphaned('conv-1');
     engine.getPendingInbound();
     engine.getOutboundByStatus('pending');
+    // Insert a dummy agent_sessions row so insertTokenEvent FK constraint is satisfied.
+    // Use exec (not prepare) to avoid triggering the prepareSpy.
+    db.raw.exec(
+      `INSERT INTO agent_sessions (id, claude_pid, started_in_directory, started_at, status)
+       VALUES (999, 0, '/tmp', datetime('now'), 'active')`,
+    );
     engine.completeTurn({
       sessionTokens: {
         dbRowId: 999,
