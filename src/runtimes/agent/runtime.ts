@@ -1636,7 +1636,7 @@ export class AgentRuntime implements Runtime {
             for (const [mapKey, sess] of this.chatSessions) {
               const st = sess.getStatus();
               if (!st.active) continue;
-              const isGrp = mapKey.includes('_at_g.us') || mapKey.endsWith('@g.us');
+              const isGrp = isGroupConversationKey(mapKey);
               const label = isGrp ? 'Group' : 'DM';
               const ageStr = st.startedAt ? formatAge(st.startedAt) : '?';
               const dbRowId = sess.getDbRowId();
@@ -1700,7 +1700,7 @@ export class AgentRuntime implements Runtime {
             this.chatQueues.delete(mapKey);
             this.cleanupPerChatState(mapKey);
             await targetSession.shutdown(false);
-            const killLabel = mapKey.includes('_at_g.us') || mapKey.endsWith('@g.us') ? 'Group' : 'DM';
+            const killLabel = isGroupConversationKey(mapKey) ? 'Group' : 'DM';
             this.sendDirect(chatJid, `_Session killed: ${mapKey} (${killLabel})_`, true);
           } else {
             if (!this.session?.getStatus().active) {

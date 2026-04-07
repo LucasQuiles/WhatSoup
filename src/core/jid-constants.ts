@@ -47,7 +47,10 @@ export function isPnJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_PERSONAL);
 }
 
-// isGroupJid removed — use isGroupConversationKey from conversation-key.ts instead
+/** Check if a raw JID (not a conversation key) is a group JID. */
+export function isGroupJid(jid: string): boolean {
+  return jid.endsWith(JID_GROUP);
+}
 
 // ── JID parsing ─────────────────────────────────────────────────────────────
 
