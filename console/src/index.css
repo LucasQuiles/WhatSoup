@@ -114,6 +114,8 @@
   --avatar-lg: 64px;         /* contact detail panel */
   --icon-empty: 40px;        /* empty state icon */
   --sparkline-h: 32px;       /* KPI sparkline height */
+  --heatmap-cell: 18px;      /* active hours heatmap cell height */
+  --heatmap-h: 64px;         /* active hours 24h bar chart height */
   --badge-unread: 20px;      /* chat unread count badge */
   /* ═══ Panel widths ═══ */
   --panel-chat-list: 288px;  /* inbox left panel */
@@ -311,6 +313,7 @@ body::before {
   0% { opacity: 0; transform: translateY(8px); }
   100% { opacity: 1; transform: translateY(0); }
 }
+.msg-slide-in { animation: msg-slide-in 0.25s ease-out both; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Feed — operational activity surface
@@ -1107,6 +1110,7 @@ body::before {
 .c-border-b-b2   { border-bottom: var(--bw) solid var(--b2); }
 .c-border-t      { border-top: var(--bw) solid var(--b1); }
 .c-border-dashed { border: var(--bw) dashed var(--b2); }
+.c-border-t-b2   { border-top: var(--bw) solid var(--b2); }
 .c-border-r      { border-right: var(--bw) solid var(--b1); }
 
 /* Wizard accent-scoped focus ring — matches the selected line type color */
