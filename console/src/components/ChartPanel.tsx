@@ -24,26 +24,24 @@ export const ChartPanel: FC<ChartPanelProps> = ({
   onRetry,
   children,
 }) => {
-  const height = expanded ? 200 : 120;
+  const height = expanded ? 240 : 140;
 
   return (
-    <section className="font-mono flex-shrink-0 p-[var(--sp-3)] bg-d3 rounded-[var(--radius-md)]">
+    <section
+      className="font-mono flex-shrink-0 rounded-[var(--radius-md)] bg-d3 p-[var(--sp-3)] c-border"
+    >
       {/* Header */}
       <div className="flex items-center justify-between mb-[var(--sp-2)]">
-        <span
-          className="font-mono text-t4 uppercase tracking-[var(--tracking-label)]"
-          style={{ fontSize: 'var(--font-size-xs)' }}
-        >
-          {title}
-        </span>
+        <span className="c-section-label">{title}</span>
         {instancesFailed > 0 && (
           <span
-            className="font-mono rounded-sm px-[var(--sp-1h)] py-[var(--sp-half)] text-s-warn bg-[var(--s-warn-wash)]"
+            className="font-mono rounded-sm px-[var(--sp-1h)] py-[var(--sp-0h)] text-s-warn"
             style={{
               fontSize: 'var(--font-size-label)',
+              backgroundColor: 'var(--s-warn-wash)',
               borderWidth: 'var(--bw)',
               borderStyle: 'solid',
-              borderColor: 'var(--color-s-warn)',
+              borderColor: 'var(--s-warn-border)',
             }}
           >
             {`${instancesFailed} instance(s) unavailable`}
@@ -55,7 +53,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
       {isLoading ? (
         <div
           data-testid="chart-shimmer"
-          className="animate-shimmer rounded-md bg-d3"
+          className="animate-shimmer rounded-sm bg-d4"
           style={{ height }}
         />
       ) : isError ? (

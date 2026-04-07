@@ -11,15 +11,20 @@ export const AXIS_TICK = {
 export const CHART_MARGIN = { top: 4, right: 8, left: -16, bottom: 0 };
 /* eslint-enable no-restricted-syntax */
 
+/* eslint-disable no-restricted-syntax -- recharts Tooltip contentStyle is an inline style object; className not supported */
 export const TOOLTIP_STYLE = {
-  background: 'var(--color-d3)',
+  background: 'var(--color-d6)',
+  color: 'var(--color-t2)',
   borderWidth: 'var(--bw)',
   borderStyle: 'solid' as const,
-  borderColor: 'var(--b2)',
-  borderRadius: 'var(--radius-md)',
+  borderColor: 'var(--b3)',
+  borderRadius: 'var(--radius-sm)',
   boxShadow: 'var(--shadow-md)',
   fontSize: 'var(--font-size-xs)',
+  fontFamily: 'var(--font-mono)',
+  padding: 'var(--sp-2) var(--sp-3)',
 };
+/* eslint-enable no-restricted-syntax */
 
 export function formatBucketLabel(bucket: string, range?: MetricsRange): string {
   const d = new Date(bucket);
