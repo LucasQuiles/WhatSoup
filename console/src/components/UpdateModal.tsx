@@ -328,7 +328,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                     {STEP_LABELS[s.step] ?? s.step}
                   </span>
                   {s.message && s.status !== 'error' && (
-                    <span className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-xs)' }}>
+                    <span className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-label)' }}>
                       {s.message}
                     </span>
                   )}

@@ -48,7 +48,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
             <div className="px-2 py-1 flex-shrink-0 text-center w-[var(--log-col-level)] min-w-[var(--log-col-level)]">
               <span
                 className={`inline-block px-1.5 py-0.5 rounded font-medium ${levelColor[log.level]}`}
-                style={{ fontSize: 'var(--font-size-sm)', background: levelBg[log.level] }}
+                style={{ fontSize: 'var(--font-size-label)', background: levelBg[log.level] }}
               >
                 {log.level}
               </span>

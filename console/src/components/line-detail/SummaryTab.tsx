@@ -152,7 +152,7 @@ export function SummaryTab({
                 type="button"
                 onClick={onEditConfig}
                 className="c-btn c-btn-ghost py-[var(--sp-0h)] px-[var(--sp-2)]"
-                style={{ fontSize: 'var(--font-size-xs)' }}
+                style={{ fontSize: 'var(--font-size-label)' }}
               >
                 Edit
               </button>
@@ -199,36 +199,32 @@ export function SummaryTab({
               type="button"
               onClick={() => setConfirmAction('restart')}
               className="c-btn w-full justify-center"
-              style={{ fontSize: 'var(--font-size-label)' }}
             >
-              <RotateCw size={13} strokeWidth={1.75} /> Restart Instance
+              <RotateCw size={15} strokeWidth={1.75} /> Restart Instance
             </button>
             {line.mode !== 'passive' && (
               <button
                 type="button"
                 onClick={onEditConfig}
                 className="c-btn w-full justify-center"
-                style={{ fontSize: 'var(--font-size-label)' }}
               >
-                <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
+                <SlidersHorizontal size={15} strokeWidth={1.75} /> Edit Configuration
               </button>
             )}
             <button
               type="button"
               onClick={onChangeMode}
               className="c-btn w-full justify-center"
-              style={{ fontSize: 'var(--font-size-label)' }}
             >
-              <GitBranch size={13} strokeWidth={1.75} /> Change Mode
+              <GitBranch size={15} strokeWidth={1.75} /> Change Mode
             </button>
             <div className="c-border-t pt-[var(--sp-2)] mt-[var(--sp-1)]">
               <button
                 type="button"
                 onClick={() => setConfirmAction('stop')}
                 className="c-btn c-btn-danger w-full justify-center"
-                style={{ fontSize: 'var(--font-size-label)' }}
               >
-                <Power size={13} strokeWidth={1.75} /> Stop Instance
+                <Power size={15} strokeWidth={1.75} /> Stop Instance
               </button>
             </div>
           </div>

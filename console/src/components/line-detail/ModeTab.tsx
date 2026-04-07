@@ -28,9 +28,8 @@ export function ModeTab({
             type="button"
             onClick={onChangeMode}
             className="c-btn"
-            style={{ fontSize: 'var(--font-size-label)' }}
           >
-            <GitBranch size={13} strokeWidth={1.75} /> Change Mode
+            <GitBranch size={15} strokeWidth={1.75} /> Change Mode
           </button>
         </div>
       </div>
@@ -53,17 +52,15 @@ export function ModeTab({
             type="button"
             onClick={onEditConfig}
             className="c-btn"
-            style={{ fontSize: 'var(--font-size-label)' }}
           >
-            <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
+            <SlidersHorizontal size={15} strokeWidth={1.75} /> Edit Configuration
           </button>
           <button
             type="button"
             onClick={onChangeMode}
             className="c-btn"
-            style={{ fontSize: 'var(--font-size-label)' }}
           >
-            <GitBranch size={13} strokeWidth={1.75} /> Change Mode
+            <GitBranch size={15} strokeWidth={1.75} /> Change Mode
           </button>
         </div>
       </div>

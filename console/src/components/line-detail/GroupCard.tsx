@@ -27,7 +27,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
     >
       {/* Avatar */}
       <div
-        className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] rounded-full text-t1"
+        className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] rounded-full text-t1 text-[var(--font-size-sm)]"
         style={{
           background: color,
         }}
@@ -38,7 +38,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="c-data truncate">
+          <span className="c-body truncate">
             {group.subject}
           </span>
           {badge && (

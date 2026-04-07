@@ -75,12 +75,7 @@ export function MetricsTab({
             <section
               className="c-card font-mono p-[var(--sp-4)] bg-d2"
             >
-              <div
-                className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
-                style={{
-                  fontSize: 'var(--font-size-xs)',
-                }}
-              >
+              <div className="c-section-label mb-[var(--sp-3)]">
                 Token Usage
               </div>
               <div className="flex items-center gap-[var(--sp-5)]">
@@ -136,12 +131,7 @@ export function MetricsTab({
             <section
               className="c-card font-mono p-[var(--sp-4)] bg-d2"
             >
-              <div
-                className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
-                style={{
-                  fontSize: 'var(--font-size-xs)',
-                }}
-              >
+              <div className="c-section-label mb-[var(--sp-3)]">
                 Model Configuration
               </div>
               <div

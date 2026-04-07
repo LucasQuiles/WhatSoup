@@ -21,7 +21,7 @@ function PipelineNode({
   const pillStyle = {
     padding: onClick ? 'var(--sp-0h) var(--sp-3)' : '5px var(--sp-3)',
     borderRadius: 'var(--radius-sm)',
-    fontSize: 'var(--font-size-label)',
+    fontSize: 'var(--font-size-data)',
     background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
     color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
     border: selected

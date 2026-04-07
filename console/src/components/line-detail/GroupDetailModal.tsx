@@ -547,8 +547,8 @@ function SettingsTab({
       {/* Messaging — announce */}
       <div style={rowStyle}>
         <div>
-          <div className="font-sans text-body text-t2">Messaging</div>
-          <div className="font-sans text-body text-t4">
+          <div className="c-body">Messaging</div>
+          <div className="c-body text-t4">
             {detail.announce ? 'Only admins can send' : 'All participants can send'}
           </div>
         </div>
@@ -577,8 +577,8 @@ function SettingsTab({
       {/* Edit info — locked */}
       <div style={rowStyle}>
         <div>
-          <div className="font-sans text-body text-t2">Edit group info</div>
-          <div className="font-sans text-body text-t4">
+          <div className="c-body">Edit group info</div>
+          <div className="c-body text-t4">
             {detail.locked ? 'Only admins can edit info' : 'All participants can edit info'}
           </div>
         </div>
@@ -608,8 +608,8 @@ function SettingsTab({
       {isAdmin && (
         <div style={rowStyle}>
           <div>
-            <div className="font-sans text-body text-t2">Who can add members</div>
-            <div className="font-sans text-body text-t4">
+            <div className="c-body">Who can add members</div>
+            <div className="c-body text-t4">
               {detail.memberAddMode === 'admin_add' ? 'Admins only' : 'All members'}
             </div>
           </div>
@@ -638,8 +638,8 @@ function SettingsTab({
       {isAdmin && (
         <div style={rowStyle}>
           <div>
-            <div className="font-sans text-body text-t2">Join approval</div>
-            <div className="font-sans text-body text-t4">
+            <div className="c-body">Join approval</div>
+            <div className="c-body text-t4">
               {detail.joinApprovalMode === 'on' ? 'Admin approval required' : 'No approval required'}
             </div>
           </div>
@@ -667,8 +667,8 @@ function SettingsTab({
       {/* Disappearing messages */}
       <div style={rowStyle}>
         <div>
-          <div className="font-sans text-body text-t2">Disappearing messages</div>
-          <div className="font-sans text-body text-t4">
+          <div className="c-body">Disappearing messages</div>
+          <div className="c-body text-t4">
             {ephemeralLabel(detail.ephemeralDuration)}
           </div>
         </div>
@@ -764,7 +764,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
         {/* Header */}
         <div className="c-dialog-header gap-3 flex-shrink-0">
         <div
-          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-t1"
+          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-t1 text-[var(--font-size-sm)]"
           style={{ background: color }}
         >
           {initials}
@@ -773,7 +773,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
             <div id="group-detail-dialog-title" className="c-heading-lg truncate">
               {group.subject}
             </div>
-            <div className="c-meta">
+            <div className="c-label">
               {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
             </div>
           </div>

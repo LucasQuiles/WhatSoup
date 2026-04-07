@@ -68,7 +68,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
         <div className="font-sans font-medium text-t2" style={{ fontSize: 'var(--font-size-body)' }}>
           {entry.subjectName}
         </div>
-        <div className="font-mono text-t4" style={{ fontSize: 'var(--font-size-sm)' }}>
+        <div className="c-data text-t4">
           {entry.subjectId}
         </div>
       </div>
@@ -92,7 +92,6 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
             type="button"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
             className="c-btn c-btn-sm c-btn-success font-mono"
-            style={{ fontSize: 'var(--font-size-label)' }}
           >
             <UserCheck size={15} strokeWidth={1.75} /> Allow
           </button>
@@ -100,7 +99,6 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
             type="button"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
             className="c-btn c-btn-sm c-btn-danger font-mono"
-            style={{ fontSize: 'var(--font-size-label)' }}
           >
             <Ban size={15} strokeWidth={1.75} /> Block
           </button>
@@ -111,7 +109,6 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
           type="button"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
           className="c-btn c-btn-sm c-btn-danger font-mono"
-          style={{ fontSize: 'var(--font-size-label)' }}
           aria-label="Block contact"
         >
           <Ban size={15} strokeWidth={1.75} />
@@ -122,7 +119,6 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
           type="button"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
           className="c-btn c-btn-sm c-btn-success font-mono"
-          style={{ fontSize: 'var(--font-size-label)' }}
           aria-label="Allow contact"
         >
           <UserCheck size={15} strokeWidth={1.75} />
