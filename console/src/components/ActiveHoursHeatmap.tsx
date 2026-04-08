@@ -21,6 +21,11 @@ function formatHour(h: number): string {
   return `${h - 12}p`;
 }
 
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 /** Collapse a 7×24 grid into a single 24-element array by summing across days. */
 function collapseToSingleDay(data: number[][]): number[] {
   const collapsed = new Array<number>(24).fill(0);
@@ -33,8 +38,13 @@ function collapseToSingleDay(data: number[][]): number[] {
 }
 
 /** 7×24 heatmap of message activity, or a single 24h bar chart when range is '24h'. */
-export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: MetricsRange }) {
+export function ActiveHoursHeatmap({ data, byDate, range }: {
+  data: number[][];
+  byDate?: { date: string; hours: number[] }[];
+  range?: MetricsRange;
+}) {
   const is24h = range === '24h';
+  const is7d = range === '7d';
 
   if (is24h) {
     const hourly = collapseToSingleDay(data);
@@ -83,9 +93,63 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
     );
   }
 
+  // 30d with per-date data — render date rows
+  if (byDate && byDate.length > 0 && !is24h && !is7d) {
+    const allValues = byDate.flatMap(d => d.hours);
+    const max = Math.max(...allValues, 1);
+
+    return (
+      <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+        <div className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-[var(--font-size-xs)]">
+          Active Hours (30 days)
+        </div>
+        <div
+          className="grid gap-[var(--bw-accent)]"
+          style={{ gridTemplateColumns: 'var(--sp-12) repeat(24, 1fr)' }}
+        >
+          {/* Hour header row */}
+          <div />
+          {HOURS.map((h) => (
+            <div key={`h-${h}`} className="text-t5 font-mono leading-tight text-center text-[var(--font-size-xs)]">
+              {h % 3 === 0 ? formatHour(h) : ''}
+            </div>
+          ))}
+
+          {/* Date rows */}
+          {byDate.map(({ date, hours }) => (
+            <React.Fragment key={date}>
+              <div className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)] text-[var(--font-size-xs)] truncate">
+                {formatDate(date)}
+              </div>
+              {HOURS.map((h) => {
+                const value = hours[h] ?? 0;
+                return (
+                  <div
+                    key={`${date}-${h}`}
+                    title={`${date} ${formatHour(h)}: ${value} messages`}
+                    className="rounded-sm h-[var(--heatmap-cell)]"
+                    style={{ background: intensityColor(value, max) }}
+                  />
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+
+        {/* Legend */}
+        <div className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-[var(--font-size-xs)]">
+          <span>Less</span>
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
+            <div key={ratio} className="w-[var(--sp-3)] h-[var(--sp-3)] rounded-sm" style={{ background: intensityColor(ratio * max, max) }} />
+          ))}
+          <span>More</span>
+        </div>
+      </section>
+    );
+  }
+
   // 7d / 30d — full 7×24 heatmap grid
   const max = Math.max(...data.flat(), 1);
-  const is7d = range === '7d';
 
   return (
     <section
