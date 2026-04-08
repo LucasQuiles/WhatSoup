@@ -18,37 +18,31 @@ These are not configuration flags on one bot. They are different codepaths with 
 
 ## Fleet Console
 
-A React dashboard for managing the entire fleet from a browser. Runs on the same port as the fleet server (production) or via Vite dev proxy (development).
+A React 19 dashboard for managing the entire fleet from a browser. Built with TypeScript, Tailwind CSS v4, React Query, and Recharts. Runs on the same port as the fleet server (production) or via Vite dev proxy (development).
 
 ### Fleet Overview
 
-KPI cards with sparklines, three fleet-wide charts (message volume, token usage by provider, session activity by provider), instance table with provider column, and live activity feed.
+KPI cards with sparklines, three fleet-wide charts (message volume, token usage by provider, session activity by provider), instance table with sorting/filtering, and live activity feed with provider badges.
 
 ![Fleet Overview](docs/screenshots/fleet-overview.png)
 
 ### Line Detail — Metrics
 
-Per-instance metrics with stacked bar chart, active hours heatmap, and tabbed token/session detail views.
+Per-instance metrics with stacked bar chart, active hours heatmap (7-day weekly pattern or 30-day per-date grid), and tabbed token/session detail views. Nine tabs: Summary, Mode, Pipeline, Access, History, Logs, Metrics, Scheduled, Groups.
 
 ![Line Detail Metrics](docs/screenshots/line-detail-metrics.png)
 
 ### Operations
 
-Health monitoring with restart, delete, and re-link actions for unhealthy instances. Log viewer with level filtering.
+Fleet status dashboard with health monitoring, restart/delete/re-link actions for unhealthy instances, and log viewer with level filtering.
 
 ![Operations](docs/screenshots/ops.png)
 
 ### Inbox
 
-Unified message inbox — select a line and chat, read messages with bubble rendering, send replies, manage contact access.
+Unified message inbox with chat list, message bubbles, send/reply, contact management (save, allow, block), and mark-read support. Line picker for switching between instances.
 
 ![Inbox](docs/screenshots/inbox.png)
-
-### Add Line Wizard
-
-5-step provisioning flow: Identity (type, name, admin phones) → Link (QR scan) → Model & Auth → Config → Review. Type-matched accent colors, inline validation, auto-generated defaults.
-
-![Add Line Wizard](docs/screenshots/add-line-wizard.png)
 
 ### Instance Lifecycle
 
@@ -57,9 +51,16 @@ Unified message inbox — select a line and chat, read messages with bubble rend
 | **Add Line** | Wizard | 5-step flow: Identity → QR scan → Model → Config → Review |
 | **Re-link** | LineDetail, Ops | Standalone QR modal for re-authenticating a disconnected instance |
 | **Configure** | LineDetail | Edit model, access, prompt, and agent settings on stopped instances |
+| **Mark Read** | Inbox | Mark conversations as read — zeroes unread count and syncs to WhatsApp |
 | **Delete** | LineDetail, Ops | Full teardown with confirmation — stops process, disables unit, removes all data |
 
-**Design system:** 60+ CSS custom properties, 40+ ESLint rules enforcing token usage. No hardcoded colors, spacing, or transition durations in components.
+### Design System
+
+60+ CSS custom properties in a Tailwind v4 `@theme` block. Type scale (`--text-xs` through `--text-2xl`) maps directly to `text-*` utility classes. 40+ ESLint rules enforce token usage — hardcoded colors, spacing, font sizes, and transitions are lint errors. Custom component classes (`c-card`, `c-btn`, `c-hover`, `c-border-*`) provide consistent surfaces with hover/transition behavior. Form resets and body styles are wrapped in `@layer base` so utility overrides work correctly.
+
+### WebSocket Realtime
+
+The fleet server broadcasts invalidation events over WebSocket. The console subscribes and automatically refetches stale data — no polling delay for messages, chat updates, log changes, access changes, or typing indicators. Falls back to polling when WebSocket is disconnected.
 
 ```bash
 # Development
@@ -102,7 +103,7 @@ For development:
 
 ```bash
 npm run typecheck         # tsc --noEmit
-npm test                  # ~2000 tests, ~15s, real SQLite, no mocks
+npm test                  # ~3900 tests, ~23s, real SQLite, no mocks
 cd console && npm run dev # Vite dev server with hot reload + API proxy
 ```
 
@@ -117,10 +118,12 @@ src/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
     agent/        Claude Code subprocess — sessions, sandbox, outbound queue
-  fleet/          Fleet management server — discovery, health polling, API routes
-    routes/       REST API handlers (lines, ops, data, feed)
+  fleet/          Fleet management server — discovery, health polling, API routes, WebSocket
+    routes/       REST API handlers (lines, ops, data, feed, metrics)
     discovery.ts  Config-dir scanner, instance registry
     health-poller.ts  5-second health probe per instance
+    realtime-event-poller.ts  2-second snapshot-diff for WebSocket invalidation
+    websocket-server.ts  WS broadcast for realtime console updates
     static.ts     SPA serving with token injection
   lib/            Shared utilities — HTTP helpers, text utils, validation
   config.ts       Instance-aware config from JSON + env vars
@@ -129,11 +132,11 @@ src/
 
 console/
   src/
-    components/   21 React components (modals, cards, badges, forms, wizards)
+    components/   30+ React components (modals, cards, badges, charts, forms, wizards)
     pages/        4 pages (SoupKitchen, Ops, Inbox, LineDetail)
-    hooks/        React Query data hooks, toast system, sticky scroll
-    lib/          API client with mock fallback, formatting, text utils
-    index.css     Design system — tokens, utilities, component classes
+    hooks/        React Query data hooks, WebSocket realtime, toast system
+    lib/          API client with mock fallback, chart utils, formatting
+    index.css     Design system — @theme tokens, @layer base/utilities, component classes
 
 deploy/
   whatsoup@.service   systemd template unit (one per instance)
@@ -156,10 +159,14 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `POST` | `/api/lines/:name/stop` | Stop systemd unit |
 | `POST` | `/api/lines/:name/send` | Send a message through the instance |
 | `POST` | `/api/lines/:name/access` | Update access control |
+| `POST` | `/api/lines/:name/mark-read` | Mark a conversation as read |
+| `POST` | `/api/lines/:name/contacts` | Save a contact |
 | `GET` | `/api/lines/:name/chats` | List chats for an instance |
 | `GET` | `/api/lines/:name/messages` | Fetch messages for a chat |
+| `GET` | `/api/lines/:name/metrics` | Per-instance metrics (24h, 7d, 30d) |
 | `GET` | `/api/lines/:name/access` | View access control list |
 | `GET` | `/api/lines/:name/logs` | View instance logs |
+| `GET` | `/api/metrics` | Fleet-wide aggregated metrics |
 | `GET` | `/api/feed` | Activity feed (all instances) |
 | `GET` | `/api/typing` | Currently typing indicators |
 
@@ -204,6 +211,8 @@ Access modes: `self_only` (just you), `allowlist` (approved contacts), `open_dm`
 
 **Media bridge** — Unix socket per workspace that lets Claude Code subprocesses send WhatsApp media (images, documents, audio) without direct Baileys access. The agent runtime owns the bridge; the subprocess just writes to a socket.
 
+**Realtime event poller** — Snapshot-diff engine running every 2 seconds. Tracks per-instance markers (latest message PK, access list changes, log file mtime) and emits WebSocket invalidation events only when something changes. Log file tracking uses a cached-path optimization — steady-state polls do a single `statSync` instead of scanning the log directory.
+
 **linkedStatus** — Each instance in the fleet API includes `linkedStatus: 'linked' | 'unlinked'` based on whether Baileys auth credentials exist. Unlinked instances show a "Re-link" button instead of "Restart" since they need QR authentication before they can run.
 
 ## Health & Monitoring
@@ -216,17 +225,21 @@ curl http://127.0.0.1:9093/health
 
 Returns connection status, uptime, message counts, enrichment state, durability stats, and model configuration. The health port is configurable per instance.
 
+The health server also exposes operational endpoints: `/send` (send messages), `/access` (allow/block contacts), `/mark-read` (mark chats as read), `/heal` (inject repair reports), and `/typing` (composing indicators).
+
 The fleet server's health poller probes each instance every 5 seconds and tracks consecutive failures to determine status: `online` → `degraded` (1-2 failures) → `unreachable` (3+). The console displays this as a color-coded heartbeat strip.
 
 ## Testing
 
 ```bash
-npm test              # ~2000 tests, ~15s
+npm test              # ~3900 tests, ~23s
 npm run test:watch    # watch mode
 npm run typecheck     # tsc --noEmit
 ```
 
 Tests use real SQLite (`:memory:` or temp files) and real Unix sockets. No infrastructure mocks. If the test passes, it works. If it doesn't, the mock was lying to you — which is why there aren't any.
+
+Coverage includes: ingest backpressure (semaphore + overflow queue), relay guardrails (config gate + payload size cap), mark-read API (health handler + fleet proxy), realtime event poller (log mtime tracking, snapshot-diff), and design system compliance (14 regression tests + 40+ ESLint rules).
 
 ## Documentation
 
@@ -236,6 +249,7 @@ Tests use real SQLite (`:memory:` or temp files) and real Unix sockets. No infra
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, **per-instance plugin scoping** |
 | [MCP Tool Reference](docs/tools.md) | All 127 tools with scopes, parameters, replay policies |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
+| [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
 
 ## License
 
