@@ -392,8 +392,8 @@ export class FleetDbReader {
           if (!hours) { hours = new Array(24).fill(0); dateMap.set(row.dt, hours); }
           hours[row.hour] = row.cnt;
         }
-        for (const [date, hours] of dateMap) {
-          activeHoursByDate.push({ date, hours });
+        for (const date of [...dateMap.keys()].sort()) {
+          activeHoursByDate.push({ date, hours: dateMap.get(date)! });
         }
       }
 
