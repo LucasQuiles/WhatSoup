@@ -1,4 +1,4 @@
-import { type FC } from "react";
+import { type FC, useId } from "react";
 
 interface KpiCardProps {
   value: string | number;
@@ -23,10 +23,12 @@ const colorMap: Record<string, string> = {
 const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = false, sparkData, suffix }) => {
   const strokeColor = colorMap[color] || "currentColor";
   const hasSparkline = sparkData && sparkData.length > 1;
+  const gradientId = useId();
 
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className="cursor-pointer select-none relative overflow-hidden c-kpi-pad c-kpi-hover rounded-md"
       style={{
@@ -53,13 +55,13 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
           viewBox={`0 0 ${sparkData.length - 1} 1`}
         >
           <defs>
-            <linearGradient id={`spark-fill-${label.replace(/\s/g, '')}`} x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={strokeColor} stopOpacity="0.15" />
               <stop offset="100%" stopColor={strokeColor} stopOpacity="0" />
             </linearGradient>
           </defs>
           <polygon
-            fill={`url(#spark-fill-${label.replace(/\s/g, '')})`}
+            fill={`url(#${gradientId})`}
             points={`0,1 ${sparkData.map((d, i) => `${i},${1 - d}`).join(" ")} ${sparkData.length - 1},1`}
           />
           <polyline

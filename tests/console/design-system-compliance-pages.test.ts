@@ -100,6 +100,13 @@ describe('design system compliance — Shannon slice', () => {
     expect(soupKitchen).toContain('aria-label="Search lines"')
   })
 
+  it('KpiCard uses aria-pressed and useId for gradient IDs', () => {
+    const source = read('console/src/components/KpiCard.tsx')
+    expect(source).toContain('aria-pressed')
+    expect(source).toContain('useId')
+    expect(source).not.toContain('spark-fill-${label')
+  })
+
   it('fully dissolves form-styles.ts — no remaining imports in wizard components', () => {
     const exists = (() => { try { read('console/src/components/wizard/form-styles.ts'); return true } catch { return false } })()
     expect(exists).toBe(false)
