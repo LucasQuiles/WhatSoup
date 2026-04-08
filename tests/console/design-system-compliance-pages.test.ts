@@ -29,7 +29,7 @@ describe('design system compliance — Shannon slice', () => {
     const content = read('console/src/components/MessageContent.tsx')
 
     expect(heatmap).not.toContain("fontSize: '9px'")
-    expect(heatmap).toContain("text-[var(--font-size-xs)]")
+    expect(heatmap).toContain("text-xs")
 
     expect(tags).not.toContain("gap: '3px'")
     expect(tags).toContain("gap-[var(--sp-0h)]")

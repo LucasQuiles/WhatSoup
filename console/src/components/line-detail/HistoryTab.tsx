@@ -139,7 +139,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
               ) : (
                 <ChevronsUp size={14} strokeWidth={1.75} />
               )}
-              <span className="text-[var(--font-size-sm)]">
+              <span className="text-sm">
                 {loadingOlder ? 'Loading...' : 'Load older messages'}
               </span>
             </div>
@@ -147,7 +147,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             <div
               className="flex items-center justify-center text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
             >
-              <span className="text-[var(--font-size-sm)]">No more messages</span>
+              <span className="text-sm">No more messages</span>
             </div>
           )
         )}
@@ -192,7 +192,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           aria-label="Jump to newest"
         >
           <ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />
-          <span className="text-[var(--font-size-sm)]">Jump to newest</span>
+          <span className="text-sm">Jump to newest</span>
         </button>
       )}
       </div>
@@ -203,7 +203,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       >
         <textarea
           ref={textareaRef}
-          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-[var(--font-size-body)]"
+          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
           rows={1}
           style={{
             maxHeight: 'var(--feed-preview-max)',

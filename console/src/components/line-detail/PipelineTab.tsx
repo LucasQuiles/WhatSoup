@@ -35,12 +35,12 @@ function PipelineNode({
       <button
         type="button"
         onClick={onClick}
-        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5 text-[var(--font-size-data)]"
+        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5 text-data"
         style={pillStyle}
       >
         <span>{label}</span>
         {value && (
-          <span className="font-mono text-t4 text-[var(--font-size-xs)]">
+          <span className="font-mono text-t4 text-xs">
             {value}
           </span>
         )}
@@ -53,13 +53,13 @@ function PipelineNode({
       className="inline-flex items-center gap-1.5"
     >
       <span
-        className="font-mono font-medium text-[var(--font-size-data)]"
+        className="font-mono font-medium text-data"
         style={pillStyle}
       >
         {label}
       </span>
       {value && (
-        <span className="font-mono text-t4 text-[var(--font-size-xs)]">
+        <span className="font-mono text-t4 text-xs">
           {value}
         </span>
       )}
@@ -68,7 +68,7 @@ function PipelineNode({
 }
 
 function PipelineArrow() {
-  return <span className="text-t5 font-mono flex-shrink-0 text-[var(--font-size-sm)]">→</span>
+  return <span className="text-t5 font-mono flex-shrink-0 text-sm">→</span>
 }
 
 export { PipelineNode, PipelineArrow }
@@ -164,12 +164,12 @@ function NodeDetailCard({
         {details.map((d) => (
           <React.Fragment key={d.label}>
             <span
-              className="font-mono text-t4 text-[var(--font-size-data)]"
+              className="font-mono text-t4 text-data"
             >
               {d.label}
             </span>
             <span
-              className="font-mono text-t2 text-[var(--font-size-data)]"
+              className="font-mono text-t2 text-data"
             >
               {d.value}
             </span>

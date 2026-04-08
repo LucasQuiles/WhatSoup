@@ -40,7 +40,7 @@ export function MetricsChart({ data, range = '24h' }: MetricsChartProps) {
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
         />
-        <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
+        <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
         <Bar dataKey="inbound" name="Inbound" stackId="messages" fill="var(--color-m-pas)" radius={[2, 2, 0, 0]} />
         <Bar dataKey="outbound" name="Outbound" stackId="messages" fill="var(--color-m-cht)" radius={[2, 2, 0, 0]} />
         <Bar dataKey="media" name="Media" stackId="messages" fill="var(--color-s-warn)" radius={[2, 2, 0, 0]} />

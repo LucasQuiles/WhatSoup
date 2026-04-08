@@ -131,7 +131,7 @@ export function ConfigEditDialog({
             onChange={e => setField(key, e.target.checked)}
             className="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
           />
-          <span className="font-mono text-m-agt text-[var(--font-size-data)]">
+          <span className="font-mono text-m-agt text-data">
             {String(val)}
           </span>
         </label>
@@ -273,7 +273,7 @@ export function ConfigEditDialog({
       >
         {/* Header */}
         <div className="c-dialog-header flex-shrink-0">
-          <span id="config-edit-dialog-title" className="font-sans font-semibold text-[var(--font-size-lg)]">
+          <span id="config-edit-dialog-title" className="font-sans font-semibold text-lg">
             Edit Configuration
           </span>
           <button type="button" onClick={onClose} className="c-btn c-btn-ghost c-btn-sm" aria-label="Close dialog">
@@ -283,7 +283,7 @@ export function ConfigEditDialog({
 
         {/* Restart warning */}
         <div
-          className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn text-[var(--font-size-sm)]"
+          className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn text-sm"
         >
           <AlertTriangle size={14} strokeWidth={1.75} />
           <span>Some changes may require a restart to take effect.</span>
@@ -298,7 +298,7 @@ export function ConfigEditDialog({
                   {key}
                   {(key in patch || key in customEnumFields) && (
                     <span
-                      className="font-mono ml-[var(--sp-2)] text-s-warn text-[var(--font-size-xs)]"
+                      className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
                     >
                       modified
                     </span>
@@ -306,7 +306,7 @@ export function ConfigEditDialog({
                 </label>
                 {renderField(key, originalValue)}
                 {(key in patch || key in customEnumFields) && getFieldError(key) && (
-                  <span className="font-mono block text-s-crit mt-[var(--sp-1)] text-[var(--font-size-xs)]">
+                  <span className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
                     {getFieldError(key)}
                   </span>
                 )}

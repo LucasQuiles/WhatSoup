@@ -141,22 +141,22 @@ export function MetricsTab({
               <div className="flex items-center gap-[var(--sp-5)]">
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)] opacity-50" />
-                  <span className="text-[var(--font-size-data)] text-t3">Input</span>
-                  <span className="font-medium text-t1 text-[var(--font-size-data)]">
+                  <span className="text-data text-t3">Input</span>
+                  <span className="font-medium text-t1 text-data">
                     {line.tokenUsage.input.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)]" />
-                  <span className="text-[var(--font-size-data)] text-t3">Output</span>
-                  <span className="font-medium text-t1 text-[var(--font-size-data)]">
+                  <span className="text-data text-t3">Output</span>
+                  <span className="font-medium text-t1 text-data">
                     {line.tokenUsage.output.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <Cpu size={13} strokeWidth={1.5} className="text-t4" />
-                  <span className="text-[var(--font-size-data)] text-t4">Total</span>
-                  <span className="text-t2 text-[var(--font-size-data)]">
+                  <span className="text-data text-t4">Total</span>
+                  <span className="text-t2 text-data">
                     {(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}
                   </span>
                 </div>
@@ -185,8 +185,8 @@ export function MetricsTab({
                 {Object.entries(line.models).map(([role, model]) =>
                   model ? (
                     <React.Fragment key={role}>
-                      <span className="text-[var(--font-size-data)] text-t4 capitalize">{role}</span>
-                      <span className="text-[var(--font-size-data)] text-m-pas">{model}</span>
+                      <span className="text-data text-t4 capitalize">{role}</span>
+                      <span className="text-data text-m-pas">{model}</span>
                     </React.Fragment>
                   ) : null
                 )}

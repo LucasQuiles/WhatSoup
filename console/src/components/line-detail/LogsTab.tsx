@@ -31,7 +31,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
 
       {/* Log viewer */}
       <div
-        className="overflow-hidden font-mono bg-d1 text-[var(--font-size-data)]"
+        className="overflow-hidden font-mono bg-d1 text-data"
       >
         {filtered.map((log, i) => (
           <div
@@ -46,7 +46,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
             {/* Level badge */}
             <div className="px-2 py-1 flex-shrink-0 text-center w-[var(--log-col-level)] min-w-[var(--log-col-level)]">
               <span
-                className={`inline-block px-1.5 py-0.5 rounded font-medium text-[var(--font-size-label)] ${levelColor[log.level]}`}
+                className={`inline-block px-1.5 py-0.5 rounded font-medium text-label ${levelColor[log.level]}`}
                 style={{ background: levelBg[log.level] }}
               >
                 {log.level}

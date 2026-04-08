@@ -40,7 +40,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
       <div className={`c-kpi-value ${color}`}>
         {value}
         {suffix && (
-          <span className="text-[var(--font-size-data)] font-normal ml-[var(--bw-accent)]">
+          <span className="text-data font-normal ml-[var(--bw-accent)]">
             {suffix}
           </span>
         )}

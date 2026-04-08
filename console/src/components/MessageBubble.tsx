@@ -139,7 +139,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
       >
         {showDetail && <DetailCard msg={msg} />}
         <div
-          className={`text-[var(--font-size-body)] c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-d3'}`}
+          className={`text-body c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-d3'}`}
           style={{
             padding: isMedia ? 'var(--sp-2) var(--sp-3)' : 'var(--sp-2h) var(--msg-pad-h)',
             ...(msg.fromMe
@@ -155,10 +155,10 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
 
       {/* Timestamp + delivery status + type badge */}
       <div
-        className={`text-[var(--font-size-xs)] flex items-center font-mono text-t5 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
+        className={`text-xs flex items-center font-mono text-t5 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
       >
         {isMedia && (
-          <span className="text-[var(--font-size-xs)] text-t5">
+          <span className="text-xs text-t5">
             {msg.type}
           </span>
         )}

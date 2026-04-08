@@ -44,7 +44,7 @@ const EmptyState: FC<EmptyStateProps> = ({
         </motion.div>
       )}
       <motion.div
-        className={`font-sans font-semibold mb-[var(--sp-1)] text-[var(--font-size-lg)] ${isError ? 'text-s-crit' : 'text-t3'}`}
+        className={`font-sans font-semibold mb-[var(--sp-1)] text-lg ${isError ? 'text-s-crit' : 'text-t3'}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.4, ease, delay: 0.1 }}
@@ -53,7 +53,7 @@ const EmptyState: FC<EmptyStateProps> = ({
       </motion.div>
       {description && (
         <motion.div
-          className="text-t4 leading-relaxed max-w-[var(--empty-max-w)] text-[var(--font-size-body)]"
+          className="text-t4 leading-relaxed max-w-[var(--empty-max-w)] text-body"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.4, ease, delay: 0.15 }}
@@ -63,7 +63,7 @@ const EmptyState: FC<EmptyStateProps> = ({
       )}
       {onRetry && (
         <motion.button
-          className="c-btn c-btn-primary mt-[var(--sp-4)] text-[var(--font-size-sm)]"
+          className="c-btn c-btn-primary mt-[var(--sp-4)] text-sm"
           onClick={onRetry}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}

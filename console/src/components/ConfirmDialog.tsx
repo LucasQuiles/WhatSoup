@@ -48,7 +48,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
         <div
           className="flex items-center justify-between c-border-b py-[var(--sp-4)] px-[var(--sp-5)]"
         >
-          <span id="confirm-dialog-title" className="font-sans font-semibold text-[var(--font-size-lg)]">
+          <span id="confirm-dialog-title" className="font-sans font-semibold text-lg">
             {title}
           </span>
           <button
@@ -63,7 +63,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
 
         {/* Body */}
         <div className="p-[var(--sp-5)]">
-          <div className="text-t2 leading-relaxed text-[var(--font-size-body)]">
+          <div className="text-t2 leading-relaxed text-body">
             {children}
           </div>
         </div>

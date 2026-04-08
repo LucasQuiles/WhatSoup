@@ -211,7 +211,7 @@ export default function Inbox() {
           ))}
           {(!chats || chats.length === 0) && (
             <div className="text-center text-t4 py-[var(--sp-8)] px-[var(--sp-4)]">
-              <span className="text-[var(--font-size-body)]">No chats found</span>
+              <span className="text-body">No chats found</span>
             </div>
           )}
         </div>
@@ -236,8 +236,8 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1">
-                <div className="text-t1 font-medium text-[var(--font-size-body)]">{resolveDisplayName(currentChat.name)}</div>
-                <div className="text-t5 font-mono text-[var(--font-size-label)]">
+                <div className="text-t1 font-medium text-body">{resolveDisplayName(currentChat.name)}</div>
+                <div className="text-t5 font-mono text-label">
                   {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
               </div>
@@ -347,7 +347,7 @@ export default function Inbox() {
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
                       : <ChevronsUp size={14} strokeWidth={1.75} />
                     }
-                    <span className="text-[var(--font-size-sm)]">
+                    <span className="text-sm">
                       {loadingOlder ? 'Loading…' : 'Load older messages'}
                     </span>
                   </button>
@@ -385,7 +385,7 @@ export default function Inbox() {
                   <button
                     type="button"
                     onClick={jumpToBottom}
-                    className="c-btn c-btn-sm absolute left-1/2 bottom-16 -translate-x-1/2 shadow-[var(--card-shadow)] z-[var(--z-float)] text-[var(--font-size-sm)]"
+                    className="c-btn c-btn-sm absolute left-1/2 bottom-16 -translate-x-1/2 shadow-[var(--card-shadow)] z-[var(--z-float)] text-sm"
                   >
                     <ChevronDown size={14} /> New messages
                   </button>
@@ -400,7 +400,7 @@ export default function Inbox() {
             >
               <textarea
                 ref={textareaRef}
-                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-[var(--font-size-body)]"
+                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
                 rows={1}
                 style={{
                   maxHeight: 'var(--feed-preview-max)',
@@ -462,7 +462,7 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-t1 font-medium truncate text-[var(--font-size-body)]">{resolveDisplayName(currentChat.name)}</div>
+                <div className="text-t1 font-medium truncate text-body">{resolveDisplayName(currentChat.name)}</div>
                 <div className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>
@@ -486,7 +486,7 @@ export default function Inbox() {
                       className={`flex justify-between py-[var(--sp-2)] px-0${i < arr.length - 1 ? ' c-border-b' : ''}`}
                     >
                       <span className="c-label">{item.label}</span>
-                      <span className="font-mono text-t2 text-[var(--font-size-data)]">{item.value}</span>
+                      <span className="font-mono text-t2 text-data">{item.value}</span>
                     </div>
                   ))}
                 </div>
@@ -569,7 +569,7 @@ export default function Inbox() {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]">
-            <div className="text-center text-t5 text-[var(--font-size-sm)]">
+            <div className="text-center text-t5 text-sm">
               Select a conversation to see details
             </div>
           </div>

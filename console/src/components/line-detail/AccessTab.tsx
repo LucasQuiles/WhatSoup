@@ -65,7 +65,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="font-sans font-medium text-t2 text-[var(--font-size-body)]">
+        <div className="font-sans font-medium text-t2 text-body">
           {entry.subjectName}
         </div>
         <div className="c-data text-t4">
@@ -75,7 +75,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
 
       {/* Status badge */}
       <span
-        className="font-mono font-medium flex-shrink-0 rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] text-[var(--font-size-sm)]"
+        className="font-mono font-medium flex-shrink-0 rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] text-sm"
         style={{
           background: statusBadge[entry.status]?.bg,
           color: statusBadge[entry.status]?.color,
@@ -157,7 +157,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
             Blocked ({blocked.length})
           </div>
           {blocked.length === 0 ? (
-            <div className="text-t5 text-center py-6 font-mono text-[var(--font-size-data)]">
+            <div className="text-t5 text-center py-6 font-mono text-data">
               No blocked contacts
             </div>
           ) : (

@@ -764,7 +764,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
         {/* Header */}
         <div className="c-dialog-header gap-3 flex-shrink-0">
         <div
-          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-t1 text-[var(--font-size-sm)]"
+          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-t1 text-sm"
           style={{ background: color }}
         >
           {initials}

@@ -19,7 +19,7 @@ const UpdateModal = lazy(() => import('./components/UpdateModal'))
 function PageLoader() {
   return (
     <div className="flex-1 flex items-center justify-center">
-      <div className="text-t4 font-mono text-[var(--font-size-data)]">Loading...</div>
+      <div className="text-t4 font-mono text-data">Loading...</div>
     </div>
   )
 }

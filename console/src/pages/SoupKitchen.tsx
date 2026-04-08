@@ -459,7 +459,7 @@ const SoupKitchen: FC = () => {
                       <td className="c-cell"><ModeBadge mode={line.mode} /></td>
                       <td className="c-cell">
                         <div className="flex flex-col">
-                          <span className="font-sans font-medium text-t1 text-[var(--font-size-body)]">{displayInstanceName(line.name)}</span>
+                          <span className="font-sans font-medium text-t1 text-body">{displayInstanceName(line.name)}</span>
                           <span className="c-label">{formatPhone(line.phone)}</span>
                         </div>
                       </td>
@@ -499,7 +499,7 @@ const SoupKitchen: FC = () => {
                 })}
                 {filtered.length === 0 && (
                   <tr>
-                    <td colSpan={12} className="text-center text-t5 font-sans py-12 text-[var(--font-size-data)]">
+                    <td colSpan={12} className="text-center text-t5 font-sans py-12 text-data">
                       No instances match the current filters
                     </td>
                   </tr>

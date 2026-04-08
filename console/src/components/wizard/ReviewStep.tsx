@@ -56,7 +56,7 @@ const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
     onClick={onClick}
   >
     <Pencil size={12} strokeWidth={1.75} />
-    <span className="text-[var(--font-size-xs)]">Edit</span>
+    <span className="text-xs">Edit</span>
   </button>
 )
 
@@ -64,8 +64,8 @@ const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
 
 const KV: FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <div style={kvRowStyle}>
-    <span className="text-[var(--font-size-label)]" style={kvLabelStyle}>{label}</span>
-    <span className="font-mono text-[var(--font-size-data)]" style={kvValueStyle}>{value}</span>
+    <span className="text-label" style={kvLabelStyle}>{label}</span>
+    <span className="font-mono text-data" style={kvValueStyle}>{value}</span>
   </div>
 )
 
@@ -127,7 +127,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       {/* Identity card */}
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>
-          <span className="font-medium text-[var(--font-size-data)]" style={headingStyle}>Identity</span>
+          <span className="font-medium text-data" style={headingStyle}>Identity</span>
           <EditBtn onClick={() => onEditPhase(0)} />
         </div>
         <KV label="Name" value={name || '-'} />
@@ -142,7 +142,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       {/* Model card */}
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>
-          <span className="font-medium text-[var(--font-size-data)]" style={headingStyle}>Model &amp; Auth</span>
+          <span className="font-medium text-data" style={headingStyle}>Model &amp; Auth</span>
           <EditBtn onClick={() => onEditPhase(2)} />
         </div>
         {type === 'passive' ? (
@@ -168,7 +168,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       {/* Config card */}
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>
-          <span className="font-medium text-[var(--font-size-data)]" style={headingStyle}>Config</span>
+          <span className="font-medium text-data" style={headingStyle}>Config</span>
           <EditBtn onClick={() => onEditPhase(3)} />
         </div>
         <KV label="Access mode" value={accessLabels[accessMode] ?? accessMode} />
@@ -205,7 +205,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
           style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--color-s-crit)' }}
         >
           <AlertCircle size={16} className="text-s-crit flex-shrink-0" />
-          <span className="text-s-crit text-[var(--font-size-data)]">
+          <span className="text-s-crit text-data">
             {friendlyError(error)}
           </span>
         </div>

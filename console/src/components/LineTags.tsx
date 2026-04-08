@@ -49,7 +49,7 @@ const Tag: FC<{ tag: TagDef }> = ({ tag }) => {
   const Icon = tag.icon
   return (
     <span
-      className="text-[var(--font-size-xs)] inline-flex items-center font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] whitespace-nowrap gap-[var(--sp-0h)] py-[var(--bw)] px-[var(--sp-1h)]"
+      className="text-xs inline-flex items-center font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] whitespace-nowrap gap-[var(--sp-0h)] py-[var(--bw)] px-[var(--sp-1h)]"
       style={{
         color: tag.color,
         backgroundColor: tag.bg,

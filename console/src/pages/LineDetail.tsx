@@ -163,19 +163,19 @@ export default function LineDetail() {
         {/* Identity */}
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-[var(--font-size-xl)]">
+            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl">
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
             <LineTags line={line} />
           </div>
-          <div className="font-mono text-t3 text-[var(--font-size-data)]">
+          <div className="font-mono text-t3 text-data">
             {line.phone}
           </div>
         </div>
 
         {/* Meta */}
-        <div className="flex gap-4 font-mono text-t4 text-[var(--font-size-sm)]">
+        <div className="flex gap-4 font-mono text-t4 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
           <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
@@ -188,7 +188,7 @@ export default function LineDetail() {
             <button
               type="button"
               onClick={() => setShowRelink(true)}
-              className="c-btn c-btn-ghost text-[var(--font-size-label)]"
+              className="c-btn c-btn-ghost text-label"
             >
               <Link2 size={15} strokeWidth={1.75} /> Re-link
             </button>
@@ -197,7 +197,7 @@ export default function LineDetail() {
             <button
               type="button"
               onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
-              className="c-btn c-btn-ghost text-[var(--font-size-label)]"
+              className="c-btn c-btn-ghost text-label"
             >
               <RotateCw size={15} strokeWidth={1.75} /> Restart
             </button>
@@ -205,7 +205,7 @@ export default function LineDetail() {
           <button
             type="button"
             onClick={() => setShowDeleteConfirm(true)}
-            className="c-btn c-btn-ghost text-s-crit text-[var(--font-size-label)]"
+            className="c-btn c-btn-ghost text-s-crit text-label"
           >
             <Trash2 size={15} strokeWidth={1.75} /> Delete
           </button>
@@ -233,7 +233,7 @@ export default function LineDetail() {
               aria-controls={`tabpanel-${tab.id}`}
               id={`tab-${tab.id}`}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 font-sans font-medium c-hover relative py-[var(--sp-2h)] px-[var(--sp-4)] text-[var(--font-size-data)] ${
+              className={`flex items-center gap-2 font-sans font-medium c-hover relative py-[var(--sp-2h)] px-[var(--sp-4)] text-data ${
                 isActive
                   ? 'text-t1 cursor-pointer'
                   : 'text-t4 hover:text-t3 cursor-pointer'

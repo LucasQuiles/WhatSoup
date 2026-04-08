@@ -25,15 +25,16 @@
   --color-s-crit: #fc8181;
 
   /* ═══ Type scale — matches design system spec exactly ═══ */
-  --font-size-xs: 0.6rem;       /* 9.6px  — minimum readable, timestamps */
-  --font-size-label: 0.65rem;   /* 10.4px — labels, column headers, badges */
-  --font-size-sm: 0.7rem;       /* 11.2px — section labels, secondary */
-  --font-size-data: 0.78rem;    /* 12.5px — data values, table cells */
-  --font-size-heading: 0.82rem; /* 13.1px — section headings */
-  --font-size-body: 0.85rem;    /* 13.6px — body text, names, UI chrome */
-  --font-size-lg: 1rem;         /* 16px   — large headings */
-  --font-size-xl: 1.4rem;       /* 22.4px — page titles, summary values */
-  --font-size-2xl: 1.7rem;      /* 27.2px — KPI values */
+  /* Tailwind v4 maps --text-* to text-* utilities automatically */
+  --text-xs: 0.6rem;       /* 9.6px  — minimum readable, timestamps */
+  --text-label: 0.65rem;   /* 10.4px — labels, column headers, badges */
+  --text-sm: 0.7rem;       /* 11.2px — section labels, secondary */
+  --text-data: 0.78rem;    /* 12.5px — data values, table cells */
+  --text-heading: 0.82rem; /* 13.1px — section headings */
+  --text-body: 0.85rem;    /* 13.6px — body text, names, UI chrome */
+  --text-lg: 1rem;         /* 16px   — large headings */
+  --text-xl: 1.4rem;       /* 22.4px — page titles, summary values */
+  --text-2xl: 1.7rem;      /* 27.2px — KPI values */
 
   /* ═══ Letter spacing ═══ */
   --tracking-tighter: -0.06em; /* logo, display text */
@@ -237,7 +238,7 @@ input[type="radio"] {
 input[type="file"] {
   cursor: pointer;
   color: var(--color-t3);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
 }
 
 input[type="file"]::file-selector-button {
@@ -332,8 +333,8 @@ body::before {
 /* ═══════════════════════════════════════════════════════════════════════════
    Feed — operational activity surface
    Adaptive cards: each event type gets the vertical space it needs.
-   Font sizes use --font-size-data (12.5px) for primary, --font-size-sm
-   (11.2px) for secondary. Never uses --font-size-xs for content.
+   Font sizes use --text-data (12.5px) for primary, --text-sm
+   (11.2px) for secondary. Never uses --text-xs for content.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Container ── */
@@ -367,7 +368,7 @@ body::before {
 
 .feed-toolbar__title {
   font-family: var(--font-sans);
-  font-size: var(--font-size-lg);
+  font-size: var(--text-lg);
   font-weight: var(--fw-semibold);
   color: var(--color-t1);
   letter-spacing: var(--tracking-tight);
@@ -378,7 +379,7 @@ body::before {
   align-items: center;
   gap: var(--sp-1);
   font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   color: var(--color-t5);
   cursor: pointer;
   padding: var(--sp-1) var(--sp-2);
@@ -428,7 +429,7 @@ body::before {
   justify-content: center;
   padding: var(--sp-12) var(--sp-4);
   font-family: var(--font-mono);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-t5);
 }
 
@@ -512,7 +513,7 @@ body::before {
 .fc-inst {
   flex-shrink: 0;
   font-family: var(--font-mono);
-  font-size: var(--font-size-label);
+  font-size: var(--text-label);
   font-weight: var(--fw-semibold);
   letter-spacing: var(--tracking-pill);
   padding: var(--bw) var(--sp-1h);
@@ -533,7 +534,7 @@ body::before {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--font-size-label);
+  font-size: var(--text-label);
   font-weight: var(--fw-medium);
   letter-spacing: var(--tracking-pill);
   padding: 0 var(--sp-1h);
@@ -561,7 +562,7 @@ body::before {
 
 .fc-headline {
   font-family: var(--font-mono);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   font-weight: var(--fw-medium);
   color: var(--color-t2);
 }
@@ -575,7 +576,7 @@ body::before {
 
 .fc-context {
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   color: var(--color-t4);
 }
 
@@ -587,7 +588,7 @@ body::before {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-t3);
   line-height: 1.5;
 }
@@ -612,10 +613,10 @@ body::before {
 /* ── Metadata row (hover/focus only) ── */
 .fc-meta {
   margin-top: var(--sp-1);
-  min-height: calc(var(--font-size-sm) * 1.5);
+  min-height: calc(var(--text-sm) * 1.5);
   padding-left: calc(var(--feed-col-icon) + var(--sp-2));
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   color: var(--color-t5);
   line-height: 1.5;
   white-space: nowrap;
@@ -662,7 +663,7 @@ body::before {
   align-items: center;
   gap: 0;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   font-weight: var(--fw-medium);
   color: var(--color-t4);
   padding: var(--sp-1) var(--sp-1h);
@@ -731,7 +732,7 @@ body::before {
 @utility c-col-header {
   font-family: var(--font-mono);
   font-weight: var(--fw-medium);
-  font-size: var(--font-size-label);
+  font-size: var(--text-label);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
   color: var(--color-t5);
@@ -740,7 +741,7 @@ body::before {
 @utility c-field-label {
   display: block;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   color: var(--color-t3);
   margin-bottom: var(--sp-1);
 }
@@ -749,7 +750,7 @@ body::before {
 @utility c-label {
   font-family: var(--font-mono);
   font-weight: var(--fw-medium);
-  font-size: var(--font-size-label);
+  font-size: var(--text-label);
   letter-spacing: var(--tracking-label);
   color: var(--color-t4);
 }
@@ -758,7 +759,7 @@ body::before {
 @utility c-section-label {
   font-family: var(--font-mono);
   font-weight: var(--fw-medium);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
   color: var(--color-t4);
@@ -768,7 +769,7 @@ body::before {
 @utility c-data {
   font-family: var(--font-mono);
   font-weight: var(--fw-normal);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-t2);
 }
 
@@ -776,7 +777,7 @@ body::before {
 @utility c-meta {
   font-family: var(--font-mono);
   font-weight: var(--fw-normal);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-xs);
   color: var(--color-t4);
 }
 
@@ -784,14 +785,14 @@ body::before {
 @utility c-heading {
   font-family: var(--font-sans);
   font-weight: var(--fw-semibold);
-  font-size: var(--font-size-heading);
+  font-size: var(--text-heading);
   color: var(--color-t1);
 }
 
 @utility c-heading-lg {
   font-family: var(--font-sans);
   font-weight: var(--fw-semibold);
-  font-size: var(--font-size-lg);
+  font-size: var(--text-lg);
   color: var(--color-t1);
 }
 
@@ -799,7 +800,7 @@ body::before {
 @utility c-body {
   font-family: var(--font-sans);
   font-weight: var(--fw-normal);
-  font-size: var(--font-size-body);
+  font-size: var(--text-body);
   color: var(--color-t2);
 }
 
@@ -807,7 +808,7 @@ body::before {
 @utility c-kpi-value {
   font-family: var(--font-mono);
   font-weight: var(--fw-semibold);
-  font-size: var(--font-size-2xl);
+  font-size: var(--text-2xl);
   letter-spacing: var(--tracking-tight);
   line-height: 1.1;
 }
@@ -826,7 +827,7 @@ body::before {
   height: var(--input-h);
   padding: var(--sp-1h) var(--sp-3);
   font-family: var(--font-mono);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-t2);
   background: var(--color-d1);
   border: var(--bw) solid var(--b2);
@@ -856,7 +857,7 @@ body::before {
   padding: var(--sp-1h) var(--sp-3);
   padding-right: var(--sp-8);
   font-family: var(--font-mono);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-t2);
   background: var(--color-d1);
   border: var(--bw) solid var(--b2);
@@ -885,13 +886,13 @@ body::before {
 }
 
 .c-helper {
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-t4);
   margin-top: var(--sp-1);
 }
 
 .c-error {
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   color: var(--color-s-crit);
   margin-top: var(--sp-1);
 }
@@ -948,7 +949,7 @@ body::before {
   gap: var(--sp-2);
   padding: var(--btn-pad-v) var(--msg-pad-h);
   border-radius: var(--radius-sm);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   font-weight: var(--fw-medium);
   border: var(--bw) solid var(--b2);
   background: var(--color-d4);
@@ -971,8 +972,8 @@ body::before {
 /* Disabled state for all button variants */
 .c-btn:disabled,
 .c-btn[disabled]     { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
-.c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--font-size-data); }
-.c-btn-xs      { padding: var(--sp-0h) var(--sp-2); font-size: var(--font-size-xs); }
+.c-btn-sm      { padding: var(--sp-1) var(--sp-2h); font-size: var(--text-data); }
+.c-btn-xs      { padding: var(--sp-0h) var(--sp-2); font-size: var(--text-xs); }
 .c-btn-nav {
   padding: var(--sp-1h) var(--sp-2h);
   gap: 0;
@@ -1061,7 +1062,7 @@ body::before {
 /* ═══ Tab button — c-tab from design system ═══ */
 .c-tab {
   padding: var(--sp-2) var(--sp-4);
-  font-size: var(--font-size-data);
+  font-size: var(--text-data);
   font-family: var(--font-sans);
   font-weight: var(--fw-medium);
   cursor: pointer;
@@ -1084,7 +1085,7 @@ body::before {
   border-radius: var(--radius-sm);
   background: var(--color-d4);
   border: var(--bw) solid var(--b2);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-xs);
   color: var(--color-t2);
   font-family: var(--font-mono);
 }

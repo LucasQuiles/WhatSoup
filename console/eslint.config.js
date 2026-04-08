@@ -17,12 +17,12 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 // ║    28px→var(--sp-7)    32px→var(--sp-8)       40px→var(--sp-10) ║
 // ║    48px→var(--sp-12)                                            ║
 // ║                                                                 ║
-// ║  FONT SIZE:                                                     ║
-// ║    9.6px→var(--font-size-xs)      10.4px→var(--font-size-label) ║
-// ║    11.2px→var(--font-size-sm)     12.5px→var(--font-size-data)  ║
-// ║    13.1px→var(--font-size-heading) 13.6px→var(--font-size-body) ║
-// ║    16px→var(--font-size-lg)       22.4px→var(--font-size-xl)    ║
-// ║    27.2px→var(--font-size-2xl)                                  ║
+// ║  FONT SIZE (Tailwind @theme: --text-* → text-* utility):         ║
+// ║    9.6px→text-xs      10.4px→text-label                        ║
+// ║    11.2px→text-sm     12.5px→text-data                         ║
+// ║    13.1px→text-heading 13.6px→text-body                        ║
+// ║    16px→text-lg       22.4px→text-xl                           ║
+// ║    27.2px→text-2xl                                             ║
 // ║                                                                 ║
 // ║  BORDER RADIUS:                                                 ║
 // ║    2px→var(--radius-xs)  4px→var(--radius-sm)                   ║
@@ -75,11 +75,11 @@ const designSystemRestrictions = [
 
         {
           selector: 'Property[key.name="fontSize"][value.value=/^[0-9]+\\.?[0-9]*(rem|em|px)$/]',
-          message: '⛔ Hardcoded fontSize. FIX: replace with var(--font-size-*) token. Scale: xs(9.6px) label(10.4px) sm(11.2px) data(12.5px) heading(13.1px) body(13.6px) lg(16px) xl(22.4px) 2xl(27.2px).',
+          message: '⛔ Hardcoded fontSize. FIX: use text-* utility class. Scale: text-xs(9.6px) text-label(10.4px) text-sm(11.2px) text-data(12.5px) text-heading(13.1px) text-body(13.6px) text-lg(16px) text-xl(22.4px) text-2xl(27.2px).',
         },
         {
           selector: 'Property[key.name="fontSize"][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',
-          message: '⛔ Raw numeric fontSize (becomes px). FIX: replace with string var(--font-size-*) token. Scale: xs(9.6px) label(10.4px) sm(11.2px) data(12.5px) body(13.6px) lg(16px).',
+          message: '⛔ Raw numeric fontSize (becomes px). FIX: use text-* utility class. Scale: text-xs(9.6px) text-label(10.4px) text-sm(11.2px) text-data(12.5px) text-body(13.6px) text-lg(16px).',
         },
         {
           selector: 'Property[key.name="letterSpacing"][value.value=/^-?[0-9]+\\.?[0-9]*(rem|em)$/]',
@@ -132,19 +132,8 @@ const designSystemRestrictions = [
         },
 
         // ═══ TAILWIND UTILITIES THAT BYPASS @THEME ═══
+        // text-xs, text-sm, text-xl now map to @theme --text-* tokens — no longer blocked.
 
-        {
-          selector: 'Literal[value=/(?<!-)\\btext-xs\\b/]',
-          message: '⛔ text-xs bypasses @theme tokens. FIX: remove from className, add style={{ fontSize: "var(--font-size-xs)" }}.',
-        },
-        {
-          selector: 'Literal[value=/(?<!-)\\btext-sm\\b/]',
-          message: '⛔ text-sm bypasses @theme tokens. FIX: remove from className, add style={{ fontSize: "var(--font-size-sm)" }}.',
-        },
-        {
-          selector: 'Literal[value=/(?<!-)\\btext-xl\\b/]',
-          message: '⛔ text-xl bypasses @theme tokens. FIX: remove from className, add style={{ fontSize: "var(--font-size-xl)" }}.',
-        },
         {
           selector: 'Literal[value=/(?<!-)\\btracking-tight\\b/]',
           message: '⛔ tracking-tight bypasses @theme tokens. FIX: remove from className, add style={{ letterSpacing: "var(--tracking-tight)" }}.',
@@ -239,8 +228,8 @@ const designSystemRestrictions = [
 
         // ═══ FONT SIZE TOKEN IN STYLE ═══
         {
-          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--font-size-/]',
-          message: '⛔ fontSize token in style. FIX: remove from style, add to className. fontSize: "var(--font-size-data)"→"text-[var(--font-size-data)]". Pattern: text-[var(--font-size-NAME)]. Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--text-/]',
+          message: '⛔ fontSize token in style. FIX: remove from style, add text-* class. fontSize: "var(--text-data)"→className="text-data". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
         },
 
         // ═══ LETTER SPACING TOKEN IN STYLE ═══
@@ -336,10 +325,6 @@ const designSystemRestrictions = [
           selector: 'JSXAttribute[name.name="style"] Property[key.name="gap"][value.value=/^var\\(--sp-/]',
           message: '⛔ gap token in style. FIX: remove gap from style, add to className. gap: "var(--sp-1)"→"gap-[var(--sp-1)]" gap: "var(--sp-2)"→"gap-[var(--sp-2)]" etc. Pattern: gap-[var(--sp-N)].',
         },
-
-        // ═══ FONT SIZE TOKEN IN STYLE ═══
-        // NOTE: fontSize CANNOT be moved to className. TW4 interprets text-[var(--font-size-*)]
-        // as COLOR, not font-size. Keep fontSize in inline style — this is correct.
 
         // ═══ BORDER RADIUS TOKEN IN STYLE ═══
         // borderRadius: 'var(--radius-*)' should be a Tailwind rounded-* class
@@ -595,30 +580,6 @@ const scheduledGroupsDesignSystemRestrictions = [
   },
 
   // Border edge shorthand rules are now in the global set — no duplicate needed here.
-
-  // ═══ FONT SIZE → UTILITY CLASS ═══
-  // TW4 text-[var()] generates COLOR not font-size — cannot use arbitrary values.
-  // These rules enforce @utility class usage on newer modal surfaces.
-  {
-    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-data)"]',
-    message: '⛔ Inline fontSize data. FIX: remove fontSize from style. Replace font-mono+text-t2 with "c-data". If color differs (e.g. text-t3), use "c-data text-t3".',
-  },
-  {
-    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--font-size-xs\\)/]',
-    message: '⛔ Inline fontSize xs. FIX: remove fontSize from style. Replace font-mono+text-t4 with "c-meta". For labels use "c-field-label". For column headers, c-col-header already sets size.',
-  },
-  {
-    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-lg)"]',
-    message: '⛔ Inline fontSize lg. FIX: remove fontSize from style. Replace font-sans+font-semibold with "c-heading-lg".',
-  },
-  {
-    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-label)"]',
-    message: '⛔ Inline fontSize label. FIX: remove fontSize from style. Use "c-label" (mono 500 label tracking-label t4).',
-  },
-  {
-    selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value="var(--font-size-sm)"]',
-    message: '⛔ Inline fontSize sm. FIX: remove fontSize from style. Use "c-section-label" if uppercase, otherwise keep with comment.',
-  },
 
   // ═══ HEIGHT AUTO IN STYLE ═══
   {

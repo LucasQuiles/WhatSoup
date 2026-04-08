@@ -32,7 +32,7 @@ const ModeBadge: FC<ModeBadgeProps> = ({ mode }) => {
 
   return (
     <span
-      className={`text-[var(--font-size-label)] inline-flex items-center gap-1.5 font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] ${textClass}`}
+      className={`text-label inline-flex items-center gap-1.5 font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] ${textClass}`}
       style={{
         padding: "var(--sp-0h) var(--sp-2h) var(--sp-0h) var(--sp-2)",
         backgroundColor: washVar,

@@ -41,7 +41,7 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
         />
-        <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
+        <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
         <Area
           type="monotone"
           dataKey="inbound"

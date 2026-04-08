@@ -51,7 +51,7 @@ const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) =>
             <div className="c-heading mb-[var(--sp-1)]">
               {opt.label}
             </div>
-            <div className="text-t3 text-[var(--font-size-data)]">
+            <div className="text-t3 text-data">
               {opt.description}
             </div>
           </button>

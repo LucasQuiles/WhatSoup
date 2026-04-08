@@ -37,7 +37,7 @@ const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }
         >
           <div className="flex items-center gap-[var(--sp-2)]">
             <Link2 size={16} strokeWidth={1.75} className="text-t3" />
-            <span id="relink-dialog-title" className="text-[var(--font-size-lg)] font-sans font-semibold">
+            <span id="relink-dialog-title" className="text-lg font-sans font-semibold">
               Re-link {lineName}
             </span>
           </div>

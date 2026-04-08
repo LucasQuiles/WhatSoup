@@ -63,7 +63,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
               String(name),
             ]}
           />
-          <Legend wrapperStyle={{ fontSize: 'var(--font-size-xs)' }} />
+          <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
           {providers.flatMap((provider) => {
             const color = getProviderColor(provider);
             const prov = getProvider(provider);

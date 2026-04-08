@@ -35,7 +35,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
         <span className="c-section-label">{title}</span>
         {instancesFailed > 0 && (
           <span
-            className="font-mono rounded-sm px-[var(--sp-1h)] py-[var(--sp-0h)] text-s-warn text-[var(--font-size-label)]"
+            className="font-mono rounded-sm px-[var(--sp-1h)] py-[var(--sp-0h)] text-s-warn text-label"
             style={{
               backgroundColor: 'var(--s-warn-wash)',
               borderWidth: 'var(--bw)',
@@ -60,7 +60,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
           className="flex flex-col items-center justify-center text-center"
           style={{ height }}
         >
-          <span className="text-s-crit font-sans text-[var(--font-size-sm)]">
+          <span className="text-s-crit font-sans text-sm">
             Failed to load
           </span>
           {onRetry && (
@@ -79,7 +79,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
           style={{ height }}
         >
           <BarChart3 size={24} strokeWidth={1.25} className="mb-[var(--sp-2)]" />
-          <span className="font-sans text-[var(--font-size-sm)]">
+          <span className="font-sans text-sm">
             No data yet
           </span>
         </div>

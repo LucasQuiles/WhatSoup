@@ -46,7 +46,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
         <button
           type="button"
           onClick={() => setOpen(!open)}
-          className="text-[var(--font-size-body)] w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover c-border-b min-h-[var(--toolbar-h)]"
+          className="text-body w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover c-border-b min-h-[var(--toolbar-h)]"
         >
           <div className="flex items-center gap-[var(--sp-2)]">
             {currentLine && <StatusDot status={currentLine.status} size="sm" />}
@@ -72,7 +72,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
                 type="button"
                 key={line.name}
                 onClick={() => { onSelect(line.name); setOpen(false) }}
-                className={`text-[var(--font-size-body)] w-full flex items-center text-left cursor-pointer c-dropdown-item py-[var(--sp-2)] px-[var(--sp-4)] gap-[var(--sp-2)] ${
+                className={`text-body w-full flex items-center text-left cursor-pointer c-dropdown-item py-[var(--sp-2)] px-[var(--sp-4)] gap-[var(--sp-2)] ${
                   line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
                 }`}
               >
@@ -94,7 +94,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="text-[var(--font-size-label)] flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4 tracking-[var(--tracking-pill)] py-[var(--dot-badge)] px-[var(--sp-3)] rounded-sm c-border-b2"
+        className="text-label flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4 tracking-[var(--tracking-pill)] py-[var(--dot-badge)] px-[var(--sp-3)] rounded-sm c-border-b2"
       >
         {currentLine && <StatusDot status={currentLine.status} size="sm" />}
         <span className="font-medium">
@@ -116,7 +116,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
               type="button"
               key={line.name}
               onClick={() => { onSelect(line.name); setOpen(false) }}
-              className={`text-[var(--font-size-sm)] w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer c-dropdown-item ${
+              className={`text-sm w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer c-dropdown-item ${
                 line.name === activeLine ? 'bg-d4 text-t1' : 'text-t3'
               }`}
             >

@@ -3,7 +3,7 @@
 import type { MetricsRange } from '../types.js';
 
 export const AXIS_TICK = {
-  fontSize: 'var(--font-size-xs)',
+  fontSize: 'var(--text-xs)',
   fill: 'var(--color-t4)',
 };
 
@@ -20,7 +20,7 @@ export const TOOLTIP_STYLE = {
   borderColor: 'var(--b3)',
   borderRadius: 'var(--radius-sm)',
   boxShadow: 'var(--shadow-md)',
-  fontSize: 'var(--font-size-xs)',
+  fontSize: 'var(--text-xs)',
   fontFamily: 'var(--font-mono)',
   padding: 'var(--sp-2) var(--sp-3)',
 };

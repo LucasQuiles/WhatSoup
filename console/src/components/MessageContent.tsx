@@ -45,7 +45,7 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
           <Image size={32} strokeWidth={1.25} className="text-t5" />
         </div>
         {caption && (
-          <div className="text-[var(--font-size-data)] text-t2 mt-[var(--sp-1)]">
+          <div className="text-data text-t2 mt-[var(--sp-1)]">
             {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
           </div>
         )}
@@ -56,11 +56,11 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
   return (
     <div className="flex items-center gap-[var(--sp-2)]">
       {icons[type] ?? <HelpCircle size={16} strokeWidth={1.75} className="text-t4" />}
-      <span className="text-[var(--font-size-data)] text-t3 italic">
+      <span className="text-data text-t3 italic">
         {labels[type] ?? type}
       </span>
       {caption && (
-        <span className="text-[var(--font-size-data)] text-t2 ml-[var(--sp-1)]">
+        <span className="text-data text-t2 ml-[var(--sp-1)]">
           {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
         </span>
       )}
@@ -85,7 +85,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               style={{ maxHeight: 'var(--media-thumb-h)' }}
             />
             {msg.content && (
-              <div className="text-[var(--font-size-data)] text-t2 mt-[var(--sp-1)]">
+              <div className="text-data text-t2 mt-[var(--sp-1)]">
                 {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
@@ -107,7 +107,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       return (
         <div className="flex items-center gap-[var(--sp-2)]">
           <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />
-          <span className="text-[var(--font-size-data)] text-t3 italic">
+          <span className="text-data text-t3 italic">
             {label}{duration ? ` \u00b7 ${duration}` : ''}
           </span>
         </div>
@@ -128,8 +128,8 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
           <div className="flex items-center gap-[var(--sp-3)] py-[var(--sp-1)] px-0">
             <FileText size={16} strokeWidth={1.75} className="text-s-warn flex-shrink-0" />
             <div className="min-w-0">
-              <div className="text-[var(--font-size-data)] text-t1 truncate">{fileName}</div>
-              <div className="text-[var(--font-size-xs)] text-t4 font-mono">
+              <div className="text-data text-t1 truncate">{fileName}</div>
+              <div className="text-xs text-t4 font-mono">
                 {[ext, fileSize].filter(Boolean).join(' \u00b7 ')}
               </div>
             </div>
@@ -159,7 +159,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               style={{ maxHeight: 'var(--media-thumb-h)' }}
             />
             {/* Duration badge + play icon overlay */}
-            <div className="text-[var(--font-size-xs)] font-mono rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] bg-[var(--overlay-badge)] text-t1" style={{
+            <div className="text-xs font-mono rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] bg-[var(--overlay-badge)] text-t1" style={{
               position: 'absolute',
               bottom: 'var(--sp-2)',
               right: 'var(--sp-2)',
@@ -167,7 +167,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               {isGif ? 'GIF' : duration || 'Video'}
             </div>
             {msg.content && (
-              <div className="text-[var(--font-size-data)] text-t2 mt-[var(--sp-1)]">
+              <div className="text-data text-t2 mt-[var(--sp-1)]">
                 {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
@@ -213,7 +213,7 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
 /** Quoted message reply bar. */
 const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participant, text }) => (
   <div
-    className="text-[var(--font-size-sm)] py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-d4 rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
+    className="text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-d4 rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
     style={{
       borderLeftWidth: 'var(--bw-accent, 3px)',
       borderLeftStyle: 'solid',
@@ -223,7 +223,7 @@ const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participa
     }}
   >
     {participant && (
-      <div className="text-[var(--font-size-xs)] font-sans font-medium text-m-cht truncate">
+      <div className="text-xs font-sans font-medium text-m-cht truncate">
         {participant.replace(/@.*/, '')}
       </div>
     )}
