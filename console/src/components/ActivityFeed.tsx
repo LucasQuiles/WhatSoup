@@ -153,7 +153,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
           }}
           className="feed-toolbar__pause"
         >
-          {paused ? <Play size={10} /> : <Pause size={10} />}
+          {paused ? <Play size={10} strokeWidth={1.75} /> : <Pause size={10} strokeWidth={1.75} />}
           {paused ? "resume" : "pause"}
         </button>
       </div>

@@ -48,7 +48,7 @@ export function ContactSearchPicker({ lineName, selected, onAdd, onRemove, place
             >
               {c.name ?? c.notify ?? c.jid}
               <button type="button" onClick={() => onRemove(c.jid)} className="c-btn c-btn-ghost p-[var(--sp-0)]" aria-label={`Remove ${c.name ?? c.jid}`}>
-                <X size={10} />
+                <X size={10} strokeWidth={1.75} />
               </button>
             </span>
           ))}

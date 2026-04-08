@@ -58,7 +58,7 @@ const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
     className="c-btn c-btn-ghost flex items-center gap-[var(--sp-1)] py-[var(--sp-1)] px-[var(--sp-2)]"
     onClick={onClick}
   >
-    <Pencil size={12} />
+    <Pencil size={12} strokeWidth={1.75} />
     <span style={{ fontSize: 'var(--font-size-xs)' }}>Edit</span>
   </button>
 )

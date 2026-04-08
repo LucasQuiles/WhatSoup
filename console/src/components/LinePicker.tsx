@@ -105,6 +105,7 @@ export default function LinePicker({ lines, activeLine, onSelect, variant = 'too
         </span>
         <ChevronDown
           size={11}
+          strokeWidth={1.75}
           className={`text-t4 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
         />
       </button>

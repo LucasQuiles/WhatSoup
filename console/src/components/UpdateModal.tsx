@@ -384,11 +384,11 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                       </span>
                       <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
                         {isRestarting ? (
-                          <Loader2 size={12} className="text-m-cht animate-spin" />
+                          <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
                         ) : isDone ? (
-                          <Check size={12} className="text-s-ok" />
+                          <Check size={12} strokeWidth={1.75} className="text-s-ok" />
                         ) : isError ? (
-                          <AlertCircle size={12} className="text-s-crit" />
+                          <AlertCircle size={12} strokeWidth={1.75} className="text-s-crit" />
                         ) : (
                           line.status
                         )}

@@ -58,7 +58,7 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
               }}
             >
               {completed ? (
-                <Check size={11} strokeWidth={2.5} style={{ color: 'var(--color-d0)' }} />
+                <Check size={11} strokeWidth={1.75} className="text-d0" />
               ) : (
                 <div
                   className="w-[var(--stepper-dot)] h-[var(--stepper-dot)] rounded-full"
