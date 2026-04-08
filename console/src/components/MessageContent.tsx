@@ -38,6 +38,21 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
     unknown: 'Message',
   }
 
+  if (type === 'image') {
+    return (
+      <div>
+        <div className="flex items-center justify-center rounded-md bg-d4 w-full h-[var(--media-thumb-h)] min-w-[var(--media-thumb-w)]">
+          <Image size={32} strokeWidth={1.25} className="text-t5" />
+        </div>
+        {caption && (
+          <div className="text-t2 mt-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-data)' }}>
+            {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex items-center gap-[var(--sp-2)]">
       {icons[type] ?? <HelpCircle size={16} strokeWidth={1.75} className="text-t4" />}

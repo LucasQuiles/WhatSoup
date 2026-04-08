@@ -912,7 +912,7 @@ export const MOCK_MESSAGES: Record<string, Message[]> = {
     msg('personal-family', 'Dad', '15550201@s.whatsapp.net', 'Great, I\'ll make the roast', 6400, false),
     msg('personal-family', 'Mom', '15550200@s.whatsapp.net', 'Should I invite Aunt Rosa?', 6000, false),
     msg('personal-family', 'Me', '15550100@s.whatsapp.net', 'Yes, definitely!', 5600, true),
-    msg('personal-family', 'Dad', '15550201@s.whatsapp.net', '[photo]', 3600, false, 'image'),
+    msg('personal-family', 'Dad', '15550201@s.whatsapp.net', 'Check out the garden', 3600, false, 'image'),
     msg('personal-family', 'Mom', '15550200@s.whatsapp.net', 'Picked up dessert from the bakery', 2400, false),
     msg('personal-family', 'Me', '15550100@s.whatsapp.net', 'That looks amazing!', 2200, true),
     msg('personal-family', 'Mom', '15550200@s.whatsapp.net', 'See everyone Sunday', 1200, false),

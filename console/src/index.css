@@ -144,6 +144,7 @@
   --empty-max-w: 320px;      /* empty state description max */
   --panel-access-col: 280px; /* access tab two-column min width */
   --media-thumb-h: 200px;    /* max height for image/video thumbnails */
+  --media-thumb-w: 180px;    /* min width for image/video placeholder */
   /* ═══ SoupKitchen table column widths ═══ */
   --sk-col-mode: 90px;
   --sk-col-chats: 60px;
