@@ -31,6 +31,7 @@ interface FeedEvent {
   text: string;
   isError?: boolean;
   instance?: string;
+  provider?: string;
   component?: string;
   level?: 'info' | 'warn' | 'error';
   detail?: FeedDetail;
@@ -94,6 +95,7 @@ const PINO_LEVEL_MAP: Record<number, 'info' | 'warn' | 'error'> = {
 interface ParseContext {
   instanceName: string;
   instanceType: 'passive' | 'chat' | 'agent';
+  provider?: string;
 }
 
 export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null {
@@ -118,6 +120,7 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
     mode: ctx.instanceType,
     text: `${ctx.instanceName}: ${prefix}${msg}`,
     instance: ctx.instanceName,
+    ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
     ...(component ? { component } : {}),
     level,
     ...(isWarnOrAbove ? { isError: true } : {}),
@@ -277,6 +280,7 @@ function synthesizeHealthEvents(
           mode: inst.type,
           text: `${inst.name}: came online`,
           instance: inst.name,
+          provider: inst.provider,
           component: 'health',
           level: 'info',
           detail: { type: 'health', status: currStatus, previousStatus: prevStatus },
@@ -288,6 +292,7 @@ function synthesizeHealthEvents(
           text: `${inst.name}: connection lost`,
           isError: true,
           instance: inst.name,
+          provider: inst.provider,
           component: 'health',
           level: 'error',
           detail: { type: 'health', status: currStatus, previousStatus: prevStatus, error: poll.error ?? undefined },
@@ -299,6 +304,7 @@ function synthesizeHealthEvents(
           text: `${inst.name}: degraded — ${poll.error ?? 'enrichment stale'}`,
           isError: true,
           instance: inst.name,
+          provider: inst.provider,
           component: 'health',
           level: 'warn',
           detail: { type: 'health', status: currStatus, previousStatus: prevStatus, error: poll.error ?? undefined },
@@ -626,7 +632,7 @@ export function handleGetFeed(
       if (!logFile) continue;
       const lines = readTailLines(logFile, 60);
       for (const line of lines) {
-        const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type });
+        const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type, provider: inst.provider });
         if (result) {
           events.push(result);
           observability.parsed++;

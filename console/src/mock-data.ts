@@ -707,8 +707,9 @@ function feedEvent(
   text: string,
   level: 'info' | 'warn' | 'error',
   detail: FeedDetail,
+  provider?: string,
 ): FeedEvent {
-  return { time: ago(secondsAgo), mode, instance, text, level, detail };
+  return { time: ago(secondsAgo), mode, instance, text, level, detail, provider };
 }
 
 export const MOCK_FEED: FeedEvent[] = [
@@ -716,88 +717,88 @@ export const MOCK_FEED: FeedEvent[] = [
   feedEvent(5, 'chat', 'support', 'support: Inbound message from Alex Chen', 'info', {
     type: 'message', direction: 'inbound', chatJid: '15550110@s.whatsapp.net',
     messageId: 'msg-001', preview: 'Hi, I need help with my order #4921', senderName: 'Alex Chen', contentType: 'text',
-  }),
+  }, 'anthropic-api'),
   // message — outbound
   feedEvent(18, 'chat', 'support', 'support: Reply sent to Alex Chen', 'info', {
     type: 'message', direction: 'outbound', chatJid: '15550110@s.whatsapp.net',
     messageId: 'msg-002', preview: 'Hi Alex! I can help you with order #4921...', contentType: 'text',
-  }),
+  }, 'anthropic-api'),
   // tool_use
   feedEvent(22, 'agent', 'research', 'research: Tool call — search_contacts', 'info', {
     type: 'tool_use', toolName: 'search_contacts', toolId: 'tool-001',
-  }),
+  }, 'claude-cli'),
   // message — inbound image
   feedEvent(35, 'passive', 'personal', 'personal: New message from Family Group', 'info', {
     type: 'message', direction: 'inbound', chatJid: '120363001@g.us',
     messageId: 'msg-003', senderName: 'Mom', contentType: 'image',
-  }),
+  }, 'claude-cli'),
   // session — started
   feedEvent(50, 'agent', 'research', 'research: Agent session started', 'info', {
     type: 'session', action: 'started', sessionId: 'sess-a1b2', chatJid: '15550112@s.whatsapp.net',
-  }),
+  }, 'claude-cli'),
   // tool_use — send_message
   feedEvent(65, 'agent', 'devops', 'devops: Tool call — send_message', 'info', {
     type: 'tool_use', toolName: 'send_message', toolId: 'tool-002',
-  }),
+  }, 'codex-cli'),
   // health — status change
   feedEvent(88, 'chat', 'sales', 'sales: Status changed to degraded', 'warn', {
     type: 'health', status: 'degraded', previousStatus: 'online', error: 'enrichment stalled',
-  }),
+  }, 'anthropic-api'),
   // connection — reconnecting
   feedEvent(120, 'agent', 'intern', 'intern: Attempting reconnection', 'warn', {
     type: 'connection', reconnecting: true, state: 'connecting',
-  }),
+  }, 'claude-cli'),
   // tool_error
   feedEvent(145, 'agent', 'intern', 'intern: Tool error — send_message failed', 'error', {
     type: 'tool_error', toolName: 'send_message', toolId: 'tool-003',
     error: 'Connection closed: auth token expired',
-  }),
+  }, 'claude-cli'),
   // message — outbound document
   feedEvent(170, 'chat', 'support', 'support: Document sent to James Wong', 'info', {
     type: 'message', direction: 'outbound', chatJid: '15550113@s.whatsapp.net',
     messageId: 'msg-004', senderName: 'James Wong', contentType: 'document',
-  }),
+  }, 'anthropic-api'),
   // session — ended
   feedEvent(210, 'agent', 'devops', 'devops: Agent session completed (12 tool calls)', 'info', {
     type: 'session', action: 'ended', sessionId: 'sess-c3d4', reason: 'task_complete',
-  }),
+  }, 'codex-cli'),
   // connection — connected
   feedEvent(270, 'agent', 'devops', 'devops: Connection established', 'info', {
     type: 'connection', state: 'connected',
-  }),
+  }, 'codex-cli'),
   // import
   feedEvent(340, 'passive', 'personal', 'personal: Imported 142 messages', 'info', {
     type: 'import', table: 'messages', count: 142, skipped: false,
-  }),
+  }, 'claude-cli'),
   // session — resumed
   feedEvent(400, 'agent', 'research', 'research: Session resumed after context reload', 'info', {
     type: 'session', action: 'resumed', sessionId: 'sess-e5f6',
-  }),
+  }, 'claude-cli'),
   // tool_error
   feedEvent(460, 'agent', 'research', 'research: Tool error — list_groups timed out', 'error', {
     type: 'tool_error', toolName: 'list_groups', toolId: 'tool-004',
     error: 'Upstream timeout after 10000ms',
-  }),
+  }, 'claude-cli'),
   // health — recovered
   feedEvent(540, 'agent', 'staging', 'staging: Status recovered to online', 'info', {
     type: 'health', status: 'online', previousStatus: 'degraded',
-  }),
+  }, 'codex-cli'),
   // connection — disconnected
   feedEvent(620, 'agent', 'intern', 'intern: Connection lost', 'error', {
     type: 'connection', state: 'disconnected', statusCode: 401, reason: 'auth_failure',
-  }),
+  }, 'claude-cli'),
   // import — with skipped
   feedEvent(720, 'passive', 'archive', 'archive: Import completed (14 skipped)', 'info', {
     type: 'import', table: 'contacts', count: 89, skipped: true,
-  }),
+  }, 'claude-cli'),
   // generic
   feedEvent(900, 'passive', 'personal', 'personal: SQLite WAL checkpoint completed', 'info', {
     type: 'generic',
-  }),
+  }, 'claude-cli'),
   // generic — system
   feedEvent(1200, 'agent', 'research', 'research: Fleet health check passed', 'info', {
     type: 'generic',
-  }),
+  }, 'claude-cli'),
 ];
 
 // ---------------------------------------------------------------------------

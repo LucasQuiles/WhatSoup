@@ -3,6 +3,7 @@ import { RotateCw, Square, Copy, ExternalLink } from "lucide-react";
 import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
 import { formatWhatsAppText } from "../lib/format-wa-text";
+import { getProvider } from "../lib/providers";
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -441,6 +442,11 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onC
           {event.instance && (
             <span className={`fc-inst ${modeClass[event.mode]}`}>
               {event.instance}
+            </span>
+          )}
+          {event.provider && (
+            <span className="fc-badge text-t5">
+              {getProvider(event.provider)?.shortName ?? event.provider}
             </span>
           )}
           <div className="fc-summary">
