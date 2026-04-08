@@ -145,6 +145,29 @@ export async function handleAccessUpdate(
   res.end(result.body);
 }
 
+/** POST /api/lines/:name/mark-read — proxy mark-read to instance health server. */
+export async function handleMarkRead(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+
+  const body = await readBody(req);
+
+  const result = await proxyToInstance(instance.healthPort, '/mark-read', 'POST', body, instance.healthToken);
+
+  if (result.status >= 200 && result.status < 300) {
+    publishFeedEvent(deps.realtime, params.name);
+  }
+
+  res.writeHead(result.status, { 'Content-Type': 'application/json' });
+  res.end(result.body);
+}
+
 /** POST /api/lines/:name/contacts — save a contact via MCP add_or_edit_contact tool. */
 export async function handleSaveContact(
   req: IncomingMessage,

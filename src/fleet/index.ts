@@ -11,7 +11,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
-import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth } from './routes/ops.ts';
+import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth, handleMarkRead } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
@@ -75,6 +75,7 @@ type RouteParamsByHandler = {
   send: NameRouteParams;
   saveContact: NameRouteParams;
   accessUpdate: NameRouteParams;
+  markRead: NameRouteParams;
   restart: NameRouteParams;
   stop: NameRouteParams;
   configUpdate: NameRouteParams;
@@ -138,6 +139,7 @@ const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'send',
   'saveContact',
   'accessUpdate',
+  'markRead',
   'restart',
   'stop',
   'configUpdate',
@@ -185,6 +187,7 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   send:         (req, res, deps, params) => handleSend(req, res, deps, params),
   saveContact:  (req, res, deps, params) => handleSaveContact(req, res, deps, params),
   accessUpdate: (req, res, deps, params) => handleAccessUpdate(req, res, deps, params),
+  markRead:     (req, res, deps, params) => handleMarkRead(req, res, deps, params),
   restart:      (req, res, deps, params) => handleRestart(req, res, deps, params),
   stop:         (req, res, deps, params) => handleStop(req, res, deps, params),
   configUpdate: (req, res, deps, params) => handleConfigUpdate(req, res, deps, params),
@@ -271,6 +274,7 @@ const ROUTES = [
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/send$/, handler: 'send' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/contacts$/, handler: 'saveContact' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/access$/, handler: 'accessUpdate' },
+  { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/mark-read$/, handler: 'markRead' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/restart$/, handler: 'restart' },
   { method: 'POST',  path: /^\/api\/lines\/(?<name>[^/]+)\/stop$/, handler: 'stop' },
   { method: 'PATCH', path: /^\/api\/lines\/(?<name>[^/]+)\/config$/, handler: 'configUpdate' },
