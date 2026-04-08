@@ -1,3 +1,4 @@
+import React from 'react';
 import type { MetricsRange } from './line-detail/types';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -86,6 +87,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
 
   // 7d / 30d — full 7×24 heatmap grid
   const max = Math.max(...data.flat(), 1);
+  const is7d = range === '7d';
 
   return (
     <section
@@ -98,50 +100,97 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
         Active Hours
       </div>
 
-      <div
-        className="grid gap-[var(--bw-accent)]"
-        style={{
-          gridTemplateColumns: 'var(--avatar-sm) repeat(24, 1fr)',
-        }}
-      >
-        {/* Hour header row */}
-        <div />
-        {HOURS.map((h) => (
-          <div
-            key={`h-${h}`}
-            className="text-t5 font-mono leading-tight text-center"
-            style={{ fontSize: 'var(--font-size-xs)' }}
-          >
-            {h % 3 === 0 ? formatHour(h) : ''}
-          </div>
-        ))}
+      {is7d ? (
+        /* 7d: days on Y, hours on X — compact 7-row layout */
+        <div
+          className="grid gap-[var(--bw-accent)]"
+          style={{
+            gridTemplateColumns: 'var(--avatar-sm) repeat(24, 1fr)',
+          }}
+        >
+          {/* Hour header row */}
+          <div />
+          {HOURS.map((h) => (
+            <div
+              key={`h-${h}`}
+              className="text-t5 font-mono leading-tight text-center"
+              style={{ fontSize: 'var(--font-size-xs)' }}
+            >
+              {h % 3 === 0 ? formatHour(h) : ''}
+            </div>
+          ))}
 
-        {/* Data rows */}
-        {DAYS.map((day, di) => (
-          <>
+          {/* Day rows */}
+          {DAYS.map((day, di) => (
+            <React.Fragment key={`dr-${di}`}>
+              <div
+                className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)]"
+                style={{ fontSize: 'var(--font-size-xs)' }}
+              >
+                {day}
+              </div>
+              {HOURS.map((h) => {
+                const value = data[di]?.[h] ?? 0;
+                return (
+                  <div
+                    key={`${di}-${h}`}
+                    title={`${day} ${formatHour(h)}: ${value} messages`}
+                    className="rounded-sm h-[var(--heatmap-cell)]"
+                    style={{
+                      background: intensityColor(value, max),
+                    }}
+                  />
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      ) : (
+        /* 30d: hours on Y, days on X — tall layout for weekly pattern */
+        <div
+          className="grid gap-[var(--bw-accent)]"
+          style={{
+            gridTemplateColumns: `var(--avatar-sm) repeat(${DAYS.length}, 1fr)`,
+          }}
+        >
+          {/* Day header row */}
+          <div />
+          {DAYS.map((day, di) => (
             <div
               key={`d-${di}`}
-              className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)]"
+              className="text-t5 font-mono leading-tight text-center"
               style={{ fontSize: 'var(--font-size-xs)' }}
             >
               {day}
             </div>
-            {HOURS.map((h) => {
-              const value = data[di]?.[h] ?? 0;
-              return (
-                <div
-                  key={`${di}-${h}`}
-                  title={`${day} ${formatHour(h)}: ${value} messages`}
-                  className="rounded-sm h-[var(--heatmap-cell)]"
-                  style={{
-                    background: intensityColor(value, max),
-                  }}
-                />
-              );
-            })}
-          </>
-        ))}
-      </div>
+          ))}
+
+          {/* Hour rows */}
+          {HOURS.map((h) => (
+            <React.Fragment key={`hr-${h}`}>
+              <div
+                className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)]"
+                style={{ fontSize: 'var(--font-size-xs)' }}
+              >
+                {h % 3 === 0 ? formatHour(h) : ''}
+              </div>
+              {DAYS.map((day, di) => {
+                const value = data[di]?.[h] ?? 0;
+                return (
+                  <div
+                    key={`${h}-${di}`}
+                    title={`${day} ${formatHour(h)}: ${value} messages`}
+                    className="rounded-sm h-[var(--heatmap-cell)]"
+                    style={{
+                      background: intensityColor(value, max),
+                    }}
+                  />
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      )}
 
       {/* Legend */}
       <div
