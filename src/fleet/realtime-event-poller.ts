@@ -5,7 +5,6 @@
 //  a marker changes. Runs on a configurable interval (default 2s).
 // ---------------------------------------------------------------------------
 
-import { statSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import type { FleetDiscovery } from './discovery.ts';
 import type { FleetDbReader } from './db-reader.ts';
@@ -88,10 +87,10 @@ export class FleetRealtimeEventPoller {
       try {
         const current = this.getSnapshot(name, inst.dbPath);
 
-        // Stat log file for mtime tracking
-        const logFile = findLatestLogFile(inst.logDir);
-        if (logFile) {
-          try { current.latestLogMtime = statSync(logFile).mtimeMs; } catch { /* race: file deleted between find and stat */ }
+        // Log file mtime tracking
+        const logResult = findLatestLogFile(inst.logDir);
+        if (logResult) {
+          current.latestLogMtime = logResult.mtimeMs;
         }
 
         const previous = this.snapshots.get(name);

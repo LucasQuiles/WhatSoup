@@ -293,11 +293,12 @@ export function handleGetLogs(
   const levelFilter = qs.level ?? null;
   const limit = parseIntParam(qs, 'limit', 200, 1, 2000);
 
-  const logFile = findLatestLogFile(instance.logDir);
-  if (!logFile) {
+  const logResult = findLatestLogFile(instance.logDir);
+  if (!logResult) {
     jsonResponse(res, 200, []);
     return;
   }
+  const logFile = logResult.path;
 
   // readTailLines reads last 64KB and returns up to maxLines — same logic that was inlined here
   const lines = readTailLines(logFile, 2000);

@@ -2,13 +2,16 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /** Find the most recent .log file in a directory (pino-roll uses numbered names). */
-export function findLatestLogFile(logDir: string): string | null {
+export function findLatestLogFile(logDir: string): { path: string; mtimeMs: number } | null {
   try {
     const files = fs.readdirSync(logDir)
       .filter(f => f.endsWith('.log'))
-      .map(f => ({ name: f, mtime: fs.statSync(path.join(logDir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    return files.length > 0 ? path.join(logDir, files[0].name) : null;
+      .map(f => {
+        const full = path.join(logDir, f);
+        return { path: full, mtimeMs: fs.statSync(full).mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return files.length > 0 ? files[0] : null;
   } catch {
     return null;
   }

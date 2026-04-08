@@ -7,22 +7,15 @@ vi.mock('../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn().mockResolvedValue({ status: 200, body: '{"composing":[]}' }),
 }));
 
-// Mock findLatestLogFile
+// Mock findLatestLogFile — now returns { path, mtimeMs } | null
 vi.mock('../../src/fleet/log-utils.ts', () => ({
   findLatestLogFile: vi.fn(),
   readTailLines: vi.fn().mockReturnValue([]),
 }));
 
-// Mock statSync from node:fs
-vi.mock('node:fs', () => ({
-  statSync: vi.fn(),
-}));
-
 import { findLatestLogFile } from '../../src/fleet/log-utils.ts';
-import { statSync } from 'node:fs';
 
 const mockFindLatestLogFile = vi.mocked(findLatestLogFile);
-const mockStatSync = vi.mocked(statSync);
 
 function makePublisher(): FleetRealtimePublisher & { calls: any[] } {
   const calls: any[] = [];
@@ -61,10 +54,6 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     const logDir = '/tmp/test-logs';
     const logFile = `${logDir}/app.log`;
 
-    mockFindLatestLogFile.mockReturnValue(logFile);
-    // First poll mtime
-    mockStatSync.mockReturnValueOnce({ mtimeMs: 1000 } as any);
-
     const discovery = makeDiscovery({
       test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
     });
@@ -72,11 +61,12 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
 
     // First poll — establishes baseline, no events yet
+    mockFindLatestLogFile.mockReturnValueOnce({ path: logFile, mtimeMs: 1000 });
     await poller.poll();
     publisher.calls.length = 0;
 
     // Second poll — mtime advanced
-    mockStatSync.mockReturnValueOnce({ mtimeMs: 2000 } as any);
+    mockFindLatestLogFile.mockReturnValueOnce({ path: logFile, mtimeMs: 2000 });
     await poller.poll();
 
     const types = publisher.calls.map((e: any) => e.type);
@@ -94,8 +84,7 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     const logDir = '/tmp/test-logs';
     const logFile = `${logDir}/app.log`;
 
-    mockFindLatestLogFile.mockReturnValue(logFile);
-    mockStatSync.mockReturnValue({ mtimeMs: 1000 } as any);
+    mockFindLatestLogFile.mockReturnValue({ path: logFile, mtimeMs: 1000 });
 
     const discovery = makeDiscovery({
       test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
@@ -146,8 +135,7 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     const logDir = '/tmp/test-logs';
     const logFile = `${logDir}/app.log`;
 
-    mockFindLatestLogFile.mockReturnValue(logFile);
-    mockStatSync.mockReturnValue({ mtimeMs: 5000 } as any);
+    mockFindLatestLogFile.mockReturnValue({ path: logFile, mtimeMs: 5000 });
 
     const discovery = makeDiscovery({
       test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
@@ -165,13 +153,9 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     poller.stop();
   });
 
-  it('handles statSync throwing (race: file deleted between find and stat)', async () => {
+  it('handles log file disappearing between polls gracefully', async () => {
     const logDir = '/tmp/test-logs';
     const logFile = `${logDir}/app.log`;
-
-    mockFindLatestLogFile.mockReturnValue(logFile);
-    // First poll succeeds
-    mockStatSync.mockReturnValueOnce({ mtimeMs: 1000 } as any);
 
     const discovery = makeDiscovery({
       test: { name: 'test', dbPath: '/tmp/test.db', logDir, healthPort: 0 },
@@ -179,14 +163,16 @@ describe('FleetRealtimeEventPoller — log change detection', () => {
     const dbReader = makeDbReader({ latestMessagePk: 1, latestAccessMarker: 'a' });
     const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
 
+    // First poll — log file exists
+    mockFindLatestLogFile.mockReturnValueOnce({ path: logFile, mtimeMs: 1000 });
     await poller.poll();
     publisher.calls.length = 0;
 
-    // Second poll: statSync throws (file deleted between find and stat)
-    mockStatSync.mockImplementationOnce(() => { throw new Error('ENOENT'); });
+    // Second poll — log file gone
+    mockFindLatestLogFile.mockReturnValueOnce(null);
     await poller.poll();
 
-    // Should not throw, should not emit log_entry (mtime stays null)
+    // Should not emit log_entry (mtime is null, guard prevents it)
     const types = publisher.calls.map((e: any) => e.type);
     expect(types).not.toContain('log_entry');
 

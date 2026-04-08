@@ -628,9 +628,9 @@ export function handleGetFeed(
   // 2. Parse log files for business events
   for (const inst of instances.values()) {
     try {
-      const logFile = findLatestLogFile(inst.logDir);
-      if (!logFile) continue;
-      const lines = readTailLines(logFile, 60);
+      const logResult = findLatestLogFile(inst.logDir);
+      if (!logResult) continue;
+      const lines = readTailLines(logResult.path, 60);
       for (const line of lines) {
         const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type, provider: inst.provider });
         if (result) {
