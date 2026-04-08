@@ -5,6 +5,7 @@
 //  a marker changes. Runs on a configurable interval (default 2s).
 // ---------------------------------------------------------------------------
 
+import { statSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import type { FleetDiscovery } from './discovery.ts';
 import type { FleetDbReader } from './db-reader.ts';
@@ -30,6 +31,7 @@ interface InstanceSnapshot {
   latestMessagePk: number | null;
   latestAccessMarker: string | null;
   latestLogMtime: number | null;
+  lastLogPath: string | null;
 }
 
 interface TypingEntry {
@@ -82,34 +84,29 @@ export class FleetRealtimeEventPoller {
   async poll(): Promise<void> {
     const instances = this.deps.discovery.getInstances();
 
-    // DB-based snapshot diffs (messages + access)
     for (const [name, inst] of instances) {
       try {
-        const current = this.getSnapshot(name, inst.dbPath);
-
-        // Log file mtime tracking
-        const logResult = findLatestLogFile(inst.logDir);
-        if (logResult) {
-          current.latestLogMtime = logResult.mtimeMs;
-        }
-
+        const dbSnapshot = this.getSnapshot(name, inst.dbPath);
         const previous = this.snapshots.get(name);
 
+        // Fast path: stat only the cached log path (1 syscall vs N for full dir scan)
+        const logMtime = this.getLogMtime(inst.logDir, previous?.lastLogPath ?? null);
+        const current: InstanceSnapshot = {
+          ...dbSnapshot,
+          latestLogMtime: logMtime?.mtimeMs ?? previous?.latestLogMtime ?? null,
+          lastLogPath: logMtime?.path ?? previous?.lastLogPath ?? null,
+        };
+
         if (previous) {
-          // Message change
           if (current.latestMessagePk !== previous.latestMessagePk) {
             publishMessageReceived(this.deps.realtime, name);
             publishChatUpdated(this.deps.realtime, name);
             publishFeedEvent(this.deps.realtime, name);
           }
-
-          // Access change
           if (current.latestAccessMarker !== previous.latestAccessMarker) {
             publishAccessChanged(this.deps.realtime, name);
             publishFeedEvent(this.deps.realtime, name);
           }
-
-          // Log change
           if (current.latestLogMtime !== null && current.latestLogMtime !== previous.latestLogMtime) {
             publishLogChanged(this.deps.realtime, name);
             publishFeedEvent(this.deps.realtime, name);
@@ -137,12 +134,20 @@ export class FleetRealtimeEventPoller {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private getSnapshot(name: string, dbPath: string): InstanceSnapshot {
+  private getSnapshot(name: string, dbPath: string): { latestMessagePk: number | null; latestAccessMarker: string | null } {
     const result = this.deps.dbReader.getLatestMarkers(name, dbPath);
     if (!result.ok) {
-      return { latestMessagePk: null, latestAccessMarker: null, latestLogMtime: null };
+      return { latestMessagePk: null, latestAccessMarker: null };
     }
-    return { ...result.data, latestLogMtime: null };
+    return result.data;
+  }
+
+  /** Stat the cached log path (1 syscall). Falls back to full dir scan if cached path is stale. */
+  private getLogMtime(logDir: string, cachedPath: string | null): { path: string; mtimeMs: number } | null {
+    if (cachedPath) {
+      try { return { path: cachedPath, mtimeMs: statSync(cachedPath).mtimeMs }; } catch { /* cached file gone, fall through */ }
+    }
+    return findLatestLogFile(logDir);
   }
 
   private async pollTyping(instances: Map<string, any>): Promise<void> {
