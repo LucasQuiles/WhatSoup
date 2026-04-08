@@ -237,6 +237,12 @@ const designSystemRestrictions = [
           message: '⛔ Border edge template literal — React drops it on spread. FIX: split into border*Width, border*Style, border*Color longhands.',
         },
 
+        // ═══ FONT SIZE TOKEN IN STYLE ═══
+        {
+          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--font-size-/]',
+          message: '⛔ fontSize token in style. FIX: remove from style, add to className. fontSize: "var(--font-size-data)"→"text-[var(--font-size-data)]". Pattern: text-[var(--font-size-NAME)]. Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+        },
+
         // ═══ LETTER SPACING TOKEN IN STYLE ═══
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="letterSpacing"][value.value=/^var\\(--tracking-/]',
