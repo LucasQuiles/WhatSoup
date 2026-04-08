@@ -93,40 +93,41 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
     );
   }
 
-  // 30d with per-date data — render date rows
+  // 30d with per-date data — dates on X axis, hours on Y axis
   if (byDate && byDate.length > 0 && !is24h && !is7d) {
     const allValues = byDate.flatMap(d => d.hours);
     const max = Math.max(...allValues, 1);
+    const labelEvery = byDate.length > 20 ? 5 : byDate.length > 10 ? 3 : 1;
 
     return (
       <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
-        <div className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-[var(--font-size-xs)]">
+        <div className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-xs">
           Active Hours (30 days)
         </div>
         <div
           className="grid gap-[var(--bw-accent)]"
-          style={{ gridTemplateColumns: 'var(--sp-12) repeat(24, 1fr)' }}
+          style={{ gridTemplateColumns: `var(--avatar-sm) repeat(${byDate.length}, 1fr)` }}
         >
-          {/* Hour header row */}
+          {/* Date header row */}
           <div />
-          {HOURS.map((h) => (
-            <div key={`h-${h}`} className="text-t5 font-mono leading-tight text-center text-[var(--font-size-xs)]">
-              {h % 3 === 0 ? formatHour(h) : ''}
+          {byDate.map(({ date }, i) => (
+            <div key={`d-${date}`} className="text-t5 font-mono leading-tight text-center text-xs truncate">
+              {i % labelEvery === 0 ? formatDate(date) : ''}
             </div>
           ))}
 
-          {/* Date rows */}
-          {byDate.map(({ date, hours }) => (
-            <React.Fragment key={date}>
-              <div className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)] text-[var(--font-size-xs)] truncate">
-                {formatDate(date)}
+          {/* Hour rows */}
+          {HOURS.map((h) => (
+            <React.Fragment key={`hr-${h}`}>
+              <div className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)] text-xs">
+                {h % 3 === 0 ? formatHour(h) : ''}
               </div>
-              {HOURS.map((h) => {
+              {byDate.map(({ date, hours }) => {
                 const value = hours[h] ?? 0;
                 return (
                   <div
-                    key={`${date}-${h}`}
-                    title={`${date} ${formatHour(h)}: ${value} messages`}
+                    key={`${h}-${date}`}
+                    title={`${formatDate(date)} ${formatHour(h)}: ${value} messages`}
                     className="rounded-sm h-[var(--heatmap-cell)]"
                     style={{ background: intensityColor(value, max) }}
                   />
@@ -137,7 +138,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
         </div>
 
         {/* Legend */}
-        <div className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-[var(--font-size-xs)]">
+        <div className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-xs">
           <span>Less</span>
           {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
             <div key={ratio} className="w-[var(--sp-3)] h-[var(--sp-3)] rounded-sm" style={{ background: intensityColor(ratio * max, max) }} />
