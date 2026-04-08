@@ -221,9 +221,9 @@ export function ScheduleComposerModal({
                     key={ct}
                     type="button"
                     onClick={() => setContentType(ct)}
-                    className={`c-btn c-btn-xs font-mono ${contentType === ct ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                    className={`c-btn c-btn-sm font-mono ${contentType === ct ? 'c-btn-primary' : 'c-btn-ghost'}`}
                   >
-                    {ct === 'text' ? <MessageSquare size={12} strokeWidth={1.75} /> : <FileText size={12} strokeWidth={1.75} />}
+                    {ct === 'text' ? <MessageSquare size={14} strokeWidth={1.75} /> : <FileText size={14} strokeWidth={1.75} />}
                     {capitalize(ct)}
                   </button>
                 ))}
@@ -305,20 +305,22 @@ export function ScheduleComposerModal({
 
             {/* Recurrence toggle */}
             <div>
-              <div className={`flex items-center gap-2 ${recurring ? 'mb-[var(--sp-3)]' : ''}`}>
+              <div className={`flex items-center gap-[var(--sp-2)] ${recurring ? 'mb-[var(--sp-3)]' : ''}`}>
                 <button
                   type="button"
-                  onClick={() => setRecurring(!recurring)}
-                  className={`c-btn c-btn-xs font-mono ${recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                  onClick={() => setRecurring(true)}
+                  className={`c-btn c-btn-sm font-mono ${recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
                 >
-                  <RefreshCw size={12} strokeWidth={1.75} />
+                  <RefreshCw size={14} strokeWidth={1.75} />
                   Recurring
                 </button>
-                {!recurring && (
-                  <span className="c-meta">
-                    One-shot
-                  </span>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setRecurring(false)}
+                  className={`c-btn c-btn-sm font-mono ${!recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                >
+                  One-shot
+                </button>
               </div>
 
               {recurring && (
