@@ -1644,36 +1644,3 @@ export function getFleetMetrics(range: MetricsRange): FleetMetrics {
   return generateFleetMetrics(range);
 }
 
-// ---------------------------------------------------------------------------
-//  KPI helper (used by dashboard)
-// ---------------------------------------------------------------------------
-
-export function computeKpis(lines: LineInstance[]): {
-  connected: number;
-  needAttention: number;
-  unread: number;
-  agentSessions: number;
-  totalSent: number;
-  totalReceived: number;
-  totalMedia: number;
-} {
-  let connected = 0, needAttention = 0, unread = 0, agentSessions = 0;
-  let totalSent = 0, totalReceived = 0, totalMedia = 0;
-
-  for (const line of lines) {
-    if (line.status === 'online') connected++;
-    if (line.status === 'degraded' || line.status === 'unreachable' || line.error) needAttention++;
-
-    const rt = line.health?.runtime;
-    if (rt?.passive) unread += rt.passive.unreadCount;
-    if (rt?.agent) agentSessions += rt.agent.activeSessions;
-
-    if (line.messageStats) {
-      totalSent += line.messageStats.sent;
-      totalReceived += line.messageStats.received;
-      totalMedia += line.messageStats.images + line.messageStats.audio + line.messageStats.documents;
-    }
-  }
-
-  return { connected, needAttention, unread, agentSessions, totalSent, totalReceived, totalMedia };
-}
