@@ -60,3 +60,4 @@ Thumbs.db
 
 # SDLC working state (ephemeral — covered by docs/sdlc/ above)
 docs/sdlc/active/*/beads/
+artifacts/
