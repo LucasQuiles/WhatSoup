@@ -21,6 +21,7 @@ import type {
   SessionActivityBucket,
   ScheduledMessage,
   GroupInfo,
+  GroupDetail,
   ContactResult,
 } from './types';
 
@@ -1193,35 +1194,35 @@ export const MOCK_LOGS: Record<string, LogEntry[]> = {
 //  MOCK_SCHEDULED — 3-5 per applicable line
 // ---------------------------------------------------------------------------
 
-const NOW_MS = Date.now();
+const NOW_SEC = Math.floor(Date.now() / 1000);
 
 export const MOCK_SCHEDULED: Record<string, ScheduledMessage[]> = {
   support: [
     {
       id: 1, chatJid: '15550110@s.whatsapp.net', chatName: 'Alex Chen',
       contentType: 'text', payload: { text: 'Hi Alex, following up on your support ticket. Is your issue resolved?' },
-      scheduledAt: NOW_MS + 3600_000, recurrence: undefined,
-      nextRunAt: NOW_MS + 3600_000, runCount: 0, status: 'pending',
-      createdAt: NOW_MS - 7200_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 3600, recurrence: undefined,
+      nextRunAt: NOW_SEC + 3600, runCount: 0, status: 'pending',
+      createdAt: NOW_SEC - 7200, retryCount: 0,
     },
     {
       id: 2, chatJid: '120363200@g.us', chatName: 'Support Ops',
       contentType: 'text', payload: { text: 'Daily support summary: 47 tickets handled, avg response 3.2 min' },
-      scheduledAt: NOW_MS + 28800_000, recurrence: 'daily',
-      nextRunAt: NOW_MS + 28800_000, runCount: 14, status: 'pending',
-      createdAt: NOW_MS - 1209600_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 28800, recurrence: 'daily',
+      nextRunAt: NOW_SEC + 28800, runCount: 14, status: 'pending',
+      createdAt: NOW_SEC - 1209600, retryCount: 0,
     },
     {
       id: 3, chatJid: '15550114@s.whatsapp.net', chatName: 'Fatima Al-Rashid',
       contentType: 'text', payload: { text: 'Your appointment reminder: tomorrow at 10am.' },
-      scheduledAt: NOW_MS - 3600_000, runCount: 1, status: 'sent',
-      createdAt: NOW_MS - 14400_000, sentAt: NOW_MS - 3600_000, retryCount: 0,
+      scheduledAt: NOW_SEC - 3600, runCount: 1, status: 'sent',
+      createdAt: NOW_SEC - 14400, sentAt: NOW_SEC - 3600, retryCount: 0,
     },
     {
       id: 4, chatJid: '15550177@s.whatsapp.net', chatName: 'Unknown',
       contentType: 'text', payload: { text: 'Your order update' },
-      scheduledAt: NOW_MS - 7200_000, runCount: 0, status: 'failed',
-      createdAt: NOW_MS - 10800_000, error: 'Recipient not in allowlist', retryCount: 2,
+      scheduledAt: NOW_SEC - 7200, runCount: 0, status: 'failed',
+      createdAt: NOW_SEC - 10800, error: 'Recipient not in allowlist', retryCount: 2,
     },
   ],
 
@@ -1229,21 +1230,21 @@ export const MOCK_SCHEDULED: Record<string, ScheduledMessage[]> = {
     {
       id: 10, chatJid: '15550115@s.whatsapp.net', chatName: 'Owner',
       contentType: 'text', payload: { text: 'Weekly research digest: 3 reports completed, 2 in progress.' },
-      scheduledAt: NOW_MS + 172800_000, recurrence: 'daily',
-      nextRunAt: NOW_MS + 172800_000, runCount: 7, status: 'pending',
-      createdAt: NOW_MS - 604800_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 172800, recurrence: 'daily',
+      nextRunAt: NOW_SEC + 172800, runCount: 7, status: 'pending',
+      createdAt: NOW_SEC - 604800, retryCount: 0,
     },
     {
       id: 11, chatJid: '120363301@g.us', chatName: 'Debug Channel',
       contentType: 'text', payload: { text: 'Session token refresh — re-authenticating agent credentials' },
-      scheduledAt: NOW_MS + 86400_000, runCount: 0, status: 'pending',
-      createdAt: NOW_MS - 3600_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 86400, runCount: 0, status: 'pending',
+      createdAt: NOW_SEC - 3600, retryCount: 0,
     },
     {
       id: 12, chatJid: '15550121@s.whatsapp.net', chatName: 'Nina Park',
       contentType: 'text', payload: { text: 'Q2 APAC analysis complete — review when available' },
-      scheduledAt: NOW_MS - 1800_000, runCount: 1, status: 'sent',
-      createdAt: NOW_MS - 7200_000, sentAt: NOW_MS - 1800_000, retryCount: 0,
+      scheduledAt: NOW_SEC - 1800, runCount: 1, status: 'sent',
+      createdAt: NOW_SEC - 7200, sentAt: NOW_SEC - 1800, retryCount: 0,
     },
   ],
 
@@ -1251,27 +1252,27 @@ export const MOCK_SCHEDULED: Record<string, ScheduledMessage[]> = {
     {
       id: 20, chatJid: '120363402@g.us', chatName: 'Deploy Channel',
       contentType: 'text', payload: { text: 'Scheduled maintenance window starts in 1 hour. Expect brief downtime.' },
-      scheduledAt: NOW_MS + 3600_000, runCount: 0, status: 'pending',
-      createdAt: NOW_MS - 1800_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 3600, runCount: 0, status: 'pending',
+      createdAt: NOW_SEC - 1800, retryCount: 0,
     },
     {
       id: 21, chatJid: '120363400@g.us', chatName: 'CI Notifications',
       contentType: 'text', payload: { text: 'Nightly build summary will post at midnight.' },
-      scheduledAt: NOW_MS + 43200_000, recurrence: 'daily',
-      nextRunAt: NOW_MS + 43200_000, runCount: 31, status: 'pending',
-      createdAt: NOW_MS - 2678400_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 43200, recurrence: 'daily',
+      nextRunAt: NOW_SEC + 43200, runCount: 31, status: 'pending',
+      createdAt: NOW_SEC - 2678400, retryCount: 0,
     },
     {
       id: 22, chatJid: '15550116@s.whatsapp.net', chatName: 'Owner',
       contentType: 'text', payload: { text: 'Weekly infra cost report' },
-      scheduledAt: NOW_MS - 86400_000, runCount: 0, status: 'cancelled',
-      createdAt: NOW_MS - 172800_000, retryCount: 0,
+      scheduledAt: NOW_SEC - 86400, runCount: 0, status: 'cancelled',
+      createdAt: NOW_SEC - 172800, retryCount: 0,
     },
     {
       id: 23, chatJid: '15550124@s.whatsapp.net', chatName: 'Jake Kim',
       contentType: 'text', payload: { text: 'Reminder: code freeze at 5pm Friday' },
-      scheduledAt: NOW_MS + 7200_000, runCount: 0, status: 'pending',
-      createdAt: NOW_MS - 3600_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 7200, runCount: 0, status: 'pending',
+      createdAt: NOW_SEC - 3600, retryCount: 0,
     },
   ],
 
@@ -1279,21 +1280,21 @@ export const MOCK_SCHEDULED: Record<string, ScheduledMessage[]> = {
     {
       id: 30, chatJid: '15550120@s.whatsapp.net', chatName: 'David Park',
       contentType: 'text', payload: { text: 'Demo reminder: tomorrow at 10am!' },
-      scheduledAt: NOW_MS + 86400_000, runCount: 0, status: 'pending',
-      createdAt: NOW_MS - 3600_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 86400, runCount: 0, status: 'pending',
+      createdAt: NOW_SEC - 3600, retryCount: 0,
     },
     {
       id: 31, chatJid: '120363500@g.us', chatName: 'Sales Pipeline',
       contentType: 'text', payload: { text: 'Weekly pipeline digest: 8 new leads, 2 conversions this week.' },
-      scheduledAt: NOW_MS + 259200_000, recurrence: 'daily',
-      nextRunAt: NOW_MS + 259200_000, runCount: 5, status: 'pending',
-      createdAt: NOW_MS - 2678400_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 259200, recurrence: 'daily',
+      nextRunAt: NOW_SEC + 259200, runCount: 5, status: 'pending',
+      createdAt: NOW_SEC - 2678400, retryCount: 0,
     },
     {
       id: 32, chatJid: '15550177@s.whatsapp.net', chatName: 'Spam Lead',
       contentType: 'text', payload: { text: 'Follow-up message' },
-      scheduledAt: NOW_MS - 3600_000, runCount: 0, status: 'failed',
-      createdAt: NOW_MS - 7200_000, error: 'Recipient blocked', retryCount: 3,
+      scheduledAt: NOW_SEC - 3600, runCount: 0, status: 'failed',
+      createdAt: NOW_SEC - 7200, error: 'Recipient blocked', retryCount: 3,
     },
   ],
 
@@ -1301,14 +1302,14 @@ export const MOCK_SCHEDULED: Record<string, ScheduledMessage[]> = {
     {
       id: 40, chatJid: '15550130@s.whatsapp.net', chatName: 'Tester A',
       contentType: 'text', payload: { text: 'Scheduled test message from staging' },
-      scheduledAt: NOW_MS + 1800_000, runCount: 0, status: 'pending',
-      createdAt: NOW_MS - 900_000, retryCount: 0,
+      scheduledAt: NOW_SEC + 1800, runCount: 0, status: 'pending',
+      createdAt: NOW_SEC - 900, retryCount: 0,
     },
     {
       id: 41, chatJid: '120363700@g.us', chatName: 'QA Channel',
       contentType: 'text', payload: { text: 'Automated test run completed' },
-      scheduledAt: NOW_MS - 3600_000, runCount: 1, status: 'sent',
-      createdAt: NOW_MS - 7200_000, sentAt: NOW_MS - 3600_000, retryCount: 0,
+      scheduledAt: NOW_SEC - 3600, runCount: 1, status: 'sent',
+      createdAt: NOW_SEC - 7200, sentAt: NOW_SEC - 3600, retryCount: 0,
     },
   ],
 };
@@ -1595,6 +1596,19 @@ export function getScheduled(name: string): { count: number; messages: Scheduled
 
 export function getGroups(name: string): { groups: GroupInfo[] } {
   return { groups: MOCK_GROUPS[name] ?? [] };
+}
+
+export function getGroupDetail(name: string, jid: string): GroupDetail | undefined {
+  const groups = MOCK_GROUPS[name] ?? [];
+  const group = groups.find(g => g.id === jid);
+  if (!group) return undefined;
+  return {
+    ...group,
+    inviteLink: `https://chat.whatsapp.com/mock${jid.replace('@g.us', '')}`,
+    memberAddMode: 'all_member_add',
+    joinApprovalMode: 'off',
+    pendingRequests: [],
+  };
 }
 
 export function searchContacts(name: string, query: string): { contacts: ContactResult[] } {

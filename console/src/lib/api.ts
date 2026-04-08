@@ -239,10 +239,12 @@ export const api = {
 
   // ── Groups (new) ──
 
-  getGroupDetail: (name: string, jid: string) =>
-    apiFetch<GroupDetail>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}`, {
+  getGroupDetail: (name: string, jid: string) => withFallback(
+    () => apiFetch<GroupDetail>(`/api/lines/${encodeURIComponent(name)}/groups/${encodeURIComponent(jid)}`, {
       signal: AbortSignal.timeout(15000),
     }),
+    async () => { const d = (await loadMockData()).getGroupDetail(name, jid); if (!d) throw new Error('Not found'); return d; },
+  ),
 
   createGroup: (name: string, subject: string, participants: string[]) =>
     apiFetch<{ id: string }>(`/api/lines/${encodeURIComponent(name)}/groups`, {
