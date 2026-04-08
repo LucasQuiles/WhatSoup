@@ -79,14 +79,13 @@ Harden the WhatsApp agent layer across stability, safety, correctness, and obser
 | Bead | Type | Status | Runner | Commit |
 |------|------|--------|--------|--------|
 | SP12-observability-pack | implement | **merged** | L | dfb2e47 (LRU, error sanitize) |
-| SP13-test-coverage | implement | partial | L | 3454 tests passing |
+| SP13-test-coverage | implement | **merged** | Q | 64ddb7d — ingest backpressure (10) + relay guardrails (14) |
 
-## Remaining Items (3 of 23 beads)
+## Remaining Items (2 of 23 beads)
 | Bead | Priority | Effort | Notes |
 |------|----------|--------|-------|
-| SP9-scheduler-media | Medium | Medium | BLOB storage + size cap + retention |
-| SP11-socket-isolation | Medium | Medium | Per-connection session context |
-| SP13-test-coverage | Low | Small | Tests for relay, admin replay, control-plane |
+| SP9-scheduler-media | Medium | Medium | BLOB storage + size cap + retention — blocked on architecture decision |
+| SP11-socket-isolation | Medium | Medium | Per-connection session context — blocked on architecture decision |
 
 ## Workers
 - **Q**: Orchestrator. Audit, spec, config fixes, mention fix, coordination, review.
