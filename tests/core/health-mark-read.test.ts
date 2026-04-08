@@ -112,6 +112,7 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
     connectionManager: {
       botJid: '18455943112@s.whatsapp.net',
       botLid: null,
+      getSocket: vi.fn().mockReturnValue(null),
       sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
@@ -185,12 +186,11 @@ describe('POST /mark-read', () => {
     const connectionManager = {
       botJid: BOT_JID,
       botLid: null,
+      getSocket: vi.fn().mockReturnValue({ chatModify }),
       sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
-      // sock is how the handler accesses Baileys
-      sock: { chatModify },
     } as unknown as ConnectionManager;
 
     ({ server, port } = await buildTestServer(makeDeps(db, { connectionManager })));

@@ -161,6 +161,7 @@ export async function handleMarkRead(
   const result = await proxyToInstance(instance.healthPort, '/mark-read', 'POST', body, instance.healthToken);
 
   if (result.status >= 200 && result.status < 300) {
+    publishChatUpdated(deps.realtime, params.name);
     publishFeedEvent(deps.realtime, params.name);
   }
 

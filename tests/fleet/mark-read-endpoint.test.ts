@@ -130,6 +130,9 @@ describe('handleMarkRead', () => {
     await handleMarkRead(mockReq('{}'), res, deps, { name: 'test-line' });
 
     expect(realtime.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'chat_updated' }),
+    );
+    expect(realtime.publish).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'feed_event' }),
     );
   });

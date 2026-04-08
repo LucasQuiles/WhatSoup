@@ -8,7 +8,7 @@ import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { useVirtualMessages } from '../hooks/use-virtual-messages'
 import { api } from '../lib/api'
 import { selectVirtualMessageRows, toChronologicalMessages } from '../lib/inbox-virtualization'
-import type { Message } from '../types'
+import type { Message, ChatItem } from '../types'
 import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
@@ -533,11 +533,15 @@ export default function Inbox() {
                       disabled={actionBusy}
                       onClick={async () => {
                         setActionBusy(true)
+                        queryClient.setQueryData<ChatItem[]>(['chats', activeLine], old =>
+                          old?.map(c => c.conversationKey === currentChat.conversationKey ? { ...c, unreadCount: 0 } : c)
+                        )
                         try {
                           await api.markRead(activeLine, currentChat.conversationKey)
                           queryClient.invalidateQueries({ queryKey: ['chats', activeLine] })
                           toast.success('Marked as read')
                         } catch (err) {
+                          queryClient.invalidateQueries({ queryKey: ['chats', activeLine] })
                           toast.error(`Failed to mark read: ${err instanceof Error ? err.message : String(err)}`)
                         } finally {
                           setActionBusy(false)

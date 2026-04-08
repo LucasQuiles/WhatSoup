@@ -348,8 +348,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           .get(conversation_key) as { message_id: string; sender_jid: string; timestamp: number } | undefined;
 
         // Call chatModify if we have a last message and WhatsApp is connected
-        const sock = (deps.connectionManager as any).sock as { chatModify?: (...args: unknown[]) => Promise<void> } | undefined;
-        if (lastMsg && sock?.chatModify) {
+        const sock = deps.connectionManager.getSocket();
+        if (lastMsg && sock) {
           try {
             await sock.chatModify(
               {
