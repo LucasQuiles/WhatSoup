@@ -5,6 +5,7 @@
 //  a marker changes. Runs on a configurable interval (default 2s).
 // ---------------------------------------------------------------------------
 
+import { statSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 import type { FleetDiscovery } from './discovery.ts';
 import type { FleetDbReader } from './db-reader.ts';
@@ -13,10 +14,12 @@ import {
   publishMessageReceived,
   publishChatUpdated,
   publishAccessChanged,
+  publishLogChanged,
   publishFeedEvent,
   publishTypingUpdate,
 } from './realtime-publisher.ts';
 import { proxyToInstance } from './http-proxy.ts';
+import { findLatestLogFile } from './log-utils.ts';
 
 const log = createChildLogger('fleet:realtime-poller');
 
@@ -27,6 +30,7 @@ const log = createChildLogger('fleet:realtime-poller');
 interface InstanceSnapshot {
   latestMessagePk: number | null;
   latestAccessMarker: string | null;
+  latestLogMtime: number | null;
 }
 
 interface TypingEntry {
@@ -83,6 +87,13 @@ export class FleetRealtimeEventPoller {
     for (const [name, inst] of instances) {
       try {
         const current = this.getSnapshot(name, inst.dbPath);
+
+        // Stat log file for mtime tracking
+        const logFile = findLatestLogFile(inst.logDir);
+        if (logFile) {
+          try { current.latestLogMtime = statSync(logFile).mtimeMs; } catch { /* race: file deleted between find and stat */ }
+        }
+
         const previous = this.snapshots.get(name);
 
         if (previous) {
@@ -96,6 +107,12 @@ export class FleetRealtimeEventPoller {
           // Access change
           if (current.latestAccessMarker !== previous.latestAccessMarker) {
             publishAccessChanged(this.deps.realtime, name);
+            publishFeedEvent(this.deps.realtime, name);
+          }
+
+          // Log change
+          if (current.latestLogMtime !== null && current.latestLogMtime !== previous.latestLogMtime) {
+            publishLogChanged(this.deps.realtime, name);
             publishFeedEvent(this.deps.realtime, name);
           }
         }
@@ -124,9 +141,9 @@ export class FleetRealtimeEventPoller {
   private getSnapshot(name: string, dbPath: string): InstanceSnapshot {
     const result = this.deps.dbReader.getLatestMarkers(name, dbPath);
     if (!result.ok) {
-      return { latestMessagePk: null, latestAccessMarker: null };
+      return { latestMessagePk: null, latestAccessMarker: null, latestLogMtime: null };
     }
-    return result.data;
+    return { ...result.data, latestLogMtime: null };
   }
 
   private async pollTyping(instances: Map<string, any>): Promise<void> {
