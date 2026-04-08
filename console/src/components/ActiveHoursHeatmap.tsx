@@ -97,7 +97,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
         className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
         style={{ fontSize: 'var(--font-size-xs)' }}
       >
-        Active Hours
+        Active Hours {!is7d ? '(weekly pattern)' : ''}
       </div>
 
       {is7d ? (
