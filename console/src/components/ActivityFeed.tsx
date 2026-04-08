@@ -147,6 +147,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
         <button
           type="button"
+          aria-pressed={paused}
           onClick={() => {
             if (paused) { setSnapshot(null); setPaused(false); }
             else { setSnapshot(events); setPaused(true); }

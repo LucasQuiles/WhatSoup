@@ -17,6 +17,7 @@ const FilterPill: FC<FilterPillProps> = ({
   return (
     <button
       type="button"
+      aria-pressed={isActive}
       onClick={onClick}
       className={`text-[var(--font-size-sm)] font-mono cursor-pointer c-hover inline-flex items-center rounded-sm tracking-[var(--tracking-pill)] py-[var(--sp-1)] px-[var(--sp-2h)] gap-[var(--sp-1h)] ${
         isActive ? `${activeColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
