@@ -35,7 +35,7 @@ describe('FleetRealtimeEventPoller', () => {
   });
 
   it('does not broadcast on identical snapshots', async () => {
-    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', healthPort: 0 } });
+    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 0 } });
     const dbReader = makeDbReader({ latestMessagePk: 10, latestAccessMarker: '2026-01-01' });
     const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
 
@@ -52,7 +52,7 @@ describe('FleetRealtimeEventPoller', () => {
 
   it('broadcasts message_received + chat_updated when latest message pk changes', async () => {
     const markers = { latestMessagePk: 10, latestAccessMarker: '2026-01-01' };
-    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', healthPort: 0 } });
+    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 0 } });
     const dbReader = makeDbReader(markers);
     const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
 
@@ -74,7 +74,7 @@ describe('FleetRealtimeEventPoller', () => {
 
   it('broadcasts access_changed when access marker changes', async () => {
     const markers = { latestMessagePk: 10, latestAccessMarker: '2026-01-01' };
-    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', healthPort: 0 } });
+    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 0 } });
     const dbReader = makeDbReader(markers);
     const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
 
@@ -104,8 +104,8 @@ describe('FleetRealtimeEventPoller', () => {
 
   it('prunes stale snapshots for instances removed from discovery', async () => {
     const instances = new Map(Object.entries({
-      alpha: { name: 'alpha', dbPath: '/tmp/alpha.db', healthPort: 0 },
-      beta: { name: 'beta', dbPath: '/tmp/beta.db', healthPort: 0 },
+      alpha: { name: 'alpha', dbPath: '/tmp/alpha.db', logDir: '/tmp/test-logs', healthPort: 0 },
+      beta: { name: 'beta', dbPath: '/tmp/beta.db', logDir: '/tmp/test-logs', healthPort: 0 },
     }));
     const discovery = { getInstances: () => instances } as any;
     const dbReader = {

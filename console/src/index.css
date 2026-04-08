@@ -27,13 +27,17 @@
   /* ═══ Type scale — matches design system spec exactly ═══ */
   /* Tailwind v4 maps --text-* to text-* utilities automatically */
   --text-xs: 0.6rem;       /* 9.6px  — minimum readable, timestamps */
+  --text-xs--line-height: 1.4;
   --text-label: 0.65rem;   /* 10.4px — labels, column headers, badges */
   --text-sm: 0.7rem;       /* 11.2px — section labels, secondary */
+  --text-sm--line-height: 1.4;
   --text-data: 0.78rem;    /* 12.5px — data values, table cells */
   --text-heading: 0.82rem; /* 13.1px — section headings */
   --text-body: 0.85rem;    /* 13.6px — body text, names, UI chrome */
   --text-lg: 1rem;         /* 16px   — large headings */
+  --text-lg--line-height: 1.35;
   --text-xl: 1.4rem;       /* 22.4px — page titles, summary values */
+  --text-xl--line-height: 1.2;
   --text-2xl: 1.7rem;      /* 27.2px — KPI values */
 
   /* ═══ Letter spacing ═══ */
