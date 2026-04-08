@@ -70,9 +70,8 @@ const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
               )}
             </div>
             <span
-              className="font-mono font-medium tracking-[var(--tracking-label)]"
+              className="font-mono font-medium tracking-[var(--tracking-label)] text-[var(--font-size-label)]"
               style={{
-                fontSize: 'var(--font-size-label)',
                 color: active ? 'var(--color-s-ok)' : completed ? 'var(--color-t2)' : 'var(--color-t5)',
                 transition: 'color var(--dur-norm) var(--ease)',
               }}
@@ -324,8 +323,7 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
           >
             {createError && (
               <div
-                className="flex items-center gap-[var(--sp-2)] text-s-crit py-[var(--sp-2)] px-[var(--sp-3)] bg-d3 rounded-sm"
-                style={{ fontSize: 'var(--font-size-data)' }}
+                className="flex items-center gap-[var(--sp-2)] text-s-crit py-[var(--sp-2)] px-[var(--sp-3)] bg-d3 rounded-sm text-[var(--font-size-data)]"
               >
                 <X size={14} strokeWidth={1.75} style={{ flexShrink: 0 }} />
                 <span>{createError}</span>

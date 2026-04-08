@@ -112,7 +112,7 @@ export const CheckboxField: FC<CheckboxFieldProps> = ({ label, checked, onChange
         onChange={e => onChange(e.target.checked)}
         /* accentColor set globally in index.css */
       />
-      <span className="text-t2" style={{ fontSize: 'var(--font-size-data)' }}>{label}</span>
+      <span className="text-t2 text-[var(--font-size-data)]">{label}</span>
     </label>
     {helper && <div className="c-helper ml-[var(--sp-5)]">{helper}</div>}
   </div>

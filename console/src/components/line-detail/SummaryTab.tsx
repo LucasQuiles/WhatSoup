@@ -109,7 +109,7 @@ export function SummaryTab({
             <div className="c-col-header text-t4 mb-[var(--sp-1)]">
               {card.label}
             </div>
-            <div className={`font-mono font-semibold ${card.color} tracking-[var(--tracking-tight)]`} style={{ fontSize: 'var(--font-size-lg)' }}>
+            <div className={`font-mono font-semibold ${card.color} tracking-[var(--tracking-tight)] text-[var(--font-size-lg)]`}>
               {card.value}
             </div>
           </motion.div>
@@ -151,8 +151,7 @@ export function SummaryTab({
               <button
                 type="button"
                 onClick={onEditConfig}
-                className="c-btn c-btn-ghost py-[var(--sp-0h)] px-[var(--sp-2)]"
-                style={{ fontSize: 'var(--font-size-label)' }}
+                className="c-btn c-btn-ghost py-[var(--sp-0h)] px-[var(--sp-2)] text-[var(--font-size-label)]"
               >
                 Edit
               </button>
@@ -163,7 +162,7 @@ export function SummaryTab({
               {line.mode === 'agent' && (
                 <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${config.length > 0 ? ' c-border-b' : ''}`}>
                   <span className="c-label">provider</span>
-                  <span className="font-mono text-m-agt" style={{ fontSize: 'var(--font-size-data)' }}>
+                  <span className="font-mono text-m-agt text-[var(--font-size-data)]">
                     {getProvider(
                       ((rawConfig.agentOptions as Record<string, unknown> | undefined)?.provider as string) ?? DEFAULT_PROVIDER_ID
                     )?.displayName ?? DEFAULT_PROVIDER_ID}
@@ -173,12 +172,12 @@ export function SummaryTab({
               {config.map((entry, i) => (
                 <div key={entry.key} className={`flex items-center justify-between py-[var(--sp-1h)] px-0${i < config.length - 1 ? ' c-border-b' : ''}`}>
                   <span className="c-label">{entry.key}</span>
-                  <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
+                  <span className="font-mono text-[var(--font-size-data)]" style={{ color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="text-t4 p-[var(--sp-5)]" style={{ fontSize: 'var(--font-size-sm)' }}>
+            <div className="text-t4 p-[var(--sp-5)] text-[var(--font-size-sm)]">
               Passive mode — no configuration required.
             </div>
           )}

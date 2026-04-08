@@ -287,7 +287,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         >
           <div className="flex items-center gap-[var(--sp-2)]">
             <Download size={16} className="text-m-cht" />
-            <span id="update-dialog-title" className="font-sans font-semibold" style={{ fontSize: 'var(--font-size-lg)' }}>
+            <span id="update-dialog-title" className="font-sans font-semibold text-[var(--font-size-lg)]">
               {phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
             </span>
           </div>
@@ -301,7 +301,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           {/* Phase: confirm */}
           {phase === 'confirm' && (
             <div className="flex flex-col gap-[var(--sp-4)]">
-              <p className="text-t3" style={{ fontSize: 'var(--font-size-body)' }}>
+              <p className="text-t3 text-[var(--font-size-body)]">
                 Pull latest code, rebuild, and restart the fleet server?
               </p>
               <div className="flex justify-end gap-[var(--sp-2)]">
@@ -320,12 +320,11 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
               {steps.map(s => (
                 <div key={s.step} className="flex items-center gap-[var(--sp-2)] py-[var(--sp-1)] px-0">
                   {stepIcon(s.status)}
-                  <span className={`font-mono ${s.status === 'skip' ? 'text-t5' : 'text-t2'}`}
-                    style={{ fontSize: 'var(--font-size-data)' }}>
+                  <span className={`font-mono text-[var(--font-size-data)] ${s.status === 'skip' ? 'text-t5' : 'text-t2'}`}>
                     {STEP_LABELS[s.step] ?? s.step}
                   </span>
                   {s.message && s.status !== 'error' && (
-                    <span className="text-t5 font-mono" style={{ fontSize: 'var(--font-size-label)' }}>
+                    <span className="text-t5 font-mono text-[var(--font-size-label)]">
                       {s.message}
                     </span>
                   )}
@@ -334,7 +333,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
               {phase === 'restarting-fleet' && (
                 <div className="flex items-center gap-[var(--sp-2)] py-[var(--sp-2)] px-0">
                   <Loader2 size={16} className="text-m-cht animate-spin" />
-                  <span className="text-t3 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>
+                  <span className="text-t3 font-mono text-[var(--font-size-data)]">
                     Waiting for fleet server...
                   </span>
                 </div>
@@ -347,7 +346,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
             <div className="flex flex-col gap-[var(--sp-3)]">
               <div className="flex items-start gap-[var(--sp-2)] p-[var(--sp-3)] bg-[var(--s-crit-soft)] rounded-md">
                 <AlertCircle size={16} className="text-s-crit flex-shrink-0 mt-[var(--bw-accent)]" />
-                <span className="text-t2 font-mono" style={{ fontSize: 'var(--font-size-data)' }}>{error}</span>
+                <span className="text-t2 font-mono text-[var(--font-size-data)]">{error}</span>
               </div>
               <div className="flex justify-end">
                 <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Close</button>
@@ -358,7 +357,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           {/* Phase: restart-instances */}
           {phase === 'restart-instances' && (
             <div className="flex flex-col gap-[var(--sp-3)]">
-              <p className="text-t3 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>
+              <p className="text-t3 font-medium text-[var(--font-size-body)]">
                 Restart instances with update?
               </p>
               <div className="flex flex-col gap-[var(--sp-1)]">
@@ -379,10 +378,10 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                         onChange={(e) => dispatch({ type: 'toggleInstance', name: line.name, on: e.target.checked })}
                         className="accent-[var(--color-m-cht)]"
                       />
-                      <span className="font-mono text-t2 flex-1" style={{ fontSize: 'var(--font-size-data)' }}>
+                      <span className="font-mono text-t2 flex-1 text-[var(--font-size-data)]">
                         {line.name}
                       </span>
-                      <span className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
+                      <span className="font-mono text-t5 text-[var(--font-size-xs)]">
                         {isRestarting ? (
                           <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
                         ) : isDone ? (
@@ -416,7 +415,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           {phase === 'done' && (
             <div className="flex items-center justify-center gap-[var(--sp-2)] py-[var(--sp-4)] px-0">
               <Check size={20} className="text-s-ok" />
-              <span className="text-t2 font-medium" style={{ fontSize: 'var(--font-size-body)' }}>
+              <span className="text-t2 font-medium text-[var(--font-size-body)]">
                 All instances restarted
               </span>
             </div>

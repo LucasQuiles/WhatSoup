@@ -66,7 +66,7 @@ export function ModeTab({
       </div>
       {/* Config entries — structured key-value grid */}
       {config.length === 0 ? (
-        <div className="text-t4" style={{ fontSize: 'var(--font-size-data)' }}>
+        <div className="text-t4 text-[var(--font-size-data)]">
           No configuration values.
         </div>
       ) : (
@@ -82,18 +82,16 @@ export function ModeTab({
           {config.map((entry) => (
             <React.Fragment key={entry.key}>
               <span
-                className="font-mono text-m-cht"
+                className="font-mono text-m-cht text-[var(--font-size-data)]"
                 style={{
-                  fontSize: 'var(--font-size-data)',
                   paddingTop: 'var(--radius-xs)',
                 }}
               >
                 {entry.key}
               </span>
               <span
-                className="font-mono"
+                className="font-mono text-[var(--font-size-data)]"
                 style={{
-                  fontSize: 'var(--font-size-data)',
                   color: TYPE_COLOR[entry.type],
                   wordBreak: 'break-word',
                 }}

@@ -61,11 +61,10 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
           {values.map((tag, i) => (
             <span
               key={tag}
-              className="inline-flex items-center font-mono font-medium rounded-sm py-[var(--sp-1)] px-[var(--sp-2)] gap-[var(--sp-1)]"
+              className="inline-flex items-center font-mono font-medium rounded-sm py-[var(--sp-1)] px-[var(--sp-2)] gap-[var(--sp-1)] text-[var(--font-size-label)]"
               style={{
                 background: accentColor ? `color-mix(in srgb, ${accentColor} 15%, var(--color-d4))` : 'var(--color-d4)',
                 color: accentColor ?? 'var(--color-t4)',
-                fontSize: 'var(--font-size-label)',
                 borderWidth: 'var(--bw)',
                 borderStyle: 'solid',
                 borderColor: accentColor ?? 'var(--b2)',

@@ -308,7 +308,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
         )}
         <button type="button" className={`c-tab ${activeTab === 'limits' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'limits'} onClick={() => setActiveTab('limits')}>Limits</button>
         <button type="button" className={`c-tab ${activeTab === 'rag' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'rag'} onClick={() => setActiveTab('rag')}>
-          RAG <span className="text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>(optional)</span>
+          RAG <span className="text-t5 text-[var(--font-size-xs)]">(optional)</span>
         </button>
       </div>
 
@@ -405,8 +405,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 type="file"
                 accept=".md,.txt"
                 onChange={handleFileUpload}
-                className="w-full cursor-pointer text-t3"
-                style={{ fontSize: 'var(--font-size-data)' }}
+                className="w-full cursor-pointer text-t3 text-[var(--font-size-data)]"
               />
             </div>
             <TextArea
@@ -603,7 +602,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               if (plugins.length === 0) return null
               return (
                 <div key={cat} className="mt-[var(--sp-3)]">
-                  <div className="text-t4 uppercase tracking-[var(--tracking-wide)] mb-[var(--sp-1)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+                  <div className="text-t4 uppercase tracking-[var(--tracking-wide)] mb-[var(--sp-1)] text-[var(--font-size-xs)]">
                     {catLabel}
                   </div>
                   {plugins.map(plugin => {
@@ -624,10 +623,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                           className="mt-[var(--sp-0h)]"
                         />
                         <div className="flex-1 min-w-0">
-                          <div className={isEnabled ? 'text-t1' : 'text-t4'} style={{ fontSize: 'var(--font-size-data)' }}>
+                          <div className={`${isEnabled ? 'text-t1' : 'text-t4'} text-[var(--font-size-data)]`}>
                             {plugin.label}
                           </div>
-                          <div className="text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
+                          <div className="text-t5 text-[var(--font-size-xs)]">
                             {plugin.description}
                           </div>
                         </div>
@@ -691,8 +690,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       }
                       reader.readAsText(file)
                     }}
-                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)]"
-                    style={{ fontSize: 'var(--font-size-data)' }}
+                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)] text-[var(--font-size-data)]"
                   />
                 </div>
                 <TextArea
@@ -811,7 +809,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 <button
                   key={mode}
                   type="button"
-                  className="c-btn cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)]"
+                  className="c-btn cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)] text-[var(--font-size-data)]"
                   onClick={() => onChange({ pineconeSearchMode: mode })}
                   style={{
                     background:
@@ -822,7 +820,6 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       mode === 'Memory'
                         ? 'var(--radius-sm) 0 0 var(--radius-sm)'
                         : '0 var(--radius-sm) var(--radius-sm) 0',
-                    fontSize: 'var(--font-size-data)',
                     transition: 'background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease)',
                   }}
                 >

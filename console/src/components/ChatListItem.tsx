@@ -26,8 +26,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
     >
       {/* Avatar — fixed size */}
       <div
-        className="rounded-full flex items-center justify-center flex-shrink-0 font-sans text-t3 font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] bg-d5"
-        style={{ fontSize: 'var(--font-size-sm)' }}
+        className="rounded-full flex items-center justify-center flex-shrink-0 font-sans text-t3 font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] bg-d5 text-[var(--font-size-sm)]"
       >
         {getInitials(displayName)}
       </div>
@@ -37,8 +36,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
         {/* Row 1: Name + Time */}
         <div className="flex items-baseline gap-[var(--sp-2)] mb-[var(--sp-0h)]">
           <span
-            className="text-t1 font-medium flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-            style={{ fontSize: 'var(--font-size-body)' }}
+            className="text-t1 font-medium flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[var(--font-size-body)]"
           >
             {displayName}
           </span>
@@ -50,7 +48,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
         {/* Row 2: Preview / Typing indicator + Unread badge */}
         <div className="flex items-center gap-[var(--sp-2)]">
           {isTyping ? (
-            <span className="flex items-center text-m-cht gap-[var(--sp-0h)] flex-1" style={{ fontSize: 'var(--font-size-data)' }}>
+            <span className="flex items-center text-m-cht gap-[var(--sp-0h)] flex-1 text-[var(--font-size-data)]">
               <span className="typing-dot" style={{ animationDelay: '0ms' }} />
               <span className="typing-dot" style={{ animationDelay: '150ms' }} />
               <span className="typing-dot" style={{ animationDelay: '300ms' }} />
@@ -58,16 +56,14 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
             </span>
           ) : (
           <span
-            className="text-t4 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-            style={{ fontSize: 'var(--font-size-data)' }}
+            className="text-t4 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[var(--font-size-data)]"
           >
             {stripMarkdown(chat.lastMessagePreview ?? '')}
           </span>
           )}
           {chat.unreadCount > 0 && (
             <span
-              className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0 w-[var(--badge-unread)] h-[var(--badge-unread)]"
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0 w-[var(--badge-unread)] h-[var(--badge-unread)] text-[var(--font-size-xs)]"
             >
               {chat.unreadCount}
             </span>

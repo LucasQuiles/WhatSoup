@@ -45,8 +45,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
         className="c-card font-mono p-[var(--sp-4)] bg-d2"
       >
         <div
-          className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
-          style={{ fontSize: 'var(--font-size-xs)' }}
+          className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-[var(--font-size-xs)]"
         >
           Active Hours
         </div>
@@ -74,8 +73,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
           {HOURS.map((h) => (
             <div
               key={h}
-              className="flex-1 text-t5 font-mono leading-tight text-center"
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className="flex-1 text-t5 font-mono leading-tight text-center text-[var(--font-size-xs)]"
             >
               {h % 3 === 0 ? formatHour(h) : ''}
             </div>
@@ -94,8 +92,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
       className="c-card font-mono p-[var(--sp-4)] bg-d2"
     >
       <div
-        className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)]"
-        style={{ fontSize: 'var(--font-size-xs)' }}
+        className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-[var(--font-size-xs)]"
       >
         Active Hours {!is7d ? '(weekly pattern)' : ''}
       </div>
@@ -113,8 +110,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
           {HOURS.map((h) => (
             <div
               key={`h-${h}`}
-              className="text-t5 font-mono leading-tight text-center"
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className="text-t5 font-mono leading-tight text-center text-[var(--font-size-xs)]"
             >
               {h % 3 === 0 ? formatHour(h) : ''}
             </div>
@@ -124,8 +120,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
           {DAYS.map((day, di) => (
             <React.Fragment key={`dr-${di}`}>
               <div
-                className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)]"
-                style={{ fontSize: 'var(--font-size-xs)' }}
+                className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)] text-[var(--font-size-xs)]"
               >
                 {day}
               </div>
@@ -158,8 +153,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
           {DAYS.map((day, di) => (
             <div
               key={`d-${di}`}
-              className="text-t5 font-mono leading-tight text-center"
-              style={{ fontSize: 'var(--font-size-xs)' }}
+              className="text-t5 font-mono leading-tight text-center text-[var(--font-size-xs)]"
             >
               {day}
             </div>
@@ -169,8 +163,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
           {HOURS.map((h) => (
             <React.Fragment key={`hr-${h}`}>
               <div
-                className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)]"
-                style={{ fontSize: 'var(--font-size-xs)' }}
+                className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)] text-[var(--font-size-xs)]"
               >
                 {h % 3 === 0 ? formatHour(h) : ''}
               </div>
@@ -194,8 +187,7 @@ export function ActiveHoursHeatmap({ data, range }: { data: number[][]; range?: 
 
       {/* Legend */}
       <div
-        className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)]"
-        style={{ fontSize: 'var(--font-size-xs)' }}
+        className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-[var(--font-size-xs)]"
       >
         <span>Less</span>
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (

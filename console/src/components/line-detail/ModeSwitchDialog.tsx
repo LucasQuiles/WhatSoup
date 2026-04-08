@@ -59,7 +59,7 @@ export function ModeSwitchDialog({
       onCancel={onClose}
     >
       <div className="flex flex-col gap-[var(--sp-3)]">
-        <p className="text-t3 mb-[var(--sp-2)]" style={{ fontSize: 'var(--font-size-sm)' }}>
+        <p className="text-t3 mb-[var(--sp-2)] text-[var(--font-size-sm)]">
           Select the operating mode for this instance. The instance will restart after switching.
         </p>
         {MODE_OPTIONS.map(opt => {
@@ -89,18 +89,17 @@ export function ModeSwitchDialog({
                 }}
               />
               <div>
-                <div className="font-sans font-medium" style={{ fontSize: 'var(--font-size-body)', color: isSelected ? `var(--color-m-${mk})` : 'var(--color-t2)' }}>
+                <div className="font-sans font-medium text-[var(--font-size-body)]" style={{ color: isSelected ? `var(--color-m-${mk})` : 'var(--color-t2)' }}>
                   {opt.label}
                   {isCurrent && (
                     <span
-                      className="font-mono ml-[var(--sp-2)] text-t4"
-                      style={{ fontSize: 'var(--font-size-xs)' }}
+                      className="font-mono ml-[var(--sp-2)] text-t4 text-[var(--font-size-xs)]"
                     >
                       current
                     </span>
                   )}
                 </div>
-                <div className="text-t4" style={{ fontSize: 'var(--font-size-sm)' }}>
+                <div className="text-t4 text-[var(--font-size-sm)]">
                   {opt.description}
                 </div>
               </div>
@@ -109,8 +108,7 @@ export function ModeSwitchDialog({
         })}
         {changed && (
           <div
-            className="flex items-center gap-2 rounded-sm bg-[var(--s-warn-wash)] text-s-warn py-[var(--sp-2)] px-[var(--sp-3)]"
-            style={{ fontSize: 'var(--font-size-sm)' }}
+            className="flex items-center gap-2 rounded-sm bg-[var(--s-warn-wash)] text-s-warn py-[var(--sp-2)] px-[var(--sp-3)] text-[var(--font-size-sm)]"
           >
             <AlertTriangle size={13} strokeWidth={1.75} />
             <span>This will restart the instance. Active sessions will be interrupted.</span>

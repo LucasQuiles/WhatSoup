@@ -44,8 +44,7 @@ export function ContactSearch({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-          className="c-input flex-1 py-[var(--sp-1)] px-[var(--sp-2)]"
-          style={{ fontSize: 'var(--font-size-data)' }}
+          className="c-input flex-1 py-[var(--sp-1)] px-[var(--sp-2)] text-[var(--font-size-data)]"
         />
         <button
           type="button"
@@ -58,7 +57,7 @@ export function ContactSearch({
       </div>
 
       {searched && results.length === 0 && (
-        <div className="text-t5 font-mono text-center p-[var(--sp-2)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <div className="text-t5 font-mono text-center p-[var(--sp-2)] text-[var(--font-size-xs)]">
           No contacts found
         </div>
       )}
@@ -69,8 +68,7 @@ export function ContactSearch({
             <button
               key={c.jid}
               type="button"
-              className="flex items-center gap-2 text-left c-hover cursor-pointer rounded-sm py-[var(--sp-1h)] px-[var(--sp-2)]"
-              style={{ fontSize: 'var(--font-size-data)' }}
+              className="flex items-center gap-2 text-left c-hover cursor-pointer rounded-sm py-[var(--sp-1h)] px-[var(--sp-2)] text-[var(--font-size-data)]"
               onClick={() => onSelect?.(c)}
             >
               <User size={14} className="text-t4 flex-shrink-0" />
@@ -79,7 +77,7 @@ export function ContactSearch({
                   {c.name ?? c.notify ?? c.number ?? c.jid}
                 </div>
                 {c.number && (
-                  <div className="font-mono text-t5" style={{ fontSize: 'var(--font-size-xs)' }}>
+                  <div className="font-mono text-t5 text-[var(--font-size-xs)]">
                     {c.number}
                   </div>
                 )}

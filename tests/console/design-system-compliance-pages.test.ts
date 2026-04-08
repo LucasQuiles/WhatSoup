@@ -29,7 +29,7 @@ describe('design system compliance — Shannon slice', () => {
     const content = read('console/src/components/MessageContent.tsx')
 
     expect(heatmap).not.toContain("fontSize: '9px'")
-    expect(heatmap).toContain("fontSize: 'var(--font-size-xs)'")
+    expect(heatmap).toContain("text-[var(--font-size-xs)]")
 
     expect(tags).not.toContain("gap: '3px'")
     expect(tags).toContain("gap-[var(--sp-0h)]")
@@ -76,7 +76,7 @@ describe('design system compliance — Shannon slice', () => {
 
     expect(pipeline).toContain('<button')
     expect(pipeline).toContain('type="button"')
-    expect(pipeline).toContain('className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5"')
+    expect(pipeline).toContain('c-btn c-btn-sm font-mono inline-flex items-center gap-1.5')
     expect(pipeline).not.toContain('<span\n      className="inline-flex items-center gap-1.5"\n      onClick={onClick}')
   })
 

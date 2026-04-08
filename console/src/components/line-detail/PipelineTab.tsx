@@ -21,7 +21,6 @@ function PipelineNode({
   const pillStyle = {
     padding: onClick ? 'var(--sp-0h) var(--sp-3)' : '5px var(--sp-3)',
     borderRadius: 'var(--radius-sm)',
-    fontSize: 'var(--font-size-data)',
     background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
     color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
     border: selected
@@ -36,12 +35,12 @@ function PipelineNode({
       <button
         type="button"
         onClick={onClick}
-        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5"
+        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5 text-[var(--font-size-data)]"
         style={pillStyle}
       >
         <span>{label}</span>
         {value && (
-          <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
+          <span className="font-mono text-t4 text-[var(--font-size-xs)]">
             {value}
           </span>
         )}
@@ -54,13 +53,13 @@ function PipelineNode({
       className="inline-flex items-center gap-1.5"
     >
       <span
-        className="font-mono font-medium"
+        className="font-mono font-medium text-[var(--font-size-data)]"
         style={pillStyle}
       >
         {label}
       </span>
       {value && (
-        <span className="font-mono text-t4" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <span className="font-mono text-t4 text-[var(--font-size-xs)]">
           {value}
         </span>
       )}
@@ -69,7 +68,7 @@ function PipelineNode({
 }
 
 function PipelineArrow() {
-  return <span className="text-t5 font-mono flex-shrink-0" style={{ fontSize: 'var(--font-size-sm)' }}>→</span>
+  return <span className="text-t5 font-mono flex-shrink-0 text-[var(--font-size-sm)]">→</span>
 }
 
 export { PipelineNode, PipelineArrow }
@@ -165,14 +164,12 @@ function NodeDetailCard({
         {details.map((d) => (
           <React.Fragment key={d.label}>
             <span
-              className="font-mono text-t4"
-              style={{ fontSize: 'var(--font-size-data)' }}
+              className="font-mono text-t4 text-[var(--font-size-data)]"
             >
               {d.label}
             </span>
             <span
-              className="font-mono text-t2"
-              style={{ fontSize: 'var(--font-size-data)' }}
+              className="font-mono text-t2 text-[var(--font-size-data)]"
             >
               {d.value}
             </span>

@@ -103,7 +103,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
           className="text-s-ok"
         />
         <div className="flex flex-col gap-[var(--sp-1)]">
-          <span className="c-heading" style={{ fontSize: 'var(--font-size-lg)' }}>
+          <span className="c-heading text-[var(--font-size-lg)]">
             Line is live!
           </span>
           <span className="c-body text-t3">
@@ -129,7 +129,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
           className="text-s-crit"
         />
         <div className="flex flex-col gap-[var(--sp-1)]">
-          <span className="c-heading" style={{ fontSize: 'var(--font-size-lg)' }}>
+          <span className="c-heading text-[var(--font-size-lg)]">
             {isTimeout ? 'Session timed out' : 'Authentication failed'}
           </span>
           <span className="c-body text-t3">
@@ -176,20 +176,20 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
           qrExpiring ? (
             <>
               <Clock size={14} />
-              <span className="c-body" style={{ fontSize: 'var(--font-size-sm)' }}>
+              <span className="c-body text-[var(--font-size-sm)]">
                 QR code expiring soon — a new one will appear automatically
               </span>
             </>
           ) : (
             <>
               <Loader2 size={14} className="animate-spin" />
-              <span className="c-body" style={{ fontSize: 'var(--font-size-sm)' }}>
+              <span className="c-body text-[var(--font-size-sm)]">
                 Waiting for scan...
               </span>
             </>
           )
         ) : (
-          <span className="c-body" style={{ fontSize: 'var(--font-size-sm)' }}>
+          <span className="c-body text-[var(--font-size-sm)]">
             Generating QR code...
           </span>
         )}

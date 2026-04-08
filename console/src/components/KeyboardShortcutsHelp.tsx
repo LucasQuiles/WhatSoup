@@ -29,7 +29,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
       >
         <div className="flex items-center gap-2 mb-[var(--sp-4)]">
           <Keyboard size={16} strokeWidth={1.75} className="text-t3" />
-          <span id="kbd-shortcuts-title" className="font-sans font-semibold text-t1" style={{ fontSize: 'var(--font-size-body)' }}>
+          <span id="kbd-shortcuts-title" className="text-[var(--font-size-body)] font-sans font-semibold text-t1">
             Keyboard Shortcuts
           </span>
         </div>
@@ -37,7 +37,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
         <div className="flex flex-col gap-[var(--sp-2h)]">
           {SHORTCUTS.map((s) => (
             <div key={s.label} className="flex items-center justify-between">
-              <span className="text-t3" style={{ fontSize: 'var(--font-size-data)' }}>{s.label}</span>
+              <span className="text-[var(--font-size-data)] text-t3">{s.label}</span>
               <div className="flex gap-[var(--sp-1)]">
                 {s.keys.map((k) => (
                   <kbd key={k} className="c-kbd">
@@ -49,7 +49,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
           ))}
         </div>
 
-        <div className="text-t5 text-center mt-[var(--sp-4)]" style={{ fontSize: 'var(--font-size-xs)' }}>
+        <div className="text-[var(--font-size-xs)] text-t5 text-center mt-[var(--sp-4)]">
           Press <kbd className="c-kbd">?</kbd> or <kbd className="c-kbd">Esc</kbd> to close
         </div>
       </div>
