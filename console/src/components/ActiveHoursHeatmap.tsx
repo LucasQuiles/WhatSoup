@@ -26,6 +26,18 @@ function formatDate(dateStr: string): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+function HeatmapLegend({ max }: { max: number }) {
+  return (
+    <div className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-xs">
+      <span>Less</span>
+      {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
+        <div key={ratio} className="w-[var(--sp-3)] h-[var(--sp-3)] rounded-sm" style={{ background: intensityColor(ratio * max, max) }} />
+      ))}
+      <span>More</span>
+    </div>
+  );
+}
+
 /** Collapse a 7×24 grid into a single 24-element array by summing across days. */
 function collapseToSingleDay(data: number[][]): number[] {
   const collapsed = new Array<number>(24).fill(0);
@@ -94,15 +106,16 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
   }
 
   // 30d with per-date data — dates on X axis, hours on Y axis
-  if (byDate && byDate.length > 0 && !is24h && !is7d) {
+  if (range === '30d' && byDate && byDate.length > 0) {
     const allValues = byDate.flatMap(d => d.hours);
     const max = Math.max(...allValues, 1);
     const labelEvery = byDate.length > 20 ? 5 : byDate.length > 10 ? 3 : 1;
+    const dateLabels = byDate.map(d => formatDate(d.date));
 
     return (
       <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
         <div className="font-mono text-t4 mb-[var(--sp-3)] uppercase tracking-[var(--tracking-label)] text-xs">
-          Active Hours (30 days)
+          Active Hours ({byDate.length} days)
         </div>
         <div
           className="grid gap-[var(--bw-accent)]"
@@ -112,7 +125,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           <div />
           {byDate.map(({ date }, i) => (
             <div key={`d-${date}`} className="text-t5 font-mono leading-tight text-center text-xs truncate">
-              {i % labelEvery === 0 ? formatDate(date) : ''}
+              {i % labelEvery === 0 ? dateLabels[i] : ''}
             </div>
           ))}
 
@@ -122,12 +135,12 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
               <div className="text-t4 font-mono leading-snug text-right pr-[var(--sp-1)] text-xs">
                 {h % 3 === 0 ? formatHour(h) : ''}
               </div>
-              {byDate.map(({ date, hours }) => {
+              {byDate.map(({ date, hours }, di) => {
                 const value = hours[h] ?? 0;
                 return (
                   <div
                     key={`${h}-${date}`}
-                    title={`${formatDate(date)} ${formatHour(h)}: ${value} messages`}
+                    title={`${dateLabels[di]} ${formatHour(h)}: ${value} messages`}
                     className="rounded-sm h-[var(--heatmap-cell)]"
                     style={{ background: intensityColor(value, max) }}
                   />
@@ -137,14 +150,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           ))}
         </div>
 
-        {/* Legend */}
-        <div className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-xs">
-          <span>Less</span>
-          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
-            <div key={ratio} className="w-[var(--sp-3)] h-[var(--sp-3)] rounded-sm" style={{ background: intensityColor(ratio * max, max) }} />
-          ))}
-          <span>More</span>
-        </div>
+        <HeatmapLegend max={max} />
       </section>
     );
   }
@@ -250,22 +256,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
         </div>
       )}
 
-      {/* Legend */}
-      <div
-        className="flex items-center text-t5 font-mono justify-end mt-[var(--sp-3)] gap-[var(--sp-2)] text-xs"
-      >
-        <span>Less</span>
-        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
-          <div
-            key={ratio}
-            className="w-[var(--sp-3)] h-[var(--sp-3)] rounded-sm"
-            style={{
-              background: intensityColor(ratio * max, max),
-            }}
-          />
-        ))}
-        <span>More</span>
-      </div>
+      <HeatmapLegend max={max} />
     </section>
   );
 }

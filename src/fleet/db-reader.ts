@@ -351,21 +351,25 @@ export class FleetDbReader {
         return { bucket, active, started };
       });
 
-      // Active hours heatmap (7 days x 24 hours) from raw messages
+      // Active hours heatmap from raw messages
       const cutoffUnix = Math.floor(new Date(cutoff).getTime() / 1000);
-      const heatmapRows = db.prepare(`
-        SELECT
-          CAST(strftime('%w', timestamp, 'unixepoch') AS INTEGER) AS dow,
-          CAST(strftime('%H', timestamp, 'unixepoch') AS INTEGER) AS hour,
-          COUNT(*) AS cnt
-        FROM messages
-        WHERE timestamp >= ? AND deleted_at IS NULL
-        GROUP BY dow, hour
-      `).all(cutoffUnix) as { dow: number; hour: number; cnt: number }[];
 
-      const activeHours: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
-      for (const row of heatmapRows) {
-        activeHours[row.dow][row.hour] = row.cnt;
+      // 7×24 dow grid (skip for 30d — per-date view replaces it)
+      let activeHours: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+      if (opts.range !== '30d') {
+        const heatmapRows = db.prepare(`
+          SELECT
+            CAST(strftime('%w', timestamp, 'unixepoch') AS INTEGER) AS dow,
+            CAST(strftime('%H', timestamp, 'unixepoch') AS INTEGER) AS hour,
+            COUNT(*) AS cnt
+          FROM messages
+          WHERE timestamp >= ? AND deleted_at IS NULL
+          GROUP BY dow, hour
+        `).all(cutoffUnix) as { dow: number; hour: number; cnt: number }[];
+
+        for (const row of heatmapRows) {
+          activeHours[row.dow][row.hour] = row.cnt;
+        }
       }
 
       // Per-date heatmap for 30d range
