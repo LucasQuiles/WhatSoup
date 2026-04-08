@@ -128,6 +128,7 @@ export interface LineMetrics {
   tokenUsageByProvider: Record<string, TokenUsageBucket[]>;
   sessionActivityByProvider: Record<string, SessionActivityBucket[]>;
   activeHours: number[][];
+  activeHoursByDate: { date: string; hours: number[] }[];
   hasMessageData: boolean;
   hasTokenData: boolean;
   hasSessionData: boolean;

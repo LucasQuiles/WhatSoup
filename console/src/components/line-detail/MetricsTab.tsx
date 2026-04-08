@@ -87,7 +87,7 @@ export function MetricsTab({
 
           {/* Active Hours Heatmap */}
           {metrics?.activeHours && (
-            <ActiveHoursHeatmap data={metrics.activeHours} range={metricsRange} />
+            <ActiveHoursHeatmap data={metrics.activeHours} byDate={metrics.activeHoursByDate} range={metricsRange} />
           )}
 
           {/* Detail metrics — tabbed */}

@@ -618,6 +618,13 @@ export function generateMetrics(name: string, range: MetricsRange): LineMetrics 
     tokenUsageByProvider,
     sessionActivityByProvider,
     activeHours: buildActiveHours(cfg.msgScale),
+    activeHoursByDate: Array.from({ length: 30 }, (_, i) => {
+      const d = new Date(Date.now() - (29 - i) * 86400000);
+      return {
+        date: d.toISOString().slice(0, 10),
+        hours: Array.from({ length: 24 }, () => Math.floor(Math.random() * cfg.msgScale * 3)),
+      };
+    }),
     hasMessageData,
     hasTokenData,
     hasSessionData,

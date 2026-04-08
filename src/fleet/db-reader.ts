@@ -276,6 +276,7 @@ export class FleetDbReader {
     tokenUsage: { bucket: string; input: number; output: number }[];
     sessionActivity: { bucket: string; active: number; started: number }[];
     activeHours: number[][];
+    activeHoursByDate: { date: string; hours: number[] }[];
     hasMessageData: boolean;
     hasTokenData: boolean;
     hasSessionData: boolean;
@@ -351,6 +352,7 @@ export class FleetDbReader {
       });
 
       // Active hours heatmap (7 days x 24 hours) from raw messages
+      const cutoffUnix = Math.floor(new Date(cutoff).getTime() / 1000);
       const heatmapRows = db.prepare(`
         SELECT
           CAST(strftime('%w', timestamp, 'unixepoch') AS INTEGER) AS dow,
@@ -359,11 +361,36 @@ export class FleetDbReader {
         FROM messages
         WHERE timestamp >= ? AND deleted_at IS NULL
         GROUP BY dow, hour
-      `).all(Math.floor(new Date(cutoff).getTime() / 1000)) as { dow: number; hour: number; cnt: number }[];
+      `).all(cutoffUnix) as { dow: number; hour: number; cnt: number }[];
 
       const activeHours: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
       for (const row of heatmapRows) {
         activeHours[row.dow][row.hour] = row.cnt;
+      }
+
+      // Per-date heatmap for 30d range
+      let activeHoursByDate: { date: string; hours: number[] }[] = [];
+      if (opts.range === '30d') {
+        const dateHeatmapRows = db.prepare(`
+          SELECT
+            date(timestamp, 'unixepoch') AS dt,
+            CAST(strftime('%H', timestamp, 'unixepoch') AS INTEGER) AS hour,
+            COUNT(*) AS cnt
+          FROM messages
+          WHERE timestamp >= ? AND deleted_at IS NULL
+          GROUP BY dt, hour
+          ORDER BY dt ASC
+        `).all(cutoffUnix) as { dt: string; hour: number; cnt: number }[];
+
+        const dateMap = new Map<string, number[]>();
+        for (const row of dateHeatmapRows) {
+          let hours = dateMap.get(row.dt);
+          if (!hours) { hours = new Array(24).fill(0); dateMap.set(row.dt, hours); }
+          hours[row.hour] = row.cnt;
+        }
+        for (const [date, hours] of dateMap) {
+          activeHoursByDate.push({ date, hours });
+        }
       }
 
       // Query per-provider suffixed metrics (e.g. agent_tokens_in:claude-cli)
@@ -419,7 +446,7 @@ export class FleetDbReader {
 
       const providers = Array.from(providerSet).sort();
 
-      return { messageVolume, tokenUsage, sessionActivity, activeHours, hasMessageData, hasTokenData, hasSessionData, tokenUsageByProvider, sessionActivityByProvider, providers };
+      return { messageVolume, tokenUsage, sessionActivity, activeHours, activeHoursByDate, hasMessageData, hasTokenData, hasSessionData, tokenUsageByProvider, sessionActivityByProvider, providers };
     });
   }
 
