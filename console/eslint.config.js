@@ -131,8 +131,18 @@ const designSystemRestrictions = [
           message: '⛔ Inline duration class. FIX: remove — transitions are handled by DS classes (c-hover, c-row-hover, etc.).',
         },
 
-        // ═══ TAILWIND UTILITIES THAT BYPASS @THEME ═══
-        // text-xs, text-sm, text-xl now map to @theme --text-* tokens — no longer blocked.
+        // ═══ TAILWIND FONT-SIZE PATTERNS ═══
+        // text-xs, text-sm, text-xl etc. map to @theme --text-* tokens — use directly.
+        // text-[var(--font-size-*)] generates NO CSS in TW4 (ambiguous font-size vs color).
+        // text-[var(--text-*)] is redundant — use text-* instead.
+        {
+          selector: 'Literal[value=/text-\\[var\\(--font-size-/]',
+          message: '⛔ text-[var(--font-size-*)] generates NO CSS in Tailwind v4. FIX: use text-* utility directly. text-[var(--font-size-sm)]→"text-sm". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+        },
+        {
+          selector: 'Literal[value=/text-\\[var\\(--text-/]',
+          message: '⛔ text-[var(--text-*)] is redundant. FIX: use text-* utility directly. text-[var(--text-sm)]→"text-sm". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+        },
 
         {
           selector: 'Literal[value=/(?<!-)\\btracking-tight\\b/]',

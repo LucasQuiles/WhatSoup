@@ -114,6 +114,46 @@ describe('design system compliance — Shannon slice', () => {
     expect(pill).toContain('aria-pressed')
   })
 
+  it('uses --text-* tokens in @theme (not --font-size-*) and text-* utility classes', () => {
+    const css = read('console/src/index.css')
+    // @theme uses --text-* naming for Tailwind v4 native utility generation
+    expect(css).toContain('--text-xs:')
+    expect(css).toContain('--text-sm:')
+    expect(css).toContain('--text-data:')
+    expect(css).toContain('--text-xl:')
+    expect(css).not.toContain('--font-size-xs:')
+    expect(css).not.toContain('--font-size-sm:')
+
+    // Line-height companions exist for sizes that override TW4 defaults
+    expect(css).toContain('--text-xs--line-height:')
+    expect(css).toContain('--text-sm--line-height:')
+    expect(css).toContain('--text-xl--line-height:')
+  })
+
+  it('wraps form reset and body styles in @layer base (not unlayered)', () => {
+    const css = read('console/src/index.css')
+    // Unlayered button/input { font: inherit } would override @layer utilities text-* classes
+    // The form reset MUST be inside @layer base
+    const formResetMatch = css.match(/input,\s*select,\s*textarea,\s*button\s*\{[^}]*font:\s*inherit/)
+    expect(formResetMatch).not.toBeNull()
+
+    // Verify it's inside @layer base by checking the preceding context
+    const idx = css.indexOf('input, select, textarea, button')
+    const preceding = css.slice(Math.max(0, idx - 200), idx)
+    expect(preceding).toContain('@layer base')
+  })
+
+  it('TSX files use text-* classes, not text-[var(--font-size-*)] or text-[var(--text-*)]', () => {
+    const nav = read('console/src/components/Nav.tsx')
+    const pill = read('console/src/components/FilterPill.tsx')
+    // text-[var(--font-size-*)] generates no CSS in TW4 (ambiguous)
+    // text-[var(--text-*)] is redundant when text-* utility exists
+    expect(nav).not.toMatch(/text-\[var\(--font-size-/)
+    expect(nav).not.toMatch(/text-\[var\(--text-/)
+    expect(pill).not.toMatch(/text-\[var\(--font-size-/)
+    expect(pill).toContain('text-sm')
+  })
+
   it('fully dissolves form-styles.ts — no remaining imports in wizard components', () => {
     const exists = (() => { try { read('console/src/components/wizard/form-styles.ts'); return true } catch { return false } })()
     expect(exists).toBe(false)
