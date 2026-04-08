@@ -1,6 +1,11 @@
 import { type FC, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes, type ReactNode, useId } from 'react'
 import { Check } from 'lucide-react'
-import { getBorderColor, confirmCheckStyle } from './form-styles'
+
+function borderColor(error?: boolean, confirmed?: boolean): string {
+  if (error) return 'var(--color-s-crit)'
+  if (confirmed) return 'var(--wizard-accent)'
+  return 'var(--b2)'
+}
 
 // ── Form field wrapper ──
 
@@ -20,7 +25,7 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, childre
       <div className="flex items-center gap-[var(--sp-2)]">
         <div className="flex-1 min-w-0">{children(id)}</div>
         {!error && confirmed && (
-          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+          <Check size={16} className="wizard-check" />
         )}
       </div>
       {error && <div className="c-error">{error}</div>}
@@ -40,7 +45,7 @@ export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ...
   <input
     {...props}
     className={`c-input font-mono ${className ?? ''}`}
-    style={{ borderColor: getBorderColor(error, confirmed) }}
+    style={{ borderColor: borderColor(error, confirmed) }}
   />
 )
 
@@ -54,7 +59,7 @@ export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className,
     type="number"
     {...props}
     className={`c-input c-input-number font-mono ${className ?? ''}`}
-    style={{ borderColor: getBorderColor(error, confirmed) }}
+    style={{ borderColor: borderColor(error, confirmed) }}
   />
 )
 
@@ -67,7 +72,7 @@ export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, 
   <select
     {...props}
     className={`c-input c-select ${className ?? ''}`}
-    style={{ borderColor: getBorderColor(error, confirmed) }}
+    style={{ borderColor: borderColor(error, confirmed) }}
   >
     {children}
   </select>
@@ -86,7 +91,7 @@ export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, class
     style={{
       minHeight: minHeight ?? 80,
       resize: 'vertical',
-      borderColor: getBorderColor(error, confirmed),
+      borderColor: borderColor(error, confirmed),
     }}
   />
 )

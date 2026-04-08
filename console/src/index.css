@@ -1143,6 +1143,8 @@ body::before {
 }
 
 .wizard-accent-scope svg.wizard-check {
+  color: var(--wizard-accent);
+  flex-shrink: 0;
   animation: wizard-check-in 0.3s ease both;
 }
 

@@ -99,4 +99,17 @@ describe('design system compliance — Shannon slice', () => {
     expect((soupKitchen.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
     expect(soupKitchen).toContain('aria-label="Search lines"')
   })
+
+  it('fully dissolves form-styles.ts — no remaining imports in wizard components', () => {
+    const exists = (() => { try { read('console/src/components/wizard/form-styles.ts'); return true } catch { return false } })()
+    expect(exists).toBe(false)
+
+    const primitives = read('console/src/components/wizard/form-primitives.tsx')
+    const identity = read('console/src/components/wizard/IdentityStep.tsx')
+    const modelAuth = read('console/src/components/wizard/ModelAuthStep.tsx')
+
+    expect(primitives).not.toContain('form-styles')
+    expect(identity).not.toContain('form-styles')
+    expect(modelAuth).not.toContain('form-styles')
+  })
 })

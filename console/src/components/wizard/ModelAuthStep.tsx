@@ -1,7 +1,6 @@
 import { type FC, useState } from 'react'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
-import { confirmCheckStyle } from './form-styles'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -95,7 +94,7 @@ const ModelAndKeyTabs: FC<{
                     ))}
                   </SelectInput>
                 </div>
-                <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+                <Check size={16} className="wizard-check" />
               </div>
             </div>
           ))}
@@ -130,7 +129,7 @@ const ModelAndKeyTabs: FC<{
                     ))}
                   </SelectInput>
                 </div>
-                {models[key] && <Check size={16} className="wizard-check" style={confirmCheckStyle} />}
+                {models[key] && <Check size={16} className="wizard-check" />}
               </div>
             </div>
           ))}
@@ -190,7 +189,7 @@ const ApiKeyInput: FC<{
           </button>
         </div>
         {!error && filled && (
-          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+          <Check size={16} className="wizard-check" />
         )}
       </div>
       {error && <div className="c-error">{error}</div>}
@@ -283,7 +282,7 @@ const AgentView: FC<{
               <span className="c-body">Existing Claude session</span>
             </label>
           </div>
-          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+          <Check size={16} className="wizard-check" />
         </div>
         {authMethod === 'oauth' && (
           <div className="c-body text-t3 bg-d3 rounded-sm p-[var(--sp-3)]">

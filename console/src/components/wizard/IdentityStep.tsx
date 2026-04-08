@@ -3,7 +3,6 @@ import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
-import { confirmCheckStyle } from './form-styles'
 import { validatePhone } from '../../lib/validation'
 
 interface IdentityStepProps {
@@ -133,7 +132,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             <Loader2 size={16} className="animate-spin text-t4 flex-none" />
           )}
           {(nameStatus === 'available' || nameLocked) && (
-            <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+            <Check size={16} className="wizard-check" />
           )}
           {!nameLocked && nameStatus === 'taken' && (
             <X size={16} className="text-s-crit flex-none" />
@@ -167,7 +166,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           }}
         />
         {showConfirmed && description.trim() && (
-          <Check size={16} className="wizard-check" style={confirmCheckStyle} />
+          <Check size={16} className="wizard-check" />
         )}
         </div>
       </div>
@@ -193,7 +192,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             />
           </div>
           {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
-            <Check size={16} className="wizard-check mt-[var(--sp-2)]" style={confirmCheckStyle} />
+            <Check size={16} className="wizard-check mt-[var(--sp-2)]" />
           )}
         </div>
         {errors.adminPhones && <div className="c-error">{errors.adminPhones}</div>}
