@@ -13,7 +13,6 @@ import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
-import { ContactSearch } from '../components/ContactSearch'
 import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
@@ -314,7 +313,7 @@ export default function Inbox() {
                         key={`search-${row.key}`}
                         ref={searchVirtualizer.measureElement}
                         data-index={row.index}
-                        className="absolute left-0 top-0 w-full"
+                        className="absolute left-0 top-0 w-full flex flex-col"
                         style={{ transform: `translateY(${row.start}px)` }}
                       >
                         <MessageBubble msg={row.message} highlightQuery={debouncedSearch} />
@@ -366,7 +365,7 @@ export default function Inbox() {
                         key={String(row.key)}
                         ref={messageVirtualizer.measureElement}
                         data-index={row.index}
-                        className="absolute left-0 top-0 w-full"
+                        className="absolute left-0 top-0 w-full flex flex-col"
                         style={{ transform: `translateY(${row.start}px)` }}
                       >
                         <MessageBubble msg={row.message} animate={animatedPks.has(row.message.pk)} />
@@ -568,14 +567,6 @@ export default function Inbox() {
                 </div>
               </div>
 
-              {/* Contact lookup */}
-              <div className="mt-[var(--sp-4)]">
-                <div className="c-col-header mb-[var(--sp-2)]">Find Contact</div>
-                <ContactSearch
-                  lineName={activeLine}
-                  onSelect={(c) => toast.info(`${c.name ?? c.jid}`)}
-                />
-              </div>
             </div>
           </>
         ) : (
