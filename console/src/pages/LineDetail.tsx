@@ -258,7 +258,7 @@ export default function LineDetail() {
 
       {/* ═══ Tab content ═══ */}
       <div
-        className="flex-1 overflow-hidden min-h-0 flex flex-col p-[var(--sp-5)]"
+        className="flex-1 overflow-hidden min-h-0 flex flex-col relative"
         role="tabpanel"
         id={`tabpanel-${activeTab}`}
         aria-labelledby={`tab-${activeTab}`}
@@ -270,7 +270,7 @@ export default function LineDetail() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-            className="flex-1 min-h-0 flex flex-col overflow-auto"
+            className="flex-1 min-h-0 flex flex-col overflow-auto px-[var(--sp-5)] pt-[var(--sp-4)] pb-[var(--sp-8)]"
           >
             {activeTab === 'summary' && (
               <SummaryTab
@@ -319,6 +319,8 @@ export default function LineDetail() {
             {activeTab === 'groups' && <GroupsTab lineName={name || ''} myJid={line.phone ? `${line.phone}@s.whatsapp.net` : undefined} />}
           </motion.div>
         </AnimatePresence>
+        {/* Bottom fade to indicate scrollable content */}
+        <div className="absolute bottom-0 left-0 right-0 h-[var(--sp-8)] pointer-events-none" style={{ background: 'linear-gradient(to top, var(--color-d0), transparent)' }} />
       </div>
       </div>
 
