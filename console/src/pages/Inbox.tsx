@@ -13,7 +13,7 @@ import EmptyState from '../components/EmptyState'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
-import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X } from 'lucide-react'
+import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -496,6 +496,27 @@ export default function Inbox() {
               <div>
                 <div className="c-col-header mb-[var(--sp-2)]">Actions</div>
                 <div className="flex flex-col gap-[var(--sp-2)]">
+                  {currentChat.unreadCount > 0 && (
+                    <button
+                      type="button"
+                      className="c-btn c-btn-sm w-full justify-center border-[var(--b2)] text-t2"
+                      disabled={actionBusy}
+                      onClick={async () => {
+                        setActionBusy(true)
+                        try {
+                          await api.markRead(activeLine, currentChat.conversationKey)
+                          queryClient.invalidateQueries({ queryKey: ['chats', activeLine] })
+                          toast.success('Marked as read')
+                        } catch (err) {
+                          toast.error(`Failed to mark read: ${err instanceof Error ? err.message : String(err)}`)
+                        } finally {
+                          setActionBusy(false)
+                        }
+                      }}
+                    >
+                      <CheckCheck size={14} strokeWidth={1.75} /> Mark Read
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="c-btn c-btn-success w-full justify-center"

@@ -174,6 +174,13 @@ export const api = {
       body: JSON.stringify({ subjectType, subjectId, action }),
     }),
 
+  markRead: (name: string, conversationKey: string) =>
+    apiFetch<{ ok: boolean }>(`/api/lines/${encodeURIComponent(name)}/mark-read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_key: conversationKey }),
+    }),
+
   updateConfig: (name: string, patch: Record<string, unknown>) =>
     apiFetch<Record<string, unknown>>(`/api/lines/${encodeURIComponent(name)}/config`, {
       method: 'PATCH',
