@@ -176,6 +176,7 @@ export interface FeedEvent {
   text: string;
   isError?: boolean;
   instance?: string;
+  provider?: string;
   component?: string;
   level?: 'info' | 'warn' | 'error';
   detail?: FeedDetail;
