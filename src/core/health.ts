@@ -283,6 +283,111 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
+    // ── POST /mark-read — zero unread_count for a chat and send chatModify ──
+    if (req.url === '/mark-read' && req.method === 'POST') {
+      (async () => {
+        const jsonHeaders = { 'Content-Type': 'application/json' };
+
+        if (!requireAuth(req, res)) return;
+
+        // Parse body (with size limit matching /access)
+        const MAX_BODY_BYTES = 64 * 1024;
+        let rawBody = '';
+        let byteCount = 0;
+        let destroyed = false;
+        await new Promise<void>((resolve) => {
+          req.on('data', (chunk: Buffer) => {
+            if (destroyed) return;
+            byteCount += chunk.byteLength;
+            if (byteCount > MAX_BODY_BYTES) {
+              destroyed = true;
+              res.writeHead(413, jsonHeaders);
+              res.end(JSON.stringify({ error: 'request body too large' }));
+              req.destroy();
+              resolve();
+              return;
+            }
+            rawBody += chunk;
+          });
+          req.once('end', resolve);
+        });
+        if (destroyed) return;
+
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(rawBody) as Record<string, unknown>;
+        } catch {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'invalid JSON' }));
+          return;
+        }
+
+        const conversation_key = data['conversation_key'] as string | undefined;
+        if (!conversation_key) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'conversation_key is required' }));
+          return;
+        }
+
+        // Look up chat JID
+        const chatRow = deps.db.raw
+          .prepare('SELECT jid FROM chats WHERE conversation_key = ? LIMIT 1')
+          .get(conversation_key) as { jid: string } | undefined;
+
+        if (!chatRow) {
+          res.writeHead(404, jsonHeaders);
+          res.end(JSON.stringify({ error: 'chat not found', conversation_key }));
+          return;
+        }
+
+        const chatJid = chatRow.jid;
+
+        // Get last message for chatModify
+        const lastMsg = deps.db.raw
+          .prepare('SELECT message_id, sender_jid, timestamp FROM messages WHERE conversation_key = ? ORDER BY pk DESC LIMIT 1')
+          .get(conversation_key) as { message_id: string; sender_jid: string; timestamp: number } | undefined;
+
+        // Call chatModify if we have a last message and WhatsApp is connected
+        const sock = (deps.connectionManager as any).sock as { chatModify?: (...args: unknown[]) => Promise<void> } | undefined;
+        if (lastMsg && sock?.chatModify) {
+          try {
+            await sock.chatModify(
+              {
+                markRead: true,
+                lastMessages: [
+                  {
+                    key: {
+                      id: lastMsg.message_id,
+                      fromMe: lastMsg.sender_jid === deps.connectionManager.botJid,
+                    },
+                    messageTimestamp: lastMsg.timestamp,
+                  },
+                ],
+              },
+              chatJid,
+            );
+          } catch (err) {
+            log.warn({ err, chatJid, conversation_key }, '/mark-read: chatModify failed (non-fatal)');
+          }
+        }
+
+        // Always zero out unread_count
+        deps.db.raw
+          .prepare('UPDATE chats SET unread_count = 0 WHERE conversation_key = ?')
+          .run(conversation_key);
+
+        res.writeHead(200, jsonHeaders);
+        res.end(JSON.stringify({ ok: true, jid: chatJid, conversation_key }));
+      })().catch((err) => {
+        log.error({ err }, 'POST /mark-read: unhandled error');
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internal error' }));
+        } catch { /* response already started */ }
+      });
+      return;
+    }
+
     // ── GET /typing — return JIDs currently composing from presence cache ──
     if (req.url === '/typing' && req.method === 'GET') {
       const cache = deps.connectionManager.presenceCache;
