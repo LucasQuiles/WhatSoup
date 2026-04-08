@@ -226,12 +226,15 @@
 }
 
 /* Reset native form element styles — design system controls all visual treatment */
-input, select, textarea, button {
-  font: inherit;
-  color: inherit;
-  outline: none;
-  border: none;
-  background: none;
+/* Must be in @layer base so @layer utilities (text-sm, text-xs, etc.) can override */
+@layer base {
+  input, select, textarea, button {
+    font: inherit;
+    color: inherit;
+    outline: none;
+    border: none;
+    background: none;
+  }
 }
 
 input[type="checkbox"],
@@ -256,13 +259,15 @@ input[type="file"]::file-selector-button {
   margin-right: var(--sp-3);
 }
 
-body {
-  background: var(--color-d0);
-  color: var(--color-t2);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@layer base {
+  body {
+    background: var(--color-d0);
+    color: var(--color-t2);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 }
 
 body::before {
