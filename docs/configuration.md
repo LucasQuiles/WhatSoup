@@ -69,7 +69,8 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`). Listens on `127.0.0.1` only. |
+| `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`). |
+| `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
 | `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for `POST /send`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, `POST /send` always returns `401`. |
 
 ### Logging
@@ -78,6 +79,27 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | string | `info` | Pino log level. Valid values: `trace`, `debug`, `info`, `warn`, `error`, `fatal`. |
 | `LOG_DIR` | path | `<dataRoot>/logs` | Set automatically by `config.ts` from the resolved data root. Set before `logger.ts` initializes. Enables pino-roll daily file rotation when present. |
+
+### Docker
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WHATSOUP_DOCKER` | string | (unset) | Set to `1` to enable Docker platform detection. The Dockerfile sets this automatically. |
+| `WHATSOUP_MODE` | string | `supervisor` | Entrypoint mode: `supervisor` (fleet + instances), `fleet` (fleet only), `instance` (single instance), `auth` (QR code pairing). |
+| `WHATSOUP_INSTANCES` | string | (empty) | Comma-separated instance names to start in supervisor mode. Example: `my-bot,chat-bot`. |
+| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Set to `0.0.0.0` in Docker. |
+
+### Docker Volume Layout
+
+The container uses XDG base directories under `/home/whatsoup/`:
+
+| Volume | Container path | Contents |
+|--------|---------------|----------|
+| `config` | `/home/whatsoup/.config/whatsoup` | Instance configs, auth credentials, fleet token |
+| `data` | `/home/whatsoup/.local/share/whatsoup` | SQLite databases, logs, media cache |
+| `state` | `/home/whatsoup/.local/state/whatsoup` | Lock files (ephemeral) |
+
+The `config` volume is critical — losing it requires re-scanning the QR code for each instance.
 
 ### Internal / Bootstrap
 

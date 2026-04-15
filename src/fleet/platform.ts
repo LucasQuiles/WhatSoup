@@ -2,11 +2,12 @@
  * Cross-platform service manager abstraction.
  *
  * Supports:
+ *  - Docker containers: in-process child spawning (supervisor mode)
  *  - Linux with systemd: systemctl --user
  *  - macOS: launchd via launchctl
- *  - Linux without systemd (WSL1, containers): throws descriptive errors
+ *  - Linux without systemd (WSL1): throws descriptive errors
  */
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,7 +19,10 @@ const execFileAsync = promisify(execFile);
 // Platform detection
 // ---------------------------------------------------------------------------
 
-export type Platform = 'linux-systemd' | 'macos-launchd' | 'linux-no-systemd';
+export type Platform = 'docker' | 'linux-systemd' | 'macos-launchd' | 'linux-no-systemd';
+
+/** Env var name set by the Dockerfile and docker-compose.yml to signal the container runtime. */
+export const WHATSOUP_DOCKER_ENV = 'WHATSOUP_DOCKER';
 
 let _cachedPlatform: Platform | undefined;
 
@@ -26,12 +30,24 @@ let _cachedPlatform: Platform | undefined;
 export function detectPlatform(): Platform {
   if (_cachedPlatform !== undefined) return _cachedPlatform;
 
+  // Docker detection — env var takes priority over all OS-specific checks
+  if (process.env[WHATSOUP_DOCKER_ENV] === '1') {
+    _cachedPlatform = 'docker';
+    return _cachedPlatform;
+  }
+
   if (process.platform === 'darwin') {
     _cachedPlatform = 'macos-launchd';
     return _cachedPlatform;
   }
 
   if (process.platform === 'linux') {
+    // /.dockerenv fallback for containers that set the sentinel file but not the env var
+    if (fs.existsSync('/.dockerenv')) {
+      _cachedPlatform = 'docker';
+      return _cachedPlatform;
+    }
+
     try {
       execFileSync('systemctl', ['--user', 'show-environment'], {
         timeout: 3_000,
@@ -141,9 +157,29 @@ export function parseInstanceName(unit: string): string {
   return match ? match[1] : unit;
 }
 
+/**
+ * Base class providing a default `startFire` implementation that delegates to `start()`.
+ * Subclasses with async start semantics inherit this default; NoSystemdServiceManager
+ * keeps its own startFire override to preserve fail-fast behavior.
+ */
+abstract class BaseServiceManager implements ServiceManager {
+  abstract enable(name: string): Promise<void>;
+  abstract disable(name: string): Promise<void>;
+  abstract start(name: string): Promise<void>;
+  abstract stop(name: string): Promise<void>;
+  abstract restart(name: string): Promise<void>;
+
+  startFire(name: string, onError?: (err: Error | null) => void): void {
+    this.start(name).then(
+      () => { if (onError) onError(null); },
+      (err) => { if (onError) onError(err instanceof Error ? err : new Error(String(err))); },
+    );
+  }
+}
+
 // ---- Linux systemd ----
 
-class SystemdServiceManager implements ServiceManager {
+class SystemdServiceManager extends BaseServiceManager {
   private unit(name: string): string {
     return `whatsoup@${name}`;
   }
@@ -167,17 +203,11 @@ class SystemdServiceManager implements ServiceManager {
   async restart(name: string): Promise<void> {
     await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);
   }
-
-  startFire(name: string, onError?: (err: Error | null) => void): void {
-    execFile('systemctl', ['--user', 'start', this.unit(name)], (err) => {
-      if (onError) onError(err);
-    });
-  }
 }
 
 // ---- macOS launchd ----
 
-class LaunchdServiceManager implements ServiceManager {
+class LaunchdServiceManager extends BaseServiceManager {
   async enable(name: string): Promise<void> {
     const dest = plistPath(name);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -203,12 +233,6 @@ class LaunchdServiceManager implements ServiceManager {
     try { await this.stop(name); } catch { /* ok if not running */ }
     await this.start(name);
   }
-
-  startFire(name: string, onError?: (err: Error | null) => void): void {
-    execFile('launchctl', ['start', launchdLabel(name)], (err) => {
-      if (onError) onError(err);
-    });
-  }
 }
 
 // ---- Fallback for Linux without systemd (WSL1, containers) ----
@@ -231,6 +255,57 @@ class NoSystemdServiceManager implements ServiceManager {
   startFire(): void { this.fail(); }
 }
 
+// ---- Docker supervisor (in-process child spawning) ----
+
+export class DockerSupervisorServiceManager extends BaseServiceManager {
+  private processes = new Map<string, ChildProcess>();
+
+  async enable(): Promise<void> { /* no-op in Docker */ }
+  async disable(): Promise<void> { /* no-op in Docker */ }
+
+  // Called by the fleet auth flow after a successful QR handshake (see routes/ops.ts handleAuth).
+  async start(name: string): Promise<void> {
+    if (this.processes.has(name)) return; // already running
+
+    const child = spawn(process.execPath, [
+      '--experimental-strip-types',
+      '--disable-warning=ExperimentalWarning',
+      'src/bootstrap.ts',
+      name,
+    ], {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+    });
+
+    this.processes.set(name, child);
+    child.on('exit', () => this.processes.delete(name));
+
+    await new Promise<void>((resolve, reject) => {
+      child.on('spawn', resolve);
+      child.on('error', reject);
+    });
+  }
+
+  async stop(name: string): Promise<void> {
+    const child = this.processes.get(name);
+    if (!child) return;
+
+    child.kill('SIGTERM');
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already exited */ }
+        resolve();
+      }, 15_000);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+
+  async restart(name: string): Promise<void> {
+    await this.stop(name);
+    await this.start(name);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -243,6 +318,9 @@ export function createServiceManager(): ServiceManager {
 
   const platform = detectPlatform();
   switch (platform) {
+    case 'docker':
+      _cachedManager = new DockerSupervisorServiceManager();
+      break;
     case 'linux-systemd':
       _cachedManager = new SystemdServiceManager();
       break;

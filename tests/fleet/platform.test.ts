@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import { escapeXml, buildPlist, parseInstanceName } from '../../src/fleet/platform.ts';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  escapeXml,
+  buildPlist,
+  parseInstanceName,
+  detectPlatform,
+  createServiceManager,
+  DockerSupervisorServiceManager,
+  _resetPlatformCache,
+} from '../../src/fleet/platform.ts';
 
 describe('platform', () => {
   describe('escapeXml', () => {
@@ -97,5 +105,120 @@ describe('platform', () => {
     it('returns full string for plain names', () => {
       expect(parseInstanceName('myservice')).toBe('myservice');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Docker platform detection
+// ---------------------------------------------------------------------------
+
+describe('detectPlatform — Docker detection', () => {
+  let savedDocker: string | undefined;
+
+  beforeEach(() => {
+    savedDocker = process.env.WHATSOUP_DOCKER;
+    delete process.env.WHATSOUP_DOCKER;
+    _resetPlatformCache();
+  });
+
+  afterEach(() => {
+    if (savedDocker === undefined) delete process.env.WHATSOUP_DOCKER;
+    else process.env.WHATSOUP_DOCKER = savedDocker;
+    _resetPlatformCache();
+    vi.restoreAllMocks();
+  });
+
+  it('returns docker when WHATSOUP_DOCKER=1', () => {
+    process.env.WHATSOUP_DOCKER = '1';
+    expect(detectPlatform()).toBe('docker');
+  });
+
+  it('does not detect docker when WHATSOUP_DOCKER is unset', () => {
+    const platform = detectPlatform();
+    expect(platform).not.toBe('docker');
+  });
+
+  it('caches the result after first detection', () => {
+    process.env.WHATSOUP_DOCKER = '1';
+    const first = detectPlatform();
+    delete process.env.WHATSOUP_DOCKER;
+    const second = detectPlatform();
+    expect(first).toBe('docker');
+    expect(second).toBe('docker'); // cached
+  });
+
+  it('_resetPlatformCache clears the cache', () => {
+    process.env.WHATSOUP_DOCKER = '1';
+    expect(detectPlatform()).toBe('docker');
+
+    _resetPlatformCache();
+    delete process.env.WHATSOUP_DOCKER;
+    expect(detectPlatform()).not.toBe('docker');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DockerSupervisorServiceManager
+// ---------------------------------------------------------------------------
+
+describe('DockerSupervisorServiceManager', () => {
+  it('enable and disable are no-ops that resolve', async () => {
+    const mgr = new DockerSupervisorServiceManager();
+    await expect(mgr.enable('test')).resolves.toBeUndefined();
+    await expect(mgr.disable('test')).resolves.toBeUndefined();
+  });
+
+  it('stop on unknown instance is a no-op', async () => {
+    const mgr = new DockerSupervisorServiceManager();
+    await expect(mgr.stop('nonexistent')).resolves.toBeUndefined();
+  });
+
+  it('startFire delegates to start() and invokes onError with null on success', async () => {
+    const mgr = new DockerSupervisorServiceManager();
+    const startSpy = vi.spyOn(mgr, 'start').mockResolvedValue(undefined);
+    const onError = vi.fn();
+
+    mgr.startFire('test-instance', onError);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(startSpy).toHaveBeenCalledWith('test-instance');
+    expect(onError).toHaveBeenCalledWith(null);
+  });
+
+  it('startFire invokes onError with Error when start() rejects', async () => {
+    const mgr = new DockerSupervisorServiceManager();
+    const err = new Error('spawn failed');
+    vi.spyOn(mgr, 'start').mockRejectedValue(err);
+    const onError = vi.fn();
+
+    mgr.startFire('test-instance', onError);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onError).toHaveBeenCalledWith(err);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createServiceManager — Docker path
+// ---------------------------------------------------------------------------
+
+describe('createServiceManager — Docker path', () => {
+  let savedDocker: string | undefined;
+
+  beforeEach(() => {
+    savedDocker = process.env.WHATSOUP_DOCKER;
+    _resetPlatformCache();
+  });
+
+  afterEach(() => {
+    if (savedDocker === undefined) delete process.env.WHATSOUP_DOCKER;
+    else process.env.WHATSOUP_DOCKER = savedDocker;
+    _resetPlatformCache();
+  });
+
+  it('returns DockerSupervisorServiceManager when WHATSOUP_DOCKER=1', () => {
+    process.env.WHATSOUP_DOCKER = '1';
+    const mgr = createServiceManager();
+    expect(mgr).toBeInstanceOf(DockerSupervisorServiceManager);
   });
 });

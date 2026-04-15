@@ -15,6 +15,7 @@
 6. [Recovery Procedures](#6-recovery-procedures)
 7. [Admin Operations](#7-admin-operations)
 8. [Monitoring](#8-monitoring)
+9. [Docker Deployment](#9-docker-deployment)
 
 ---
 
@@ -848,3 +849,163 @@ Groups used for multi-agent orchestration (where a conductor agent like Q coordi
 **To check:** `sqlite3 <instance>/bot.db "SELECT * FROM access_list WHERE subject_type='group';"`
 
 **To fix:** `DELETE FROM access_list WHERE subject_type='group' AND subject_id='<group_jid>';`
+
+---
+
+## 9. Docker Deployment
+
+WhatSoup can run in a Docker container as an alternative to the systemd/launchd host deployment. The container runs fleet + instances in a single supervisor process.
+
+### Build
+
+```bash
+docker compose build
+```
+
+The multi-stage build installs dependencies, builds the console frontend, and produces a slim runtime image (~300MB) based on `node:24-slim`.
+
+### Configure
+
+```bash
+cp .env.example .env
+# Edit .env — set API keys, instance names, health token
+```
+
+Create instance configs in the config volume. If using named volumes (default), exec into the container first:
+
+```bash
+docker compose run --rm --entrypoint bash whatsoup -c '
+  mkdir -p ~/.config/whatsoup/instances/my-bot
+  cat > ~/.config/whatsoup/instances/my-bot/config.json << EOF
+{
+  "name": "my-bot",
+  "type": "chat",
+  "systemPrompt": "You are a helpful assistant.",
+  "adminPhones": ["15555550100"],
+  "accessMode": "self_only",
+  "healthPort": 9090
+}
+EOF'
+```
+
+Then set `WHATSOUP_INSTANCES=my-bot` in `.env`.
+
+### Start / Stop
+
+```bash
+# Start in background
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+
+# Stop and remove volumes (destroys auth + data)
+docker compose down -v
+```
+
+### Authenticate an Instance (QR Code)
+
+**Via fleet console (recommended):** Open `http://localhost:9099`, navigate to the instance, click the auth button. The QR code renders in the browser.
+
+**Via CLI:**
+
+```bash
+docker compose run --rm auth
+# Scan the QR code displayed in the terminal
+```
+
+After auth succeeds, the supervisor starts the instance automatically.
+
+### Logs
+
+```bash
+# All services
+docker compose logs -f
+
+# Fleet server only
+docker compose logs -f whatsoup 2>&1 | grep fleet
+
+# Pino-formatted logs are in the data volume at:
+# /home/whatsoup/.local/share/whatsoup/instances/<name>/logs/
+```
+
+### Health Checks
+
+```bash
+# Fleet health (from host)
+curl http://localhost:9099/api/lines
+
+# Instance health (if port exposed in compose)
+curl http://localhost:9090/health
+```
+
+### Persistence and Backup
+
+Three named volumes store all runtime state:
+
+| Volume | Contents | Backup priority |
+|--------|----------|----------------|
+| `config` | Auth credentials, instance configs, fleet token | **Critical** — losing auth requires re-scanning QR |
+| `data` | SQLite databases, logs, media cache | High — message history, contacts |
+| `state` | Lock files | Low — ephemeral, recreated on start |
+
+To back up:
+
+```bash
+docker compose stop
+docker run --rm -v docker_config:/data -v $(pwd)/backup:/backup alpine \
+  tar czf /backup/whatsoup-config.tar.gz -C /data .
+docker compose start
+```
+
+### Troubleshooting
+
+**Symptom:** `EACCES: permission denied, open '/home/whatsoup/.config/whatsoup/instances/<name>/auth/creds.json'`
+
+**Cause:** The container runs as UID 1000 (`whatsoup` user, renamed from the base image's `node` user). If the host deploying user has a different UID and a named volume was previously initialized by a different process, the mount may be owned by the wrong UID.
+
+**Fix:** Reset volume ownership from the host.
+
+```bash
+docker compose down
+docker volume rm docker_config docker_data docker_state  # destroys auth + data
+docker compose up -d
+```
+
+If preserving data is required, chown inside the container as root:
+
+```bash
+docker compose run --rm --user root --entrypoint bash whatsoup -c \
+  'chown -R whatsoup:whatsoup /home/whatsoup'
+docker compose up -d
+```
+
+**Symptom:** Healthcheck reports the container unhealthy even though the fleet API responds on port 9099.
+
+**Cause:** The healthcheck probes `http://127.0.0.1:9099/` — the unauthenticated SPA shell. If the `dist/` directory is missing from the image or the console build failed, the root route returns 404.
+
+**Fix:** Rebuild with `docker compose build --no-cache` and confirm the build log shows `vite build` success and a non-empty `dist/` copy.
+
+**Symptom:** Supervisor mode exits immediately when `WHATSOUP_INSTANCES` is unset or empty.
+
+**Cause:** Expected when no instances are configured — the supervisor runs only the fleet process. If the fleet crashes (for example, port 9099 already in use on the host), the container exits and `restart: unless-stopped` triggers a restart loop.
+
+**Fix:** Read fleet logs with `docker compose logs whatsoup` and confirm port 9099 is free on the host.
+
+### Rollback
+
+To remove Docker and revert to host deployment:
+
+```bash
+# Stop and remove containers (keep volumes for safety)
+docker compose down
+
+# Remove Docker files from the repo
+git checkout -- src/fleet/platform.ts src/core/health.ts
+rm -rf docker/ docker-compose.yml .dockerignore .env.example .env
+```
+
+Volumes persist until explicitly removed with `docker volume rm`.

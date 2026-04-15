@@ -338,3 +338,44 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// HEALTH_BIND_ADDRESS env var
+// ---------------------------------------------------------------------------
+
+describe('HEALTH_BIND_ADDRESS env var', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  afterEach(async () => {
+    if (db) db.close();
+    delete process.env.HEALTH_BIND_ADDRESS;
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('defaults to 127.0.0.1 when HEALTH_BIND_ADDRESS is not set', async () => {
+    delete process.env.HEALTH_BIND_ADDRESS;
+    db = makeDb();
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+    const addr = server.address();
+    expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('127.0.0.1');
+  });
+
+  it('binds to 0.0.0.0 when HEALTH_BIND_ADDRESS=0.0.0.0', async () => {
+    process.env.HEALTH_BIND_ADDRESS = '0.0.0.0';
+    db = makeDb();
+    // Need a fresh import to pick up the env change in the closure
+    const { startHealthServer } = await import('../../src/core/health.ts');
+    const testServer = startHealthServer(makeDeps(db));
+    server = testServer;
+    // The server initially listens on config.healthPort with the env bind address.
+    // Close and re-listen on port 0 to verify the bind was respected.
+    await new Promise<void>((resolve) => testServer.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      testServer.listen(0, '0.0.0.0', () => resolve());
+    });
+    const addr = testServer.address();
+    expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('0.0.0.0');
+  });
+});

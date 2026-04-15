@@ -72,10 +72,17 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 
 ## Requirements
 
+### Host deployment (systemd / launchd)
+
 - **Node.js >= 23.10** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
 - **Linux with systemd** — user units for process management (`systemctl --user`); enable lingering for headless servers: `loginctl enable-linger $USER`
 - **GNOME Keyring** (`libsecret-tools`) or environment variables for API keys — `npm run setup` checks both
 - **ffmpeg** — video frame extraction in chat mode (optional)
+
+### Docker deployment
+
+- **Docker** with Compose V2 (`docker compose version`)
+- No Node.js, systemd, or keyring required — the image bundles everything
 
 > **Pinned dependencies:** Due to the increase in recent supply chain attacks, all dependency versions in `package.json` are pinned to exact versions known to be safe at time of release. This minimizes the risk of compromised packages being pulled in by WhatSoup. If you choose to unpin or update these, do so at your own risk and with due diligence. Pinned versions will be updated in future releases with known good sources.
 
@@ -98,6 +105,24 @@ npm run fleet
 ```
 
 The setup script installs the systemd template unit, symlinks the wrapper script to `~/.local/bin`, builds the console, and checks for API keys in your keyring. After setup, `npm run fleet` is the only command you need — everything else is managed from the browser.
+
+### Docker Quick Start
+
+```bash
+# 1. Clone and configure
+git clone https://github.com/LucasQuiles/WhatSoup.git
+cd WhatSoup
+cp .env.example .env
+# Edit .env — set API keys, WHATSOUP_INSTANCES, WHATSOUP_HEALTH_TOKEN
+
+# 2. Build and start
+docker compose up -d --build
+
+# 3. Open http://localhost:9099 and create your first instance
+#    Click "Add Line" → choose a type → scan the QR code with WhatsApp
+```
+
+The Docker image runs fleet + instances in a single supervisor container. Auth credentials, databases, and logs persist in named volumes (`config`, `data`, `state`). See [docs/configuration.md](docs/configuration.md) for environment variables and [docs/runbook.md](docs/runbook.md) for Docker operations.
 
 For development:
 

@@ -541,8 +541,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     }
   });
 
-  server.listen(config.healthPort, '127.0.0.1', () => {
-    log.info({ port: config.healthPort }, 'health server listening');
+  const healthHost = process.env.HEALTH_BIND_ADDRESS ?? '127.0.0.1';
+  server.listen(config.healthPort, healthHost, () => {
+    log.info({ port: config.healthPort, host: healthHost }, 'health server listening');
   });
 
   return server;
