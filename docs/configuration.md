@@ -16,7 +16,7 @@ Both take precedence over hardcoded defaults.
 | Variable | Type | Description |
 |----------|------|-------------|
 | `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances. **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so Claude Code uses Max/Pro subscription billing instead. |
-| `OPENAI_API_KEY` | string | OpenAI API key. Required for audio transcription (Whisper) in `agent` instances, and for LLM fallback in `chat` instances. |
+| `OPENAI_API_KEY` | string | OpenAI API key. Preferred for cloud audio transcription and used for LLM fallback in `chat` instances. Local transcription fallbacks can run without it when installed. |
 | `PINECONE_API_KEY` | string | Pinecone API key. Required for `chat` instances that use the memory/entity search pipeline. |
 
 These three keys are loaded from GNOME Keyring by the `whatsoup` wrapper script and exported
@@ -413,6 +413,6 @@ secret-tool store --label='openai'    service openai    <<< 'sk-...'
 secret-tool store --label='pinecone'  service pinecone  <<< 'pcsk_...'
 ```
 
-Agent and passive instances only need `openai` (for Whisper audio transcription). If the key
+Agent and passive instances only need `openai` for the cloud transcription layer and other OpenAI-backed features. If the key
 is absent, voice note transcription silently degrades — the agent receives the file path
 instead of transcribed text.

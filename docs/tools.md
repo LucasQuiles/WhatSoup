@@ -283,7 +283,7 @@ Download media from a received WhatsApp message. Returns the local file path. Us
 
 ### transcribe_audio
 
-Transcribe an audio/voice message using Whisper. Downloads the audio if needed, transcribes it, and persists the transcription to both `content` (structured JSON) and `content_text` (FTS-indexed). Returns cached transcription if already transcribed.
+Transcribe an audio/voice message using the shared transcription chain. Downloads the audio if needed, transcribes it, and persists the transcription to both `content` (structured JSON) and `content_text` (FTS-indexed). Returns cached transcription if already transcribed.
 
 | | |
 |---|---|
