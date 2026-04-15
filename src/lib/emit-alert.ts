@@ -2,7 +2,10 @@ import { spawn } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('emit-alert');
-const ALERT_SCRIPT = '/home/q/.claude/scripts/whatsapp-alert.sh';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
 
 /**
  * Fire-and-forget alert emission. Spawns whatsapp-alert.sh with stdio: 'ignore'.
