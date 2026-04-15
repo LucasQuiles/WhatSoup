@@ -35,4 +35,30 @@ describe('runCommand', () => {
 
     await rm(dir, { recursive: true, force: true });
   });
+
+  it('escalates to SIGKILL when SIGTERM is ignored', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'whatsoup-local-audio-'));
+    const pidPath = join(dir, 'pid.txt');
+    const script = [
+      'process.on("SIGTERM", () => {});',
+      'require("node:fs").writeFileSync(process.argv[1], String(process.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join('');
+
+    const start = Date.now();
+    await expect(runCommand(
+      process.execPath,
+      ['-e', script, pidPath],
+      100,
+    )).rejects.toThrow(/timed out/i);
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeGreaterThanOrEqual(2_000);
+
+    const pid = Number((await readFile(pidPath, 'utf8')).trim());
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(isAlive(pid)).toBe(false);
+
+    await rm(dir, { recursive: true, force: true });
+  }, 10_000);
 });
