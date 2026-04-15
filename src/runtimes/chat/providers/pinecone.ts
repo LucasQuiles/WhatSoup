@@ -58,6 +58,35 @@ function isBreakerOpen(operation: string): boolean {
   return getBreaker(operation).isOpen();
 }
 
+export type PineconeReadinessState = 'disabled' | 'auth_failed' | 'index_missing' | 'ready';
+
+export async function getPineconeReadiness(indexName: string = config.pineconeIndex): Promise<{
+  state: PineconeReadinessState;
+  index: string;
+}> {
+  const apiKey = process.env.PINECONE_API_KEY?.trim();
+  if (!apiKey) {
+    return { state: 'disabled', index: indexName };
+  }
+
+  try {
+    const client = new Pinecone({ apiKey });
+    const result = await client.listIndexes();
+    const indexes = Array.isArray((result as { indexes?: Array<{ name?: string }> }).indexes)
+      ? (result as { indexes: Array<{ name?: string }> }).indexes
+      : [];
+
+    if (indexes.some((index) => index.name === indexName)) {
+      return { state: 'ready', index: indexName };
+    }
+
+    return { state: 'index_missing', index: indexName };
+  } catch (err) {
+    logger.warn({ err, indexName }, 'pinecone readiness check failed');
+    return { state: 'auth_failed', index: indexName };
+  }
+}
+
 
 export interface MemoryRecord {
   id: string;

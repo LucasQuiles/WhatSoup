@@ -11,7 +11,7 @@ import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
-import { PineconeMemory } from './runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
 import { startHealthServer } from './core/health.ts';
@@ -116,6 +116,12 @@ log.info({
 if (config.adminPhones.size === 0) {
   log.warn('No admin phones configured — approval requests will not be delivered');
 }
+
+const pineconeReadiness = await getPineconeReadiness(config.pineconeIndex);
+log.info({
+  pineconeIndex: pineconeReadiness.index,
+  pineconeReadiness: pineconeReadiness.state,
+}, 'pinecone readiness');
 
 // 1. Lock
 acquireLock();
