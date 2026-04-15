@@ -337,6 +337,14 @@ export function setLidAuthDir(authDir: string): void {
  * upsert the mapping into the DB. Returns the resolved phone or null.
  *
  * Used by resolveLid() as an on-miss fallback; also callable directly.
+ *
+ * Transaction safety: uses a single-statement INSERT...ON CONFLICT rather
+ * than upsertLidMapping(), because resolveLid is called from within open
+ * transactions (e.g. blocklist-sync.ts:28). A nested BEGIN would raise
+ * "cannot start a transaction within a transaction". The access_list
+ * orphan-migration logic in upsertLidMapping is intentionally skipped here;
+ * if the mapping is genuinely new to the system, L2/L3/L6 will still
+ * exercise the orphan migration through their own non-hot-path upserts.
  */
 function lookupLidFromDisk(db: Database, lid: string): string | null {
   if (!_lidAuthDir) return null;
@@ -355,9 +363,13 @@ function lookupLidFromDisk(db: Database, lid: string): string | null {
   }
   if (typeof phone !== 'string' || phone.length === 0) return null;
 
-  // Persist so subsequent lookups hit the DB fast path.
+  // Single-statement upsert — safe inside a caller's transaction.
   try {
-    upsertLidMapping(db, lid, `${phone}@${DOMAIN_PERSONAL}`);
+    db.raw.prepare(
+      `INSERT INTO lid_mappings (lid, phone_jid, updated_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, updated_at = datetime('now')`,
+    ).run(lid, `${phone}@${DOMAIN_PERSONAL}`);
     log.info({ lid, phone }, 'L1.5 disk fallback resolved LID from reverse file');
   } catch (err) {
     log.warn({ err, lid, phone }, 'L1.5 disk fallback upsert failed');

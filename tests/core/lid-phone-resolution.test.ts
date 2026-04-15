@@ -356,6 +356,39 @@ describe('resolveLid — L1.5 disk fallback', () => {
     expect(resolveLid(db, `${lid}:2`)).toBe(phone);
     db.close();
   });
+
+  it('safe when called from within an open transaction (regression: no nested BEGIN)', () => {
+    // Reproduces the hazard in blocklist-sync.ts:28 — resolvePhoneFromJid runs
+    // inside BEGIN/COMMIT. If L1.5 fired the transaction-wrapped upsertLidMapping()
+    // here, SQLite would throw "cannot start a transaction within a transaction".
+    // The error was historically caught and swallowed, so the bug signature is
+    // NOT a thrown error — it's that the mapping never gets persisted because
+    // the inner BEGIN fails before the INSERT runs. We verify persistence directly.
+    const db = createTestDb();
+    const lid = '22222';
+    const phone = '15551234567';
+    fs.writeFileSync(
+      path.join(tmpDir, `lid-mapping-${lid}_reverse.json`),
+      JSON.stringify(phone),
+    );
+
+    db.raw.prepare('BEGIN').run();
+    const resolved = resolveLid(db, lid);
+    db.raw.prepare('COMMIT').run();
+
+    // Resolution returns the phone (read from disk)
+    expect(resolved).toBe(phone);
+
+    // Critical: the mapping must have been persisted into the DB even though
+    // we were inside an outer transaction at the time of the fallback.
+    const row = db.raw
+      .prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?')
+      .get(lid) as { phone_jid: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row?.phone_jid).toBe(`${phone}@s.whatsapp.net`);
+
+    db.close();
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
