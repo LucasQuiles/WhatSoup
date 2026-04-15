@@ -32,7 +32,7 @@ import {
 import { handleLabelsEdit, handleLabelsAssociation, cleanupOrphanedAssociations } from './core/label-sync.ts';
 import { handleBlocklistSet, handleBlocklistUpdate } from './core/blocklist-sync.ts';
 import { lookupAccess, updateAccess, insertAllowed, resolvePhoneFromJid } from './core/access-list.ts';
-import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings } from './core/lid-resolver.ts';
+import { hydrateLidMappings, upsertLidMapping, mineMessageKey, mineGroupParticipants, reconcileLidMappings, setLidAuthDir } from './core/lid-resolver.ts';
 import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
@@ -135,7 +135,10 @@ if (config.accessMode !== 'self_only') {
 }
 
 // 2a-2. Hydrate LID↔phone mappings from Baileys filesystem into DB.
+// L1.5: also register the auth dir so resolveLid() can fall back to disk on DB miss
+// (covers reverse files Baileys writes AFTER startup, e.g. first contact from a new LID).
 {
+  setLidAuthDir(config.authDir);
   const hydrated = hydrateLidMappings(db, config.authDir);
   if (hydrated > 0) log.info({ count: hydrated }, 'hydrated LID mappings from auth dir');
 }

@@ -70,7 +70,7 @@ import {
   updateAccess,
   upsertAccess,
 } from '../../src/core/access-list.ts';
-import { resolveLid, hydrateLidMappings, upsertLidMapping, getAllLidMappings } from '../../src/core/lid-resolver.ts';
+import { resolveLid, hydrateLidMappings, upsertLidMapping, getAllLidMappings, setLidAuthDir } from '../../src/core/lid-resolver.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from '../../src/core/jid-constants.ts';
 import { isAdminPhone, normalizePhone, normalizePhoneE164 } from '../../src/lib/phone.ts';
@@ -263,6 +263,98 @@ describe('resolveLid', () => {
     const tempDb = createTestDb();
     expect(hydrateLidMappings(tempDb, '/nonexistent/dir')).toBe(0);
     tempDb.close();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2b. L1.5 disk fallback — on-miss re-read of a reverse mapping file
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('resolveLid — L1.5 disk fallback', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lid-fallback-'));
+    setLidAuthDir(tmpDir);
+  });
+
+  afterEach(() => {
+    setLidAuthDir('');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('resolves a LID whose reverse file exists on disk but is not in the DB', () => {
+    const db = createTestDb();
+    const lid = '16566225768547';
+    const phone = '18459780919';
+    fs.writeFileSync(
+      path.join(tmpDir, `lid-mapping-${lid}_reverse.json`),
+      JSON.stringify(phone),
+    );
+    expect(resolveLid(db, lid)).toBe(phone);
+    db.close();
+  });
+
+  it('back-fills the DB so subsequent lookups hit the fast path', () => {
+    const db = createTestDb();
+    const lid = '77777';
+    const phone = '15555550101';
+    fs.writeFileSync(
+      path.join(tmpDir, `lid-mapping-${lid}_reverse.json`),
+      JSON.stringify(phone),
+    );
+
+    // First call — disk fallback fires, inserts into DB
+    expect(resolveLid(db, lid)).toBe(phone);
+
+    // Remove the file — next call must be served from DB, proving back-fill
+    fs.unlinkSync(path.join(tmpDir, `lid-mapping-${lid}_reverse.json`));
+    expect(resolveLid(db, lid)).toBe(phone);
+
+    db.close();
+  });
+
+  it('returns null when reverse file is absent and DB has no mapping', () => {
+    const db = createTestDb();
+    expect(resolveLid(db, '99999')).toBeNull();
+    db.close();
+  });
+
+  it('returns null when reverse file is malformed JSON', () => {
+    const db = createTestDb();
+    fs.writeFileSync(path.join(tmpDir, 'lid-mapping-12345_reverse.json'), 'not json');
+    expect(resolveLid(db, '12345')).toBeNull();
+    db.close();
+  });
+
+  it('returns null when reverse file contains a non-string value', () => {
+    const db = createTestDb();
+    fs.writeFileSync(path.join(tmpDir, 'lid-mapping-54321_reverse.json'), '123');
+    expect(resolveLid(db, '54321')).toBeNull();
+    db.close();
+  });
+
+  it('is disabled when auth dir is not set (setLidAuthDir("") or never called)', () => {
+    setLidAuthDir('');
+    const db = createTestDb();
+    fs.writeFileSync(
+      path.join(tmpDir, 'lid-mapping-88888_reverse.json'),
+      JSON.stringify('15555559999'),
+    );
+    expect(resolveLid(db, '88888')).toBeNull();
+    db.close();
+  });
+
+  it('normalizes colon-device suffix before disk lookup', () => {
+    const db = createTestDb();
+    const lid = '44444';
+    const phone = '18008008000';
+    fs.writeFileSync(
+      path.join(tmpDir, `lid-mapping-${lid}_reverse.json`),
+      JSON.stringify(phone),
+    );
+    expect(resolveLid(db, `${lid}:2`)).toBe(phone);
+    db.close();
   });
 });
 

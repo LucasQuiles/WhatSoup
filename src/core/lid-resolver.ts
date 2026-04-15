@@ -6,12 +6,13 @@
 // resilient to any single source failing.
 //
 // Defense layers (ordered by when they fire):
-//   L1  Startup hydration     — reads Baileys auth dir lid-mapping-*_reverse.json files
-//   L2  Real-time events      — lid-mapping.update (jidAliasChanged) from Baileys
-//   L3  Message mining        — extract LID↔phone from msg.key.participant + participantAlt
-//   L4  Group metadata mining — extract from group participant lid/phoneNumber fields
-//   L5  Cross-instance sync   — fleet API endpoint for broadcasting mappings between instances
-//   L6  Periodic reconciliation — scheduled sweep re-reads auth dir + cross-checks
+//   L1   Startup hydration    — reads Baileys auth dir lid-mapping-*_reverse.json files
+//   L1.5 Lazy disk fallback   — on DB miss, re-reads a single reverse file from auth dir
+//   L2   Real-time events     — lid-mapping.update (jidAliasChanged) from Baileys
+//   L3   Message mining       — extract LID↔phone from msg.key.participant + participantAlt
+//   L4   Group metadata mining — extract from group participant lid/phoneNumber fields
+//   L5   Cross-instance sync  — fleet API endpoint for broadcasting mappings between instances
+//   L6   Periodic reconciliation — scheduled sweep re-reads auth dir + cross-checks
 //
 // All layers converge on upsertLidMapping() which atomically writes the
 // lid_mappings table AND migrates orphaned access_list entries.
@@ -312,11 +313,65 @@ export function reconcileLidMappings(
   return { hydrated, unresolvedLids: lids };
 }
 
+// ── L1.5: Lazy disk fallback ────────────────────────────────────────────────
+
+/**
+ * Baileys auth dir registered by main.ts at startup. When set, `resolveLid`
+ * falls back to reading `{authDir}/lid-mapping-{lid}_reverse.json` on DB miss
+ * before giving up. This closes the gap where Baileys learns a LID↔phone pair
+ * from an incoming message and writes the reverse file immediately, but the
+ * L2 event (`lid-mapping.update`) hasn't fired yet or wasn't received before
+ * the ingest pipeline runs its access check.
+ *
+ * Empty string = disabled (production uses a real path; tests typically omit).
+ */
+let _lidAuthDir: string = '';
+
+/** Register the Baileys auth directory for L1.5 disk fallback. */
+export function setLidAuthDir(authDir: string): void {
+  _lidAuthDir = authDir ?? '';
+}
+
+/**
+ * Read a single `lid-mapping-{lid}_reverse.json` file from disk and, if valid,
+ * upsert the mapping into the DB. Returns the resolved phone or null.
+ *
+ * Used by resolveLid() as an on-miss fallback; also callable directly.
+ */
+function lookupLidFromDisk(db: Database, lid: string): string | null {
+  if (!_lidAuthDir) return null;
+  const file = join(_lidAuthDir, `lid-mapping-${lid}_reverse.json`);
+  let raw: string;
+  try {
+    raw = readFileSync(file, 'utf8').trim();
+  } catch {
+    return null;
+  }
+  let phone: unknown;
+  try {
+    phone = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof phone !== 'string' || phone.length === 0) return null;
+
+  // Persist so subsequent lookups hit the DB fast path.
+  try {
+    upsertLidMapping(db, lid, `${phone}@${DOMAIN_PERSONAL}`);
+    log.info({ lid, phone }, 'L1.5 disk fallback resolved LID from reverse file');
+  } catch (err) {
+    log.warn({ err, lid, phone }, 'L1.5 disk fallback upsert failed');
+  }
+  return phone;
+}
+
 // ── Core resolution ─────────────────────────────────────────────────────────
 
 /**
- * Resolve a LID number to a phone number via the DB.
+ * Resolve a LID number to a phone number.
+ *
  * Normalizes the LID first (strips colon-device suffix, e.g. '12345:67' → '12345').
+ * Order: DB lookup → on-miss disk fallback (L1.5) → null.
  * Returns the phone digits (without @s.whatsapp.net suffix) or null.
  *
  * Uses a lazily-cached prepared statement to avoid re-preparing on every call.
@@ -339,8 +394,10 @@ export function resolveLid(db: Database, rawLid: string): string | null {
   }
 
   const row = _resolveLidStmt.get(lid) as { phone_jid: string } | undefined;
-  if (!row) return null;
-  return bareNumber(row.phone_jid);
+  if (row) return bareNumber(row.phone_jid);
+
+  // L1.5: lazy disk fallback for mappings Baileys wrote after startup hydration.
+  return lookupLidFromDisk(db, lid);
 }
 
 /**
