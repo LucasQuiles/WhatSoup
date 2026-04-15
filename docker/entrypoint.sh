@@ -13,9 +13,13 @@ case "$MODE" in
 
     cleanup() {
       STOPPING=true
-      for pid in "${PIDS[@]}"; do
-        kill "$pid" 2>/dev/null || true
-      done
+      # Guard against empty PIDS: under `set -u`, ${PIDS[@]} errors on empty
+      # arrays, and an early SIGTERM (before any child spawn) leaves PIDS=().
+      if [ "${#PIDS[@]}" -gt 0 ]; then
+        for pid in "${PIDS[@]}"; do
+          kill "$pid" 2>/dev/null || true
+        done
+      fi
       wait
     }
     trap cleanup SIGTERM SIGINT

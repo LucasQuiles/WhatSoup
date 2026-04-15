@@ -237,6 +237,10 @@ class LaunchdServiceManager extends BaseServiceManager {
 
 // ---- Fallback for Linux without systemd (WSL1, containers) ----
 
+// Does NOT extend BaseServiceManager: the base's default startFire would
+// produce an unhandled rejection when this.start() throws. Keeping a sync
+// throw preserves fail-fast semantics for callsites that invoke startFire
+// without an onError callback.
 class NoSystemdServiceManager implements ServiceManager {
   private fail(): never {
     throw new Error(
