@@ -23,10 +23,6 @@ export async function transcribeAudioWithProviders(
 
     try {
       const text = await provider.transcribe(buffer, mimeType);
-      if (text.trim().length === 0) {
-        log.warn({ provider: provider.name }, 'transcription provider returned empty transcript');
-        continue;
-      }
       log.info({ provider: provider.name, textLength: text.length }, 'transcription complete');
       return text;
     } catch (err) {

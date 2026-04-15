@@ -50,6 +50,17 @@ describe('transcription chain', () => {
     expect(local.transcribe).toHaveBeenCalledOnce();
   });
 
+  it('returns an empty transcript immediately without cascading', async () => {
+    const openai = provider('openai', { result: '' });
+    const local = provider('local', { result: 'should not be used' });
+
+    const result = await transcribeAudioWithProviders(Buffer.from('abc'), 'audio/ogg', [openai, local]);
+
+    expect(result).toBe('');
+    expect(openai.transcribe).toHaveBeenCalledOnce();
+    expect(local.transcribe).not.toHaveBeenCalled();
+  });
+
   it('returns the fallback text when every provider is unavailable or fails', async () => {
     const openai = provider('openai', { available: false });
     const local = provider('local', { error: new Error('offline') });

@@ -416,3 +416,5 @@ secret-tool store --label='pinecone'  service pinecone  <<< 'pcsk_...'
 Agent and passive instances only need `openai` for the cloud transcription layer and other OpenAI-backed features. If the key
 is absent, voice note transcription silently degrades — the agent receives the file path
 instead of transcribed text.
+
+For mwlab host-specific Pinecone/transcription setup, see `docs/runbooks/mwlab-transcription-pinecone.md`.

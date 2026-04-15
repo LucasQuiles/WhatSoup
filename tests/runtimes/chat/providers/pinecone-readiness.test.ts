@@ -47,6 +47,14 @@ describe('getPineconeReadiness', () => {
     });
   });
 
+  it('returns disabled when the configured index name is empty', async () => {
+    process.env.PINECONE_API_KEY = 'pcsk-test';
+    await expect(getPineconeReadiness('')).resolves.toEqual({
+      state: 'disabled',
+      index: '',
+    });
+  });
+
   it('returns ready when the configured index exists', async () => {
     process.env.PINECONE_API_KEY = 'pcsk-test';
     vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
@@ -73,15 +81,30 @@ describe('getPineconeReadiness', () => {
     });
   });
 
-  it('returns auth_failed when listing indexes throws', async () => {
+  it('returns auth_failed when listing indexes throws with 401', async () => {
     process.env.PINECONE_API_KEY = 'pcsk-test';
     vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
       this.listIndexes = mockListIndexes;
     } as unknown as () => Pinecone);
-    mockListIndexes.mockRejectedValueOnce(new Error('401 unauthorized'));
+    mockListIndexes.mockRejectedValueOnce(Object.assign(new Error('401 unauthorized'), { status: 401 }));
 
     await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
       state: 'auth_failed',
+      index: 'mw-mind',
+    });
+  });
+
+  it('returns network_error when listing indexes fails due to connectivity', async () => {
+    process.env.PINECONE_API_KEY = 'pcsk-test';
+    vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
+      this.listIndexes = mockListIndexes;
+    } as unknown as () => Pinecone);
+    mockListIndexes.mockRejectedValueOnce(Object.assign(new Error('connect refused'), {
+      cause: { code: 'ECONNREFUSED' },
+    }));
+
+    await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
+      state: 'network_error',
       index: 'mw-mind',
     });
   });

@@ -58,15 +58,42 @@ function isBreakerOpen(operation: string): boolean {
   return getBreaker(operation).isOpen();
 }
 
-export type PineconeReadinessState = 'disabled' | 'auth_failed' | 'index_missing' | 'ready';
+export type PineconeReadinessState = 'disabled' | 'auth_failed' | 'index_missing' | 'network_error' | 'ready';
+
+function classifyReadinessError(err: unknown): Extract<PineconeReadinessState, 'auth_failed' | 'network_error'> {
+  const status = typeof err === 'object' && err !== null && 'status' in err
+    ? (err as { status?: number }).status
+    : undefined;
+  if (status === 401 || status === 403) {
+    return 'auth_failed';
+  }
+
+  const cause = typeof err === 'object' && err !== null && 'cause' in err
+    ? (err as { cause?: { code?: string } }).cause
+    : undefined;
+  if (cause?.code && ['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(cause.code)) {
+    return 'network_error';
+  }
+
+  if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TypeError')) {
+    return 'network_error';
+  }
+
+  return 'auth_failed';
+}
 
 export async function getPineconeReadiness(indexName: string = config.pineconeIndex): Promise<{
   state: PineconeReadinessState;
   index: string;
 }> {
+  const targetIndex = indexName.trim();
+  if (!targetIndex) {
+    return { state: 'disabled', index: targetIndex };
+  }
+
   const apiKey = process.env.PINECONE_API_KEY?.trim();
   if (!apiKey) {
-    return { state: 'disabled', index: indexName };
+    return { state: 'disabled', index: targetIndex };
   }
 
   try {
@@ -76,17 +103,17 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
       ? (result as { indexes: Array<{ name?: string }> }).indexes
       : [];
 
-    if (indexes.some((index) => index.name === indexName)) {
-      return { state: 'ready', index: indexName };
+    if (indexes.some((index) => index.name === targetIndex)) {
+      return { state: 'ready', index: targetIndex };
     }
 
-    return { state: 'index_missing', index: indexName };
+    return { state: 'index_missing', index: targetIndex };
   } catch (err) {
-    logger.warn({ err, indexName }, 'pinecone readiness check failed');
-    return { state: 'auth_failed', index: indexName };
+    const state = classifyReadinessError(err);
+    logger.warn({ err, indexName: targetIndex, state }, 'pinecone readiness check failed');
+    return { state, index: targetIndex };
   }
 }
-
 
 export interface MemoryRecord {
   id: string;

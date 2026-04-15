@@ -1,10 +1,13 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-function extensionForMimeType(mimeType: string): string {
+const DEFAULT_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
+const KILL_GRACE_MS = 2_000;
+
+export function extensionForMimeType(mimeType: string): string {
   if (mimeType.includes('ogg')) return 'ogg';
   if (mimeType.includes('mp4') || mimeType.includes('m4a')) return 'm4a';
   if (mimeType.includes('webm')) return 'webm';
@@ -29,22 +32,91 @@ export async function runCommand(
   timeoutMs: number,
 ): Promise<{ stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    execFile(
-      command,
-      args,
-      { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          const wrapped = new Error(
-            stderr?.trim() || stdout?.trim() || error.message,
-            { cause: error },
-          );
-          reject(wrapped);
-          return;
-        }
+    const controller = new AbortController();
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      signal: controller.signal,
+      killSignal: 'SIGTERM',
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let pendingError: Error | null = null;
+    let settled = false;
+    let exited = false;
+    let killTimer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+    };
+
+    const rejectOnce = (error: Error) => {
+      if (!pendingError) pendingError = error;
+    };
+
+    const requestTermination = (error: Error) => {
+      rejectOnce(error);
+      controller.abort();
+      if (!killTimer) {
+        killTimer = setTimeout(() => {
+          if (!exited) child.kill('SIGKILL');
+        }, KILL_GRACE_MS);
+      }
+    };
+
+    const timeoutTimer = setTimeout(() => {
+      requestTermination(new Error(`Command timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stdoutBytes += buffer.length;
+      stdoutChunks.push(buffer);
+      if (stdoutBytes + stderrBytes > DEFAULT_MAX_BUFFER_BYTES) {
+        requestTermination(new Error(`Command output exceeded ${DEFAULT_MAX_BUFFER_BYTES} bytes`));
+      }
+    });
+
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stderrBytes += buffer.length;
+      stderrChunks.push(buffer);
+      if (stdoutBytes + stderrBytes > DEFAULT_MAX_BUFFER_BYTES) {
+        requestTermination(new Error(`Command output exceeded ${DEFAULT_MAX_BUFFER_BYTES} bytes`));
+      }
+    });
+
+    child.on('error', (error) => {
+      if (error.name === 'AbortError') return;
+      rejectOnce(new Error(error.message, { cause: error }));
+    });
+
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      exited = true;
+      settled = true;
+      cleanup();
+
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
+
+      if (pendingError) {
+        reject(pendingError);
+        return;
+      }
+
+      if (code === 0) {
         resolve({ stdout, stderr });
-      },
-    );
+        return;
+      }
+
+      reject(new Error(
+        stderr.trim() || stdout.trim() || `Command failed with code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}`,
+      ));
+    });
   });
 }
 
