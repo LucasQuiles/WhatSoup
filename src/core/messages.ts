@@ -161,6 +161,28 @@ export function getRecentMessages(db: Database, conversationKey: string, limit: 
 }
 
 /**
+ * Return messages in a conversation that arrived after `sinceUnixSec`, ordered
+ * chronologically (ASC). Capped at `limit` to avoid runaway context injection.
+ * Used to inject messages the agent missed during downtime (restart, crash).
+ */
+export function getMessagesSince(
+  db: Database,
+  conversationKey: string,
+  sinceUnixSec: number,
+  limit: number = 30,
+): StoredMessage[] {
+  const rows = db.raw.prepare(`
+    SELECT * FROM messages
+    WHERE conversation_key = @conversation_key
+      AND timestamp > @since
+    ORDER BY timestamp ASC, pk ASC
+    LIMIT @limit
+  `).all({ conversation_key: conversationKey, since: sinceUnixSec, limit }) as Record<string, unknown>[];
+
+  return rows.map(rowToStoredMessage);
+}
+
+/**
  * Return messages that have not yet been enrichment-processed, ordered ASC
  * so enrichment runs in arrival order.
  */

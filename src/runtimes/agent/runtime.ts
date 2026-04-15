@@ -33,7 +33,7 @@ import {
 } from './outbound-queue.ts';
 import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
-import { getRecentMessages, updateMediaPath, updateTranscription } from '../../core/messages.ts';
+import { getRecentMessages, getMessagesSince, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
@@ -1203,13 +1203,23 @@ export class AgentRuntime implements Runtime {
         const perChatQ = this.createOutboundQueue(chatJid, 'startup proactive per-chat resume');
         this.chatQueues.set(initialMapKey, perChatQ);
 
-        // Attempt resume, then send a continuation turn so the agent picks up
-        // where it left off without requiring the user to send "proceed".
+        // Attempt resume, then inject any messages the agent missed during
+        // downtime and send a continuation turn so the agent picks up where it
+        // left off without requiring the user to send "proceed".
+        const checkpointUpdatedAt = full.updated_at
+          ? Math.floor(new Date(full.updated_at + 'Z').getTime() / 1000)
+          : undefined;
         session.spawnSession(full.session_id).then(async () => {
           // Small delay to let the init event propagate (confirms resume succeeded)
           await new Promise(r => setTimeout(r, 1_000));
           if (!session.getStatus().active) return; // resume failed, onResumeFailed handles it
           try {
+            // Inject messages that arrived while the service was down.
+            // Without this, the agent resumes with stale context — it has no
+            // awareness of messages sent during the downtime window.
+            if (checkpointUpdatedAt) {
+              await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
+            }
             await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
@@ -2907,6 +2917,7 @@ export class AgentRuntime implements Runtime {
       if (session) {
         const sessionId = info.sessionId;
         const dbRowId = info.dbRowId;
+        const crashedAtSec = Math.floor(Date.now() / 1000);
         const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, crashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS);
         log.info({ mapKey, sessionId, attempt: crashCount, delayMs }, 'scheduling auto-respawn');
         const timer = setTimeout(() => {
@@ -2921,7 +2932,11 @@ export class AgentRuntime implements Runtime {
             if (!session.getStatus().active) return;
             clearAlertSource(this.instanceName, 'agent_respawn_failed');
             try {
-              await session.sendTurn('[System: session resumed after crash — continue where you left off]');
+              // Inject messages that arrived during the crash window
+              if (chatJid) {
+                await this.injectMissedMessages(session, chatJid, crashedAtSec);
+              }
+              await session.sendTurn('[System: session resumed after crash ��� continue where you left off]');
               log.info({ mapKey }, 'sent continuation turn after auto-respawn');
             } catch (err) {
               log.warn({ err, mapKey }, 'failed to send continuation turn after auto-respawn');
@@ -2986,6 +3001,37 @@ export class AgentRuntime implements Runtime {
   private formatRecoveryTimestamp(unixMs: number): string {
     const d = new Date(unixMs * 1000); // timestamps are unix seconds
     return d.toTimeString().slice(0, 5); // HH:MM
+  }
+
+  /**
+   * Inject messages the agent missed during downtime into a resumed session.
+   * Uses `sinceUnixSec` (typically the checkpoint's updated_at) to fetch only
+   * messages that arrived after the session was last active.
+   * Returns true if any context was injected.
+   */
+  private async injectMissedMessages(
+    session: SessionManager,
+    chatJid: string,
+    sinceUnixSec: number,
+  ): Promise<boolean> {
+    try {
+      const convKey = toConversationKey(chatJid);
+      const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
+      if (missed.length === 0) return false;
+
+      const lines = missed
+        .map(
+          (m) =>
+            `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
+        )
+        .join('\n');
+      await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
+      log.info({ chatJid, messageCount: missed.length, sinceUnixSec }, 'injected missed messages after resume');
+      return true;
+    } catch (err) {
+      log.warn({ err, chatJid }, 'missed message injection failed — agent continues without context');
+      return false;
+    }
   }
 
   /**
