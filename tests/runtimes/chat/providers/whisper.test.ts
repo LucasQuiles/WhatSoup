@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const FALLBACK_TEXT = '[🎤 Voice note received — transcription unavailable]';
 
-// Use vi.hoisted so the mock fn is available inside vi.mock factory (which is hoisted)
 const { mockTranscriptionsCreate } = vi.hoisted(() => ({
   mockTranscriptionsCreate: vi.fn(),
 }));
@@ -22,18 +21,17 @@ vi.mock('../../../../src/logger.ts', () => ({
 }));
 
 import OpenAI from 'openai';
-// Import AFTER mocks are registered
-import { transcribeAudio } from '../../../../src/runtimes/chat/providers/whisper.ts';
+import { _testing, transcribeWithOpenAI } from '../../../../src/runtimes/chat/providers/transcription/openai-whisper.ts';
 
 function makeAudioBuffer(): Buffer {
   return Buffer.from([0x00, 0x01, 0x02, 0x03]);
 }
 
-describe('transcribeAudio (Whisper)', () => {
+describe('transcribeWithOpenAI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Wire up the mock constructor implementation each time so the lazy
-    // singleton (on first construction) gets the correct audio client shape.
+    process.env.OPENAI_API_KEY = 'sk-test';
+    _testing.reset();
     vi.mocked(OpenAI).mockImplementation(function (this: Record<string, unknown>) {
       this.audio = {
         transcriptions: { create: mockTranscriptionsCreate },
@@ -41,42 +39,37 @@ describe('transcribeAudio (Whisper)', () => {
     } as unknown as () => OpenAI);
   });
 
-  // ── Positive tests ─────────────────────────────────────────────────────────
-
   it('returns transcription text on success', async () => {
     mockTranscriptionsCreate.mockResolvedValueOnce({ text: 'Hello world' });
-    const result = await transcribeAudio(makeAudioBuffer(), 'audio/ogg');
+    const result = await transcribeWithOpenAI(makeAudioBuffer(), 'audio/ogg');
     expect(result).toBe('Hello world');
   });
 
   it('returns exact transcription text without modification', async () => {
     const verbatim = 'The quick brown fox jumps over the lazy dog.';
     mockTranscriptionsCreate.mockResolvedValueOnce({ text: verbatim });
-    const result = await transcribeAudio(makeAudioBuffer(), 'audio/webm');
+    const result = await transcribeWithOpenAI(makeAudioBuffer(), 'audio/webm');
     expect(result).toBe(verbatim);
   });
 
-  // ── Negative tests ────────────────────────────────────────────────────────
-
-  it('returns fallback text on AbortError (timeout)', async () => {
+  it('throws on AbortError (timeout)', async () => {
     const abortErr = new Error('aborted');
     abortErr.name = 'AbortError';
     mockTranscriptionsCreate.mockRejectedValueOnce(abortErr);
-    const result = await transcribeAudio(makeAudioBuffer(), 'audio/ogg');
-    expect(result).toBe(FALLBACK_TEXT);
+    mockTranscriptionsCreate.mockRejectedValueOnce(abortErr);
+    await expect(transcribeWithOpenAI(makeAudioBuffer(), 'audio/ogg')).rejects.toThrow('aborted');
   });
 
-  it('returns fallback text on API error', async () => {
+  it('throws on API error', async () => {
     mockTranscriptionsCreate.mockRejectedValueOnce(new Error('Internal Server Error'));
-    const result = await transcribeAudio(makeAudioBuffer(), 'audio/mp4');
-    expect(result).toBe(FALLBACK_TEXT);
+    mockTranscriptionsCreate.mockRejectedValueOnce(new Error('Internal Server Error'));
+    await expect(transcribeWithOpenAI(makeAudioBuffer(), 'audio/mp4')).rejects.toThrow('Internal Server Error');
   });
 
-  it('fallback text does not contain stack trace or error details', async () => {
-    mockTranscriptionsCreate.mockRejectedValueOnce(new Error('some internal error details'));
-    const result = await transcribeAudio(makeAudioBuffer(), 'audio/ogg');
-    expect(result).not.toContain('some internal error details');
-    expect(result).not.toContain('Error');
-    expect(result).not.toContain('at ');
+  it('does not leak stack trace details through the compatibility fallback path', async () => {
+    delete process.env.OPENAI_API_KEY;
+    await expect(transcribeWithOpenAI(makeAudioBuffer(), 'audio/ogg')).rejects.toThrow('OPENAI_API_KEY not set');
+    expect(FALLBACK_TEXT).not.toContain('Error');
+    expect(FALLBACK_TEXT).not.toContain('at ');
   });
 });

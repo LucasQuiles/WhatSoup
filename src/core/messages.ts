@@ -318,9 +318,9 @@ export function updateMediaPath(db: Database, messageId: string, filePath: strin
 }
 
 /**
- * Persist a Whisper transcription to both content (structured JSON)
+ * Persist a transcription to both content (structured JSON)
  * and content_text (human-readable, FTS-indexed).
- * Called by agent runtime and transcribe_audio MCP tool after Whisper completes.
+ * Called by agent runtime and transcribe_audio MCP tool after transcription completes.
  */
 export function updateTranscription(db: Database, messageId: string, transcription: string): void {
   // Read existing content to merge transcription into structured JSON

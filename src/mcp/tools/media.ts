@@ -357,7 +357,7 @@ export function registerMediaTools(
   registry.register({
     name: 'transcribe_audio',
     description:
-      'Transcribe an audio/voice message using Whisper. Downloads the audio if needed, transcribes it, and persists the transcription. Returns cached transcription if already transcribed.',
+      'Transcribe an audio/voice message using the shared transcription chain. Downloads the audio if needed, transcribes it, and persists the transcription. Returns cached transcription if already transcribed.',
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
@@ -454,12 +454,12 @@ export function registerMediaTools(
         return { error: 'no_audio_data', message: 'No audio data available. Media path missing and raw message unavailable.' };
       }
 
-      // Transcribe via Whisper
+      // Transcribe via the shared transcription chain
       const { transcribeAudio } = await import('../../runtimes/chat/providers/whisper.ts');
       const transcription = await transcribeAudio(audioBuffer, audioMime);
 
       if (!transcription || transcription.includes('transcription unavailable')) {
-        return { error: 'transcription_failed', message: 'Whisper transcription failed or is unavailable.' };
+        return { error: 'transcription_failed', message: 'Transcription failed or is unavailable.' };
       }
 
       // Persist transcription

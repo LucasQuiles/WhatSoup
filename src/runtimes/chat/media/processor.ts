@@ -91,7 +91,7 @@ export async function processMedia(
     };
   }
 
-  // Audio: download → Whisper transcription
+  // Audio: download → shared transcription chain
   if (contentType === 'audio') {
     if (!downloadFn) {
       return { content: "[audio — couldn't download]", images: [] };

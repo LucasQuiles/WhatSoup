@@ -113,10 +113,10 @@ const GLOBAL_CRASH_SCOPE_KEY = '__global__';
  *
  * Media files (images, audio, video, documents, stickers) are saved to disk so the
  * agent can use its Read tool to view them. The agent receives the file path in brackets.
- * Audio is also transcribed via Whisper so the agent gets the text without having to
+ * Audio is also transcribed via the shared transcription chain so the agent gets the text without having to
  * open the file. Non-downloadable types (location, contact, poll) return descriptive text.
  *
- * Requires OPENAI_API_KEY in the environment for audio transcription (Whisper).
+ * OpenAI is used when configured; local faster-whisper and whisper.cpp fallbacks are used when installed.
  */
 export async function prepareContentForAgent(msg: IncomingMessage, db?: Database, messageId?: string): Promise<string> {
   const { contentType, content } = msg;
