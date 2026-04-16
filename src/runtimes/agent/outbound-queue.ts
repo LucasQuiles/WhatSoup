@@ -34,6 +34,22 @@ export const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: st
   cancelled: { label: 'Cancelled', emoji: '⏭️' },
 };
 
+/** User-friendly labels for 'friendly' mode — plain language, no jargon. */
+const FRIENDLY_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
+  reading:   { label: 'Looking at',       emoji: '👀' },
+  searching: { label: 'Searching',        emoji: '🔍' },
+  modifying: { label: 'Updating',         emoji: '✏️' },
+  running:   { label: 'Working on',       emoji: '⚙️' },
+  agent:     { label: 'Getting help from', emoji: '🤝' },
+  fetching:  { label: 'Looking up',       emoji: '🌐' },
+  planning:  { label: 'Planning',         emoji: '📋' },
+  skill:     { label: 'Loading',          emoji: '📦' },
+  other:     { label: 'Working on',       emoji: '⚙️' },
+  error:     { label: 'Ran into an issue', emoji: '⚠️' },
+  blocked:   { label: 'Paused',           emoji: '⏸️' },
+  cancelled: { label: 'Skipped',          emoji: '⏭️' },
+};
+
 const MAX_MESSAGE_LENGTH = 4000;
 // Exported so tests can import the exact values rather than hardcoding them.
 // Changing a constant here will automatically break tests that rely on it.
@@ -101,8 +117,8 @@ export interface IOutboundQueue {
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
   enqueueResultText(text: string): void;
   enqueueToolUpdate(update: ToolUpdate): void;
-  /** Set the tool update display mode. 'minimal' hides technical details from non-technical users. */
-  setToolUpdateMode(mode: 'full' | 'minimal'): void;
+  /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
+  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void;
   /** Start the composing indicator immediately without adding any content to the queue. */
   indicateTyping(): void;
   flush(): Promise<void>;
@@ -161,8 +177,8 @@ export class OutboundQueue implements IOutboundQueue {
   /** Promise chain used to serialize sends. */
   private chain: Promise<void> = Promise.resolve();
 
-  /** Controls tool update verbosity. 'minimal' suppresses technical noise. */
-  private toolUpdateMode: 'full' | 'minimal' = 'full';
+  /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
+  private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
 
   /** In minimal mode: detail strings already sent this turn (dedup across batches). */
   private minimalSentDetails = new Set<string>();
@@ -178,8 +194,8 @@ export class OutboundQueue implements IOutboundQueue {
     this.cachedConversationKey = toConversationKey(chatJid);
   }
 
-  /** Set the tool update display mode. 'minimal' hides technical details from non-technical users. */
-  setToolUpdateMode(mode: 'full' | 'minimal'): void {
+  /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
+  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void {
     this.toolUpdateMode = mode;
   }
 
@@ -360,6 +376,14 @@ export class OutboundQueue implements IOutboundQueue {
           this.scheduleMinimalHeartbeat();
           return;
         }
+      }
+    }
+    // Friendly mode: let everything through (no filtering), but skip internal noise
+    // that adds no user value (skill lookups, cancelled ops).
+    if (this.toolUpdateMode === 'friendly') {
+      if (update.category === 'skill' || update.category === 'cancelled') {
+        this.startTyping();
+        return;
       }
     }
     this.toolBuffer.push(update);
@@ -547,9 +571,10 @@ export class OutboundQueue implements IOutboundQueue {
     }
 
     // Render each group as "{emoji} {Label}:\n  • detail\n  • detail"
+    const meta = this.toolUpdateMode === 'friendly' ? FRIENDLY_CATEGORY_META : TOOL_CATEGORY_META;
     const sections: string[] = [];
     for (const category of categoryOrder) {
-      const { emoji, label } = TOOL_CATEGORY_META[category];
+      const { emoji, label } = meta[category];
       const details = groups.get(category)!;
       const bullets = details.map((d) => `  • ${d}`).join('\n');
       sections.push(`${emoji} ${label}:\n${bullets}`);

@@ -210,8 +210,9 @@ export const config = {
   pineconeAllowedIndexes: (Array.isArray(instance?.pineconeAllowedIndexes) ? instance.pineconeAllowedIndexes : []) as string[],
 
   // Tool update verbosity: 'full' (default — all updates shown to user),
-  // 'minimal' (suppress technical noise — only friendly status updates)
-  toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'minimal',
+  // 'friendly' (all updates in plain language for non-technical users),
+  // 'minimal' (suppress most updates — only critical status shown)
+  toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'friendly' | 'minimal',
 
   // Health
   healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),
