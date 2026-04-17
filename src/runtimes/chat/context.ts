@@ -1,6 +1,7 @@
 import type { EntitySearchResult, PineconeMemory, SearchResult } from './providers/pinecone.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
+import { routeQuery } from './memory/query-router.ts';
 
 const log = createChildLogger('conversation');
 
@@ -57,10 +58,23 @@ export async function loadContext(
   if (!messageText.trim()) return '';
 
   if (config.pineconeSearchMode === 'entity') {
+    // Classify the query up-front so WhatsApp-intent ordering is visible in
+    // logs even when the underlying entity search uses filters rather than
+    // namespace fan-out. knowledge.ts consumes the same router for the
+    // standalone mw-mind profile where namespace ordering actually changes
+    // the fan-out.
+    const routed = routeQuery(messageText);
     const results = await pinecone.searchEntities(messageText);
     const topScores = results.slice(0, 3).map((r) => r.score);
     log.info(
-      { chatJid, senderJid, entityHits: results.length, topScores },
+      {
+        chatJid,
+        senderJid,
+        entityHits: results.length,
+        topScores,
+        queryIntent: routed.intent,
+        routedNamespaces: routed.namespaces,
+      },
       'entity context retrieval complete',
     );
     return loadEntityContext(results);

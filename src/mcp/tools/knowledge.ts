@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
+import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import type { ToolDeclaration } from '../types.ts';
 
 const log = createChildLogger('knowledge-tools');
@@ -45,15 +46,28 @@ const INDEX_PROFILES: Record<string, {
   },
   'mw-mind': {
     namespace: '',
-    namespaces: ['local-docs', 'onedrive', 'whatsapp', 'whatsapp-contacts'],
+    // Phase 3: fan-out includes the three new WhatsApp namespaces
+    // (whatsapp-facts, whatsapp-chunks, whatsapp-summaries). The historical
+    // `whatsapp` namespace remains read-only source material. WhatsApp queries
+    // fan out in intent-ordered fashion via query-router.ts.
+    namespaces: [
+      'local-docs',
+      'onedrive',
+      'whatsapp',
+      'whatsapp-contacts',
+      'whatsapp-facts',
+      'whatsapp-chunks',
+      'whatsapp-summaries',
+    ],
     searchMode: 'vector',
     rerank: false,
     rerankModel: '',
     topK: 20,
     rerankTopN: 6,
     description:
-      "Michael's memory — local docs, OneDrive files, WhatsApp messages, and WhatsApp contacts. " +
-      "Standalone index; queries embed client-side via the local mw-mind-embed service.",
+      "Michael's memory — local docs, OneDrive files, WhatsApp messages (facts, chunks, summaries), and WhatsApp contacts. " +
+      "Standalone index; queries embed client-side via the local mw-mind-embed service. " +
+      "WhatsApp queries route by intent: facts-first, raw-first, or hybrid.",
   },
 };
 
@@ -192,12 +206,30 @@ export function registerKnowledgeTools(
       const profile = INDEX_PROFILES[indexName];
       const startMs = Date.now();
 
-      // Determine which namespaces to search
-      const namespacesToSearch: string[] = nsOverride
-        ? [nsOverride]
-        : profile.namespaces.length > 0
-          ? profile.namespaces
-          : [profile.namespace];
+      // Determine which namespaces to search.
+      //
+      // For the standalone mw-mind index, WhatsApp queries route by intent:
+      //   - facts-first: whatsapp-facts, then whatsapp-summaries, whatsapp-chunks
+      //   - raw-first:   whatsapp-summaries, whatsapp-chunks, then whatsapp-facts
+      //   - hybrid:      whatsapp-summaries, whatsapp-facts, whatsapp-chunks
+      // Other scopes (local-docs, onedrive, whatsapp, whatsapp-contacts) are
+      // appended after the routed WhatsApp order so they still participate in
+      // the fan-out. An explicit `namespace` argument overrides routing.
+      let namespacesToSearch: string[];
+      let queryIntent: string | undefined;
+      if (nsOverride) {
+        namespacesToSearch = [nsOverride];
+      } else if (indexName === 'mw-mind') {
+        const routed = routeQuery(query);
+        queryIntent = routed.intent;
+        const routedSet = new Set(routed.namespaces);
+        const others = profile.namespaces.filter((ns) => !routedSet.has(ns));
+        namespacesToSearch = [...routed.namespaces, ...others];
+      } else if (profile.namespaces.length > 0) {
+        namespacesToSearch = profile.namespaces;
+      } else {
+        namespacesToSearch = [profile.namespace];
+      }
 
       try {
         const index = pc.index(indexName);
@@ -323,7 +355,14 @@ export function registerKnowledgeTools(
 
         const durationMs = Date.now() - startMs;
         log.info(
-          { index: indexName, namespaces: namespacesToSearch, query: query.slice(0, 80), hits: deduped.length, durationMs },
+          {
+            index: indexName,
+            namespaces: namespacesToSearch,
+            query: query.slice(0, 80),
+            hits: deduped.length,
+            durationMs,
+            ...(queryIntent ? { queryIntent } : {}),
+          },
           'knowledge search complete',
         );
 
