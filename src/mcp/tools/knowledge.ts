@@ -16,7 +16,7 @@ const INDEX_PROFILES: Record<string, {
   namespace: string;
   /** Named namespaces to fan-out search across (empty = use namespace field only). */
   namespaces: string[];
-  searchMode: 'entity' | 'text';
+  searchMode: 'entity' | 'text' | 'vector';
   rerank: boolean;
   rerankModel: string;
   topK: number;
@@ -43,7 +43,22 @@ const INDEX_PROFILES: Record<string, {
     rerankTopN: 6,
     description: 'Structured entities — accounts, contacts, buildings, people, external system records',
   },
+  'mw-mind': {
+    namespace: '',
+    namespaces: ['local-docs', 'onedrive', 'whatsapp', 'whatsapp-contacts'],
+    searchMode: 'vector',
+    rerank: false,
+    rerankModel: '',
+    topK: 20,
+    rerankTopN: 6,
+    description:
+      "Michael's memory — local docs, OneDrive files, WhatsApp messages, and WhatsApp contacts. " +
+      "Standalone index; queries embed client-side via the local mw-mind-embed service.",
+  },
 };
+
+/** Local embed service (mw-mind) — emits multilingual-e5-large vectors. */
+const MW_MIND_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
 /** Max chars per result text to keep tool output within token budget. */
 const MAX_TEXT_PER_RESULT = 600;
@@ -186,27 +201,80 @@ export function registerKnowledgeTools(
 
       try {
         const index = pc.index(indexName);
-
-        // Phase 1: vector search (fan out across namespaces if needed)
-        const searchPromises = namespacesToSearch.map((ns) =>
-          index.searchRecords({
-            namespace: ns,
-            query: {
-              topK: top_k ?? profile.topK,
-              inputs: { text: query },
-            },
-            fields: ['*'],
-          }).catch((err) => {
-            log.warn({ err, namespace: ns }, 'namespace search failed — skipping');
-            return null;
-          }),
-        );
-
-        const responses = await Promise.all(searchPromises);
         let hits: ParsedHit[] = [];
-        for (const response of responses) {
-          if (response?.result?.hits) {
-            hits.push(...parseHits(response.result.hits));
+
+        if (profile.searchMode === 'vector') {
+          // Standalone index: embed the query client-side and call index.query.
+          // mw-mind uses multilingual-e5-large (1024-dim) served at MW_MIND_EMBED_URL.
+          let vec: number[];
+          try {
+            const embedResp = await fetch(MW_MIND_EMBED_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ texts: [query], input_type: 'query' }),
+            });
+            if (!embedResp.ok) {
+              const status = embedResp.status;
+              log.error({ index: indexName, status }, 'embed service returned non-OK');
+              return { error: `Embed service unavailable (HTTP ${status}). Try again in a moment.` };
+            }
+            const embedJson = (await embedResp.json()) as { vectors: number[][]; dim?: number };
+            if (!Array.isArray(embedJson.vectors) || embedJson.vectors.length === 0) {
+              log.error({ index: indexName }, 'embed service returned no vectors');
+              return { error: 'Embed service returned no vectors.' };
+            }
+            vec = embedJson.vectors[0]!;
+          } catch (embedErr) {
+            log.error({ err: embedErr, index: indexName }, 'embed service call failed');
+            return { error: 'Knowledge base is temporarily unavailable (embed service). Try again in a moment.' };
+          }
+
+          const topK = top_k ?? profile.topK;
+          const queryPromises = namespacesToSearch.map((ns) =>
+            index.namespace(ns).query({
+              topK,
+              vector: vec,
+              includeMetadata: true,
+            }).catch((err) => {
+              log.warn({ err, namespace: ns }, 'namespace vector query failed — skipping');
+              return null;
+            }),
+          );
+          const responses = await Promise.all(queryPromises);
+          for (const response of responses) {
+            if (!response || !Array.isArray(response.matches)) continue;
+            for (const match of response.matches) {
+              const fields = (match.metadata ?? {}) as Record<string, unknown>;
+              hits.push({
+                id: String(match.id),
+                score: typeof match.score === 'number' ? match.score : 0,
+                text: (fields['text'] as string) ?? '',
+                entityType: (fields['entity_type'] as string) ?? 'document',
+                fields,
+              });
+            }
+          }
+        } else {
+          // Integrated-index branch: Pinecone-hosted embedding via searchRecords.
+          const searchPromises = namespacesToSearch.map((ns) =>
+            index.searchRecords({
+              namespace: ns,
+              query: {
+                topK: top_k ?? profile.topK,
+                inputs: { text: query },
+              },
+              fields: ['*'],
+            }).catch((err) => {
+              log.warn({ err, namespace: ns }, 'namespace search failed — skipping');
+              return null;
+            }),
+          );
+
+          const responses = await Promise.all(searchPromises);
+          for (const response of responses) {
+            if (response?.result?.hits) {
+              hits.push(...parseHits(response.result.hits));
+            }
           }
         }
 
