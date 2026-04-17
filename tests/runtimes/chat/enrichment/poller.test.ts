@@ -38,7 +38,9 @@ vi.mock('../../../../src/core/messages.ts', () => ({
   incrementEnrichmentRetries: vi.fn(),
 }));
 
-// Mock extractor, validator, upserter so we control their output
+// Mock extractor, validator, fact-export-queue so we control their output.
+// The poller now enqueues validated facts into SQLite instead of upserting
+// to Pinecone directly; the standalone mw-mind pipeline drains the queue.
 vi.mock('../../../../src/runtimes/chat/enrichment/extractor.ts', () => ({
   extractFacts: vi.fn(),
 }));
@@ -47,8 +49,8 @@ vi.mock('../../../../src/runtimes/chat/enrichment/validator.ts', () => ({
   validateFacts: vi.fn(),
 }));
 
-vi.mock('../../../../src/runtimes/chat/enrichment/upserter.ts', () => ({
-  upsertFacts: vi.fn(),
+vi.mock('../../../../src/runtimes/chat/enrichment/fact-export-queue.ts', () => ({
+  enqueueFacts: vi.fn(),
 }));
 
 import { EnrichmentPoller } from '../../../../src/runtimes/chat/enrichment/poller.ts';
@@ -63,7 +65,7 @@ import {
 } from '../../../../src/core/messages.ts';
 import { extractFacts } from '../../../../src/runtimes/chat/enrichment/extractor.ts';
 import { validateFacts } from '../../../../src/runtimes/chat/enrichment/validator.ts';
-import { upsertFacts } from '../../../../src/runtimes/chat/enrichment/upserter.ts';
+import { enqueueFacts } from '../../../../src/runtimes/chat/enrichment/fact-export-queue.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -156,7 +158,7 @@ describe('EnrichmentPoller', () => {
     vi.mocked(incrementEnrichmentRetries).mockReturnValue(undefined);
     vi.mocked(extractFacts).mockResolvedValue([]);
     vi.mocked(validateFacts).mockResolvedValue([]);
-    vi.mocked(upsertFacts).mockResolvedValue({ upserted: 0, deduplicated: 0, superseded: 0 });
+    vi.mocked(enqueueFacts).mockReturnValue(0);
   });
 
   afterEach(() => {
@@ -184,7 +186,7 @@ describe('EnrichmentPoller', () => {
 
     const validatedFact = { ...extractedFact, adjustedConfidence: 0.9 };
     vi.mocked(validateFacts).mockResolvedValue([validatedFact]);
-    vi.mocked(upsertFacts).mockResolvedValue({ upserted: 1, deduplicated: 0, superseded: 0 });
+    vi.mocked(enqueueFacts).mockReturnValue(1);
 
     const { poller } = makePoller();
     await triggerOneCycle(poller);
@@ -192,7 +194,8 @@ describe('EnrichmentPoller', () => {
     expect(getUnprocessedMessages).toHaveBeenCalledTimes(1);
     expect(extractFacts).toHaveBeenCalledTimes(1);
     expect(validateFacts).toHaveBeenCalledTimes(1);
-    expect(upsertFacts).toHaveBeenCalledTimes(1);
+    expect(enqueueFacts).toHaveBeenCalledTimes(1);
+    // Messages are marked processed after successful queueing, NOT after Pinecone write.
     expect(markMessagesProcessed).toHaveBeenCalledWith(expect.anything(), [1, 2]);
     expect(markMessagesWithError).toHaveBeenCalledWith(expect.anything(), [], 'max_retries_exceeded');
   });
@@ -372,7 +375,7 @@ describe('EnrichmentPoller', () => {
 
     expect(extractFacts).not.toHaveBeenCalled();
     expect(validateFacts).not.toHaveBeenCalled();
-    expect(upsertFacts).not.toHaveBeenCalled();
+    expect(enqueueFacts).not.toHaveBeenCalled();
     expect(markMessagesProcessed).not.toHaveBeenCalled();
   });
 

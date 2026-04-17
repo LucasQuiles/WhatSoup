@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { Database } from '../../../core/database.ts';
@@ -6,8 +7,35 @@ import type { LLMProvider } from '../providers/types.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import { extractFacts } from './extractor.ts';
-import { validateFacts } from './validator.ts';
-import { upsertFacts } from './upserter.ts';
+import { validateFacts, type ValidatedFact } from './validator.ts';
+import { enqueueFacts, type ExportableFact } from './fact-export-queue.ts';
+
+function shortHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 12);
+}
+
+/**
+ * Map a validated fact to an ExportableFact row.
+ *
+ * `factId` mirrors the ID shape the upserter used for Pinecone
+ * (`{chatJid}:{senderSegment}:{hash(text)}`) so the queue stays idempotent
+ * across retries and matches the downstream mw-mind Pinecone record IDs.
+ */
+function toExportable(fact: ValidatedFact): ExportableFact {
+  const senderSegment = fact.senderJid || 'group';
+  const factId = `${fact.chatJid}:${senderSegment}:${shortHash(fact.text)}`;
+  return {
+    factId,
+    chatJid: fact.chatJid,
+    senderJid: fact.senderJid || null,
+    text: fact.text,
+    memoryType: fact.memoryType,
+    confidence: fact.adjustedConfidence,
+    senderName: fact.senderName,
+    supersedesText: fact.supersedesText,
+    sourceMessagePks: fact.sourceMessagePks,
+  };
+}
 
 const log = createChildLogger('enrichment');
 
@@ -102,9 +130,7 @@ export class EnrichmentPoller {
     }
 
     let totalExtracted = 0;
-    let totalUpserted = 0;
-    let totalDeduplicated = 0;
-    let totalSuperseded = 0;
+    let totalQueued = 0;
     const successPks: number[] = [];
     const failedPks: number[] = [];
 
@@ -125,10 +151,14 @@ export class EnrichmentPoller {
           continue;
         }
 
-        const { upserted, deduplicated, superseded } = await upsertFacts(this.pinecone, validated);
-        totalUpserted = totalUpserted + upserted;
-        totalDeduplicated = totalDeduplicated + deduplicated;
-        totalSuperseded = totalSuperseded + superseded;
+        // Enqueue validated facts for the standalone mw-mind Pinecone
+        // exporter (Track A of Phase 3). Source messages are marked
+        // processed after successful queueing, NOT after Pinecone write —
+        // the exporter is responsible for the remote upsert and for
+        // calling markFactsExported once Pinecone confirms.
+        const exportable = validated.map(toExportable);
+        const queued = enqueueFacts(this.db, exportable);
+        totalQueued = totalQueued + queued;
 
         for (const msg of chatMessages) successPks.push(msg.pk);
       } catch (err) {
@@ -173,12 +203,15 @@ export class EnrichmentPoller {
     const messagesProcessed = successPks.length + failedPks.length;
     const durationMs = Date.now() - cycleStart;
 
-    // Write to enrichment_runs table
+    // Write to enrichment_runs table. `facts_upserted` is retained as the
+    // column name for wire-compatibility with existing metrics readers; the
+    // value now represents facts successfully queued for standalone export
+    // (the mw-mind Python pipeline performs the actual Pinecone upsert).
     try {
       this.db.raw.prepare(`
         INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted)
         VALUES (?, datetime('now'), ?, ?, ?)
-      `).run(new Date(cycleStart).toISOString(), messagesProcessed, totalExtracted, totalUpserted);
+      `).run(new Date(cycleStart).toISOString(), messagesProcessed, totalExtracted, totalQueued);
     } catch (err) {
       log.error({ err }, 'enrichment: failed to write enrichment_runs record');
     }
@@ -187,7 +220,7 @@ export class EnrichmentPoller {
       {
         messagesProcessed,
         factsExtracted: totalExtracted,
-        factsUpserted: totalUpserted,
+        factsQueued: totalQueued,
         durationMs,
       },
       'enrichment: cycle complete',

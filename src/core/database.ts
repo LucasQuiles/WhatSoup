@@ -373,6 +373,24 @@ CREATE INDEX IF NOT EXISTS idx_agent_token_events_ts ON agent_token_events(times
 CREATE INDEX IF NOT EXISTS idx_agent_token_events_session_ts ON agent_token_events(agent_session_id, timestamp);
 `;
 
+// ─── Migration 20: fact_export_queue for WhatsApp → mw-mind export ──────────
+
+const MIGRATION_20 = `
+CREATE TABLE IF NOT EXISTS fact_export_queue (
+  id INTEGER PRIMARY KEY,
+  fact_id TEXT UNIQUE NOT NULL,
+  chat_jid TEXT NOT NULL,
+  sender_jid TEXT,
+  namespace TEXT NOT NULL DEFAULT 'whatsapp-facts',
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  exported_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fact_export_queue_pending ON fact_export_queue(status, id)
+  WHERE status = 'pending';
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -537,7 +555,12 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
       db.exec('ALTER TABLE agent_sessions ADD COLUMN provider TEXT');
     }
   }],
+  [20, runMigration20],
 ]);
+
+function runMigration20(db: DatabaseSync): void {
+  db.exec(MIGRATION_20);
+}
 
 // ─── Database class ──────────────────────────────────────────────────────────
 
