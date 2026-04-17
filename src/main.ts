@@ -1,7 +1,7 @@
 import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { config, DEFAULT_PINECONE_INDEX } from './config.ts';
+import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
@@ -238,8 +238,14 @@ if (instanceType === 'agent') {
   const anthropic = createAnthropicProvider();
   const openai = createOpenAIProvider();
   const pinecone = new PineconeMemory();
-  // Disable enrichment for instances using external Pinecone indexes (e.g., chatbot)
-  const enableEnrichment = config.pineconeIndex === DEFAULT_PINECONE_INDEX;
+  // Enrichment is now drain-via-queue: the poller enqueues validated facts
+  // into `fact_export_queue` (see Phase 3, Task 1), and the Python mw-mind
+  // pipeline drains that queue and upserts them to standalone MWLab
+  // `mw-mind`. Any instance with a configured pineconeIndex participates
+  // (historical `whatsapp-bot` callers still enqueue against their own
+  // index name; routing to the right index is the pipeline's concern).
+  const enableEnrichment =
+    typeof config.pineconeIndex === 'string' && config.pineconeIndex.length > 0;
   runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
     enableEnrichment,
     getBotJid: () => connectionManager.botJid ?? '',
