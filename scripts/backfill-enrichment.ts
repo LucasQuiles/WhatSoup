@@ -37,6 +37,8 @@ import {
   type StoredMessage,
 } from '../src/core/messages.ts';
 import { createAnthropicProvider } from '../src/runtimes/chat/providers/anthropic.ts';
+import { createOpenAIProvider } from '../src/runtimes/chat/providers/openai.ts';
+import type { LLMProvider } from '../src/runtimes/chat/providers/types.ts';
 import { extractFacts } from '../src/runtimes/chat/enrichment/extractor.ts';
 import { validateFacts, type ValidatedFact } from '../src/runtimes/chat/enrichment/validator.ts';
 import {
@@ -92,11 +94,14 @@ export function accountingOk(result: EnqueueFactsResult, expected: number): bool
 
 // ── CLI parsing ──────────────────────────────────────────────────────────────
 
+export type ProviderKind = 'anthropic' | 'openai';
+
 export interface BackfillArgs {
   instance: string;
   limit: number;
   dryRun: boolean;
   runId: string;
+  provider: ProviderKind;
   telemetryPath?: string;
 }
 
@@ -105,6 +110,7 @@ export function parseArgs(argv: readonly string[]): BackfillArgs {
     instance: 'mw-bot',
     limit: 500,
     dryRun: false,
+    provider: 'anthropic',
     runId:
       process.env.MW_MIND_RUN_ID ||
       `backfill-${new Date().toISOString().replace(/[:.]/g, '-')}`,
@@ -119,7 +125,13 @@ export function parseArgs(argv: readonly string[]): BackfillArgs {
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--run-id') args.runId = argv[++i] ?? args.runId;
     else if (a === '--telemetry') args.telemetryPath = argv[++i];
-    else if (a === '--help' || a === '-h') {
+    else if (a === '--provider') {
+      const v = argv[++i];
+      if (v !== 'anthropic' && v !== 'openai') {
+        throw new Error(`--provider must be 'anthropic' or 'openai' (got: ${v ?? 'empty'})`);
+      }
+      args.provider = v;
+    } else if (a === '--help' || a === '-h') {
       printUsage();
       process.exit(0);
     } else {
@@ -136,12 +148,98 @@ function printUsage(): void {
     '  --instance <name>      Instance to backfill (default: mw-bot)',
     '  --limit <N>            Max messages to process (default: 500)',
     '  --dry-run              Classify but do not enqueue',
+    '  --provider <name>      LLM provider: anthropic | openai (default: anthropic)',
     '  --run-id <id>          Run identifier (default: $MW_MIND_RUN_ID or backfill-<ts>)',
     '  --telemetry <path>     JSONL output path (default: $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl)',
     '',
-    'Honors EXTRACTION_MODEL / VALIDATION_MODEL / ANTHROPIC_API_KEY env vars.',
+    'Provider config:',
+    '  anthropic  → reads ANTHROPIC_API_KEY; default models claude-sonnet-4-6 / claude-haiku-4-5',
+    '  openai     → reads OPENAI_BASE_URL (e.g. http://localhost:11434/v1 for Ollama) and OPENAI_API_KEY',
+    '               (set to any non-empty placeholder when talking to Ollama). Requires',
+    '               EXTRACTION_MODEL and VALIDATION_MODEL env vars because the built-in',
+    '               defaults are Anthropic model IDs that will fail against an OpenAI-style endpoint.',
+    '',
+    'Honors EXTRACTION_MODEL / VALIDATION_MODEL env vars for all providers.',
   ].join('\n');
   console.log(text);
+}
+
+// ── Provider selection ──────────────────────────────────────────────────────
+
+export interface ProviderFactories {
+  anthropic: () => LLMProvider;
+  openai: () => LLMProvider;
+}
+
+export const DEFAULT_PROVIDER_FACTORIES: ProviderFactories = {
+  anthropic: createAnthropicProvider,
+  openai: createOpenAIProvider,
+};
+
+export class ProviderConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderConfigError';
+  }
+}
+
+export interface ProviderConfigEnv {
+  EXTRACTION_MODEL?: string;
+  VALIDATION_MODEL?: string;
+  OPENAI_BASE_URL?: string;
+  OPENAI_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+}
+
+/**
+ * Validate the env for the selected provider BEFORE instantiating clients.
+ * Fail-fast so a misconfigured --provider openai doesn't surprise us mid-run.
+ */
+export function validateProviderConfig(provider: ProviderKind, env: ProviderConfigEnv): void {
+  if (provider === 'openai') {
+    const baseUrl = env.OPENAI_BASE_URL;
+    if (!baseUrl) {
+      throw new ProviderConfigError(
+        '--provider openai requires OPENAI_BASE_URL (e.g. http://localhost:11434/v1 for Ollama)',
+      );
+    }
+    if (!env.OPENAI_API_KEY) {
+      throw new ProviderConfigError(
+        "--provider openai requires OPENAI_API_KEY (use any non-empty placeholder for Ollama, e.g. 'ollama')",
+      );
+    }
+    // The built-in defaults (claude-sonnet-4-6 / claude-haiku-4-5) are Anthropic
+    // model IDs and cannot be sent to an OpenAI-style endpoint. Force an
+    // explicit override so operators don't accidentally talk to Ollama with
+    // an Anthropic model name.
+    if (!env.EXTRACTION_MODEL) {
+      throw new ProviderConfigError(
+        '--provider openai requires EXTRACTION_MODEL (e.g. qwen3:32b-tuned) — the default is an Anthropic model ID',
+      );
+    }
+    if (!env.VALIDATION_MODEL) {
+      throw new ProviderConfigError(
+        '--provider openai requires VALIDATION_MODEL (e.g. qwen3:8b-tuned) — the default is an Anthropic model ID',
+      );
+    }
+  } else {
+    // anthropic path: the SDK will raise if the key is missing, but a
+    // pre-flight message is more operator-friendly.
+    if (!env.ANTHROPIC_API_KEY) {
+      throw new ProviderConfigError('--provider anthropic requires ANTHROPIC_API_KEY');
+    }
+  }
+}
+
+export function buildProviders(
+  provider: ProviderKind,
+  factories: ProviderFactories = DEFAULT_PROVIDER_FACTORIES,
+): { extraction: LLMProvider; validation: LLMProvider } {
+  const make = factories[provider];
+  // The extractor and validator receive distinct LLMProvider instances in the
+  // live poller so the two stages can use different models via config. We
+  // preserve that separation here even though both share a provider kind.
+  return { extraction: make(), validation: make() };
 }
 
 // ── Telemetry ────────────────────────────────────────────────────────────────
@@ -411,16 +509,26 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 3;
   }
 
+  try {
+    validateProviderConfig(args.provider, {
+      EXTRACTION_MODEL: process.env.EXTRACTION_MODEL,
+      VALIDATION_MODEL: process.env.VALIDATION_MODEL,
+      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    });
+  } catch (err) {
+    console.error(`[backfill] ${(err as Error).message}`);
+    return 5;
+  }
+
   const db = new Database(dbPath);
   db.open();
 
-  const providers = {
-    extraction: createAnthropicProvider(),
-    validation: createAnthropicProvider(),
-  };
+  const providers = buildProviders(args.provider);
 
   console.log(
-    `[backfill] instance=${args.instance} path=${dbPath} run_id=${args.runId} dry_run=${args.dryRun}`,
+    `[backfill] instance=${args.instance} path=${dbPath} run_id=${args.runId} dry_run=${args.dryRun} provider=${args.provider}`,
   );
   console.log(
     `[backfill] models extraction=${config.models.extraction} validation=${config.models.validation}`,

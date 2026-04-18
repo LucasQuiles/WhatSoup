@@ -23,6 +23,11 @@ import {
   accountingOk,
   processBatch,
   runBackfill,
+  validateProviderConfig,
+  buildProviders,
+  ProviderConfigError,
+  type ProviderFactories,
+  type ProviderKind,
 } from '../../scripts/backfill-enrichment.ts';
 
 // ── Fixture helpers ──────────────────────────────────────────────────────────
@@ -100,12 +105,13 @@ function stubProvider(): LLMProvider {
 // ── Unit helpers ─────────────────────────────────────────────────────────────
 
 describe('parseArgs', () => {
-  it('defaults to instance mw-bot and limit 500', () => {
+  it('defaults to instance mw-bot, limit 500, provider anthropic', () => {
     const a = parseArgs([]);
     expect(a.instance).toBe('mw-bot');
     // 500 is the documented safety cap per the script header
     expect(a.limit).toBe(500);
     expect(a.dryRun).toBe(false);
+    expect(a.provider).toBe('anthropic');
     expect(a.runId).toMatch(/^backfill-|[A-Za-z0-9_-]/);
   });
 
@@ -120,11 +126,124 @@ describe('parseArgs', () => {
     expect(a.runId).toBe('test-run-xyz');
   });
 
+  it('accepts --provider openai', () => {
+    const a = parseArgs(['--provider', 'openai']);
+    expect(a.provider).toBe('openai');
+  });
+
+  it('accepts --provider anthropic explicitly', () => {
+    const a = parseArgs(['--provider', 'anthropic']);
+    expect(a.provider).toBe('anthropic');
+  });
+
+  it('rejects unknown --provider values', () => {
+    // "anthropic-claude" is a plausible typo; the guard must reject anything
+    // outside the allow-list so we don't instantiate an undefined factory.
+    expect(() => parseArgs(['--provider', 'anthropic-claude'])).toThrow(/must be 'anthropic' or 'openai'/);
+  });
+
+  it('rejects empty --provider', () => {
+    expect(() => parseArgs(['--provider'])).toThrow(/must be 'anthropic' or 'openai'/);
+  });
+
   it('throws on unknown args', () => {
     // "unknown args" must fail loudly, not be silently ignored. The error
     // is the primary proof — we assert the message shape so a regression
     // that silently accepts bad args would fail here.
     expect(() => parseArgs(['--bogus'])).toThrow(/unknown arg/);
+  });
+});
+
+describe('validateProviderConfig', () => {
+  it('anthropic: requires ANTHROPIC_API_KEY', () => {
+    expect(() => validateProviderConfig('anthropic', {})).toThrow(ProviderConfigError);
+    expect(() => validateProviderConfig('anthropic', {})).toThrow(/ANTHROPIC_API_KEY/);
+  });
+
+  it('anthropic: passes with ANTHROPIC_API_KEY set', () => {
+    // The value itself is ignored by the validator — only presence matters.
+    expect(() => validateProviderConfig('anthropic', { ANTHROPIC_API_KEY: 'sk-test' })).not.toThrow();
+  });
+
+  it('openai: requires OPENAI_BASE_URL', () => {
+    expect(() =>
+      validateProviderConfig('openai', {
+        OPENAI_API_KEY: 'ollama',
+        EXTRACTION_MODEL: 'qwen3:32b-tuned',
+        VALIDATION_MODEL: 'qwen3:8b-tuned',
+      }),
+    ).toThrow(/OPENAI_BASE_URL/);
+  });
+
+  it('openai: requires OPENAI_API_KEY (placeholder allowed)', () => {
+    expect(() =>
+      validateProviderConfig('openai', {
+        OPENAI_BASE_URL: 'http://localhost:11434/v1',
+        EXTRACTION_MODEL: 'qwen3:32b-tuned',
+        VALIDATION_MODEL: 'qwen3:8b-tuned',
+      }),
+    ).toThrow(/OPENAI_API_KEY/);
+  });
+
+  it('openai: requires EXTRACTION_MODEL (the default is an Anthropic model ID)', () => {
+    expect(() =>
+      validateProviderConfig('openai', {
+        OPENAI_BASE_URL: 'http://localhost:11434/v1',
+        OPENAI_API_KEY: 'ollama',
+        VALIDATION_MODEL: 'qwen3:8b-tuned',
+      }),
+    ).toThrow(/EXTRACTION_MODEL/);
+  });
+
+  it('openai: requires VALIDATION_MODEL', () => {
+    expect(() =>
+      validateProviderConfig('openai', {
+        OPENAI_BASE_URL: 'http://localhost:11434/v1',
+        OPENAI_API_KEY: 'ollama',
+        EXTRACTION_MODEL: 'qwen3:32b-tuned',
+      }),
+    ).toThrow(/VALIDATION_MODEL/);
+  });
+
+  it('openai: passes with full config (Ollama-style)', () => {
+    expect(() =>
+      validateProviderConfig('openai', {
+        OPENAI_BASE_URL: 'http://localhost:11434/v1',
+        OPENAI_API_KEY: 'ollama',
+        EXTRACTION_MODEL: 'qwen3:32b-tuned',
+        VALIDATION_MODEL: 'qwen3:8b-tuned',
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('buildProviders', () => {
+  it('routes --provider anthropic to the anthropic factory', () => {
+    const antFactory = vi.fn(() => ({ name: 'stub-anthropic' }) as unknown as LLMProvider);
+    const oaiFactory = vi.fn(() => ({ name: 'stub-openai' }) as unknown as LLMProvider);
+    const factories: ProviderFactories = { anthropic: antFactory, openai: oaiFactory };
+
+    const { extraction, validation } = buildProviders('anthropic', factories);
+
+    // Each stage gets its own provider instance, mirroring the live poller.
+    // A regression that shares one instance would make the assertion fail.
+    expect(antFactory).toHaveBeenCalledTimes(2);
+    expect(oaiFactory).not.toHaveBeenCalled();
+    expect(extraction.name).toBe('stub-anthropic');
+    expect(validation.name).toBe('stub-anthropic');
+  });
+
+  it('routes --provider openai to the openai factory', () => {
+    const antFactory = vi.fn(() => ({ name: 'stub-anthropic' }) as unknown as LLMProvider);
+    const oaiFactory = vi.fn(() => ({ name: 'stub-openai' }) as unknown as LLMProvider);
+    const factories: ProviderFactories = { anthropic: antFactory, openai: oaiFactory };
+
+    const { extraction, validation } = buildProviders('openai', factories);
+
+    expect(oaiFactory).toHaveBeenCalledTimes(2);
+    expect(antFactory).not.toHaveBeenCalled();
+    expect(extraction.name).toBe('stub-openai');
+    expect(validation.name).toBe('stub-openai');
   });
 });
 
