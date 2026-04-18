@@ -129,6 +129,15 @@ acquireLock();
 process.on('exit', () => releaseLock());
 
 // 2. Database
+// db.open() runs pending schema migrations against config.dbPath (see
+// core/database.ts:594+). This makes the process that executes these lines
+// the de-facto migration trigger for bot.db. For mw-bot (live WhatsApp
+// runtime), that means only restarting com.whatsoup.mw-bot can apply a
+// new migration to /Users/mw/.local/share/whatsoup/instances/mw-bot/bot.db;
+// com.whatsoup.mw-cell has a separate DB, and com.whatsoup.whatsoup-fleet
+// reads instance DBs read-only (see src/fleet/db-reader.ts) — it does not
+// run migrations. Operator runbook: docs/runbooks/mwlab-transcription-pinecone.md
+// (Phase 3 gate G1).
 const db = new Database(config.dbPath);
 db.open();
 
