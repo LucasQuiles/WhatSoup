@@ -715,6 +715,13 @@ describe('runBackfill — P3.6-H2 strict-mode summary + failedBatches', () => {
     expect(summary.failedBatches[0].messageIds).toEqual([2]);
     expect(summary.failedBatches[0].errorType).toBe('ExtractionError');
     expect(summary.failedBatches[0].stage).toBe('schema-items-all-dropped');
+    // P3.6 review S-4: StrictFailure.details (the ExtractionError.message string)
+    // must survive from processBatch into summary.failedBatches so operators
+    // can read the root cause without cross-referencing extractor source.
+    // Details shape is `string` (err.message), not an object — the
+    // ExtractionError constructor sets message to `extraction failed: <stage>`.
+    expect(typeof summary.failedBatches[0].details).toBe('string');
+    expect(summary.failedBatches[0].details).toMatch(/extraction failed: schema-items-all-dropped/);
   });
 
   it('strict mode: all-good run → failedBatches is empty array', async () => {
@@ -759,5 +766,64 @@ describe('runBackfill — P3.6-H2 strict-mode summary + failedBatches', () => {
     // perChat records the error string; strictFailure is absent.
     expect(summary.perChat[0].error).toMatch(/generic/);
     expect(summary.perChat[0].strictFailure).toBeUndefined();
+  });
+
+  // P3.6 review I-1: enrichment_runs status discriminator.
+  //
+  // Before I-1, strict-mode fail-closed and accounting-invariant failure both
+  // wrote `backfill_fail:<run_id>` to enrichment_runs.error. Operators reading
+  // the DB table could not distinguish the two failure modes without cross-
+  // referencing stdout. After I-1, strict-mode fail-closed writes
+  // `backfill_strict_fail_<stage>:<run_id>` so the DB row alone carries the
+  // discrimination that the exit code (6 vs 4) already conveys at process
+  // shutdown.
+  it('strict mode: ExtractionError fail-closed writes backfill_strict_fail_<stage> to enrichment_runs', async () => {
+    seedMessage(db, { pk: 1, chatJid: 'b@g.us' });
+    const deps: BackfillBatchDeps = {
+      extract: vi.fn(async () => {
+        throw new ExtractionError('schema-items-all-dropped', {
+          droppedCount: 1,
+          totalCount: 1,
+          sampleItem: { fact: 'wrong' },
+        });
+      }) as unknown as BackfillBatchDeps['extract'],
+      validate: vi.fn(async () => []) as unknown as BackfillBatchDeps['validate'],
+      enqueue: vi.fn() as unknown as BackfillBatchDeps['enqueue'],
+      markProcessed: vi.fn() as unknown as BackfillBatchDeps['markProcessed'],
+    };
+
+    await runBackfill(db, parseArgs(['--strict']), stubProviders(), deps);
+
+    const rows = db.raw
+      .prepare('SELECT error FROM enrichment_runs ORDER BY run_id ASC')
+      .all() as Array<{ error: string }>;
+    expect(rows).toHaveLength(1);
+    // Discriminated status tag: includes the extractor stage, not the
+    // generic backfill_fail.
+    expect(rows[0].error).toMatch(/^backfill_strict_fail_schema-items-all-dropped:/);
+    // Anti-regression: must NOT collapse back into the pre-I-1 generic tag.
+    expect(rows[0].error).not.toMatch(/^backfill_fail:/);
+  });
+
+  it('strict mode: ValidationError fail-closed writes backfill_strict_fail_<stage> to enrichment_runs', async () => {
+    seedMessage(db, { pk: 1, chatJid: 'a@g.us' });
+    const extracted: ExtractedFact[] = [makeExtracted('a@g.us', 'fact A')];
+    const deps: BackfillBatchDeps = {
+      extract: vi.fn(async () => extracted) as unknown as BackfillBatchDeps['extract'],
+      validate: vi.fn(async () => {
+        throw new ValidationError('json-parse', { rawOutput: 'not json {' });
+      }) as unknown as BackfillBatchDeps['validate'],
+      enqueue: vi.fn() as unknown as BackfillBatchDeps['enqueue'],
+      markProcessed: vi.fn() as unknown as BackfillBatchDeps['markProcessed'],
+    };
+
+    await runBackfill(db, parseArgs(['--strict']), stubProviders(), deps);
+
+    const rows = db.raw
+      .prepare('SELECT error FROM enrichment_runs ORDER BY run_id ASC')
+      .all() as Array<{ error: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].error).toMatch(/^backfill_strict_fail_json-parse:/);
+    expect(rows[0].error).not.toMatch(/^backfill_fail:/);
   });
 });

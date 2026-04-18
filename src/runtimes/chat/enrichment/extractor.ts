@@ -7,6 +7,8 @@ const log = createChildLogger('enrichment');
 
 // P3.6-H1: maximum length of rawOutput preserved on ExtractionError details.
 // 500 chars is enough to diagnose schema drift without leaking conversation content.
+// Keep in sync with validator.ts RAW_OUTPUT_TRUNCATE. PII hygiene for
+// ExtractionError.details.rawOutput.
 const RAW_OUTPUT_TRUNCATE = 500;
 
 /**
@@ -24,6 +26,10 @@ const RAW_OUTPUT_TRUNCATE = 500;
  * - `schema-items-all-dropped`: parsed array is non-empty but 100% of entries
  *   were schema-invalid (missing `text`, wrong type, etc.). This catches the
  *   2026-04-18 regression where qwen3:32b-tuned returned `[{"fact":"..."}]`.
+ *
+ * Intentionally no shared base class with ValidationError — each module stays
+ * self-contained. Future callers handle both types via separate `instanceof`
+ * branches (see backfill-enrichment.ts).
  */
 export class ExtractionError extends Error {
   constructor(
@@ -225,6 +231,13 @@ export async function extractFacts(
   // facts solely due to schema mismatches is the silent-failure class we must
   // fail-closed on. An empty parsed input (`[]`) is a legitimate model-replied-
   // empty and flows through as `[]`.
+  //
+  // Invariant: under the extraction prompt contract, no legitimate 100%-schema-drop
+  // exists. Every drop counted here is structural (non-object, missing `text`,
+  // etc). A well-formed model reply with zero facts uses the empty-array
+  // short-circuit above, not this path. If a future prompt change introduces
+  // items that can be legitimately 100% dropped for non-schema reasons, move
+  // that filter above this gate.
   if (strict && parsed.length > 0 && schemaDrop === parsed.length) {
     log.error(
       {

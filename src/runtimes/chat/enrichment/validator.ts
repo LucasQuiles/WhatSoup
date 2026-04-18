@@ -7,6 +7,8 @@ import type { ExtractedFact } from './extractor.ts';
 const log = createChildLogger('enrichment');
 
 // P3.6-H1: match extractor truncation for PII hygiene.
+// Keep in sync with extractor.ts RAW_OUTPUT_TRUNCATE. PII hygiene for
+// ValidationError.details.rawOutput.
 const RAW_OUTPUT_TRUNCATE = 500;
 
 /**
@@ -16,6 +18,10 @@ const RAW_OUTPUT_TRUNCATE = 500;
  * AND an "ambiguous empty" is detected. Critically, legitimate semantic drops
  * — `grounded=false` results and `adjustedConfidence < threshold` — are the
  * model's explicit "this fact isn't defensible" signal and never raise.
+ *
+ * Intentionally no shared base class with ExtractionError — each module stays
+ * self-contained. Future callers handle both types via separate `instanceof`
+ * branches (see backfill-enrichment.ts).
  */
 export class ValidationError extends Error {
   constructor(

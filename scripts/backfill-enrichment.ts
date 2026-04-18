@@ -525,7 +525,13 @@ export async function runBackfill(
       summary.batchesOk += 1;
     }
 
-    const status = args.dryRun ? 'backfill_dryrun' : batchResult.markedProcessed ? 'backfill_ok' : 'backfill_fail';
+    const status = args.dryRun
+      ? 'backfill_dryrun'
+      : batchResult.strictFailure
+        ? `backfill_strict_fail_${batchResult.strictFailure.stage}`
+        : batchResult.markedProcessed
+          ? 'backfill_ok'
+          : 'backfill_fail';
     try {
       db.raw
         .prepare(
@@ -641,7 +647,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.log(
       [
         '',
-        `[backfill] unprocessed_before=${summary.unprocessedBefore} already_processed_skipped=${summary.alreadyProcessedSkipped}`,
+        `[backfill] unprocessed_before=${summary.unprocessedBefore} already_processed_skipped=${summary.alreadyProcessedSkipped} strict=${args.strict}`,
         `[backfill] messages_processed=${summary.messagesProcessed} facts_extracted=${summary.factsExtracted} facts_validated=${summary.factsValidated} facts_queued=${summary.factsQueued}`,
         `[backfill] batches_ok=${summary.batchesOk} batches_failed=${summary.batchesFailed}`,
         `[backfill] elapsed=${(summary.elapsedMs / 1000).toFixed(1)}s`,
