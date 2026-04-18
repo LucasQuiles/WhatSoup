@@ -43,6 +43,25 @@ vi.mock('node:util', async (importOriginal) => {
 });
 
 // Now import the module under test — the mocks are already in place
+// Mock the service manager factory so restart tests are platform-agnostic
+// (LaunchdServiceManager on macOS calls launchctl stop+start; SystemdServiceManager
+// on Linux calls systemctl restart. Stubbing createServiceManager lets us drive
+// restart success/failure deterministically from the test without platform coupling.)
+const { serviceManagerRestartSpy } = vi.hoisted(() => ({
+  serviceManagerRestartSpy: vi.fn(),
+}));
+vi.mock('../../../src/fleet/platform.ts', () => ({
+  createServiceManager: () => ({
+    restart: serviceManagerRestartSpy,
+    start: vi.fn(),
+    stop: vi.fn(),
+    enable: vi.fn(),
+    disable: vi.fn(),
+    startFire: vi.fn(),
+  }),
+  detectPlatform: () => 'macos-launchd',
+}));
+
 import { handleUpdate } from '../../../src/fleet/routes/update.ts';
 
 // ---------------------------------------------------------------------------
@@ -110,11 +129,15 @@ function setupHappyPath({
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // Default: service manager restart resolves successfully. Tests that exercise
+  // restart failures override with serviceManagerRestartSpy.mockRejectedValueOnce.
+  serviceManagerRestartSpy.mockResolvedValue(undefined);
 });
 
-// The systemctl restart step uses callback-based execFile (not promisified).
-// Its callback fires on the next event loop tick AFTER handleUpdate() resolves,
-// which means updateInProgress is still true when the test ends. Drain it here.
+// The service manager restart runs on the next event loop tick AFTER
+// handleUpdate() resolves (see the .catch().finally() chain in update.ts),
+// which means updateInProgress is still true when the test body returns.
+// Drain the microtask queue here so mutex state does not leak across tests.
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
 });
@@ -479,32 +502,26 @@ describe('handleUpdate — rollback', () => {
 // Error paths — systemctl restart
 // ---------------------------------------------------------------------------
 
-describe('handleUpdate — systemctl restart error', () => {
-  it('emits SSE error event with step=restart when systemctl fails', async () => {
+describe('handleUpdate — service manager restart error', () => {
+  it('emits SSE error event with step=restart when service manager restart fails', async () => {
     setupHappyPath();
-    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => {
-      cb(new Error('Failed to connect to bus'));
-      return {} as any;
-    });
+    serviceManagerRestartSpy.mockRejectedValueOnce(new Error('Failed to connect to bus'));
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    // systemctl callback is async — wait a microtask
+    // .catch/.finally chain on svcMgr.restart runs on the next microtask
     await new Promise((r) => setImmediate(r));
 
     const events = parseSSE(res.chunks);
     const restartError = events.find((e) => e.event === 'error' && e.data?.step === 'restart');
     expect(restartError).toBeDefined();
-    expect(restartError!.data.message).toMatch(/systemd|Restart manually/i);
+    expect(restartError!.data.message).toMatch(/Restart manually/i);
   });
 
-  it('calls res.end after systemctl error', async () => {
+  it('calls res.end after service manager restart error', async () => {
     setupHappyPath();
-    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => {
-      cb(new Error('systemd not available'));
-      return {} as any;
-    });
+    serviceManagerRestartSpy.mockRejectedValueOnce(new Error('service not available'));
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
