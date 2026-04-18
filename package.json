@@ -1,7 +1,7 @@
 {
   "name": "whatsoup",
   "version": "0.1.0",
-  "description": "WhatSoup — consolidated WhatsApp platform with embedded MCP tools",
+  "description": "WhatSoup \u2014 consolidated WhatsApp platform with embedded MCP tools",
   "type": "module",
   "engines": {
     "node": ">=23.10.0"
@@ -13,6 +13,7 @@
     "setup": "bash deploy/setup.sh",
     "auth": "node --experimental-strip-types src/transport/auth.ts",
     "auth:instance": "node --experimental-strip-types src/bootstrap-auth.ts",
+    "backfill-enrichment": "node --experimental-strip-types scripts/backfill-enrichment.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",
     "pretest": "npm run strip-types-compat",
     "typecheck": "tsc --noEmit",
