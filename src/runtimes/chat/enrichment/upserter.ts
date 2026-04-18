@@ -1,13 +1,9 @@
-import { createHash } from 'node:crypto';
 import { createChildLogger } from '../../../logger.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { ValidatedFact } from './validator.ts';
+import { shortHash } from './fact-export-queue.ts';
 
 const log = createChildLogger('enrichment');
-
-function shortHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 12);
-}
 
 export async function upsertFacts(
   pinecone: PineconeMemory,

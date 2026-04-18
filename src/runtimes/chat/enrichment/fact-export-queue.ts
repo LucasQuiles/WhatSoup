@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { createChildLogger } from '../../../logger.ts';
 import type { Database } from '../../../core/database.ts';
@@ -21,6 +22,40 @@ export interface ExportableFact {
   supersedesText: string;
   sourceMessagePks: number[];
   namespace?: string;
+}
+
+/**
+ * Cross-service `fact_id` shape: `{chatJid}:{senderSegment}:{hash(text)}`.
+ *
+ * Shared here because the UNIQUE constraint on fact_export_queue.fact_id is
+ * the only thing preventing duplicate upserts across the live poller, the
+ * direct upserter, and the one-shot backfill. If any caller computes a
+ * different hash or different layout, retries silently produce duplicate
+ * queue rows with distinct fact_ids and the downstream Pinecone upsert
+ * loses idempotency. Keep this the single source of truth.
+ */
+export function shortHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 12);
+}
+
+/**
+ * Map a validated fact to an ExportableFact row using the canonical factId
+ * scheme. See `shortHash` for the cross-service contract rationale.
+ */
+export function toExportable(fact: ValidatedFact): ExportableFact {
+  const senderSegment = fact.senderJid || 'group';
+  const factId = `${fact.chatJid}:${senderSegment}:${shortHash(fact.text)}`;
+  return {
+    factId,
+    chatJid: fact.chatJid,
+    senderJid: fact.senderJid || null,
+    text: fact.text,
+    memoryType: fact.memoryType,
+    confidence: fact.adjustedConfidence,
+    senderName: fact.senderName,
+    supersedesText: fact.supersedesText,
+    sourceMessagePks: fact.sourceMessagePks,
+  };
 }
 
 /**

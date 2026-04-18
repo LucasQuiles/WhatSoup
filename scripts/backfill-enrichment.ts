@@ -23,7 +23,6 @@
  * Run this with `com.whatsoup.mw-bot` STOPPED. See Phase 3.5 plan.
  */
 
-import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -40,42 +39,16 @@ import { createAnthropicProvider } from '../src/runtimes/chat/providers/anthropi
 import { createOpenAIProvider } from '../src/runtimes/chat/providers/openai.ts';
 import type { LLMProvider } from '../src/runtimes/chat/providers/types.ts';
 import { extractFacts } from '../src/runtimes/chat/enrichment/extractor.ts';
-import { validateFacts, type ValidatedFact } from '../src/runtimes/chat/enrichment/validator.ts';
+import { validateFacts } from '../src/runtimes/chat/enrichment/validator.ts';
 import {
   enqueueFacts,
-  type ExportableFact,
+  shortHash,
+  toExportable,
   type EnqueueFactsResult,
 } from '../src/runtimes/chat/enrichment/fact-export-queue.ts';
 
-// ── Pure helpers (exported for tests) ────────────────────────────────────────
-
-export function shortHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 12);
-}
-
-/**
- * Mirror of the private `toExportable` in poller.ts. Kept inline here so the
- * backfill stays decoupled from the live poller's internals. Any drift
- * between this and `poller.ts:toExportable` means the backfill's fact_ids
- * would not match the poller's — both codepaths MUST produce the same
- * `factId` for the same `ValidatedFact` or the queue's UNIQUE constraint
- * stops deduplicating correctly.
- */
-export function toExportable(fact: ValidatedFact): ExportableFact {
-  const senderSegment = fact.senderJid || 'group';
-  const factId = `${fact.chatJid}:${senderSegment}:${shortHash(fact.text)}`;
-  return {
-    factId,
-    chatJid: fact.chatJid,
-    senderJid: fact.senderJid || null,
-    text: fact.text,
-    memoryType: fact.memoryType,
-    confidence: fact.adjustedConfidence,
-    senderName: fact.senderName,
-    supersedesText: fact.supersedesText,
-    sourceMessagePks: fact.sourceMessagePks,
-  };
-}
+// Re-export so the existing test imports keep working.
+export { shortHash, toExportable };
 
 export function groupByChatJid(messages: StoredMessage[]): Map<string, StoredMessage[]> {
   const byChat = new Map<string, StoredMessage[]>();
