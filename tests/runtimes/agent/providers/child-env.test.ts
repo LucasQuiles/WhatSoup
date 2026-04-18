@@ -17,6 +17,7 @@ const MANAGED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'PINECONE_API_KEY',
   'CUSTOM_SECRET',
+  'ALLOW_M365_MUTATIONS',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -89,5 +90,28 @@ describe('buildBaseChildEnv', () => {
 
     process.env.HOME = '/changed-home';
     expect(env.HOME).toBe('/tmp/child-home');
+  });
+
+  it("propagates ALLOW_M365_MUTATIONS when set (mw-bot M365 bypass)", () => {
+    resetManagedEnv({
+      PATH: "/usr/bin",
+      HOME: "/tmp/child-home",
+      ALLOW_M365_MUTATIONS: "1",
+    });
+
+    const env = buildBaseChildEnv();
+
+    expect(env).toHaveProperty("ALLOW_M365_MUTATIONS", "1");
+  });
+
+  it("omits ALLOW_M365_MUTATIONS when not set (default read-only)", () => {
+    resetManagedEnv({
+      PATH: "/usr/bin",
+      HOME: "/tmp/child-home",
+    });
+
+    const env = buildBaseChildEnv();
+
+    expect(env).not.toHaveProperty("ALLOW_M365_MUTATIONS");
   });
 });

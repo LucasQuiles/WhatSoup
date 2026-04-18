@@ -23,6 +23,10 @@ export function buildBaseChildEnv(): NodeJS.ProcessEnv {
       XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
       XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+      // Per-instance overrides (mw-bot has ALLOW_M365_MUTATIONS=1 in its
+      // launchd plist to bypass the global claude-guards M365 read-only
+      // hook; other instances do not set it and remain read-only).
+      ALLOW_M365_MUTATIONS: process.env.ALLOW_M365_MUTATIONS,
       // Sudo support
       SUDO_ASKPASS: process.env.SUDO_ASKPASS,
     }).filter(([, v]) => v !== undefined),
