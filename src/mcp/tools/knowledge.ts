@@ -354,11 +354,26 @@ export function registerKnowledgeTools(
         });
 
         const durationMs = Date.now() - startMs;
-        log.info(
+        // T1 PII hygiene: the raw query text may contain personal details
+        // (names, phone numbers, addresses) and must NOT land in the INFO
+        // stream that ships to aggregated log surfaces. The query prefix is
+        // demoted to DEBUG for local diagnosis; routing and count metadata
+        // remain at INFO so operators can still observe retrieval health.
+        log.debug(
           {
             index: indexName,
             namespaces: namespacesToSearch,
             query: query.slice(0, 80),
+            hits: deduped.length,
+            durationMs,
+            ...(queryIntent ? { queryIntent } : {}),
+          },
+          'knowledge search: query + duration (debug-only, may contain PII)',
+        );
+        log.info(
+          {
+            index: indexName,
+            routedNamespaces: namespacesToSearch,
             hits: deduped.length,
             durationMs,
             ...(queryIntent ? { queryIntent } : {}),

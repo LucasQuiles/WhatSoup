@@ -158,7 +158,7 @@ describe('EnrichmentPoller', () => {
     vi.mocked(incrementEnrichmentRetries).mockReturnValue(undefined);
     vi.mocked(extractFacts).mockResolvedValue([]);
     vi.mocked(validateFacts).mockResolvedValue([]);
-    vi.mocked(enqueueFacts).mockReturnValue(0);
+    vi.mocked(enqueueFacts).mockReturnValue({ attempted: 0, inserted: 0, duplicates: 0, failed: 0 });
   });
 
   afterEach(() => {
@@ -186,7 +186,7 @@ describe('EnrichmentPoller', () => {
 
     const validatedFact = { ...extractedFact, adjustedConfidence: 0.9 };
     vi.mocked(validateFacts).mockResolvedValue([validatedFact]);
-    vi.mocked(enqueueFacts).mockReturnValue(1);
+    vi.mocked(enqueueFacts).mockReturnValue({ attempted: 1, inserted: 1, duplicates: 0, failed: 0 });
 
     const { poller } = makePoller();
     await triggerOneCycle(poller);
@@ -447,5 +447,134 @@ describe('EnrichmentPoller', () => {
 
     // With empty batch, runCycle returns early before setting lastRunAt
     expect(poller.lastRunAt).toBeNull();
+  });
+
+  // ── T1 hardening: accounting-gated markMessagesProcessed ─────────────────
+  //
+  // The pre-T1 poller called markMessagesProcessed on every message in a chat
+  // segment whenever enqueueFacts returned anything (bare integer). This hides
+  // partial-failure cases: if the SQLite insert loop swallowed 2-of-3 rows,
+  // the upstream message rows were still marked processed and the lost facts
+  // were never visible downstream.
+  //
+  // T1 contract: markMessagesProcessed (and appending to successPks) is
+  // only permitted when the enqueueFacts accounting object reports
+  //   failed === 0  AND  inserted + duplicates === facts.length
+  // On mismatch, the poller must:
+  //   - NOT mark those messages processed
+  //   - log at WARN with run_id (from MW_MIND_RUN_ID), failed count, and the
+  //     full accounting object.
+
+  it('does NOT mark messages processed when enqueueFacts returns failed > 0', async () => {
+    // Seed a fact segment with 3 messages and 3 extracted/validated facts.
+    // enqueueFacts then reports a partial failure (2 failed of 3 attempted).
+    const msgs = [
+      makeStoredMsg({ pk: 101, chatJid: 'chatFail@g.us', messageId: 'f1' }),
+      makeStoredMsg({ pk: 102, chatJid: 'chatFail@g.us', messageId: 'f2' }),
+      makeStoredMsg({ pk: 103, chatJid: 'chatFail@g.us', messageId: 'f3' }),
+    ];
+    vi.mocked(getUnprocessedMessages).mockReturnValue(msgs);
+
+    const extracted = [
+      {
+        text: 'Fact A', chatJid: 'chatFail@g.us',
+        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        memoryType: 'user_fact' as const, confidence: 0.9,
+        supersedesText: '', sourceMessagePks: [101],
+      },
+      {
+        text: 'Fact B', chatJid: 'chatFail@g.us',
+        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        memoryType: 'user_fact' as const, confidence: 0.9,
+        supersedesText: '', sourceMessagePks: [102],
+      },
+      {
+        text: 'Fact C', chatJid: 'chatFail@g.us',
+        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        memoryType: 'user_fact' as const, confidence: 0.9,
+        supersedesText: '', sourceMessagePks: [103],
+      },
+    ];
+    vi.mocked(extractFacts).mockResolvedValue(extracted);
+    vi.mocked(validateFacts).mockResolvedValue(
+      extracted.map((f) => ({ ...f, adjustedConfidence: 0.9 })),
+    );
+
+    // 3 attempted, 1 inserted, 0 duplicates, 2 failed. Accounting mismatch:
+    // inserted + duplicates (1) !== facts.length (3) AND failed > 0.
+    vi.mocked(enqueueFacts).mockReturnValue({
+      attempted: 3,
+      inserted: 1,
+      duplicates: 0,
+      failed: 2,
+    });
+
+    const { poller } = makePoller();
+    await triggerOneCycle(poller);
+
+    // markMessagesProcessed must either not be called, or be called with an
+    // empty successPks array. (The poller groups by chatJid; all 3 messages
+    // are in the failing segment, so nothing should succeed.)
+    const processedCalls = vi.mocked(markMessagesProcessed).mock.calls;
+    const processedPks = processedCalls.flatMap((c) => (c[1] ?? []) as number[]);
+    expect(processedPks).not.toContain(101);
+    expect(processedPks).not.toContain(102);
+    expect(processedPks).not.toContain(103);
+  });
+
+  it('marks all processed on full success (attempted === inserted + duplicates, failed === 0)', async () => {
+    const msgs = [
+      makeStoredMsg({ pk: 201, chatJid: 'chatOK@g.us', messageId: 'ok1' }),
+      makeStoredMsg({ pk: 202, chatJid: 'chatOK@g.us', messageId: 'ok2' }),
+      makeStoredMsg({ pk: 203, chatJid: 'chatOK@g.us', messageId: 'ok3' }),
+    ];
+    vi.mocked(getUnprocessedMessages).mockReturnValue(msgs);
+
+    // Validated produces 3 facts for this segment.
+    const validated = [
+      {
+        text: 'A', chatJid: 'chatOK@g.us',
+        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        memoryType: 'user_fact' as const, confidence: 0.9,
+        supersedesText: '', sourceMessagePks: [201],
+        adjustedConfidence: 0.9,
+      },
+      {
+        text: 'B', chatJid: 'chatOK@g.us',
+        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        memoryType: 'user_fact' as const, confidence: 0.9,
+        supersedesText: '', sourceMessagePks: [202],
+        adjustedConfidence: 0.9,
+      },
+      {
+        text: 'C', chatJid: 'chatOK@g.us',
+        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        memoryType: 'user_fact' as const, confidence: 0.9,
+        supersedesText: '', sourceMessagePks: [203],
+        adjustedConfidence: 0.9,
+      },
+    ];
+    vi.mocked(extractFacts).mockResolvedValue(
+      validated.map(({ adjustedConfidence: _ac, ...rest }) => rest),
+    );
+    vi.mocked(validateFacts).mockResolvedValue(validated);
+
+    // Accounting: 3 attempted = 2 inserted + 1 duplicate, 0 failed → full success.
+    vi.mocked(enqueueFacts).mockReturnValue({
+      attempted: 3,
+      inserted: 2,
+      duplicates: 1,
+      failed: 0,
+    });
+
+    const { poller } = makePoller();
+    await triggerOneCycle(poller);
+
+    // All 3 messages are marked processed.
+    const processedCalls = vi.mocked(markMessagesProcessed).mock.calls;
+    const processedPks = processedCalls.flatMap((c) => (c[1] ?? []) as number[]);
+    expect(processedPks).toContain(201);
+    expect(processedPks).toContain(202);
+    expect(processedPks).toContain(203);
   });
 });

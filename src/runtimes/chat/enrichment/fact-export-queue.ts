@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { createChildLogger } from '../../../logger.ts';
 import type { Database } from '../../../core/database.ts';
 import type { ValidatedFact } from './validator.ts';
@@ -22,6 +23,29 @@ export interface ExportableFact {
   namespace?: string;
 }
 
+/**
+ * Accounting summary for a single `enqueueFacts` call.
+ *
+ * - `attempted`  : rows handed to the function in this call.
+ * - `inserted`   : rows that were actually written (changes > 0).
+ * - `duplicates` : rows that matched the UNIQUE fact_id constraint and
+ *                  were therefore ignored by INSERT OR IGNORE — this is an
+ *                  idempotent success path, NOT a failure.
+ * - `failed`     : rows that raised a hard DB error inside the loop.
+ *                  In the T1 transactional semantics this field should
+ *                  normally be 0 because any hard error throws out of the
+ *                  function and rolls back the batch; it remains in the
+ *                  return shape for the downstream (poller) gate contract.
+ *
+ * Invariant on successful return: `attempted === inserted + duplicates`.
+ */
+export interface EnqueueFactsResult {
+  attempted: number;
+  inserted: number;
+  duplicates: number;
+  failed: number;
+}
+
 /** Shape of a claimed row as returned to the caller (payload is parsed). */
 export interface ClaimedFact {
   id: number;
@@ -34,13 +58,46 @@ export interface ClaimedFact {
 }
 
 /**
+ * Zod schema for the payload_json column.
+ *
+ * The queue's payload is written by enqueueFacts using the ExportableFact
+ * subset; this schema must stay in lock-step with that writer. We accept
+ * any string for memoryType because historical rows predate the tighter
+ * ValidatedFact['memoryType'] union — exporter-side triage handles unknown
+ * types rather than failing the claim.
+ */
+const PayloadSchema = z.object({
+  text: z.string(),
+  memoryType: z.string(),
+  confidence: z.number(),
+  senderName: z.string(),
+  supersedesText: z.string(),
+  sourceMessagePks: z.array(z.number()),
+});
+
+/**
  * Insert validated facts into the export queue. Duplicate `fact_id` values
  * are ignored (INSERT OR IGNORE) so callers can retry safely.
  *
- * Returns the number of rows actually inserted (excludes duplicates).
+ * Transactional semantics (T1): the entire batch is wrapped in
+ * BEGIN / COMMIT / ROLLBACK via `db.raw.exec`. If any row raises a hard
+ * DB error during `stmt.run`, the whole batch is rolled back and the
+ * error is re-thrown so the caller can decide whether to retry.
+ *
+ * Returns an accounting summary (`EnqueueFactsResult`) so callers can
+ * decide whether downstream message rows are safe to mark processed.
  */
-export function enqueueFacts(db: Database, facts: ExportableFact[]): number {
-  if (facts.length === 0) return 0;
+export function enqueueFacts(
+  db: Database,
+  facts: ExportableFact[],
+): EnqueueFactsResult {
+  const runId = process.env.MW_MIND_RUN_ID;
+
+  if (facts.length === 0) {
+    return { attempted: 0, inserted: 0, duplicates: 0, failed: 0 };
+  }
+
+  const attempted = facts.length;
 
   const stmt = db.raw.prepare(
     `INSERT OR IGNORE INTO fact_export_queue
@@ -49,16 +106,23 @@ export function enqueueFacts(db: Database, facts: ExportableFact[]): number {
   );
 
   let inserted = 0;
-  for (const fact of facts) {
-    const payload = {
-      text: fact.text,
-      memoryType: fact.memoryType,
-      confidence: fact.confidence,
-      senderName: fact.senderName,
-      supersedesText: fact.supersedesText,
-      sourceMessagePks: fact.sourceMessagePks,
-    };
-    try {
+  let duplicates = 0;
+
+  // BEGIN / COMMIT / ROLLBACK pattern — node:sqlite's DatabaseSync does not
+  // expose better-sqlite3's `stmt.transaction(fn)` helper, so we drive the
+  // transaction explicitly (same pattern as core/database.ts migrations).
+  db.raw.exec('BEGIN');
+  try {
+    for (const fact of facts) {
+      const payload = {
+        text: fact.text,
+        memoryType: fact.memoryType,
+        confidence: fact.confidence,
+        senderName: fact.senderName,
+        supersedesText: fact.supersedesText,
+        sourceMessagePks: fact.sourceMessagePks,
+      };
+
       const result = stmt.run(
         fact.factId,
         fact.chatJid,
@@ -66,12 +130,49 @@ export function enqueueFacts(db: Database, facts: ExportableFact[]): number {
         fact.namespace ?? 'whatsapp-facts',
         JSON.stringify(payload),
       );
-      if (Number(result.changes) > 0) inserted += 1;
-    } catch (err) {
-      log.warn({ err, factId: fact.factId }, 'enqueueFacts: insert failed');
+      if (Number(result.changes) > 0) {
+        inserted += 1;
+      } else {
+        // INSERT OR IGNORE returned 0 changes -> unique-constraint collision.
+        // This is the idempotent-retry path, not a failure.
+        duplicates += 1;
+      }
     }
+    db.raw.exec('COMMIT');
+  } catch (err) {
+    // Roll back the whole batch. If ROLLBACK itself fails we still want to
+    // surface the original error, so swallow any rollback error here.
+    try {
+      db.raw.exec('ROLLBACK');
+    } catch (rollbackErr) {
+      log.error(
+        { err: rollbackErr, ...(runId ? { runId } : {}) },
+        'enqueueFacts: ROLLBACK failed after batch insert error',
+      );
+    }
+    log.error(
+      {
+        err,
+        attempted,
+        ...(runId ? { runId } : {}),
+      },
+      'enqueueFacts: batch rolled back on hard DB error',
+    );
+    throw err;
   }
-  return inserted;
+
+  log.debug(
+    {
+      attempted,
+      inserted,
+      duplicates,
+      failed: 0,
+      ...(runId ? { runId } : {}),
+    },
+    'enqueueFacts: batch committed',
+  );
+
+  return { attempted, inserted, duplicates, failed: 0 };
 }
 
 /**
@@ -79,8 +180,14 @@ export function enqueueFacts(db: Database, facts: ExportableFact[]): number {
  * read-only operation — it does NOT mutate row state. The caller
  * (the mw-mind Python pipeline) is responsible for calling
  * `markFactsExported` after Pinecone confirms the upsert.
+ *
+ * T1 hardening: corrupted payload_json rows are surfaced at log.error
+ * (not silently hidden) and omitted from the returned array so the
+ * exporter can observe and triage them.
  */
 export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
+  const runId = process.env.MW_MIND_RUN_ID;
+
   const rows = db.raw
     .prepare(
       `SELECT id, fact_id, chat_jid, sender_jid, namespace, payload_json, created_at
@@ -101,23 +208,43 @@ export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
 
   const claimed: ClaimedFact[] = [];
   for (const row of rows) {
-    let payload: ClaimedFact['payload'];
+    let parsed: unknown;
     try {
-      payload = JSON.parse(row.payload_json);
+      parsed = JSON.parse(row.payload_json);
     } catch (err) {
-      log.warn(
-        { err, factId: row.fact_id },
-        'claimPendingFacts: payload_json parse failed — skipping row',
+      log.error(
+        {
+          err,
+          factId: row.fact_id,
+          rowId: row.id,
+          ...(runId ? { runId } : {}),
+        },
+        'claimPendingFacts: payload_json not valid JSON -- quarantining row',
       );
       continue;
     }
+
+    const validated = PayloadSchema.safeParse(parsed);
+    if (!validated.success) {
+      log.error(
+        {
+          factId: row.fact_id,
+          rowId: row.id,
+          issues: validated.error.issues,
+          ...(runId ? { runId } : {}),
+        },
+        'claimPendingFacts: payload_json failed schema validation -- quarantining row',
+      );
+      continue;
+    }
+
     claimed.push({
       id: row.id,
       factId: row.fact_id,
       chatJid: row.chat_jid,
       senderJid: row.sender_jid,
       namespace: row.namespace,
-      payload,
+      payload: validated.data as ClaimedFact['payload'],
       createdAt: row.created_at,
     });
   }

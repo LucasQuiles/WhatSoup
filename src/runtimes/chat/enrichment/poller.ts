@@ -105,6 +105,7 @@ export class EnrichmentPoller {
 
   private async runCycle(): Promise<void> {
     const cycleStart = Date.now();
+    const runId = process.env.MW_MIND_RUN_ID;
 
     let messages: StoredMessage[];
     try {
@@ -156,11 +157,38 @@ export class EnrichmentPoller {
         // processed after successful queueing, NOT after Pinecone write —
         // the exporter is responsible for the remote upsert and for
         // calling markFactsExported once Pinecone confirms.
+        //
+        // T1 accounting-gated promotion: we only mark the segment's
+        // messages as processed if the queue accepted every fact without
+        // a hard failure. `failed === 0 && inserted + duplicates === facts.length`
+        // captures both the "all new" and the "some idempotent duplicates"
+        // happy paths; any mismatch means at least one fact did not land
+        // and the source messages must remain eligible for retry.
         const exportable = validated.map(toExportable);
-        const queued = enqueueFacts(this.db, exportable);
-        totalQueued = totalQueued + queued;
+        const result = enqueueFacts(this.db, exportable);
+        totalQueued = totalQueued + result.inserted;
 
-        for (const msg of chatMessages) successPks.push(msg.pk);
+        const accountingOk =
+          result.failed === 0 &&
+          result.inserted + result.duplicates === exportable.length;
+
+        if (accountingOk) {
+          for (const msg of chatMessages) successPks.push(msg.pk);
+        } else {
+          log.warn(
+            {
+              chatJid,
+              expected: exportable.length,
+              attempted: result.attempted,
+              inserted: result.inserted,
+              duplicates: result.duplicates,
+              failed: result.failed,
+              segmentMessagePks: chatMessages.map((m) => m.pk),
+              ...(runId ? { runId } : {}),
+            },
+            'enrichment: queue accounting mismatch — segment messages NOT marked processed',
+          );
+        }
       } catch (err) {
         log.error({ err, chatJid }, 'enrichment: segment processing failed');
         const retryPks: number[] = [];
@@ -222,6 +250,7 @@ export class EnrichmentPoller {
         factsExtracted: totalExtracted,
         factsQueued: totalQueued,
         durationMs,
+        ...(runId ? { runId } : {}),
       },
       'enrichment: cycle complete',
     );
