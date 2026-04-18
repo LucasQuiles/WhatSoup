@@ -5,6 +5,61 @@ import type { StoredMessage } from '../../../core/messages.ts';
 
 const log = createChildLogger('enrichment');
 
+// P3.6-H1: maximum length of rawOutput preserved on ExtractionError details.
+// 500 chars is enough to diagnose schema drift without leaking conversation content.
+const RAW_OUTPUT_TRUNCATE = 500;
+
+/**
+ * P3.6-H1 strict-mode error.
+ *
+ * Raised by {@link extractFacts} only when the caller opts into `strict: true`
+ * AND an "ambiguous empty" is detected — i.e. an empty result that cannot be
+ * distinguished from a legitimate "no facts" reply. A legitimate empty (model
+ * returned `[]`, or no input messages) never raises.
+ *
+ * Stage meanings:
+ * - `provider-call`: the LLM provider threw before returning a response.
+ * - `json-parse`: the response body failed `JSON.parse`.
+ * - `schema-shape`: the parsed top-level is not a JSON array.
+ * - `schema-items-all-dropped`: parsed array is non-empty but 100% of entries
+ *   were schema-invalid (missing `text`, wrong type, etc.). This catches the
+ *   2026-04-18 regression where qwen3:32b-tuned returned `[{"fact":"..."}]`.
+ */
+export class ExtractionError extends Error {
+  constructor(
+    public readonly stage:
+      | 'provider-call'
+      | 'json-parse'
+      | 'schema-shape'
+      | 'schema-items-all-dropped',
+    public readonly details: {
+      cause?: Error;
+      rawOutput?: string;
+      droppedCount?: number;
+      totalCount?: number;
+      sampleItem?: unknown;
+    } = {},
+  ) {
+    super(`extraction failed: ${stage}`);
+    this.name = 'ExtractionError';
+  }
+}
+
+function truncateRaw(raw: string): string {
+  return raw.length > RAW_OUTPUT_TRUNCATE ? raw.slice(0, RAW_OUTPUT_TRUNCATE) : raw;
+}
+
+export interface ExtractFactsOptions {
+  /**
+   * P3.6-H1. When true, "ambiguous empty" results raise {@link ExtractionError}
+   * instead of silently coercing to `[]`. Legitimate empties (empty batch,
+   * model-replied-`[]`) still return `[]` silently.
+   *
+   * @default false
+   */
+  strict?: boolean;
+}
+
 export interface ExtractedFact {
   text: string;
   chatJid: string;
@@ -54,7 +109,11 @@ function formatMessages(messages: StoredMessage[]): string {
 export async function extractFacts(
   provider: LLMProvider,
   messages: StoredMessage[],
+  options: ExtractFactsOptions = {},
 ): Promise<ExtractedFact[]> {
+  const strict = options.strict === true;
+
+  // Legitimate empty: no input to extract from.
   if (messages.length === 0) return [];
 
   const chatJid = messages[0].chatJid;
@@ -71,6 +130,13 @@ export async function extractFacts(
     });
     raw = response.content.trim();
   } catch (err) {
+    if (strict) {
+      // P3.6-H1 — log before throw so operators see the failure in telemetry.
+      log.error({ stage: 'provider-call', chatJid, err }, 'extractFacts: strict-mode provider-call failure');
+      throw new ExtractionError('provider-call', {
+        cause: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
     log.warn({ err, chatJid }, 'extractFacts: LLM call failed');
     return [];
   }
@@ -84,18 +150,45 @@ export async function extractFacts(
   try {
     parsed = JSON.parse(jsonStr);
   } catch {
+    if (strict) {
+      log.error(
+        { stage: 'json-parse', chatJid, raw: truncateRaw(raw) },
+        'extractFacts: strict-mode json-parse failure',
+      );
+      throw new ExtractionError('json-parse', { rawOutput: truncateRaw(raw) });
+    }
     log.warn({ chatJid, raw: raw.slice(0, 200) }, 'extractFacts: JSON parse failed');
     return [];
   }
 
   if (!Array.isArray(parsed)) {
+    if (strict) {
+      log.error(
+        { stage: 'schema-shape', chatJid, raw: truncateRaw(raw) },
+        'extractFacts: strict-mode schema-shape failure',
+      );
+      throw new ExtractionError('schema-shape', { rawOutput: truncateRaw(raw) });
+    }
     log.warn({ chatJid }, 'extractFacts: response is not an array');
     return [];
   }
 
   const facts: ExtractedFact[] = [];
+  // P3.6-H1: schema-based drops are tallied so strict mode can detect
+  // 100%-schema-drop (the 2026-04-18 qwen3 silent-empty class) and raise.
+  let schemaDrop = 0;
+  let firstDroppedSample: unknown = undefined;
+
+  const noteSchemaDrop = (sample: unknown) => {
+    if (firstDroppedSample === undefined) firstDroppedSample = sample;
+    schemaDrop += 1;
+  };
+
   for (const item of parsed) {
-    if (typeof item !== 'object' || item === null) continue;
+    if (typeof item !== 'object' || item === null) {
+      noteSchemaDrop(item);
+      continue;
+    }
     const obj = item as Record<string, unknown>;
 
     const text = typeof obj['text'] === 'string' ? obj['text'] : null;
@@ -110,7 +203,11 @@ export async function extractFacts(
     const supersedesText =
       typeof obj['supersedes_text'] === 'string' ? obj['supersedes_text'] : '';
 
-    if (!text) continue;
+    if (!text) {
+      // Missing required `text` field — schema failure, not a semantic drop.
+      noteSchemaDrop(item);
+      continue;
+    }
 
     facts.push({
       text,
@@ -121,6 +218,27 @@ export async function extractFacts(
       confidence: Math.max(0, Math.min(1, confidence)),
       supersedesText,
       sourceMessagePks: pks,
+    });
+  }
+
+  // P3.6-H1: ambiguous-empty gate. Non-empty parsed input that produced zero
+  // facts solely due to schema mismatches is the silent-failure class we must
+  // fail-closed on. An empty parsed input (`[]`) is a legitimate model-replied-
+  // empty and flows through as `[]`.
+  if (strict && parsed.length > 0 && schemaDrop === parsed.length) {
+    log.error(
+      {
+        stage: 'schema-items-all-dropped',
+        chatJid,
+        droppedCount: schemaDrop,
+        totalCount: parsed.length,
+      },
+      'extractFacts: strict-mode all-items-schema-dropped',
+    );
+    throw new ExtractionError('schema-items-all-dropped', {
+      droppedCount: schemaDrop,
+      totalCount: parsed.length,
+      sampleItem: firstDroppedSample,
     });
   }
 

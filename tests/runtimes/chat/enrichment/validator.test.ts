@@ -21,7 +21,10 @@ vi.mock('../../../../src/logger.ts', () => ({
   }),
 }));
 
-import { validateFacts } from '../../../../src/runtimes/chat/enrichment/validator.ts';
+import {
+  validateFacts,
+  ValidationError,
+} from '../../../../src/runtimes/chat/enrichment/validator.ts';
 import type { ExtractedFact } from '../../../../src/runtimes/chat/enrichment/extractor.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -274,6 +277,189 @@ describe('validateFacts', () => {
     const provider = mockProvider(response);
 
     const validated = await validateFacts(provider, facts, [makeStoredMsg()]);
+
+    expect(validated).toEqual([]);
+  });
+});
+
+// ── Strict mode (P3.6-H1) ─────────────────────────────────────────────────
+// Strict mode throws on schema/shape/parse failures ("ambiguous empty").
+// Legitimate semantic drops (grounded=false, adjustedConfidence < threshold)
+// stay silent — the model's "this fact isn't grounded" signal is not a schema
+// failure.
+
+describe('validateFacts — strict mode (opt-in)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('strict: provider throw raises ValidationError with stage=provider-call', async () => {
+    const cause = new Error('LLM offline'); // synthetic per P3.6-H1
+    const provider: LLMProvider = {
+      name: 'mock',
+      generate: vi.fn().mockRejectedValue(cause),
+    };
+    const facts = [makeFact()];
+
+    await expect(
+      validateFacts(provider, facts, [makeStoredMsg()], { strict: true }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ValidationError);
+      const e = err as ValidationError;
+      expect(e.stage).toBe('provider-call');
+      expect(e.details.cause).toBe(cause);
+      return true;
+    });
+  });
+
+  it('strict: malformed JSON raises ValidationError with stage=json-parse', async () => {
+    const provider = mockProvider('{invalid json!!!'); // synthetic per P3.6-H1
+    const facts = [makeFact()];
+
+    await expect(
+      validateFacts(provider, facts, [makeStoredMsg()], { strict: true }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ValidationError);
+      const e = err as ValidationError;
+      expect(e.stage).toBe('json-parse');
+      expect(typeof e.details.rawOutput).toBe('string');
+      expect((e.details.rawOutput ?? '').length).toBeLessThanOrEqual(500);
+      return true;
+    });
+  });
+
+  it('strict: non-array top-level raises ValidationError with stage=schema-shape', async () => {
+    const provider = mockProvider(
+      JSON.stringify({ index: 0, grounded: true, adjusted_confidence: 0.9 }),
+    );
+    const facts = [makeFact()];
+
+    await expect(
+      validateFacts(provider, facts, [makeStoredMsg()], { strict: true }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ValidationError);
+      const e = err as ValidationError;
+      expect(e.stage).toBe('schema-shape');
+      return true;
+    });
+  });
+
+  it('strict: grounded=false drops stay silent (semantic, not schema)', async () => {
+    // synthetic per P3.6-H1 — model explicitly said "not grounded", that's a
+    // legitimate semantic signal and must NOT raise in strict mode.
+    const facts = [makeFact({ text: 'Ungrounded claim A' }), makeFact({ text: 'Ungrounded claim B' })];
+    const response = validationResponse([
+      { index: 0, grounded: false, adjusted_confidence: 0.9 },
+      { index: 1, grounded: false, adjusted_confidence: 0.85 },
+    ]);
+    const provider = mockProvider(response);
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()], { strict: true });
+
+    expect(validated).toEqual([]);
+  });
+
+  it('strict: below-threshold drops stay silent (semantic, not schema)', async () => {
+    // synthetic per P3.6-H1 — confidence < enrichmentMinConfidence (0.7) is
+    // a legitimate semantic threshold drop, not a schema failure.
+    const facts = [makeFact()];
+    const response = validationResponse([{ index: 0, grounded: true, adjusted_confidence: 0.3 }]);
+    const provider = mockProvider(response);
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()], { strict: true });
+
+    expect(validated).toEqual([]);
+  });
+
+  it('strict: all items shape-malformed raises stage=schema-items-all-dropped', async () => {
+    // synthetic per P3.6-H1 — every parsed item is an object but missing the
+    // required `index` field. 100% schema-malformed → must raise.
+    const provider = mockProvider(
+      JSON.stringify([
+        { grounded: true, adjusted_confidence: 0.9 }, // missing index
+        { grounded: true, adjusted_confidence: 0.85 }, // missing index
+      ]),
+    );
+    const facts = [makeFact({ text: 'A' }), makeFact({ text: 'B' })];
+
+    await expect(
+      validateFacts(provider, facts, [makeStoredMsg()], { strict: true }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ValidationError);
+      const e = err as ValidationError;
+      expect(e.stage).toBe('schema-items-all-dropped');
+      expect(e.details.droppedCount).toBe(2);
+      expect(e.details.totalCount).toBe(2);
+      return true;
+    });
+  });
+
+  it('strict: facts.length===0 returns [] without calling provider', async () => {
+    const provider = mockProvider('[]');
+
+    const validated = await validateFacts(provider, [], [makeStoredMsg()], { strict: true });
+
+    expect(validated).toEqual([]);
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+
+  it('strict: empty-array response with no facts-to-validate edge: all facts pass-through with original confidence if legal', async () => {
+    // Strict mode must NOT treat "zero results returned" as schema failure —
+    // because the validator treats missing-result entries as pass-through.
+    const facts = [makeFact({ confidence: 0.8 })];
+    const provider = mockProvider('[]');
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()], { strict: true });
+
+    // Pass-through with original confidence (0.8 >= 0.7 threshold)
+    expect(validated).toHaveLength(1);
+    expect(validated[0].adjustedConfidence).toBe(0.8);
+  });
+
+  it('strict: partial schema-drop (mix of valid + malformed) returns only valid entries', async () => {
+    // synthetic per P3.6-H1 — one valid result, one malformed. Partial drop is OK.
+    const facts = [makeFact({ text: 'A' }), makeFact({ text: 'B' })];
+    const response = JSON.stringify([
+      { index: 0, grounded: true, adjusted_confidence: 0.9, reason: 'ok' },
+      { grounded: true, adjusted_confidence: 0.85 }, // missing index
+    ]);
+    const provider = mockProvider(response);
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()], { strict: true });
+
+    // index 0 validates normally; index 1 has no result so passes through with original confidence
+    expect(validated).toHaveLength(2);
+    expect(validated[0].adjustedConfidence).toBe(0.9);
+  });
+
+  // ── Non-strict backward-compat regression tests ───────────────────────
+
+  it('non-strict default: provider throw coerces to []', async () => {
+    const provider: LLMProvider = {
+      name: 'mock',
+      generate: vi.fn().mockRejectedValue(new Error('LLM offline')),
+    };
+    const facts = [makeFact()];
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()]);
+
+    expect(validated).toEqual([]);
+  });
+
+  it('non-strict default: malformed JSON coerces to []', async () => {
+    const provider = mockProvider('{invalid json!!!');
+    const facts = [makeFact()];
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()]);
+
+    expect(validated).toEqual([]);
+  });
+
+  it('non-strict default (explicit false): same coerce behavior', async () => {
+    const provider = mockProvider('[[[');
+    const facts = [makeFact()];
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()], { strict: false });
 
     expect(validated).toEqual([]);
   });

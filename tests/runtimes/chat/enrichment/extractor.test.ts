@@ -22,7 +22,10 @@ vi.mock('../../../../src/logger.ts', () => ({
   }),
 }));
 
-import { extractFacts } from '../../../../src/runtimes/chat/enrichment/extractor.ts';
+import {
+  extractFacts,
+  ExtractionError,
+} from '../../../../src/runtimes/chat/enrichment/extractor.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -285,6 +288,160 @@ describe('extractFacts', () => {
     const msgs = [makeStoredMsg()];
 
     const facts = await extractFacts(provider, msgs);
+
+    expect(facts).toEqual([]);
+  });
+});
+
+// ── Strict mode (P3.6-H1) ─────────────────────────────────────────────────
+// Regression guard for the 2026-04-18 silent-empty-failure class: qwen3:32b-tuned
+// returned [{"fact":"..."}] instead of the required schema. Non-strict path
+// silently dropped every entry; strict path must throw so callers fail-closed.
+
+describe('extractFacts — strict mode (opt-in)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('strict: provider throw raises ExtractionError with stage=provider-call', async () => {
+    const cause = new Error('Network failure'); // synthetic per P3.6-H1
+    const provider: LLMProvider = {
+      name: 'mock',
+      generate: vi.fn().mockRejectedValue(cause),
+    };
+    const msgs = [makeStoredMsg()];
+
+    await expect(extractFacts(provider, msgs, { strict: true })).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ExtractionError);
+      const e = err as ExtractionError;
+      expect(e.stage).toBe('provider-call');
+      expect(e.details.cause).toBe(cause);
+      return true;
+    });
+  });
+
+  it('strict: malformed JSON raises ExtractionError with stage=json-parse and truncated rawOutput', async () => {
+    const provider = mockProvider('not json at all {{{'); // synthetic per P3.6-H1
+    const msgs = [makeStoredMsg()];
+
+    await expect(extractFacts(provider, msgs, { strict: true })).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ExtractionError);
+      const e = err as ExtractionError;
+      expect(e.stage).toBe('json-parse');
+      expect(typeof e.details.rawOutput).toBe('string');
+      // PII hygiene: rawOutput must be truncated to <= 500 chars
+      expect((e.details.rawOutput ?? '').length).toBeLessThanOrEqual(500);
+      return true;
+    });
+  });
+
+  it('strict: non-array top-level raises ExtractionError with stage=schema-shape', async () => {
+    const provider = mockProvider(JSON.stringify({ text: 'foo', memory_type: 'user_fact' })); // object, not array
+    const msgs = [makeStoredMsg()];
+
+    await expect(extractFacts(provider, msgs, { strict: true })).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ExtractionError);
+      const e = err as ExtractionError;
+      expect(e.stage).toBe('schema-shape');
+      return true;
+    });
+  });
+
+  it('strict: qwen3-shaped [{"fact":"..."}] raises schema-items-all-dropped with droppedCount=totalCount', async () => {
+    // synthetic per P3.6-H1 — reproduces the 2026-04-18 qwen3:32b-tuned silent-empty failure:
+    // model returned `fact` instead of the required `text` field, causing every item to be dropped.
+    const qwenBadOutput = JSON.stringify([
+      { fact: 'User lives in London' },
+      { fact: 'User works as a developer' },
+      { fact: 'User prefers dark mode' },
+    ]);
+    const provider = mockProvider(qwenBadOutput);
+    const msgs = [makeStoredMsg()];
+
+    await expect(extractFacts(provider, msgs, { strict: true })).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(ExtractionError);
+      const e = err as ExtractionError;
+      expect(e.stage).toBe('schema-items-all-dropped');
+      expect(e.details.droppedCount).toBe(3);
+      expect(e.details.totalCount).toBe(3);
+      expect(e.details.sampleItem).toBeDefined();
+      return true;
+    });
+  });
+
+  it('strict: well-formed empty array returns [] (legitimate model-replied-empty)', async () => {
+    const provider = mockProvider('[]');
+    const msgs = [makeStoredMsg()];
+
+    const facts = await extractFacts(provider, msgs, { strict: true });
+
+    expect(facts).toEqual([]);
+    expect(provider.generate).toHaveBeenCalledOnce();
+  });
+
+  it('strict: messages.length===0 returns [] (no extraction needed, no call)', async () => {
+    const provider = mockProvider('[]');
+
+    const facts = await extractFacts(provider, [], { strict: true });
+
+    expect(facts).toEqual([]);
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+
+  it('strict: mix of good + bad items returns only good items (partial drop is OK, not 100%)', async () => {
+    // synthetic per P3.6-H1 — one valid item, one bad (qwen-style `fact`) item.
+    // Mixed drops must NOT throw — only 100% schema-drop does.
+    const mixed = JSON.stringify([
+      validFactJson({ text: 'Valid fact' }),
+      { fact: 'malformed qwen-style entry' },
+    ]);
+    const provider = mockProvider(mixed);
+    const msgs = [makeStoredMsg()];
+
+    const facts = await extractFacts(provider, msgs, { strict: true });
+
+    expect(facts).toHaveLength(1);
+    expect(facts[0].text).toBe('Valid fact');
+  });
+
+  // ── Non-strict backward-compat regression tests ───────────────────────
+
+  it('non-strict default: provider throw coerces to []', async () => {
+    const provider: LLMProvider = {
+      name: 'mock',
+      generate: vi.fn().mockRejectedValue(new Error('Network failure')),
+    };
+    const msgs = [makeStoredMsg()];
+
+    const facts = await extractFacts(provider, msgs); // no strict option
+
+    expect(facts).toEqual([]);
+  });
+
+  it('non-strict default: malformed JSON coerces to []', async () => {
+    const provider = mockProvider('not json at all {{{');
+    const msgs = [makeStoredMsg()];
+
+    const facts = await extractFacts(provider, msgs); // no strict option
+
+    expect(facts).toEqual([]);
+  });
+
+  it('non-strict default: qwen3-shaped all-dropped coerces to [] (the 2026-04-18 silent-failure bug reproduction)', async () => {
+    // synthetic per P3.6-H1 — verifies legacy callers keep old behavior until they opt in.
+    const provider = mockProvider(JSON.stringify([{ fact: 'bad shape' }]));
+    const msgs = [makeStoredMsg()];
+
+    const facts = await extractFacts(provider, msgs); // no strict option
+
+    expect(facts).toEqual([]);
+  });
+
+  it('non-strict default (explicit false): same coerce-to-[] behavior', async () => {
+    const provider = mockProvider('{not an array}');
+    const msgs = [makeStoredMsg()];
+
+    const facts = await extractFacts(provider, msgs, { strict: false });
 
     expect(facts).toEqual([]);
   });
