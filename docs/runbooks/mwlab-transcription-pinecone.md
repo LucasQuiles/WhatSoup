@@ -59,6 +59,49 @@ This installs:
 - faster-whisper cache under `~/.local/share/whatsoup/models/faster-whisper`
 - whisper.cpp model at `~/.local/share/whatsoup/models/whisper.cpp/ggml-small.bin`
 
+## Phase 3 gate G1 — migration trigger (`mw-bot` restart)
+
+Phase 3 introduced schema migration 20 (`fact_export_queue` table) in `src/core/database.ts`. Migrations fire at `src/main.ts:141-142` when `db.open()` is called — this is the de-facto migration trigger for the live `bot.db`.
+
+Only `com.whatsoup.mw-bot` triggers migration for `~/.local/share/whatsoup/instances/mw-bot/bot.db`. `com.whatsoup.mw-cell` has a separate DB at `~/.local/share/whatsoup/instances/mw-cell/` — restarting it does **not** create missing tables in mw-bot's DB. `com.whatsoup.whatsoup-fleet` opens instance DBs read-only via `src/fleet/db-reader.ts:53-55` (`READ_ONLY_DATABASE_OPTIONS`) and does **not** run migrations under any circumstance.
+
+### Actor contract
+
+| Actor | DB path | Migration authority |
+|---|---|---|
+| `com.whatsoup.mw-bot` | `~/.local/share/whatsoup/instances/mw-bot/bot.db` | Yes — `db.open()` at `src/main.ts:141-142` |
+| `com.whatsoup.mw-cell` | `~/.local/share/whatsoup/instances/mw-cell/` | Separate DB — writes to mw-bot path would be a bug |
+| `com.whatsoup.whatsoup-fleet` | opens instance DBs via `src/fleet/db-reader.ts` | Read-only (`READ_ONLY_DATABASE_OPTIONS`) — never migrates |
+
+### Operator procedure
+
+```bash
+# Confirm the schema version before restart
+sqlite3 ~/.local/share/whatsoup/instances/mw-bot/bot.db \
+  "SELECT MAX(version) FROM schema_migrations"
+
+# Restart mw-bot (explicit operator GO required per Phase 3 gate G1)
+launchctl kickstart -k gui/$(id -u)/com.whatsoup.mw-bot
+
+# Wait ~5-10s for startup, then confirm migration applied
+sqlite3 ~/.local/share/whatsoup/instances/mw-bot/bot.db \
+  "SELECT MAX(version) FROM schema_migrations"
+# Expected: version number bumped to the latest migration (20 for Phase 3)
+```
+
+### When not to run
+
+Never restart mw-bot while a manual bridge run or backfill is actively writing to `bot.db`. Coordinate with ongoing operations before firing the kickstart.
+
+### Regression reference
+
+The 2026-04-17 incident where `fact_export_queue` was absent from live bot.db because mw-bot predated the migration-20 code deploy. Root cause: the code shipped but the process didn't reopen the DB. G1 exists to prevent this class of drift.
+
+### Related gates
+
+- G2 is the launchd bootstrap of `com.mwlab.mw-mind-whatsapp-bridge` (see separate bridge section if present).
+- G1 is a prerequisite for the `backfill-enrichment --strict` workflow documented below.
+
 ## `backfill-enrichment --strict` (P3.6-H2) operator guide
 
 Operator-invoked retroactive enrichment of messages with `enrichment_processed_at IS NULL`. Preferred invocation:
