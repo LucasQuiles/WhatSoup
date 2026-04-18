@@ -8,6 +8,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../../src/core/database.ts';
 import type { StoredMessage } from '../../src/core/messages.ts';
 import type { ExtractedFact } from '../../src/runtimes/chat/enrichment/extractor.ts';
@@ -825,5 +828,150 @@ describe('runBackfill — P3.6-H2 strict-mode summary + failedBatches', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].error).toMatch(/^backfill_strict_fail_json-parse:/);
     expect(rows[0].error).not.toMatch(/^backfill_fail:/);
+  });
+});
+
+// ── P3.6 review D-1: final run_complete telemetry record ─────────────────────
+//
+// The runbook advertises `jq '.failedBatches' <telemetry.jsonl>` but before
+// D-1 every batch telemetry record was either `input` or per-batch `execution`
+// with no `failedBatches` key, so the jq command returned `null` on every
+// line. The fix: emit one final record at the end of runBackfill with
+// action=run_complete and inputs.failedBatches populated.
+describe('runBackfill — P3.6 D-1 final run_complete telemetry', () => {
+  let db: Database;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+    tmpDir = mkdtempSync(join(tmpdir(), 'p36-d1-telem-'));
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function stubProviders() {
+    return { extraction: stubProvider(), validation: stubProvider() };
+  }
+
+  function readTelemetry(path: string): Array<Record<string, unknown>> {
+    const raw = readFileSync(path, 'utf8');
+    return raw
+      .trim()
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  it('emits a run_complete record with inputs.failedBatches = [] when no strict failures', async () => {
+    // Clean strict-mode run. The final telemetry record MUST still land
+    // (non-strict paths should not be the only producers) and MUST carry
+    // failedBatches as an empty array so `jq '.inputs.failedBatches'` on the
+    // last line returns `[]` rather than `null`.
+    seedMessage(db, { pk: 1, chatJid: 'a@g.us' });
+    const vf = [makeValidated(makeExtracted('a@g.us', 'ok'))];
+    const deps: BackfillBatchDeps = {
+      extract: vi.fn(async () => vf.map((v) => v as ExtractedFact)) as unknown as BackfillBatchDeps['extract'],
+      validate: vi.fn(async () => vf) as unknown as BackfillBatchDeps['validate'],
+      enqueue: vi.fn(
+        (): EnqueueFactsResult => ({ attempted: 1, inserted: 1, duplicates: 0, failed: 0 }),
+      ) as unknown as BackfillBatchDeps['enqueue'],
+      markProcessed: vi.fn() as unknown as BackfillBatchDeps['markProcessed'],
+    };
+
+    const telemetryPath = join(tmpDir, 'task-5-backfill-telemetry.jsonl');
+    await runBackfill(
+      db,
+      parseArgs(['--strict', '--telemetry', telemetryPath]),
+      stubProviders(),
+      deps,
+    );
+
+    const records = readTelemetry(telemetryPath);
+    const runComplete = records.find((r) => r.action === 'run_complete');
+    expect(runComplete).toBeDefined();
+    expect(runComplete!.event).toBe('execution');
+    expect(runComplete!.result).toBe('Pass');
+    const inputs = runComplete!.inputs as Record<string, unknown>;
+    expect(inputs.failedBatches).toEqual([]);
+    expect(inputs.batchesOk).toBe(1);
+    expect(inputs.batchesFailed).toBe(0);
+    expect(inputs.strict).toBe(true);
+    expect(inputs.dryRun).toBe(false);
+  });
+
+  it('emits a run_complete record with inputs.failedBatches populated on strict fail-closed', async () => {
+    // Strict-mode run with one ExtractionError — the final record must carry
+    // the structured failedBatches list so operators running the runbook's
+    // documented jq command see the chatJid + messageIds + stage + details
+    // without parsing stdout.
+    seedMessage(db, { pk: 7, chatJid: 'b@g.us' });
+    const deps: BackfillBatchDeps = {
+      extract: vi.fn(async () => {
+        throw new ExtractionError('schema-items-all-dropped', {
+          droppedCount: 1,
+          totalCount: 1,
+          sampleItem: { fact: 'wrong-shape' },
+        });
+      }) as unknown as BackfillBatchDeps['extract'],
+      validate: vi.fn(async () => []) as unknown as BackfillBatchDeps['validate'],
+      enqueue: vi.fn() as unknown as BackfillBatchDeps['enqueue'],
+      markProcessed: vi.fn() as unknown as BackfillBatchDeps['markProcessed'],
+    };
+
+    const telemetryPath = join(tmpDir, 'task-5-backfill-telemetry.jsonl');
+    await runBackfill(
+      db,
+      parseArgs(['--strict', '--telemetry', telemetryPath]),
+      stubProviders(),
+      deps,
+    );
+
+    const records = readTelemetry(telemetryPath);
+    const runComplete = records.find((r) => r.action === 'run_complete');
+    expect(runComplete).toBeDefined();
+    expect(runComplete!.result).toBe('Fail');
+    const inputs = runComplete!.inputs as Record<string, unknown>;
+    const failedBatches = inputs.failedBatches as Array<Record<string, unknown>>;
+    expect(failedBatches).toHaveLength(1);
+    expect(failedBatches[0].chatJid).toBe('b@g.us');
+    expect(failedBatches[0].messageIds).toEqual([7]);
+    expect(failedBatches[0].errorType).toBe('ExtractionError');
+    expect(failedBatches[0].stage).toBe('schema-items-all-dropped');
+    expect(typeof failedBatches[0].details).toBe('string');
+    expect(inputs.batchesOk).toBe(0);
+    expect(inputs.batchesFailed).toBe(1);
+  });
+
+  it('run_complete record is the LAST telemetry line (jq on last line returns failedBatches)', async () => {
+    // The runbook's convention (`jq '... | .inputs.failedBatches' <last line>`)
+    // assumes the run_complete record is at the end. Guard against a future
+    // refactor that reorders telemetry emission and causes the final record
+    // to land before per-batch records.
+    seedMessage(db, { pk: 1, chatJid: 'a@g.us' });
+    seedMessage(db, { pk: 2, chatJid: 'b@g.us' });
+    const vf = [makeValidated(makeExtracted('a@g.us', 'ok'))];
+    const deps: BackfillBatchDeps = {
+      extract: vi.fn(async () => vf.map((v) => v as ExtractedFact)) as unknown as BackfillBatchDeps['extract'],
+      validate: vi.fn(async () => vf) as unknown as BackfillBatchDeps['validate'],
+      enqueue: vi.fn(
+        (): EnqueueFactsResult => ({ attempted: 1, inserted: 1, duplicates: 0, failed: 0 }),
+      ) as unknown as BackfillBatchDeps['enqueue'],
+      markProcessed: vi.fn() as unknown as BackfillBatchDeps['markProcessed'],
+    };
+
+    const telemetryPath = join(tmpDir, 'task-5-backfill-telemetry.jsonl');
+    await runBackfill(
+      db,
+      parseArgs(['--telemetry', telemetryPath]),
+      stubProviders(),
+      deps,
+    );
+
+    const records = readTelemetry(telemetryPath);
+    expect(records.length).toBeGreaterThan(0);
+    expect(records[records.length - 1].action).toBe('run_complete');
   });
 });

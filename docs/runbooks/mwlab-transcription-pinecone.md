@@ -85,7 +85,7 @@ From `scripts/backfill-enrichment.ts`:
 | `0` | Success (or dry-run) |
 | `2` | Unhandled exception |
 | `3` | `bot.db` missing |
-| `4` | T1 accounting-invariant failure (enqueue/poller gate tripped) |
+| `4` | T1 accounting-invariant failure (`summary.batchesFailed > 0`), or argument parse error (unknown flag, missing required value) |
 | `5` | Provider config error (missing API key or invalid model) |
 | `6` | **P3.6-H2 strict-mode fail-closed** (ambiguous-empty model output caught) |
 
@@ -100,19 +100,22 @@ The `<stage>` in `backfill_strict_fail_<stage>`:
 | `schema-shape` | Top-level not an array (e.g. model returned object) |
 | `schema-items-all-dropped` | Every item in the array failed schema (the 2026-04-18 qwen3:32b-tuned regression class) |
 
+Note: the same stage vocabulary covers both `ExtractionError` and `ValidationError`. Check `failedBatches[].errorType` in the final telemetry record (see Recovery step 1) to determine which function fired.
+
 ### Recovery steps for exit code `6`
 
-1. Read the `failedBatches` JSON printed at end of run:
+1. Read the final `run_complete` telemetry record. `runBackfill` emits this as the last JSONL line of every run (action: `run_complete`), with `inputs.failedBatches` carrying the full structured list:
    ```bash
-   jq '.failedBatches' $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl
+   jq 'select(.action == "run_complete") | .inputs.failedBatches' \
+     $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl
    ```
    — or the last stdout block.
 2. Identify the `stage`:
    - `provider-call` usually means transient — retry.
    - `schema-*` means the model is producing the wrong shape — do **not** retry with the same model.
 3. For `schema-*` failures: swap `--provider`, swap `EXTRACTION_MODEL` / `VALIDATION_MODEL`, or revert to Anthropic.
-4. For `provider-call` failures: check Ollama health (`curl http://localhost:11434/api/tags`), check for cold-load timeouts (raise `apiTimeoutMs` or pre-warm model), retry.
-5. Messages are retry-eligible — the same `--run-id` will pick them up again on next invocation (no DB reset needed).
+4. For `provider-call` failures: check Ollama health (`curl http://localhost:11434/api/tags`), check for cold-load timeouts (raise via `WHATSOUP_API_TIMEOUT_MS` env var (in ms) or pre-warm model), retry.
+5. Messages are retry-eligible based on `enrichment_processed_at IS NULL` (no DB reset needed); the `--run-id` is a run label, not a retry key — any value (same or different) works.
 
 ### Regression reference
 
@@ -126,10 +129,11 @@ OPENAI_API_KEY="ollama-placeholder"   # SDK rejects literal empty string
 OPENAI_BASE_URL="http://localhost:11434/v1"
 EXTRACTION_MODEL=gemma3:27b
 VALIDATION_MODEL=gemma3:27b
-npx tsx scripts/backfill-enrichment.ts --strict --provider openai --instance mw-bot
+WHATSOUP_API_TIMEOUT_MS=60000 \
+  npx tsx scripts/backfill-enrichment.ts --strict --provider openai --instance mw-bot
 ```
 
-Only `gemma3:27b` has been proven viable in the default 30s `apiTimeoutMs`. `qwen2.5:72b` and `qwen3:32b-tuned` have both timed out at cold-load — raise timeout to ≥60s if using them.
+Only `gemma3:27b` has been proven viable in the default 30s `apiTimeoutMs`. `qwen2.5:72b` and `qwen3:32b-tuned` have both timed out at cold-load — set `WHATSOUP_API_TIMEOUT_MS=60000` (or higher; value is in ms) before invoking the script if using them. The env var overrides the hardcoded `config.apiTimeoutMs` default without a code edit.
 
 ## Open item
 

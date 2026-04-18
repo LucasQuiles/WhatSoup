@@ -51,6 +51,20 @@ import {
 // Re-export so the existing test imports keep working.
 export { shortHash, toExportable };
 
+/**
+ * P3.6 review S-1a: shared stage vocabulary for ExtractionError and
+ * ValidationError. Both error classes use the exact same four-value union,
+ * so promoting it to a named type keeps the backfill summary / failedBatches
+ * surface in sync with the error sources. If a future stage is added in
+ * extractor.ts / validator.ts without updating this alias, tsc flags the
+ * gap here and in StrictFailure.stage below.
+ */
+export type StrictStage =
+  | 'provider-call'
+  | 'json-parse'
+  | 'schema-shape'
+  | 'schema-items-all-dropped';
+
 // P3.6-H2: pino-child logger used only on strict-mode fail-closed paths so
 // operators see the batch-level failure even when the summary is silenced
 // by telemetry-off runs. Non-strict paths keep their console.* logging.
@@ -279,7 +293,7 @@ export interface BackfillBatchDeps {
  */
 export interface StrictFailure {
   errorType: 'ExtractionError' | 'ValidationError';
-  stage: string;
+  stage: StrictStage;
   messageIds: number[];
   details: string;
 }
@@ -429,7 +443,7 @@ export interface BackfillSummary {
     chatJid: string;
     messageIds: number[];
     errorType: 'ExtractionError' | 'ValidationError';
-    stage: string;
+    stage: StrictStage;
     details: string;
   }>;
 }
@@ -582,6 +596,38 @@ export async function runBackfill(
   }
 
   summary.elapsedMs = Date.now() - start;
+
+  // P3.6 review D-1: emit a final run_complete telemetry record so the
+  // runbook-documented jq command
+  //   jq '.failedBatches' $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl
+  // returns the structured failure list instead of `null` on every line.
+  // Before this, failedBatches lived only on the BackfillSummary returned
+  // from runBackfill and was printed via console.log in main(); operators
+  // following the runbook would read the JSONL and find no failedBatches
+  // key anywhere. The record is written after the loop so batchesOk /
+  // batchesFailed reflect the final totals.
+  emitTelemetry(args.telemetryPath, {
+    timestamp_utc: new Date().toISOString(),
+    run_id: args.runId,
+    service: 'whatsoup',
+    env: process.env.NODE_ENV ?? 'prod',
+    actor: 'backfill-script',
+    trace_id: args.runId,
+    span_id: 'run-complete',
+    event: 'execution',
+    action: 'run_complete',
+    result: summary.failedBatches.length > 0 ? 'Fail' : 'Pass',
+    inputs: {
+      batchesOk: summary.batchesOk,
+      batchesFailed: summary.batchesFailed,
+      failedBatches: summary.failedBatches,
+      strict: args.strict,
+      dryRun: args.dryRun,
+    },
+    evidence: { artifact_paths: [] },
+    error: { type: '', message: '' },
+  });
+
   return summary;
 }
 

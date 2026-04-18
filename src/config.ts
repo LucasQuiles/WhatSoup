@@ -222,7 +222,16 @@ export const config = {
   guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', 9099),
 
   // API
-  apiTimeoutMs: 30_000,
+  // P3.6 review D-2: env-var override for operator-actionable timeout
+  // tuning. The mwlab runbook's "raise apiTimeoutMs" recovery step is
+  // now actionable without a code edit via WHATSOUP_API_TIMEOUT_MS.
+  // Invalid values (non-numeric) and non-positive values (0, negative)
+  // fall back to the 30_000 default — intEnv() handles the non-numeric
+  // case, the positive-only guard below handles 0 / negative.
+  apiTimeoutMs: (() => {
+    const n = intEnv('WHATSOUP_API_TIMEOUT_MS', 30_000);
+    return n > 0 ? n : 30_000;
+  })(),
   apiRetryDelayMs: 2_000,
 
   // Access control — rehydrate from instance (string[]) or use defaults

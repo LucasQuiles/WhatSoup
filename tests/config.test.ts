@@ -23,6 +23,8 @@ beforeEach(() => {
     WHATSOUP_DATA_DIR: process.env.WHATSOUP_DATA_DIR,
     WHATSOUP_STATE_DIR: process.env.WHATSOUP_STATE_DIR,
     WHATSOUP_GUI_PORT: process.env.WHATSOUP_GUI_PORT,
+    // P3.6 D-2: new env var that overrides apiTimeoutMs.
+    WHATSOUP_API_TIMEOUT_MS: process.env.WHATSOUP_API_TIMEOUT_MS,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME,
@@ -45,6 +47,9 @@ beforeEach(() => {
   delete process.env.PINECONE_INDEX;
   delete process.env.LOG_LEVEL;
   delete process.env.WHATSOUP_GUI_PORT;
+  // D-2: keep existing "apiTimeoutMs defaults to 30_000" tests deterministic
+  // regardless of what the parent env has set for WHATSOUP_API_TIMEOUT_MS.
+  delete process.env.WHATSOUP_API_TIMEOUT_MS;
 
   vi.resetModules();
 });
@@ -598,5 +603,61 @@ describe('config — gui fields', () => {
     const { config } = await import('../src/config.ts');
     expect(config.guiPort).toBe(7777);
     delete process.env.WHATSOUP_GUI_PORT;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 9: P3.6 D-2 — WHATSOUP_API_TIMEOUT_MS env var override
+// ---------------------------------------------------------------------------
+// Before D-2, config.apiTimeoutMs was hardcoded 30_000 and operators
+// following the runbook's "raise apiTimeoutMs" recovery step needed a code
+// edit to tune it. These tests lock the env-var fallback contract so the
+// runbook recommendation becomes operator-actionable.
+describe('config — apiTimeoutMs env-var override (P3.6 D-2)', () => {
+  it('defaults to 30000 when WHATSOUP_API_TIMEOUT_MS is unset', async () => {
+    delete process.env.WHATSOUP_API_TIMEOUT_MS;
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.apiTimeoutMs).toBe(30_000);
+  });
+
+  it('defaults to 30000 when WHATSOUP_API_TIMEOUT_MS is the empty string', async () => {
+    // intEnv() treats whitespace / empty as unset and returns the fallback.
+    process.env.WHATSOUP_API_TIMEOUT_MS = '';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.apiTimeoutMs).toBe(30_000);
+  });
+
+  it('defaults to 30000 when WHATSOUP_API_TIMEOUT_MS is malformed ("abc")', async () => {
+    // parseInt('abc', 10) → NaN → intEnv returns the fallback → 30_000.
+    process.env.WHATSOUP_API_TIMEOUT_MS = 'abc';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.apiTimeoutMs).toBe(30_000);
+  });
+
+  it('accepts a valid positive integer ("60000" → 60000)', async () => {
+    // The documented recovery path for 72B models in the runbook.
+    process.env.WHATSOUP_API_TIMEOUT_MS = '60000';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.apiTimeoutMs).toBe(60_000);
+  });
+
+  it('falls back to 30000 for "0" (non-positive → invalid)', async () => {
+    // Zero timeouts would mean "never wait" in Node's HTTP layer — safer to
+    // coerce to the hardcoded default than to accept the nonsense.
+    process.env.WHATSOUP_API_TIMEOUT_MS = '0';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.apiTimeoutMs).toBe(30_000);
+  });
+
+  it('falls back to 30000 for "-5000" (negative → invalid)', async () => {
+    process.env.WHATSOUP_API_TIMEOUT_MS = '-5000';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.apiTimeoutMs).toBe(30_000);
   });
 });
