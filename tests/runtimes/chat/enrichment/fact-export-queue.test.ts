@@ -1,4 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// ─── Logger mock ─────────────────────────────────────────────────────────────
+// The enrichment module binds its own `log` at module-load time via
+// createChildLogger(). To prove the quarantine path surfaces errors (T1
+// I-1 hard-negative contract) we mock the logger module and share a
+// stable spy for `.error` across all tests via vi.hoisted — mirroring
+// the pattern used in tests/core/workspace-error-handling.test.ts.
+const { mockLogError } = vi.hoisted(() => ({
+  mockLogError: vi.fn(),
+}));
+
+vi.mock('../../../../src/logger.ts', () => ({
+  createChildLogger: () => ({
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: mockLogError,
+    debug: vi.fn(),
+  }),
+}));
+
 import { Database } from '../../../../src/core/database.ts';
 import {
   enqueueFacts,
@@ -506,29 +526,16 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     db.close();
   });
 
-  it('surfaces corrupted payload_json at log.error with fact_id, not silently returned as {}', async () => {
-    // Arrange a spy on the enrichment child logger so we can prove the
-    // corruption is surfaced at ERROR (not silent, not WARN-and-hide).
-    //
-    // We access the module-level logger via dynamic import after patching,
-    // because fact-export-queue.ts holds a closure over its own `log`
-    // instance created from createChildLogger at module load time.
-    //
-    // Strategy: patch `process.env.WHATSOUP_TEST_LOGGER_CAPTURE` pattern is
-    // not present in this repo, so we instead install a pino "hook" via
-    // vi.spyOn on the global logger transport. The most reliable form is
-    // to intercept via the logger module itself, but it is a singleton —
-    // we therefore use vi.spyOn(console, 'error') as a coarse fallback:
-    // pino default transport writes to stderr, and in test mode the pino
-    // instance surfaces through console.error when the env lacks a
-    // structured sink. If the implementation logs via log.error, the
-    // assertion below passes regardless of exact transport.
-    //
-    // What we actually verify is BEHAVIOUR, not transport:
-    //  1. Corrupted rows are NOT returned with payload === {}.
-    //  2. Either they are omitted from the returned array AND the call
-    //     leaves audit evidence (via the schema / status field changing),
-    //     OR they are returned with an explicit quarantine marker.
+  it('surfaces corrupted payload_json at log.error with fact_id, not silently returned as {}', () => {
+    // Contract (T1 I-1 hard negative): corrupted payload_json rows MUST
+    // be omitted from the claimed result AND the quarantine MUST emit a
+    // log.error bearing the offending factId. This test asserts BOTH —
+    // no conditional-guard gating — so a regression that started
+    // returning `{}` payloads (the pre-T1 silent fallback) would make
+    // one of the assertions below fail rather than be skipped.
+
+    // Reset the shared logger spy so we only see errors from this test.
+    mockLogError.mockClear();
 
     // Insert a malformed row directly so the payload_json is not valid JSON.
     db.raw
@@ -541,6 +548,10 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     // not nuke adjacent good rows.
     enqueueFacts(db, [makeFact({ factId: 'healthy-1', text: 'Good payload' })]);
 
+    // Optional runId propagation — only assert it if the env var is set,
+    // matching the implementation's conditional spread.
+    const runId = process.env.MW_MIND_RUN_ID;
+
     const claimed = claimPendingFacts(db, 10);
 
     // Good row is returned with parsed payload.
@@ -548,17 +559,36 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     expect(goodRow).toBeDefined();
     expect(goodRow?.payload.text).toBe('Good payload');
 
-    // Corrupted row MUST NOT be returned with payload === {} (the silent
-    // fallback the pre-T1 code produced). The T1 contract is that the
-    // guard either (a) omits the row from the returned array (preferred),
-    // or (b) surfaces it with an explicit quarantine marker in its
-    // payload — but never with a plain empty-object payload that would
-    // let the exporter upsert junk.
-    const corruptClaimed = claimed.find((c) => c.factId === 'corrupt-1');
-    if (corruptClaimed !== undefined) {
-      // If surfaced, the payload must NOT be an empty object masquerading
-      // as a valid parse. A quarantine marker is acceptable.
-      expect(corruptClaimed.payload as unknown).not.toEqual({});
+    // Hard negative: the corrupt row MUST NOT appear in the claimed result.
+    expect(claimed.find((c) => c.factId === 'corrupt-1')).toBeUndefined();
+    // And the claimed array MUST NOT contain ANY row with the corrupt fact_id
+    // under any shape (including a resurfaced empty-object payload).
+    expect(claimed.some((c) => c.factId === 'corrupt-1')).toBe(false);
+
+    // Hard positive: the quarantine path MUST have emitted log.error with
+    // the offending factId — this is the audit-trail contract. Without it,
+    // operators have no way to triage corrupted rows.
+    const errorCalls = mockLogError.mock.calls.filter((call) => {
+      const [ctx] = call as [unknown, unknown];
+      return (
+        typeof ctx === 'object' &&
+        ctx !== null &&
+        (ctx as Record<string, unknown>).factId === 'corrupt-1'
+      );
+    });
+    expect(errorCalls.length).toBeGreaterThan(0);
+
+    // Payload shape: every error call for this factId carries the row id
+    // too (so operators can SELECT on id), and carries runId iff the env
+    // var is present at call time.
+    for (const call of errorCalls) {
+      const [ctx] = call as [Record<string, unknown>, string];
+      expect(typeof ctx.rowId).toBe('number');
+      if (runId) {
+        expect(ctx.runId).toBe(runId);
+      } else {
+        expect('runId' in ctx).toBe(false);
+      }
     }
 
     // Additionally: the row must still exist in the DB so an operator
@@ -571,9 +601,13 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
   });
 
   it('rejects payload_json that parses as JSON but fails zod validation', () => {
-    // A syntactically-valid but semantically-invalid payload: JSON object
-    // but missing required fields (no `text`, no `memoryType`). The zod
-    // guard must catch this and refuse to pass it through as a normal fact.
+    // Contract (T1 I-1 hard negative): a syntactically-valid but
+    // semantically-invalid payload (JSON object missing required fields)
+    // MUST be quarantined — omitted from the claimed result AND surfaced
+    // at log.error with the offending factId.
+
+    mockLogError.mockClear();
+
     db.raw
       .prepare(
         `INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`,
@@ -583,18 +617,40 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     // Adjacent healthy row
     enqueueFacts(db, [makeFact({ factId: 'healthy-2', text: 'Fine' })]);
 
+    const runId = process.env.MW_MIND_RUN_ID;
+
     const claimed = claimPendingFacts(db, 10);
 
     // Healthy row is still returned
     const healthy = claimed.find((c) => c.factId === 'healthy-2');
     expect(healthy).toBeDefined();
 
-    // Schema-bad row must NOT be returned as a valid claim. If returned,
-    // it must have an explicit quarantine marker — not its raw
-    // schema-violating payload passed through.
-    const badClaim = claimed.find((c) => c.factId === 'schema-bad-1');
-    if (badClaim !== undefined) {
-      expect((badClaim.payload as Record<string, unknown>).unexpected).toBeUndefined();
+    // Hard negative: the schema-bad row MUST NOT appear in the claimed result.
+    expect(claimed.find((c) => c.factId === 'schema-bad-1')).toBeUndefined();
+    expect(claimed.some((c) => c.factId === 'schema-bad-1')).toBe(false);
+
+    // Hard positive: the quarantine path MUST have emitted log.error
+    // bearing the offending factId and the zod issues array.
+    const errorCalls = mockLogError.mock.calls.filter((call) => {
+      const [ctx] = call as [unknown, unknown];
+      return (
+        typeof ctx === 'object' &&
+        ctx !== null &&
+        (ctx as Record<string, unknown>).factId === 'schema-bad-1'
+      );
+    });
+    expect(errorCalls.length).toBeGreaterThan(0);
+
+    for (const call of errorCalls) {
+      const [ctx] = call as [Record<string, unknown>, string];
+      expect(typeof ctx.rowId).toBe('number');
+      // zod failure path carries the issues array for operator triage.
+      expect(Array.isArray(ctx.issues)).toBe(true);
+      if (runId) {
+        expect(ctx.runId).toBe(runId);
+      } else {
+        expect('runId' in ctx).toBe(false);
+      }
     }
   });
 });
