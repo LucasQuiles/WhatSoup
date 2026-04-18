@@ -87,6 +87,13 @@ export class FleetDiscovery {
           configError = `Invalid config.json: ${(err as Error).message}`;
         }
 
+        // Honor the `enabled: false` opt-out so operators can keep a config on
+        // disk while taking it out of fleet rotation (no polling, no proxy).
+        if (raw.enabled === false) {
+          log.info({ name }, 'fleet scan: skipping disabled instance');
+          continue;
+        }
+
         // Read health token from tokens.env
         let healthToken: string | null = null;
         const tokensPath = path.join(this.configRoot, name, 'tokens.env');

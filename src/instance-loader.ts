@@ -45,6 +45,9 @@ interface InstanceConfig {
   systemPrompt?: string;
   adminPhones: string[];
   accessMode: AccessMode;
+  /** Set to false to hide this instance from fleet discovery (no polling, no routing).
+   * Defaults to true. Useful for keeping a config on disk while taking it out of rotation. */
+  enabled?: boolean;
   // Optional fields
   model?: string;
   models?: Record<string, string>;

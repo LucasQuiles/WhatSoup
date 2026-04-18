@@ -425,3 +425,36 @@ describe('FleetDiscovery — auto-refresh lifecycle', () => {
     // No throw
   });
 });
+
+describe('FleetDiscovery - enabled flag', () => {
+  it('skips instances with enabled: false (ghost-instance opt-out)', () => {
+    // Write a fully valid passive instance but mark it disabled.
+    writeInstanceConfig('ghost', {
+      name: 'ghost',
+      type: 'passive',
+      adminPhones: ['15550000000'],
+      accessMode: 'self_only',
+      healthPort: 9999,
+      enabled: false,
+    });
+    // And an enabled instance alongside it to confirm scan still picks up others.
+    writeInstanceConfig('loops', chatInstance);
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    expect(instances.has('ghost')).toBe(false);
+    expect(instances.has('loops')).toBe(true);
+  });
+
+  it('keeps instances with enabled: true or enabled omitted', () => {
+    writeInstanceConfig('active', { ...chatInstance, name: 'active', enabled: true });
+    writeInstanceConfig('defaulted', { ...chatInstance, name: 'defaulted' });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    expect(instances.has('active')).toBe(true);
+    expect(instances.has('defaulted')).toBe(true);
+  });
+});
