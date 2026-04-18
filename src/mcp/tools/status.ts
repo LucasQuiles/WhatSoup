@@ -5,7 +5,7 @@ import { JID_PERSONAL } from '../../core/jid-constants.ts';
 import { rowToMessage, type MessageRow } from '../../core/messages.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
-import type { SessionContext, ToolDeclaration, ExtendedBaileysSocket } from '../types.ts';
+import { isPathWithinAllowedRoot, type SessionContext, type ToolDeclaration, type ExtendedBaileysSocket } from '../types.ts';
 
 const STATUS_BROADCAST_JID = 'status@broadcast';
 const MAX_STATUS_FILE_SIZE_BYTES = 50 * 1024 * 1024;
@@ -65,10 +65,8 @@ function resolveStatusFile(filePath: string, session: SessionContext): {
     throw new Error(`File not found: ${filePath}`);
   }
 
-  if (session.allowedRoot) {
-    if (resolved !== session.allowedRoot && !resolved.startsWith(session.allowedRoot + '/')) {
+  if (!isPathWithinAllowedRoot(resolved, session.allowedRoot)) {
       throw new Error(`Path outside workspace: ${filePath}`);
-    }
   }
 
   if (!existsSync(resolved)) {

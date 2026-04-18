@@ -120,6 +120,19 @@ describe('registerMediaTools', () => {
 
   // ── media type routing ────────────────────────────────────────────────────
 
+  it('accepts a file under a macOS tmpdir workspace (canonicalizes /var/folders ↔ /private/var/folders)', async () => {
+    // Regression: allowedRoot = /var/folders/... but realpathSync(filePath) = /private/var/folders/...
+    // Previously the startsWith check failed on every macOS tmpdir workspace. isPathWithinAllowedRoot
+    // now canonicalizes both sides via realpathSync before comparing.
+    const filePath = writeFile('regression-macos-tmpdir.jpg');
+    const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
+
+    const result = await registry.call('send_media', { filePath }, session);
+
+    expect(result.isError).toBeUndefined();
+    expect(mediaCalls).toHaveLength(1);
+  });
+
   it('sends an image file', async () => {
     const filePath = writeFile('photo.jpg');
     const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);

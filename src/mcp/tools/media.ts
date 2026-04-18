@@ -13,7 +13,7 @@ import { createChildLogger } from '../../logger.ts';
 import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
-import type { SessionContext } from '../types.ts';
+import { isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 
@@ -118,13 +118,8 @@ export function registerMediaTools(
         return { error: `File not found: ${filePath}` };
       }
 
-      if (session.allowedRoot) {
-        if (
-          resolved !== session.allowedRoot &&
-          !resolved.startsWith(session.allowedRoot + '/')
-        ) {
-          return { error: `Path outside workspace: ${filePath}` };
-        }
+      if (!isPathWithinAllowedRoot(resolved, session.allowedRoot)) {
+        return { error: `Path outside workspace: ${filePath}` };
       }
 
       // ── File size check ────────────────────────────────────────────────

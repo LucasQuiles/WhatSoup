@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import type { ZodType } from 'zod';
 import type { WhatsAppSocket } from '../transport/connection.ts';
 
@@ -49,3 +50,30 @@ export interface ToolCallResult {
 export function resolveConversationKey(session: SessionContext, callerKey: string): string {
   return session.tier === 'chat-scoped' ? session.conversationKey! : callerKey;
 }
+
+/**
+ * Check whether a resolved filesystem path is within the session's allowedRoot.
+ *
+ * Both the resolved path and the allowedRoot are canonicalized via realpathSync
+ * before comparison so this works correctly on macOS, where /var/folders is a
+ * symlink to /private/var/folders (and the same for /tmp).
+ *
+ * Returns true if allowedRoot is undefined (no boundary enforced).
+ */
+export function isPathWithinAllowedRoot(
+  resolvedPath: string,
+  allowedRoot: string | undefined,
+): boolean {
+  if (!allowedRoot) return true;
+  let canonicalAllowedRoot: string;
+  try {
+    canonicalAllowedRoot = realpathSync(allowedRoot);
+  } catch {
+    canonicalAllowedRoot = allowedRoot;
+  }
+  return (
+    resolvedPath === canonicalAllowedRoot ||
+    resolvedPath.startsWith(canonicalAllowedRoot + "/")
+  );
+}
+

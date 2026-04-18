@@ -5,7 +5,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import type { Database } from '../../core/database.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 import type { ToolRegistry } from '../registry.ts';
-import type { SessionContext } from '../types.ts';
+import { isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
 
@@ -119,10 +119,8 @@ function resolveFile(filePath: string, session: SessionContext): { resolved: str
     throw new Error(`File not found: ${filePath}`);
   }
 
-  if (session.allowedRoot) {
-    if (resolved !== session.allowedRoot && !resolved.startsWith(session.allowedRoot + '/')) {
+  if (!isPathWithinAllowedRoot(resolved, session.allowedRoot)) {
       throw new Error(`Path outside workspace: ${filePath}`);
-    }
   }
 
   if (!existsSync(resolved)) {
