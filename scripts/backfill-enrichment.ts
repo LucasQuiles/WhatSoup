@@ -38,8 +38,9 @@ import {
 import { createAnthropicProvider } from '../src/runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from '../src/runtimes/chat/providers/openai.ts';
 import type { LLMProvider } from '../src/runtimes/chat/providers/types.ts';
-import { extractFacts } from '../src/runtimes/chat/enrichment/extractor.ts';
-import { validateFacts } from '../src/runtimes/chat/enrichment/validator.ts';
+import { extractFacts, ExtractionError } from '../src/runtimes/chat/enrichment/extractor.ts';
+import { validateFacts, ValidationError } from '../src/runtimes/chat/enrichment/validator.ts';
+import { createChildLogger } from '../src/logger.ts';
 import {
   enqueueFacts,
   shortHash,
@@ -49,6 +50,11 @@ import {
 
 // Re-export so the existing test imports keep working.
 export { shortHash, toExportable };
+
+// P3.6-H2: pino-child logger used only on strict-mode fail-closed paths so
+// operators see the batch-level failure even when the summary is silenced
+// by telemetry-off runs. Non-strict paths keep their console.* logging.
+const log = createChildLogger('backfill-enrichment');
 
 export function groupByChatJid(messages: StoredMessage[]): Map<string, StoredMessage[]> {
   const byChat = new Map<string, StoredMessage[]>();
@@ -76,6 +82,15 @@ export interface BackfillArgs {
   runId: string;
   provider: ProviderKind;
   telemetryPath?: string;
+  /**
+   * P3.6-H2. When true, pass `{ strict: true }` through to extractFacts /
+   * validateFacts and fail-closed on ExtractionError / ValidationError:
+   * the batch is NOT marked processed, the failure is recorded in
+   * `runBackfill.summary.failedBatches`, and the run exit code is non-zero
+   * so orchestrators detect the incident. Dry-run keeps the exit code at 0.
+   * Default false to preserve pre-H2 behavior for existing callers.
+   */
+  strict: boolean;
 }
 
 export function parseArgs(argv: readonly string[]): BackfillArgs {
@@ -84,6 +99,7 @@ export function parseArgs(argv: readonly string[]): BackfillArgs {
     limit: 500,
     dryRun: false,
     provider: 'anthropic',
+    strict: false,
     runId:
       process.env.MW_MIND_RUN_ID ||
       `backfill-${new Date().toISOString().replace(/[:.]/g, '-')}`,
@@ -96,6 +112,7 @@ export function parseArgs(argv: readonly string[]): BackfillArgs {
     if (a === '--instance') args.instance = argv[++i] ?? args.instance;
     else if (a === '--limit') args.limit = Number.parseInt(argv[++i] ?? '', 10) || args.limit;
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--strict') args.strict = true;
     else if (a === '--run-id') args.runId = argv[++i] ?? args.runId;
     else if (a === '--telemetry') args.telemetryPath = argv[++i];
     else if (a === '--provider') {
@@ -121,6 +138,8 @@ function printUsage(): void {
     '  --instance <name>      Instance to backfill (default: mw-bot)',
     '  --limit <N>            Max messages to process (default: 500)',
     '  --dry-run              Classify but do not enqueue',
+    '  --strict               Fail-closed on ExtractionError / ValidationError',
+    '                         (P3.6-H2: skip markProcessed + propagate non-zero exit)',
     '  --provider <name>      LLM provider: anthropic | openai (default: anthropic)',
     '  --run-id <id>          Run identifier (default: $MW_MIND_RUN_ID or backfill-<ts>)',
     '  --telemetry <path>     JSONL output path (default: $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl)',
@@ -252,6 +271,19 @@ export interface BackfillBatchDeps {
   markProcessed: typeof markMessagesProcessed;
 }
 
+/**
+ * P3.6-H2 strict-mode failure record attached to a per-batch result when
+ * the extractor or validator raises. Lives on BackfillBatchResult so the
+ * runBackfill caller can aggregate these into summary.failedBatches without
+ * a second data path.
+ */
+export interface StrictFailure {
+  errorType: 'ExtractionError' | 'ValidationError';
+  stage: string;
+  messageIds: number[];
+  details: string;
+}
+
 export interface BackfillBatchResult {
   chatJid: string;
   messagesInBatch: number;
@@ -260,6 +292,13 @@ export interface BackfillBatchResult {
   enqueueResult: EnqueueFactsResult | null;
   markedProcessed: boolean;
   error?: string;
+  /**
+   * P3.6-H2. Populated only when the batch failed-closed under strict mode
+   * (caller passed `strict=true` and extractFacts / validateFacts raised).
+   * Non-strict generic errors still land on `error` instead, preserving the
+   * pre-H2 caller contract.
+   */
+  strictFailure?: StrictFailure;
 }
 
 export async function processBatch(
@@ -269,6 +308,7 @@ export async function processBatch(
   providers: { extraction: Parameters<typeof extractFacts>[0]; validation: Parameters<typeof validateFacts>[0] },
   deps: BackfillBatchDeps,
   dryRun: boolean,
+  strict: boolean = false,
 ): Promise<BackfillBatchResult> {
   const out: BackfillBatchResult = {
     chatJid,
@@ -279,21 +319,33 @@ export async function processBatch(
     markedProcessed: false,
   };
 
+  const batchMessageIds = chatMessages.map((m) => m.pk);
+
   try {
-    const facts = await deps.extract(providers.extraction, chatMessages);
+    // P3.6-H2: pass the strict flag through; H1 owns the decision of what
+    // becomes an ExtractionError (provider-call / json-parse / schema-shape
+    // / schema-items-all-dropped). Legitimate empties (empty batch, model
+    // replied `[]`) still return `[]` silently — we do NOT classify those
+    // as failures here.
+    const facts = await deps.extract(providers.extraction, chatMessages, { strict });
     out.factsExtracted = facts.length;
 
     if (facts.length === 0) {
-      if (!dryRun) deps.markProcessed(db, chatMessages.map((m) => m.pk));
+      if (!dryRun) deps.markProcessed(db, batchMessageIds);
       out.markedProcessed = !dryRun;
       return out;
     }
 
-    const validated = await deps.validate(providers.validation, facts, chatMessages);
+    const validated = await deps.validate(
+      providers.validation,
+      facts,
+      chatMessages,
+      { strict },
+    );
     out.factsValidated = validated.length;
 
     if (validated.length === 0) {
-      if (!dryRun) deps.markProcessed(db, chatMessages.map((m) => m.pk));
+      if (!dryRun) deps.markProcessed(db, batchMessageIds);
       out.markedProcessed = !dryRun;
       return out;
     }
@@ -306,10 +358,43 @@ export async function processBatch(
     out.enqueueResult = enq;
 
     if (accountingOk(enq, exportable.length)) {
-      deps.markProcessed(db, chatMessages.map((m) => m.pk));
+      deps.markProcessed(db, batchMessageIds);
       out.markedProcessed = true;
     }
+    // Note: accountingOk===false (T1 invariant) is a separate failure class
+    // from strict-mode fail-closed. Both skip markProcessed but the
+    // discrimination happens at the runBackfill summary level, not here.
   } catch (err) {
+    // P3.6-H2 fail-closed: ExtractionError / ValidationError get structured
+    // treatment — stage + messageIds preserved verbatim for the operator
+    // retry path. Non-strict paths can never reach this branch (extract /
+    // validate silently coerce to `[]`), so `strict` is implicitly true
+    // when we observe these classes, but we still gate explicitly so a
+    // future regression that throws H1 errors from a non-strict caller
+    // doesn't silently corrupt the summary contract.
+    if (strict && err instanceof ExtractionError) {
+      out.strictFailure = {
+        errorType: 'ExtractionError',
+        stage: err.stage,
+        messageIds: batchMessageIds,
+        details: err.message,
+      };
+      log.error(
+        { err, chatJid, batchMessageIds, stage: err.stage },
+        'backfill: strict-mode extract fail-closed',
+      );
+    } else if (strict && err instanceof ValidationError) {
+      out.strictFailure = {
+        errorType: 'ValidationError',
+        stage: err.stage,
+        messageIds: batchMessageIds,
+        details: err.message,
+      };
+      log.error(
+        { err, chatJid, batchMessageIds, stage: err.stage },
+        'backfill: strict-mode validate fail-closed',
+      );
+    }
     out.error = (err as Error).message || String(err);
   }
 
@@ -322,6 +407,7 @@ export interface BackfillSummary {
   instance: string;
   runId: string;
   dryRun: boolean;
+  strict: boolean;
   unprocessedBefore: number;
   alreadyProcessedSkipped: number;
   messagesProcessed: number;
@@ -332,6 +418,20 @@ export interface BackfillSummary {
   batchesFailed: number;
   elapsedMs: number;
   perChat: BackfillBatchResult[];
+  /**
+   * P3.6-H2. Every batch whose extractor / validator raised under strict
+   * mode. Always present as an array (empty if no failures); non-strict
+   * runs never populate entries here even if generic errors land on
+   * `perChat[i].error`. The `chatJid` + `messageIds` are what operators
+   * need for a manual retry.
+   */
+  failedBatches: Array<{
+    chatJid: string;
+    messageIds: number[];
+    errorType: 'ExtractionError' | 'ValidationError';
+    stage: string;
+    details: string;
+  }>;
 }
 
 export async function runBackfill(
@@ -356,6 +456,7 @@ export async function runBackfill(
     instance: args.instance,
     runId: args.runId,
     dryRun: args.dryRun,
+    strict: args.strict,
     unprocessedBefore,
     alreadyProcessedSkipped,
     messagesProcessed: 0,
@@ -366,6 +467,7 @@ export async function runBackfill(
     batchesFailed: 0,
     elapsedMs: 0,
     perChat: [],
+    failedBatches: [],
   };
 
   if (messages.length === 0) {
@@ -392,12 +494,31 @@ export async function runBackfill(
       error: { type: '', message: '' },
     });
 
-    const batchResult = await processBatch(db, chatJid, chatMessages, providers, deps, args.dryRun);
+    const batchResult = await processBatch(
+      db,
+      chatJid,
+      chatMessages,
+      providers,
+      deps,
+      args.dryRun,
+      args.strict,
+    );
     summary.perChat.push(batchResult);
     summary.messagesProcessed += batchResult.markedProcessed ? batchResult.messagesInBatch : 0;
     summary.factsExtracted += batchResult.factsExtracted;
     summary.factsValidated += batchResult.factsValidated;
     summary.factsQueued += batchResult.enqueueResult?.inserted ?? 0;
+    // P3.6-H2: strict failures feed the structured failedBatches list so
+    // main() can emit the JSON summary and pick the correct exit code.
+    if (batchResult.strictFailure) {
+      summary.failedBatches.push({
+        chatJid: batchResult.chatJid,
+        messageIds: batchResult.strictFailure.messageIds,
+        errorType: batchResult.strictFailure.errorType,
+        stage: batchResult.strictFailure.stage,
+        details: batchResult.strictFailure.details,
+      });
+    }
     if (batchResult.error || (batchResult.enqueueResult && !batchResult.markedProcessed && !args.dryRun)) {
       summary.batchesFailed += 1;
     } else {
@@ -501,7 +622,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   const providers = buildProviders(args.provider);
 
   console.log(
-    `[backfill] instance=${args.instance} path=${dbPath} run_id=${args.runId} dry_run=${args.dryRun} provider=${args.provider}`,
+    `[backfill] instance=${args.instance} path=${dbPath} run_id=${args.runId} dry_run=${args.dryRun} strict=${args.strict} provider=${args.provider}`,
   );
   console.log(
     `[backfill] models extraction=${config.models.extraction} validation=${config.models.validation}`,
@@ -529,9 +650,35 @@ export async function main(argv: readonly string[]): Promise<number> {
       ].join('\n'),
     );
 
+    // P3.6-H2 summary block: always emit under --strict so operators see
+    // the message pks they need to retry, even when failedBatches is empty
+    // (the empty case proves fail-closed didn't fire, which is itself useful
+    // evidence on a clean run).
+    if (args.strict) {
+      const n = summary.failedBatches.length;
+      console.log(
+        `[backfill] strict-mode: ${summary.batchesOk} batches succeeded, ${n} batches failed-closed ` +
+          `(messages not marked processed and will be retried on next run)`,
+      );
+      if (n > 0) {
+        console.log(
+          `[backfill] strict-mode failedBatches:\n${JSON.stringify(summary.failedBatches, null, 2)}`,
+        );
+      }
+    }
+
     if (summary.unprocessedBefore === 0) {
       console.log('[backfill] BACKFILL_NO_OP: 0 unprocessed messages');
       return 0;
+    }
+    // P3.6-H2: exit code 6 is reserved for "strict-mode fail-closed ran and
+    // blocked at least one batch from being marked". Dry-run suppresses the
+    // non-zero exit because dry-run is informational. Codes in use elsewhere:
+    // 0 success, 2 unhandled, 3 bot.db missing, 4 general batch failure,
+    // 5 provider config. Code 6 distinguishes strict-blocked from the
+    // accountingOk===false path (which still returns 4).
+    if (args.strict && !args.dryRun && summary.failedBatches.length > 0) {
+      return 6;
     }
     if (summary.batchesFailed > 0) return 4;
     return 0;
