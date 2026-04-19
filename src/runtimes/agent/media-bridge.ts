@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { unlinkSync, realpathSync } from 'node:fs';
 import { resolve, extname, dirname, basename, join } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
+import { isPathWithinAllowedRoot } from '../../mcp/types.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('media-bridge');
@@ -86,15 +87,7 @@ export function startMediaBridge(
   messenger: Messenger,
   allowedRoot: string,
 ): MediaBridge {
-  // Canonicalize allowedRoot so the path-boundary check works on macOS,
-  // where /var/folders is a symlink to /private/var/folders. Fall back to a
-  // non-canonical resolve() if the directory does not yet exist.
-  let resolvedRoot: string;
-  try {
-    resolvedRoot = realpathSync(allowedRoot);
-  } catch {
-    resolvedRoot = resolve(allowedRoot);
-  }
+  // Canonicalization happens lazily inside isPathWithinAllowedRoot at the boundary check.
 
   const MAX_BUF = 1_024 * 1_024; // 1 MB — match WhatSoupSocketServer's limit
   const activeSockets = new Set<Socket>();
@@ -120,7 +113,7 @@ export function startMediaBridge(
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        handleRequest(trimmed, messenger, resolvedRoot, bridge).then((response) => {
+        handleRequest(trimmed, messenger, allowedRoot, bridge).then((response) => {
           try {
             socket.write(JSON.stringify(response) + '\n');
           } catch (err) {
@@ -189,7 +182,7 @@ interface BridgeResponse {
 async function handleRequest(
   rawLine: string,
   messenger: Messenger,
-  resolvedRoot: string,
+  allowedRoot: string,
   bridge: MediaBridge,
 ): Promise<BridgeResponse> {
   let req: BridgeRequest;
@@ -204,11 +197,11 @@ async function handleRequest(
     return { ok: false, error: 'missing path' };
   }
 
-  // Canonicalize the incoming filePath the same way as resolvedRoot so the
-  // startsWith check is symmetric across /var/folders vs /private/var/folders.
-  // realpathSync throws on non-existent paths — canonicalize the parent
-  // directory + basename instead so the boundary check stays consistent,
-  // letting the downstream readFile produce the "file not found" error.
+  // Canonicalize the incoming filePath so the boundary check is symmetric
+  // across /var/folders vs /private/var/folders on macOS. realpathSync throws
+  // on non-existent paths — canonicalize the parent directory + basename so
+  // the downstream readFile still produces "file not found" instead of
+  // "path not allowed".
   let resolvedPath: string;
   try {
     resolvedPath = realpathSync(filePath);
@@ -220,8 +213,8 @@ async function handleRequest(
       resolvedPath = resolve(filePath);
     }
   }
-  if (!resolvedPath.startsWith(resolvedRoot + '/') && resolvedPath !== resolvedRoot) {
-    log.warn({ resolvedPath, resolvedRoot }, 'path not allowed');
+  if (!isPathWithinAllowedRoot(resolvedPath, allowedRoot)) {
+    log.warn({ resolvedPath, allowedRoot }, 'path not allowed');
     return { ok: false, error: 'path not allowed' };
   }
 
