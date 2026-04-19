@@ -32,13 +32,26 @@ const RAW_OUTPUT_TRUNCATE = 500;
  * branches (see backfill-enrichment.ts).
  */
 export class ExtractionError extends Error {
+  public readonly stage:
+    | 'provider-call'
+    | 'json-parse'
+    | 'schema-shape'
+    | 'schema-items-all-dropped';
+  public readonly details: {
+    cause?: Error;
+    rawOutput?: string;
+    droppedCount?: number;
+    totalCount?: number;
+    sampleItem?: unknown;
+  };
+
   constructor(
-    public readonly stage:
+    stage:
       | 'provider-call'
       | 'json-parse'
       | 'schema-shape'
       | 'schema-items-all-dropped',
-    public readonly details: {
+    details: {
       cause?: Error;
       rawOutput?: string;
       droppedCount?: number;
@@ -47,6 +60,8 @@ export class ExtractionError extends Error {
     } = {},
   ) {
     super(`extraction failed: ${stage}`);
+    this.stage = stage;
+    this.details = details;
     this.name = 'ExtractionError';
   }
 }
