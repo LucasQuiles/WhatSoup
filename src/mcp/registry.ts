@@ -182,7 +182,7 @@ export class ToolRegistry {
       });
     }
 
-    return result;
+    return result.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /**
