@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createConnection, type Socket } from 'node:net';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -255,6 +255,30 @@ describe('bridge validation', () => {
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/path not allowed/);
   });
+
+  it('accepts a canonical (symlink-resolved) path that maps under allowedRoot (macOS /private/var regression)', async () => {
+    // On macOS, os.tmpdir() returns /var/folders/... but realpathSync() resolves
+    // to /private/var/folders/... Callers that canonicalize paths upstream
+    // (e.g. a child Claude Code subprocess) would pass the /private/var form
+    // and get rejected by a root path check that never canonicalizes. Regression
+    // guard: ensure the bridge's path-boundary check accepts the canonical form.
+    setMediaBridgeChat(bridge, 'chat@g.us');
+    const filename = 'canonical-regression.png';
+    const underRoot = join(allowedRoot, filename);
+    // Create the file so the write/read side succeeds if the guard lets us through.
+    writeFileSync(underRoot, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    // Use realpathSync to get the canonical form the way an upstream caller would.
+    const canonicalPath = realpathSync(underRoot);
+
+    const res = await sendRequest(socketPath, { path: canonicalPath });
+
+    // The request may fail downstream (no Messenger configured etc.), but it
+    // must NOT fail with "path not allowed".
+    if (!res.ok) {
+      expect(String(res.error)).not.toMatch(/path not allowed/);
+    }
+  });
+
 
   it('returns ok:false when file does not exist', async () => {
     setMediaBridgeChat(bridge, 'chat@g.us');

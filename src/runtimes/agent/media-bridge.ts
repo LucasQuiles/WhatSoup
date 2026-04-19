@@ -4,8 +4,8 @@
 
 import { createServer, type Server, type Socket } from 'node:net';
 import { readFile } from 'node:fs/promises';
-import { unlinkSync } from 'node:fs';
-import { resolve, extname } from 'node:path';
+import { unlinkSync, realpathSync } from 'node:fs';
+import { resolve, extname, dirname, basename, join } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -86,7 +86,15 @@ export function startMediaBridge(
   messenger: Messenger,
   allowedRoot: string,
 ): MediaBridge {
-  const resolvedRoot = resolve(allowedRoot);
+  // Canonicalize allowedRoot so the path-boundary check works on macOS,
+  // where /var/folders is a symlink to /private/var/folders. Fall back to a
+  // non-canonical resolve() if the directory does not yet exist.
+  let resolvedRoot: string;
+  try {
+    resolvedRoot = realpathSync(allowedRoot);
+  } catch {
+    resolvedRoot = resolve(allowedRoot);
+  }
 
   const MAX_BUF = 1_024 * 1_024; // 1 MB — match WhatSoupSocketServer's limit
   const activeSockets = new Set<Socket>();
@@ -196,8 +204,22 @@ async function handleRequest(
     return { ok: false, error: 'missing path' };
   }
 
-  // Resolve and validate against allowed root
-  const resolvedPath = resolve(filePath);
+  // Canonicalize the incoming filePath the same way as resolvedRoot so the
+  // startsWith check is symmetric across /var/folders vs /private/var/folders.
+  // realpathSync throws on non-existent paths — canonicalize the parent
+  // directory + basename instead so the boundary check stays consistent,
+  // letting the downstream readFile produce the "file not found" error.
+  let resolvedPath: string;
+  try {
+    resolvedPath = realpathSync(filePath);
+  } catch {
+    try {
+      const resolvedInput = resolve(filePath);
+      resolvedPath = join(realpathSync(dirname(resolvedInput)), basename(resolvedInput));
+    } catch {
+      resolvedPath = resolve(filePath);
+    }
+  }
   if (!resolvedPath.startsWith(resolvedRoot + '/') && resolvedPath !== resolvedRoot) {
     log.warn({ resolvedPath, resolvedRoot }, 'path not allowed');
     return { ok: false, error: 'path not allowed' };
