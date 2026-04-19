@@ -8,16 +8,16 @@ mechanics. For the Phase 3 WhatsApp hybrid ingestion pipeline into
 
 ## Repo and branch
 
-Production runs from a worktree, not the main checkout:
+Production runs from the canonical checkout (as of 2026-04-18 closeout):
 
 | Role | Path | Branch |
 | --- | --- | --- |
-| Canonical checkout | `~/LAB/WhatSoup` | `main` |
-| Live service checkout | `~/LAB/WhatSoup/.worktrees/docker` | `feature/transcription-pinecone-readiness` |
+| Canonical checkout / live service | `~/LAB/WhatSoup` | `main` |
 
-All launchd plists point at the worktree. Do not `git clean`, force-reset,
-or delete the worktree directory without coordinating with the operator —
-live services resolve their source files through it.
+All launchd plists and `~/.local/bin/whatsoup*` symlinks resolve through
+the main checkout. The prior `.worktrees/docker` worktree was removed
+during the 2026-04-18 closeout — do not reintroduce it without a matching
+plist and symlink update.
 
 ## Node and PATH
 
@@ -75,7 +75,7 @@ take an instance out of rotation without deleting it.
 | Fleet token file | `~/.config/whatsoup/fleet-token` |
 | Fleet logs | `~/.local/share/whatsoup/fleet-{stdout,stderr}.log` |
 | mw-mind bridge logs | `~/.local/share/mw-mind/whatsapp-bridge-{stdout,stderr}.log` |
-| mw-mind WhatSoup MCP proxy | `/Users/mw/LAB/WhatSoup/.worktrees/docker/deploy/mcp/whatsoup-proxy.ts` |
+| mw-mind WhatSoup MCP proxy | `/Users/mw/LAB/WhatSoup/deploy/mcp/whatsoup-proxy.ts` |
 
 Do not create `bot.db` at the repo root or inside `~/.config/whatsoup/…`
 — those paths are wrong tiers. `.gitignore` covers `*.db` to prevent
@@ -132,9 +132,8 @@ polled instance is unreachable. If that name is not expected, add
 
 ## Worktree discipline
 
-- Do not commit to the `docker` worktree from outside an operator session —
-  pre-commit hooks invoke `npx lint-staged` and fail under bare SSH unless
-  `PATH=/opt/homebrew/bin:$PATH` is exported.
+- Always `export PATH=/opt/homebrew/bin:$PATH` before `npm`/`npx`/`node`
+  commands over SSH so the pre-commit hook can resolve `npx lint-staged`.
 - Untracked `scripts/p36-*` probes are Phase 3 investigation artifacts —
   do not delete. See `mwlab-transcription-pinecone.md`.
 - `artifacts/plan-hardening/…` is the run-scoped evidence root for this

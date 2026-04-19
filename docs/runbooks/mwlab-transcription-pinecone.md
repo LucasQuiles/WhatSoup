@@ -47,7 +47,7 @@ Leave `pineconeAllowedIndexes` absent until `mw-mind` has a defined schema and s
 Run from the deployment worktree:
 
 ```bash
-cd ~/LAB/WhatSoup/.worktrees/docker
+cd ~/LAB/WhatSoup
 bash scripts/install-transcription-deps.sh
 ```
 
