@@ -254,6 +254,10 @@ export const config = {
   pineconeRerankTopN: (instance?.pineconeRerankTopN as number | undefined) ?? 6,
   pineconeAllowedIndexes: (Array.isArray(instance?.pineconeAllowedIndexes) ? instance.pineconeAllowedIndexes : []) as string[],
 
+  // Recency decay — Ebbinghaus-style exponential forgetting for memory search
+  recencyHalfLifeDays: (instance?.recencyHalfLifeDays as number | undefined) ?? Number(process.env.RECENCY_HALF_LIFE_DAYS ?? 14),
+  maxAgeDays: (instance?.maxAgeDays as number | undefined) ?? Number(process.env.MAX_AGE_DAYS ?? 90),
+
   // Tool update verbosity: 'full' (default — all updates shown to user),
   // 'friendly' (all updates in plain language for non-technical users),
   // 'minimal' (suppress most updates — only critical status shown)

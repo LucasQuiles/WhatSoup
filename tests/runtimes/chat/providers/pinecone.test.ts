@@ -21,6 +21,8 @@ vi.mock('../../../../src/config.ts', () => ({
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,
     enrichmentDedupThreshold: 0.95,
+    recencyHalfLifeDays: 36500,   // ~100 years — effectively disable decay in existing tests
+    maxAgeDays: 36500,
   },
 }));
 
@@ -65,8 +67,8 @@ function makePineconeHit(id: string, score: number, overrides: Record<string, un
       sender_name: 'Alice',
       memory_type: 'user_fact',
       confidence: 0.85,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       superseded: '',
       source_message_pks: '42',
       ...overrides,
@@ -100,7 +102,7 @@ describe('PineconeMemory', () => {
       expect(Array.isArray(results)).toBe(true);
       expect(results).toHaveLength(1);
       expect(results[0].id).toBe('rec-001');
-      expect(results[0].score).toBe(0.92);
+      expect(results[0].score).toBeCloseTo(0.92, 2);
     });
 
     it('maps hit fields to camelCase record properties', async () => {

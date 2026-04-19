@@ -241,6 +241,41 @@ function fromPineconeHitEntity(hit: {
   return { id: hit._id, score: hit._score, record };
 }
 
+// ---------------------------------------------------------------------------
+// Recency decay — Ebbinghaus-style exponential forgetting
+// ---------------------------------------------------------------------------
+
+const LN2 = 0.693147;
+
+export function decayScore(
+  similarity: number,
+  ageDays: number,
+  halfLifeDays: number,
+  maxAgeDays?: number,
+): number {
+  if (similarity <= 0) return 0;
+  if (maxAgeDays !== undefined && ageDays > maxAgeDays) return 0;
+  if (halfLifeDays <= 0) return ageDays > 0 ? 0 : similarity;
+  return similarity * Math.exp(-LN2 * ageDays / halfLifeDays);
+}
+
+export function applyDecay(
+  results: SearchResult[],
+  halfLifeDays: number,
+  maxAgeDays: number,
+): SearchResult[] {
+  const now = Date.now();
+  return results
+    .map((r) => {
+      const createdMs = new Date(r.record.createdAt).getTime();
+      const ageDays = (now - createdMs) / 86_400_000;
+      const decayed = decayScore(r.score, ageDays, halfLifeDays, maxAgeDays);
+      return { ...r, score: decayed };
+    })
+    .filter((r) => r.score > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
 export class PineconeMemory {
   private client: Pinecone;
   private index: ReturnType<InstanceType<typeof Pinecone>['index']>;
@@ -280,7 +315,7 @@ export class PineconeMemory {
         'Pinecone search complete',
       );
       trackSuccess('search');
-      return results;
+      return applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
     } catch (err) {
       // One retry after a short delay to catch transient blips
       await sleep(RETRY_DELAY_MS);
@@ -293,7 +328,7 @@ export class PineconeMemory {
           'Pinecone search complete (after retry)',
         );
         trackSuccess('search');
-        return results;
+        return applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
       } catch (retryErr) {
         const durationMs = Date.now() - startMs;
         trackFailure('search', retryErr);
