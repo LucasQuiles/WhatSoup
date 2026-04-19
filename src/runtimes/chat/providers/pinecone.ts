@@ -268,7 +268,8 @@ export function applyDecay(
   return results
     .map((r) => {
       const createdMs = new Date(r.record.createdAt).getTime();
-      const ageDays = (now - createdMs) / 86_400_000;
+      if (isNaN(createdMs)) return { ...r }; // no decay, preserve original score
+      const ageDays = Math.max(0, (now - createdMs) / 86_400_000);
       const decayed = decayScore(r.score, ageDays, halfLifeDays, maxAgeDays);
       return { ...r, score: decayed };
     })

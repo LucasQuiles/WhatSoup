@@ -49,4 +49,23 @@ describe('applyDecay', () => {
     const decayed = applyDecay(results as any, 14, 90);
     expect(decayed[0].id).toBe('new-low');
   });
+
+  it('preserves score when createdAt is empty or invalid', () => {
+    const results = [
+      { id: 'no-date', score: 0.85, record: { createdAt: '' } },
+    ];
+    const decayed = applyDecay(results as any, 14, 90);
+    expect(decayed).toHaveLength(1);
+    expect(decayed[0].score).toBe(0.85);
+  });
+
+  it('clamps future timestamps to age=0 (no amplification)', () => {
+    const future = new Date(Date.now() + 86400000).toISOString();
+    const results = [
+      { id: 'future', score: 0.8, record: { createdAt: future } },
+    ];
+    const decayed = applyDecay(results as any, 14, 90);
+    expect(decayed).toHaveLength(1);
+    expect(decayed[0].score).toBe(0.8); // No amplification
+  });
 });
