@@ -524,6 +524,9 @@ function usedHealthPorts(): number[] {
   for (const name of entries) {
     try {
       const raw = JSON.parse(fs.readFileSync(path.join(root, name, 'config.json'), 'utf-8'));
+      // Skip instances flagged as disabled so their port can be reused by a
+      // new line — mirrors the fleet discovery opt-out semantics.
+      if (raw.enabled === false) continue;
       if (typeof raw.healthPort === 'number') ports.push(raw.healthPort);
     } catch { /* skip unreadable configs */ }
   }
