@@ -144,7 +144,8 @@ polled instance is unreachable. If that name is not expected, add
 - All plists have `KeepAlive -> Crashed` only. Clean-exit services do not
   auto-restart. No supervisor watches for stalled instances (no fleet-level
   circuit breaker today).
-- `WHATSOUP_HEALTH_TOKEN` for mw-bot is stored plaintext in the plist.
-  Migration to a keychain wrapper (mirroring `with-pinecone-env`) is
-  tracked as a separate approved-only ops rotation and is not executed
-  by the standard hardening runbook.
+- `WHATSOUP_HEALTH_TOKEN` for mw-bot is loaded at runtime from the mwlab
+  secrets keychain (`~/.config/mwlab-secrets.keychain-db`, service
+  `whatsoup-health-token`, account `mw`) via the `with-health-token`
+  wrapper. Rotated out of plaintext plist storage on 2026-04-19
+  (F3/T10–T13 per `/Users/q/.claude/plans/whatsoup-followups.md`).
