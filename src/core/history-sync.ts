@@ -12,8 +12,10 @@
  * Transaction semantics: the whole batch runs inside one BEGIN/COMMIT. Per-message
  * errors are caught and counted as `skipped` so one malformed record does not
  * poison the rest of a 50k-message sync — the batch commits with partial success.
- * Atomic rollback only fires if BEGIN, COMMIT, or the setup (prepareStatements)
- * itself throws, since those indicate SQLite is in an unrecoverable state.
+ * ROLLBACK fires only if BEGIN or COMMIT itself throws. A failure in
+ * prepareStatements or in preparing BEGIN/COMMIT/ROLLBACK itself occurs before
+ * any transaction is open, so there is nothing to roll back — the error simply
+ * propagates to the caller.
  *
  * Known gap (tracked, not fixed here): if the live `messages.upsert` path later
  * receives the same message_id, `INSERT OR IGNORE` no-ops and the placeholder
@@ -67,13 +69,14 @@ function bufferSafeReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
-function stringifyWaMsg(waMsg: unknown): string {
+function stringifyWaMsg(waMsg: unknown, log?: Logger, msgId?: string): string {
   try {
     return JSON.stringify(waMsg, bufferSafeReplacer);
-  } catch {
+  } catch (err) {
     // Pathological payload (cyclic ref, BigInt, etc.) — store a marker so
     // downstream tools can see that raw_message was lost here rather than
-    // the row failing to insert.
+    // the row failing to insert. Log so operators can diagnose the pattern.
+    log?.warn({ err, msgId }, 'historyMessages: raw_message stringify failed, storing sentinel');
     return JSON.stringify({ $raw_message_error: 'stringify_failed' });
   }
 }
@@ -174,7 +177,7 @@ function processHistoryMessage(
       is_from_me: parsedMsg.isFromMe ? 1 : 0,
       timestamp: parsedMsg.timestamp,
       quoted_message_id: parsedMsg.quotedMessageId ?? null,
-      raw_message: stringifyWaMsg(waMsg),
+      raw_message: stringifyWaMsg(waMsg, log, msgId),
     });
 
     if (!before) return 'inserted';
