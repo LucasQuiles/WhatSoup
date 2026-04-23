@@ -352,7 +352,7 @@ connectionManager.on('historyMessages', (messages) => {
     return;
   }
   const stats = processHistoryBatch(db, messages as HistoryInput[], log);
-  if (stats.parsed || stats.placeholders || stats.skipped) {
+  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped) {
     log.info(stats, 'historyMessages: batch processed');
   }
 });

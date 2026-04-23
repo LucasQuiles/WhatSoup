@@ -9,8 +9,11 @@
  *   - envelope-only (no decrypted body)  →  placeholder row with content_type='history'
  *   - fully parsed (body present)        →  full row (or upgrade of a prior placeholder)
  *
- * The per-message logic is wrapped in a single SQLite transaction at the batch
- * level so a mid-sync crash leaves a consistent state.
+ * Transaction semantics: the whole batch runs inside one BEGIN/COMMIT. Per-message
+ * errors are caught and counted as `skipped` so one malformed record does not
+ * poison the rest of a 50k-message sync — the batch commits with partial success.
+ * Atomic rollback only fires if BEGIN, COMMIT, or the setup (prepareStatements)
+ * itself throws, since those indicate SQLite is in an unrecoverable state.
  *
  * Known gap (tracked, not fixed here): if the live `messages.upsert` path later
  * receives the same message_id, `INSERT OR IGNORE` no-ops and the placeholder
@@ -39,11 +42,40 @@ export type HistoryAction =
   | 'noop';        // row already exists at a real content_type (not 'history')
 
 export interface HistorySyncStats {
-  parsed: number;      // bodies inserted or upgraded
+  /** Full-body rows newly written. */
   inserted: number;
+  /** Prior placeholder rows upgraded in place by this batch. */
   upgraded: number;
+  /** Envelope-only rows written because Baileys did not deliver a body. */
   placeholders: number;
+  /** Rows not written — missing key fields, null parse, or per-message exceptions. */
   skipped: number;
+}
+
+/**
+ * JSON replacer that preserves Uint8Array / Buffer fields as `{$b64: "..."}`.
+ *
+ * Baileys WAMessage payloads carry protobuf byte arrays for media keys, hashes,
+ * and thumbnails. The default JSON.stringify serializes Uint8Array as an
+ * indexed-offset object (`{"0":17,"1":42,...}`), which is useless for replay
+ * and balloons raw_message to tens of MB for a single media envelope.
+ */
+function bufferSafeReplacer(_key: string, value: unknown): unknown {
+  if (value instanceof Uint8Array) {
+    return { $b64: Buffer.from(value).toString('base64') };
+  }
+  return value;
+}
+
+function stringifyWaMsg(waMsg: unknown): string {
+  try {
+    return JSON.stringify(waMsg, bufferSafeReplacer);
+  } catch {
+    // Pathological payload (cyclic ref, BigInt, etc.) — store a marker so
+    // downstream tools can see that raw_message was lost here rather than
+    // the row failing to insert.
+    return JSON.stringify({ $raw_message_error: 'stringify_failed' });
+  }
 }
 
 interface Statements {
@@ -142,7 +174,7 @@ function processHistoryMessage(
       is_from_me: parsedMsg.isFromMe ? 1 : 0,
       timestamp: parsedMsg.timestamp,
       quoted_message_id: parsedMsg.quotedMessageId ?? null,
-      raw_message: JSON.stringify(waMsg),
+      raw_message: stringifyWaMsg(waMsg),
     });
 
     if (!before) return 'inserted';
@@ -191,7 +223,7 @@ export function processHistoryBatch(
   messages: readonly HistoryInput[],
   log?: Logger,
 ): HistorySyncStats {
-  const stats: HistorySyncStats = { parsed: 0, inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 };
+  const stats: HistorySyncStats = { inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 };
   // Note: node:sqlite has no transaction wrapper, so we drive BEGIN/COMMIT via
   // prepared statements. (The sibling convention in blocklist-sync.ts uses the
   // raw exec form, which the repo's security hook flags on literal match; the
@@ -209,8 +241,8 @@ export function processHistoryBatch(
       try {
         const action = processHistoryMessage(db, stmts, msg, log);
         switch (action) {
-          case 'inserted': stats.inserted++; stats.parsed++; break;
-          case 'upgraded': stats.upgraded++; stats.parsed++; break;
+          case 'inserted': stats.inserted++; break;
+          case 'upgraded': stats.upgraded++; break;
           case 'placeholder': stats.placeholders++; break;
           case 'skipped_no_key':
           case 'skipped_null_parse': stats.skipped++; break;

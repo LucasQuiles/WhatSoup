@@ -44,7 +44,7 @@ describe('processHistoryBatch', () => {
 
   it('inserts a full-body row when no prior row exists', () => {
     const stats = processHistoryBatch(db, [textMsg({ id: 'MSG1', chat: 'alice@s.whatsapp.net', text: 'hello' })]);
-    expect(stats).toMatchObject({ inserted: 1, upgraded: 0, placeholders: 0, parsed: 1 });
+    expect(stats).toMatchObject({ inserted: 1, upgraded: 0, placeholders: 0, skipped: 0 });
 
     const row = db.raw.prepare('SELECT content, content_type FROM messages WHERE message_id=?').get('MSG1') as {
       content: string;
@@ -68,7 +68,7 @@ describe('processHistoryBatch', () => {
     const stats = processHistoryBatch(db, [
       textMsg({ id: 'MSG2', chat: 'group@g.us', participant: 'alice@s.whatsapp.net', text: 'the real body' }),
     ]);
-    expect(stats).toMatchObject({ inserted: 0, upgraded: 1, placeholders: 0, parsed: 1 });
+    expect(stats).toMatchObject({ inserted: 0, upgraded: 1, placeholders: 0, skipped: 0 });
 
     const after = db.raw.prepare('SELECT content, content_type FROM messages WHERE message_id=?').get('MSG2') as {
       content: string;
@@ -170,5 +170,38 @@ describe('processHistoryBatch', () => {
 
     const count = (db.raw.prepare('SELECT COUNT(*) as c FROM messages').get() as { c: number }).c;
     expect(count).toBe(3);
+  });
+
+  it('round-trips Uint8Array media fields as base64 in raw_message (not indexed-offset bloat)', () => {
+    // Baileys attaches Uint8Array fields (mediaKey, fileEncSha256, etc.) to media
+    // messages. Default JSON.stringify serializes Uint8Array as {"0":n,"1":n,...}
+    // which bloats raw_message to tens of MB per envelope and destroys replayability.
+    const mediaKey = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const imgMsg: HistoryInput = {
+      key: { id: 'MSG_MEDIA', remoteJid: 'alice@s.whatsapp.net' },
+      messageTimestamp: 1_700_000_000,
+      message: {
+        imageMessage: {
+          caption: 'photo',
+          mediaKey,
+          fileEncSha256: new Uint8Array([9, 9, 9]),
+        },
+      },
+    } as HistoryInput;
+
+    processHistoryBatch(db, [imgMsg]);
+    const row = db.raw.prepare('SELECT raw_message FROM messages WHERE message_id=?').get('MSG_MEDIA') as {
+      raw_message: string;
+    };
+
+    // Must NOT contain indexed-offset serialization like "0":1,"1":2
+    expect(row.raw_message).not.toMatch(/"0":\d+,"1":\d+/);
+    // Must contain the base64 marker shape we write instead
+    expect(row.raw_message).toContain('"$b64"');
+
+    // Decoding round-trip: find the first $b64 value and confirm it's the original bytes
+    const parsed = JSON.parse(row.raw_message) as { message: { imageMessage: { mediaKey: { $b64: string } } } };
+    const recovered = Buffer.from(parsed.message.imageMessage.mediaKey.$b64, 'base64');
+    expect(Array.from(recovered)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
