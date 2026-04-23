@@ -5,9 +5,9 @@ import { config } from './config.ts';
 import logger, { createChildLogger, flushLogger } from './logger.ts';
 import { Database, storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
-import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
+import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount, storeMessageIfNew } from './core/messages.ts';
 import { execFileSync } from 'node:child_process';
-import { ConnectionManager } from './transport/connection.ts';
+import { ConnectionManager, parseIncomingMessage } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
@@ -351,11 +351,16 @@ connectionManager.on('historyMessages', (messages) => {
     log.warn({ type: typeof messages }, 'historyMessages: expected array');
     return;
   }
-  const checkStmt = db.raw.prepare('SELECT 1 FROM messages WHERE message_id = ?');
-  const insertStmt = db.raw.prepare(`
-    INSERT OR IGNORE INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
-    VALUES (?, ?, ?, ?, 'history', ?, ?)
-  `);
+  const checkStmt = db.raw.prepare('SELECT content_type FROM messages WHERE message_id = ?');
+  const placeholderStmt = db.raw.prepare(
+    "INSERT OR IGNORE INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp) VALUES (?, ?, ?, ?, 'history', ?, ?)"
+  );
+  const upgradeStmt = db.raw.prepare(
+    "UPDATE messages SET content=?, content_text=?, content_type=?, sender_name=?, sender_jid=?, raw_message=?, quoted_message_id=?, timestamp=? WHERE message_id=? AND content_type='history'"
+  );
+  let parsed = 0;
+  let upgraded = 0;
+  let placeholders = 0;
   for (const msg of messages) {
     try {
       const waMsg = msg as { key?: { id?: string; remoteJid?: string; fromMe?: boolean }; messageTimestamp?: number; message?: unknown };
@@ -365,14 +370,61 @@ connectionManager.on('historyMessages', (messages) => {
         log.debug({ msg: typeof msg }, 'historyMessages: skipping message with missing key fields');
         continue;
       }
-      const existing = checkStmt.get(msgId);
-      if (existing) continue;
+      const existing = checkStmt.get(msgId) as { content_type?: string } | undefined;
       const conversationKey = toConversationKey(chatJid);
-      const timestamp = Number(waMsg.messageTimestamp ?? nowUnixSec());
-      insertStmt.run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
+      const hasBody = !!(waMsg as { message?: unknown }).message;
+
+      if (hasBody) {
+        const parsedMsg = parseIncomingMessage(waMsg as any);
+        if (parsedMsg) {
+          if (!existing) {
+            storeMessageIfNew(db, {
+              chatJid: parsedMsg.chatJid,
+              conversationKey,
+              senderJid: parsedMsg.senderJid,
+              senderName: parsedMsg.senderName ?? null,
+              messageId: parsedMsg.messageId,
+              content: parsedMsg.content ?? null,
+              contentText: parsedMsg.contentText ?? null,
+              contentType: parsedMsg.contentType,
+              isFromMe: parsedMsg.isFromMe,
+              timestamp: parsedMsg.timestamp,
+              quotedMessageId: parsedMsg.quotedMessageId ?? null,
+              rawMessage: JSON.stringify(waMsg),
+            });
+            parsed++;
+            continue;
+          } else if (existing.content_type === 'history') {
+            upgradeStmt.run(
+              parsedMsg.content ?? null,
+              parsedMsg.contentText ?? null,
+              parsedMsg.contentType,
+              parsedMsg.senderName ?? null,
+              parsedMsg.senderJid,
+              JSON.stringify(waMsg),
+              parsedMsg.quotedMessageId ?? null,
+              parsedMsg.timestamp,
+              msgId,
+            );
+            upgraded++;
+            continue;
+          } else {
+            continue;
+          }
+        }
+      }
+
+      if (!existing) {
+        const timestamp = Number(waMsg.messageTimestamp ?? nowUnixSec());
+        placeholderStmt.run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
+        placeholders++;
+      }
     } catch (err) {
       log.error({ err }, 'historyMessages: failed to store message');
     }
+  }
+  if (parsed || upgraded || placeholders) {
+    log.info({ parsed, upgraded, placeholders }, 'historyMessages: batch processed');
   }
 });
 
