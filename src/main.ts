@@ -393,7 +393,6 @@ connectionManager.on('historyMessages', (messages) => {
               rawMessage: JSON.stringify(waMsg),
             });
             parsed++;
-            continue;
           } else if (existing.content_type === 'history') {
             upgradeStmt.run(
               parsedMsg.content ?? null,
@@ -407,16 +406,19 @@ connectionManager.on('historyMessages', (messages) => {
               msgId,
             );
             upgraded++;
-            continue;
-          } else {
-            continue;
           }
+          continue;
         }
+        // parseIncomingMessage returned null despite hasBody=true — skip rather than
+        // silently downgrading to an envelope-only placeholder row.
+        log.debug({ msgId }, 'historyMessages: parseIncomingMessage returned null for message with body');
+        continue;
       }
 
       if (!existing) {
         const timestamp = Number(waMsg.messageTimestamp ?? nowUnixSec());
-        placeholderStmt.run(chatJid, conversationKey, chatJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
+        const senderJid = (waMsg.key as { participant?: string } | undefined)?.participant ?? chatJid;
+        placeholderStmt.run(chatJid, conversationKey, senderJid, msgId, waMsg.key?.fromMe ? 1 : 0, timestamp);
         placeholders++;
       }
     } catch (err) {
