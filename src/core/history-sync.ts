@@ -99,10 +99,14 @@ function prepareStatements(db: Database): Statements {
 }
 
 /**
- * Process one history-sync message. Synchronous against better-sqlite3.
- * Safe to call from inside a transaction.
+ * Process one history-sync message.
+ *
+ * Must be called from within an active transaction — the CHECK / UPSERT
+ * pair is not atomic on its own, and a concurrent live `messages.upsert`
+ * between them would re-open the race this module exists to close.
+ * The batch wrapper in `processHistoryBatch` is the only supported caller.
  */
-export function processHistoryMessage(
+function processHistoryMessage(
   db: Database,
   stmts: Statements,
   waMsg: HistoryInput,
@@ -145,6 +149,18 @@ export function processHistoryMessage(
     // A row existed. If it was a placeholder the WHERE clause just upgraded it.
     // If it was a live-path row the WHERE clause suppressed the update.
     if (before.content_type === 'history' && result.changes > 0) return 'upgraded';
+    if (before.content_type === 'history' && result.changes === 0) {
+      // Defensive: placeholder row existed but UPSERT did not fire. Should not
+      // be reachable under normal operation (WHERE clause matches 'history').
+      // If we see this, parseIncomingMessage may have normalized messageId in
+      // a way that diverged from the original key.id, so the UPSERT targeted
+      // a different conflict slot. Log so we can diagnose rather than silently
+      // leaving the placeholder stuck.
+      log?.warn(
+        { msgId, parsedMessageId: parsedMsg.messageId },
+        'historyMessages: placeholder upgrade unexpectedly did not fire',
+      );
+    }
     return 'noop';
   }
 
@@ -175,14 +191,20 @@ export function processHistoryBatch(
   messages: readonly HistoryInput[],
   log?: Logger,
 ): HistorySyncStats {
-  const stmts = prepareStatements(db);
   const stats: HistorySyncStats = { parsed: 0, inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 };
+  // Note: node:sqlite has no transaction wrapper, so we drive BEGIN/COMMIT via
+  // prepared statements. (The sibling convention in blocklist-sync.ts uses the
+  // raw exec form, which the repo's security hook flags on literal match; the
+  // prepare/run form is semantically identical.)
   const begin = db.raw.prepare('BEGIN');
   const commit = db.raw.prepare('COMMIT');
   const rollback = db.raw.prepare('ROLLBACK');
 
-  begin.run();
+  let transactionOpen = false;
   try {
+    const stmts = prepareStatements(db);
+    begin.run();
+    transactionOpen = true;
     for (const msg of messages) {
       try {
         const action = processHistoryMessage(db, stmts, msg, log);
@@ -200,8 +222,11 @@ export function processHistoryBatch(
       }
     }
     commit.run();
+    transactionOpen = false;
   } catch (err) {
-    rollback.run();
+    if (transactionOpen) {
+      try { rollback.run(); } catch { /* best-effort rollback */ }
+    }
     throw err;
   }
 

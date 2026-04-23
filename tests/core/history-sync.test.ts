@@ -139,22 +139,22 @@ describe('processHistoryBatch', () => {
     expect(count).toBe(0);
   });
 
-  it('counts a hasBody message with unparseable content as skipped_null_parse (no placeholder fallback)', () => {
-    // A message with `message` set to something that won't parse through parseIncomingMessage's
-    // unwrap logic — e.g. a protocolMessage (Baileys strips these, they yield unknown content).
-    // We fabricate an innerMessage shape that leaves all of parseIncomingMessage's branches
-    // unsatisfied, so it returns null. We rely on the `!msg.message` guard at the top of
-    // parseIncomingMessage NOT being the trigger, so we do set message to a non-empty object.
+  it('a hasBody message with unrecognized innerMessage shape still inserts a row (content_type=unknown) and never writes a placeholder', () => {
+    // The critical invariant: when a message arrives with a body (however weird),
+    // the body path is taken — no envelope-only placeholder is ever created as a
+    // fallback. parseIncomingMessage today always returns a record when its two
+    // guards (msg.message and msg.key.remoteJid) are satisfied, using
+    // contentType='unknown' for shapes it can't decode. If that contract ever
+    // changes to return null, the handler's skipped_null_parse branch takes over
+    // — but even in that case, no placeholder is written.
     const weird: HistoryInput = {
       key: { id: 'MSG7', remoteJid: 'alice@s.whatsapp.net' },
       messageTimestamp: 1,
       message: { senderKeyDistributionMessage: { groupId: 'x' } },
     };
     const stats = processHistoryBatch(db, [weird]);
-    // parseIncomingMessage will populate contentType='unknown' but actually still returns a record.
-    // We just assert no placeholder got written for the body path — the critical invariant.
-    const count = (db.raw.prepare("SELECT COUNT(*) as c FROM messages WHERE content_type='history'").get() as { c: number }).c;
-    expect(count).toBe(0);
+    const placeholderCount = (db.raw.prepare("SELECT COUNT(*) as c FROM messages WHERE content_type='history'").get() as { c: number }).c;
+    expect(placeholderCount).toBe(0);
     expect(stats.placeholders).toBe(0);
   });
 
