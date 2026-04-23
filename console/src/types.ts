@@ -83,7 +83,7 @@ export interface Message {
   conversationKey: string;
   senderName: string;
   senderJid: string;
-  content: string;
+  content: string | null;
   timestamp: string;
   fromMe: boolean;
   type: string;
