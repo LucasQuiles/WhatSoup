@@ -9,13 +9,13 @@
  *   - envelope-only (no decrypted body)  →  placeholder row with content_type='history'
  *   - fully parsed (body present)        →  full row (or upgrade of a prior placeholder)
  *
- * Transaction semantics: the whole batch runs inside one BEGIN/COMMIT. Per-message
- * errors are caught and counted as `skipped` so one malformed record does not
- * poison the rest of a 50k-message sync — the batch commits with partial success.
- * ROLLBACK fires only if BEGIN or COMMIT itself throws. A failure in
- * prepareStatements or in preparing BEGIN/COMMIT/ROLLBACK itself occurs before
- * any transaction is open, so there is nothing to roll back — the error simply
- * propagates to the caller.
+ * Transaction semantics: the whole batch runs inside one transaction via
+ * `withTransaction` (src/core/db-tx.ts). Per-message errors are caught and
+ * counted as `skipped` so one malformed record does not poison the rest of
+ * a 50k-message sync — the batch commits with partial success. ROLLBACK
+ * fires only if a BEGIN/COMMIT failure or a non-caught throw escapes the
+ * withTransaction callback. `prepareStatements` runs before withTransaction
+ * by design, so a statement-prepare failure never leaves a transaction open.
  *
  * Known gap (tracked, not fixed here): if the live `messages.upsert` path later
  * receives the same message_id, `INSERT OR IGNORE` no-ops and the placeholder
@@ -24,7 +24,8 @@
  */
 import type { Logger } from 'pino';
 import type { Database } from './database.ts';
-import { parseIncomingMessage } from '../transport/connection.ts';
+import { parseIncomingMessage } from './message-parser.ts';
+import { withTransaction } from './db-tx.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
 
@@ -166,11 +167,12 @@ function processHistoryMessage(
   const hasBody = !!waMsg.message;
 
   if (hasBody) {
-    // HistoryInput is a structural subset of Baileys' WAMessage — this module
-    // deliberately does not import WAMessage to keep core/ decoupled from the
-    // transport layer. The cast is safe because parseIncomingMessage's only
-    // preconditions (`msg.message` and `msg.key?.remoteJid`) are already
-    // guaranteed by the hasBody / chatJid guards above.
+    // HistoryInput is a structural subset of Baileys' WAMessage. parseIncomingMessage
+    // (src/core/message-parser.ts) imports WAMessage directly; we keep HistoryInput
+    // narrow to avoid a cross-module type dependency from this module. The cast is
+    // safe because parseIncomingMessage's only preconditions (`msg.message` and
+    // `msg.key?.remoteJid`) are already guaranteed by the hasBody / chatJid guards
+    // above.
     const parsedMsg = parseIncomingMessage(waMsg as any);
     if (!parsedMsg) {
       log?.debug({ msgId }, 'historyMessages: parseIncomingMessage returned null for message with body');
@@ -240,19 +242,13 @@ export function processHistoryBatch(
   log?: Logger,
 ): HistorySyncStats {
   const stats: HistorySyncStats = { inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 };
-  // Note: node:sqlite has no transaction wrapper, so we drive BEGIN/COMMIT via
-  // prepared statements. (The sibling convention in blocklist-sync.ts uses the
-  // raw exec form, which the repo's security hook flags on literal match; the
-  // prepare/run form is semantically identical.)
-  const begin = db.raw.prepare('BEGIN');
-  const commit = db.raw.prepare('COMMIT');
-  const rollback = db.raw.prepare('ROLLBACK');
+  // Semantic guardrail: prepareStatements runs BEFORE withTransaction opens
+  // BEGIN. A statement-prepare failure (e.g. schema mismatch) therefore
+  // propagates without leaving a transaction open — matching the prior
+  // hand-rolled behavior that this migration replaced.
+  const stmts = prepareStatements(db);
 
-  let transactionOpen = false;
-  try {
-    const stmts = prepareStatements(db);
-    begin.run();
-    transactionOpen = true;
+  withTransaction(db, () => {
     for (const msg of messages) {
       try {
         const action = processHistoryMessage(db, stmts, msg, log);
@@ -269,16 +265,8 @@ export function processHistoryBatch(
         stats.skipped++;
       }
     }
-    commit.run();
-    transactionOpen = false;
-  } catch (err) {
-    if (transactionOpen) {
-      try { rollback.run(); } catch { /* best-effort rollback */ }
-      // Not resetting transactionOpen=false here is deliberate: the catch is
-      // the terminal path (we re-throw), so further flag reads are impossible.
-    }
-    throw err;
-  }
+  });
 
   return stats;
 }
+
