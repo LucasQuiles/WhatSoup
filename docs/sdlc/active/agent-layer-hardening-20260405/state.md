@@ -20,7 +20,7 @@ Harden the WhatsApp agent layer across stability, safety, correctness, and obser
 6. ✅ Connection exhaustion → process.exit(1), systemd restarts
 
 ## Source
-- Q audit: 26 findings — `docs/superpowers/specs/2026-04-05-phase6-agent-layer-hardening-design.md`
+- Q audit: 26 findings — _phase-6 design doc not committed; Bead Manifest below is authoritative_
 - L audit: 20 additional findings (C1-C2 critical, H1-H6 high, M1-M7 medium, 5 low)
 - Agent behavior audit: echo loops, siblingPhones empty, group auto-respond misconfigured
 
@@ -92,6 +92,6 @@ Harden the WhatsApp agent layer across stability, safety, correctness, and obser
 - **L**: Primary implementer. SP1-SP8, SP12, SEC1, SEC3-5, anti-echo, usage-limit suppression.
 
 ## Key Artifacts
-- Phase 6 spec: `docs/superpowers/specs/2026-04-05-phase6-agent-layer-hardening-design.md`
+- Phase 6 spec: _not committed to repo — Bead Manifest in this state file is the delivered scope_
 - This state file: `docs/sdlc/active/agent-layer-hardening-20260405/state.md`
 - Key commits: dfb2e47, 2b81a94, 65d6847, f0a38ff, cfc03b6

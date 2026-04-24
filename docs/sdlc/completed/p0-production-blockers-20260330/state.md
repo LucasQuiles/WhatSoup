@@ -4,7 +4,7 @@
 > **Created:** 2026-03-30
 > **Complexity:** Moderate
 > **Phase:** Frame → Execute
-> **Source:** `docs/handoff-2026-03-30-baileys-parity.md`
+> **Source:** _2026-03-30 Baileys-parity handoff (source doc not committed; findings are inlined in the Beads section below)_
 
 ## Objective
 

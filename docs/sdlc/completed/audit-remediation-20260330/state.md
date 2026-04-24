@@ -2,11 +2,11 @@
 
 **ID:** audit-remediation-20260330
 **Created:** 2026-03-30T15:00:00Z
-**Status:** in-progress
+**Status:** completed
 **Phase:** 4-execute
 **Profile:** REPAIR
 **Complexity:** complicated
-**Audit:** `docs/audit-2026-03-30.md`
+**Audit:** _2026-03-30 WhatSoup code audit (source doc not committed; see bead list below for the 28 findings)_
 
 ## Objective
 

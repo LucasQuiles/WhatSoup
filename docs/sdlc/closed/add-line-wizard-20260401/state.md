@@ -7,7 +7,7 @@
 - **Phase:** 5 — Synthesize
 - **Status:** Complete
 - **Completed:** 2026-04-05
-- **Spec:** `docs/superpowers/specs/2026-04-01-add-line-wizard-design.md`
+- **Spec:** _2026-04-01 add-line-wizard design (source doc not committed; Bead Registry and Implementation Plan below are authoritative)_
 
 ## Bead Registry
 | ID | Title | Layer | Status | Depends |

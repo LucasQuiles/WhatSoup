@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-04-24T02:19:00Z",
+  "generated_at": "2026-04-24T02:33:51Z",
   "repo": "/Users/q/LAB/WhatSoup",
-  "git_head": "3da18d08c3babfeb4ee1d78c3827e9af893df9f8",
+  "git_head": "6ffad917593adf6e3ef831692f5870feeb5f7bb5",
   "git_head_note": "Captured at scan time. If this index is committed via squash-merge, the landed commit SHA will differ from this value \u2014 the row data remains accurate.",
   "total": 171,
   "schema_version": 5,
@@ -87,8 +87,8 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/active/agent-layer-hardening-20260405",
       "supersedes_hint": null,
-      "last_modified": "2026-04-08",
-      "size_bytes": 5243
+      "last_modified": "2026-04-23",
+      "size_bytes": 5250
     },
     {
       "path": "docs/sdlc/closed/add-line-wizard-20260401/implementation-plan.md",
@@ -111,8 +111,8 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/add-line-wizard-20260401",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
-      "size_bytes": 1885
+      "last_modified": "2026-04-23",
+      "size_bytes": 1949
     },
     {
       "path": "docs/sdlc/closed/control-plane-20260401/state.md",
@@ -159,20 +159,20 @@
       "status_source": "directory",
       "canonical_parent": "docs/sdlc/closed/design-system-compliance-2026-04-06",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
-      "size_bytes": 3168
+      "last_modified": "2026-04-23",
+      "size_bytes": 3211
     },
     {
       "path": "docs/sdlc/closed/fleet-charts-20260407/state.md",
       "kind": "state",
       "topic_raw": "fleet-charts-20260407",
       "topic": "fleet-charts",
-      "status": "active",
-      "status_source": "phase-log",
+      "status": "deferred",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/fleet-charts-20260407",
       "supersedes_hint": null,
-      "last_modified": "2026-04-08",
-      "size_bytes": 3054
+      "last_modified": "2026-04-23",
+      "size_bytes": 3205
     },
     {
       "path": "docs/sdlc/closed/mark-read-api-20260408/beads/MR-01-health-handler.md",
@@ -227,7 +227,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -251,7 +251,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -287,7 +287,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -311,7 +311,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -335,7 +335,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -359,7 +359,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -371,7 +371,7 @@
       "kind": "bead",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -395,7 +395,7 @@
       "kind": "doc",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -407,7 +407,7 @@
       "kind": "doc",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -419,7 +419,7 @@
       "kind": "doc",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -431,7 +431,7 @@
       "kind": "doc",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -443,7 +443,7 @@
       "kind": "doc",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -455,19 +455,19 @@
       "kind": "state",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
-      "size_bytes": 1929
+      "last_modified": "2026-04-23",
+      "size_bytes": 2047
     },
     {
       "path": "docs/sdlc/closed/multi-provider-runtime-2026-0404/triage-backlog-scan-018.md",
       "kind": "doc",
       "topic_raw": "multi-provider-runtime-2026-0404",
       "topic": "multi-provider-runtime-2026-0404",
-      "status": "active",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
@@ -507,8 +507,8 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/phase3-console-features-20260401",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
-      "size_bytes": 1749
+      "last_modified": "2026-04-23",
+      "size_bytes": 1825
     },
     {
       "path": "docs/sdlc/closed/session-leak-audit-20260406/beads/ERR-01-control-slot-lock.md",
@@ -911,7 +911,7 @@
       "kind": "doc",
       "topic_raw": "whatsapp-mcp-features",
       "topic": "whatsapp-mcp-features",
-      "status": "active",
+      "status": "completed",
       "status_source": "phase-log",
       "canonical_parent": "docs/sdlc/closed/whatsapp-mcp-features",
       "supersedes_hint": null,
@@ -923,19 +923,19 @@
       "kind": "state",
       "topic_raw": "whatsapp-mcp-features",
       "topic": "whatsapp-mcp-features",
-      "status": "active",
+      "status": "completed",
       "status_source": "phase-log",
       "canonical_parent": "docs/sdlc/closed/whatsapp-mcp-features",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
-      "size_bytes": 2706
+      "last_modified": "2026-04-23",
+      "size_bytes": 2795
     },
     {
       "path": "docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md",
       "kind": "doc",
       "topic_raw": "whatsapp-mcp-features",
       "topic": "whatsapp-mcp-features",
-      "status": "active",
+      "status": "completed",
       "status_source": "phase-log",
       "canonical_parent": "docs/sdlc/closed/whatsapp-mcp-features",
       "supersedes_hint": null,
@@ -947,12 +947,12 @@
       "kind": "state",
       "topic_raw": "audit-remediation-20260330",
       "topic": "audit-remediation",
-      "status": "unknown",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/completed/audit-remediation-20260330",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
-      "size_bytes": 2330
+      "last_modified": "2026-04-23",
+      "size_bytes": 2402
     },
     {
       "path": "docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md",
@@ -1431,20 +1431,20 @@
       "status_source": "directory",
       "canonical_parent": "docs/sdlc/completed/p0-production-blockers-20260330",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
-      "size_bytes": 1862
+      "last_modified": "2026-04-23",
+      "size_bytes": 1930
     },
     {
       "path": "docs/sdlc/completed/remaining-hardening-20260330/state.md",
       "kind": "state",
       "topic_raw": "remaining-hardening-20260330",
       "topic": "remaining-hardening",
-      "status": "unknown",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/completed/remaining-hardening-20260330",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
-      "size_bytes": 1775
+      "last_modified": "2026-04-23",
+      "size_bytes": 1834
     },
     {
       "path": "docs/sdlc/completed/transport-hardening-20260404/beads/H01-budget-burst-mitigation.md",
@@ -2078,19 +2078,19 @@
     ]
   },
   "state_overrides": {
-    "docs/sdlc/completed/audit-remediation-20260330/": "unknown",
+    "docs/sdlc/completed/audit-remediation-20260330/": "completed",
     "docs/sdlc/completed/codex-transport-gaps-20260404/": "completed",
     "docs/sdlc/completed/whatsoup-full-hardening-20260331/": "completed",
-    "docs/sdlc/completed/remaining-hardening-20260330/": "unknown",
+    "docs/sdlc/completed/remaining-hardening-20260330/": "completed",
     "docs/sdlc/completed/heal-reliability-fixes-20260401/": "completed",
     "docs/sdlc/completed/transport-hardening-20260404/": "completed",
     "docs/sdlc/closed/control-plane-20260401/": "completed",
     "docs/sdlc/closed/add-line-wizard-20260401/": "completed",
     "docs/sdlc/closed/design-fidelity-fixes-20260401/": "completed",
     "docs/sdlc/closed/mark-read-api-20260408/": "completed",
-    "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "active",
-    "docs/sdlc/closed/fleet-charts-20260407/": "active",
-    "docs/sdlc/closed/whatsapp-mcp-features/": "active",
+    "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "completed",
+    "docs/sdlc/closed/fleet-charts-20260407/": "deferred",
+    "docs/sdlc/closed/whatsapp-mcp-features/": "completed",
     "docs/sdlc/closed/dedup-consolidation-20260404/": "unknown",
     "docs/sdlc/closed/session-leak-audit-20260406/": "completed",
     "docs/sdlc/closed/phase3-console-features-20260401/": "completed",
@@ -2108,7 +2108,7 @@
     "docs/sdlc/closed/design-fidelity-fixes-20260401/": "state-md-status",
     "docs/sdlc/closed/mark-read-api-20260408/": "state-md-status",
     "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "state-md-status",
-    "docs/sdlc/closed/fleet-charts-20260407/": "phase-log",
+    "docs/sdlc/closed/fleet-charts-20260407/": "state-md-status",
     "docs/sdlc/closed/whatsapp-mcp-features/": "phase-log",
     "docs/sdlc/closed/dedup-consolidation-20260404/": "state-md-status",
     "docs/sdlc/closed/session-leak-audit-20260406/": "state-md-status",
@@ -2139,72 +2139,5 @@
       "SP13": "completed"
     }
   },
-  "inconsistencies": [
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/completed/audit-remediation-20260330/state.md",
-      "references_missing": "docs/audit-2026-03-30.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/completed/p0-production-blockers-20260330/state.md",
-      "references_missing": "docs/handoff-2026-03-30-baileys-parity.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/completed/remaining-hardening-20260330/state.md",
-      "references_missing": "docs/handoff-2026-03-30-production-hardening.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/completed/remaining-hardening-20260330/state.md",
-      "references_missing": "docs/audit-2026-03-30.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/closed/add-line-wizard-20260401/state.md",
-      "references_missing": "docs/superpowers/specs/2026-04-01-add-line-wizard-design.md"
-    },
-    {
-      "kind": "directory-status-mismatch",
-      "path": "docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md",
-      "directory_says": "closed",
-      "state_declares": "active",
-      "source": "state-md-status"
-    },
-    {
-      "kind": "directory-status-mismatch",
-      "path": "docs/sdlc/closed/fleet-charts-20260407/state.md",
-      "directory_says": "closed",
-      "state_declares": "active",
-      "source": "phase-log"
-    },
-    {
-      "kind": "directory-status-mismatch",
-      "path": "docs/sdlc/closed/whatsapp-mcp-features/state.md",
-      "directory_says": "closed",
-      "state_declares": "active",
-      "source": "phase-log"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/closed/whatsapp-mcp-features/state.md",
-      "references_missing": "docs/sdlc/active/whatsapp-mcp-features/sp9-broadcast-proof.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/closed/phase3-console-features-20260401/state.md",
-      "references_missing": "docs/plans/2026-04-01-phase3-roadmap.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/closed/design-system-compliance-2026-04-06/state.md",
-      "references_missing": "docs/superpowers/plans/2026-04-06-design-system-compliance.md"
-    },
-    {
-      "kind": "dangling-source-ref",
-      "from": "docs/sdlc/active/agent-layer-hardening-20260405/state.md",
-      "references_missing": "docs/superpowers/specs/2026-04-05-phase6-agent-layer-hardening-design.md"
-    }
-  ]
+  "inconsistencies": []
 }
