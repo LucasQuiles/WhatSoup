@@ -5,7 +5,7 @@
 **Status:** frame
 **Phase:** 1-frame
 **Complexity:** moderate
-**Source:** `docs/audit-2026-03-30.md` (8 open findings), `docs/handoff-2026-03-30-production-hardening.md`
+**Source:** _2026-03-30 WhatSoup code audit (8 open findings) and 2026-03-30 production-hardening handoff (source docs not committed; findings are inlined below)_
 
 ## Objective
 

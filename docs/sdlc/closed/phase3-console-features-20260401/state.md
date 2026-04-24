@@ -12,7 +12,7 @@
 Implement Phase 3 of the WhatSoup Fleet Console: rich media rendering, conversation management (pagination, contacts, search), and instance operations (config editor, mode switch, stop). This makes the console a usable daily-driver for managing WhatsApp instances.
 
 ## Source Plan
-`docs/plans/2026-04-01-phase3-roadmap.md`
+_2026-04-01 phase-3 roadmap (source doc not committed; the Bead Registry below enumerates the 10 beads that shipped)_
 
 ## Bead Registry
 | ID | Title | Sub-phase | Status | Depends |

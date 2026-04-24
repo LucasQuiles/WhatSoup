@@ -22,61 +22,21 @@ between `state.md` source-document references and on-disk reality.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, state=19, plan=13, doc=13, spec=7, handoff=5, review=1 |
-| Status | completed=84, pending=37, unknown=29, active=20, closed=1 |
-| Status source | body-marker=72, state-md-status=60, fallback=25, phase-log=9, bead-manifest=3, directory=2 |
+| Status | completed=102, pending=37, unknown=29, active=2, closed=1 |
+| Status source | body-marker=72, state-md-status=61, fallback=25, phase-log=8, bead-manifest=3, directory=2 |
 
 ## Inconsistencies
 
-12 detected.
-
-### Directory-status mismatches
-
-| state.md | Directory says | Declared status | Source |
-|----------|----------------|-----------------|--------|
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | closed | active | state-md-status |
-| `docs/sdlc/closed/fleet-charts-20260407/state.md` | closed | active | phase-log |
-| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | closed | active | phase-log |
-
-### Dangling source-document references in state.md files
-
-| state.md | References path (not on disk) |
-|----------|-------------------------------|
-| `docs/sdlc/completed/audit-remediation-20260330/state.md` | `docs/audit-2026-03-30.md` |
-| `docs/sdlc/completed/p0-production-blockers-20260330/state.md` | `docs/handoff-2026-03-30-baileys-parity.md` |
-| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | `docs/handoff-2026-03-30-production-hardening.md` |
-| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | `docs/audit-2026-03-30.md` |
-| `docs/sdlc/closed/add-line-wizard-20260401/state.md` | `docs/superpowers/specs/2026-04-01-add-line-wizard-design.md` |
-| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | `docs/sdlc/active/whatsapp-mcp-features/sp9-broadcast-proof.md` |
-| `docs/sdlc/closed/phase3-console-features-20260401/state.md` | `docs/plans/2026-04-01-phase3-roadmap.md` |
-| `docs/sdlc/closed/design-system-compliance-2026-04-06/state.md` | `docs/superpowers/plans/2026-04-06-design-system-compliance.md` |
-| `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | `docs/superpowers/specs/2026-04-05-phase6-agent-layer-hardening-design.md` |
+0 detected.
 
 ## Synthesis
 
-### Active (20)
+### Active (2)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
 | `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
 | `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
-| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | fleet-charts | phase-log |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B01-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B02-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B03-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B04-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B05-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B06-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B07-decision-trace.md` | bead | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/evidence-packet.md` | doc | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/gap-analysis.md` | doc | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/handoff-frontend.md` | doc | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/review-provider-interface-2026-04-04.md` | doc | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/revised-provider-spec.md` | doc | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | state | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/triage-backlog-scan-018.md` | doc | multi-provider-runtime-2026-0404 | state-md-status |
-| `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md` | doc | whatsapp-mcp-features | phase-log |
-| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | whatsapp-mcp-features | phase-log |
-| `docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md` | doc | whatsapp-mcp-features | phase-log |
 
 ### Unknown-status — triage needed (29)
 
@@ -127,7 +87,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Parent |
 |------|------|--------|--------|
-| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | active | docs/sdlc/closed/fleet-charts-20260407 |
+| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | completed | docs/sdlc/closed/fleet-charts-20260407 |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md` | handoff | unknown | docs/superpowers/handoffs |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | handoff | unknown | docs/superpowers/handoffs |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | unknown | docs/superpowers/handoffs |
@@ -196,7 +156,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | active | phase-log | fleet-charts | 2026-04-08 |  |
+| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | completed | state-md-status | fleet-charts | 2026-04-08 |  |
 
 ### docs/sdlc/closed/mark-read-api-20260408  _(4 entries)_
 
@@ -211,27 +171,27 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B01-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B01-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B01-provider-interface.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B02-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B02-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B02-extract-claude-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B03-config-schema.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B03-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B03-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B04-codex-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B04-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B04-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B05-api-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B05-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B05-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B06-anthropic-api-provider.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B06-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B07-decision-trace.md` | bead | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B06-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B07-decision-trace.md` | bead | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/beads/B07-mcp-bridge.md` | bead | pending | body-marker | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/evidence-packet.md` | doc | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/gap-analysis.md` | doc | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/handoff-frontend.md` | doc | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/review-provider-interface-2026-04-04.md` | doc | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/revised-provider-spec.md` | doc | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | state | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/triage-backlog-scan-018.md` | doc | active | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/evidence-packet.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/gap-analysis.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/handoff-frontend.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/review-provider-interface-2026-04-04.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/revised-provider-spec.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | state | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/triage-backlog-scan-018.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 
 ### docs/sdlc/closed/phase3-console-features-20260401  _(3 entries)_
 
@@ -283,9 +243,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md` | doc | active | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
-| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | active | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
-| `docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md` | doc | active | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
+| `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md` | doc | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
+| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
+| `docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md` | doc | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
@@ -437,6 +397,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 ---
 
-_Scan HEAD: `3da18d08c3babfeb4ee1d78c3827e9af893df9f8` at 2026-04-24T02:19:00Z. Post-squash-merge, the landed commit SHA will 
+_Scan HEAD: `b81a9c99d82121d393c4e7d4c775237664ce5cce` at 2026-04-24T02:28:35Z. Post-squash-merge, the landed commit SHA will 
 differ from this value — the row data and inconsistencies remain accurate._
 

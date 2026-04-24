@@ -4,6 +4,7 @@
 ## Profile: BUILD
 ## Started: 2026-04-04
 ## Completed: 2026-04-05
+## Status: completed
 
 ## Phase Log
 | Phase | Status | Timestamp |
@@ -17,7 +18,9 @@
 | Synthesize | complete | 2026-04-05 |
 | Deploy (canary) | complete | 2026-04-05 — BES Bot canary, 6/6 smoke test PASS |
 | Deploy (full) | complete | 2026-04-05 — all instances running Phase 2 code |
-| **Follow-on** | active | → `agent-layer-hardening-20260405` (Phase 6 hardening) |
+
+## Follow-on
+Phase 6 hardening continued as its own epic: `agent-layer-hardening-20260405`. That is a successor scope, not unfinished work in this epic.
 
 ## Bead Manifest
 
@@ -53,6 +56,6 @@
 ## Key Artifacts
 - Phase 1 spec: `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md`
 - Phase 2 spec: `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md`
-- SP9 proof: `docs/sdlc/active/whatsapp-mcp-features/sp9-broadcast-proof.md`
+- SP9 proof: `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md`
 - Release note: `docs/releases/2026-04-05-phase2-release.md`
 - Plans: `docs/superpowers/plans/2026-04-05-sp{1,2,3,4}-*.md`
