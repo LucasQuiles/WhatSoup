@@ -19,7 +19,7 @@ Exactly one SDLC epic is genuinely active. State declared explicitly in its `sta
 
 | Epic | Status source | Notes |
 |---|---|---|
-| [`docs/sdlc/active/agent-layer-hardening-20260405/`](sdlc/active/agent-layer-hardening-20260405/) | `state-md-status` | Phase 6 hardening. 20 beads tracked in its Bead Manifest (SP1–SP12, SEC1–SEC5, CFG1–CFG3); remaining Synthesize-phase verification is the only open work. |
+| [`docs/sdlc/active/agent-layer-hardening-20260405/`](sdlc/active/agent-layer-hardening-20260405/) | `state-md-status` | Phase 6 hardening. 20 beads tracked in its Bead Manifest: SP1–SP8, SP10, SP12, SP13 (note gaps at SP9 and SP11); SEC1–SEC5; CFG1–CFG4. Remaining Synthesize-phase verification is the only open work. |
 
 Its state.md and `evidence-reconnect.md` are the two index rows classified `active`. All 20 bead rows under it resolve individually via `bead-manifest` (most `completed`, some still-open tracked in that table).
 
@@ -87,7 +87,7 @@ Explicit supersession relationships captured in the index: **one** (via the poli
 
 For every other epic and every `docs/superpowers/*` artifact, **the supersession relation is unknown** — no structured `Supersedes:` or `Superseded by:` marker exists in the index. The `supersedes_hint` column in `docs/work-index.json` has zero populated rows.
 
-Cross-tree topic clusters exist (`fleet-charts`, `anti-echo-session-controls`, `scheduled-groups-tabs`) but the index does not state which entry within each cluster supersedes another. Per policy these remain unknown until explicit markers are authored.
+Cross-tree topic clusters exist (`fleet-charts` = 6 entries across 3 trees; `anti-echo-session-controls` = 2 entries, plan + spec; `scheduled-groups-tabs` = 2 entries, plan + spec) but the index does not state which entry within each cluster supersedes another. Per policy these remain unknown until explicit markers are authored. Note: an anti-echo review-handoff exists at `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` but is not part of the cross-tree cluster (it's a single-tree row), and is listed separately in the normalization backlog.
 
 ---
 
@@ -112,7 +112,7 @@ One SDLC epic has an authoritative `state.md` but no authored Status value the s
 
 | Epic | Status source | Disposition |
 |---|---|---|
-| [`docs/sdlc/closed/dedup-consolidation-20260404/`](sdlc/closed/dedup-consolidation-20260404/) | `fallback` (no state.md Status field) | Classify needed. Per commit `cf0dbf3` this epic was closed alongside `multi-provider-runtime`, so the correct authored status is likely `completed`, but until a human confirms and updates the state.md the row stays unknown. |
+| [`docs/sdlc/closed/dedup-consolidation-20260404/`](sdlc/closed/dedup-consolidation-20260404/) | `state-md-status` (field present but value unrecognized by scanner) | Classify needed. The state.md carries `**Status:** Execute`, which is a phase name rather than a policy-vocabulary status, so the scanner returns unknown. Per commit `cf0dbf3` this epic was closed alongside `multi-provider-runtime`, so the authored status is likely `completed`, but until a human confirms and rewrites the state.md Status field into the policy vocabulary the row stays unknown. |
 
 ---
 
@@ -171,7 +171,7 @@ These rows are classified `unknown` by the scanner. Per the policy they stay unk
 - **docs/superpowers/plans**: each should either point at its implementing SDLC epic (in which case inherit status) or declare its own lifecycle marker.
 - **docs/superpowers/specs**: same. Specs tied to a completed epic can be marked completed; specs never implemented should be marked deferred or superseded.
 - **fleet-charts handoffs** (4 of the 11 handoffs/plans): all tied to the deferred `fleet-charts-20260407` epic. Cluster decision is whether to inherit the epic's `deferred` status or mark these as historical references.
-- **anti-echo-session-controls** (plan + spec + review): cluster decision — was this implemented? If yes, which epic?
+- **anti-echo-session-controls** (plan + spec in the cross-tree cluster; plus a separate review-handoff row): was this implemented? If yes, which epic? The review-handoff row, though not in the cluster, belongs to the same topic and should be triaged together.
 - **scheduled-groups-tabs** (plan + spec): same cluster question.
 
 ---
