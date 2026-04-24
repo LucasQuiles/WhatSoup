@@ -120,6 +120,8 @@ Whenever an epic moves between `active/`, `closed/`, or `completed/`:
 - update any self-references to the old path prefix
 - ensure `Phase Log` does not still claim an open execution phase unless that is intentional
 
+**Atomicity:** perform the directory move and the state.md Status rewrite in the same commit. The scanner's active-sibling damping rule (§Scanner Rules) suppresses `active` propagation to sibling files when the epic's declared status disagrees with its directory bucket. That is the correct steady-state behavior, but it means a mid-transition commit where the directory has moved but the state.md still says `active` will briefly classify sibling docs via their own body-marker or fallback instead of inheriting from the parent. The directory-status-mismatch inconsistency is still flagged, but operators should not rely on sibling-row statuses during a transitional commit.
+
 ### 2. Successor epics and follow-on work
 
 If a closed/completed epic spawns future work:
