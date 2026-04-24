@@ -22,7 +22,7 @@ between `state.md` source-document references and on-disk reality.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, state=19, plan=13, doc=13, spec=7, handoff=5, review=1 |
-| Status | completed=102, pending=37, unknown=29, active=2, closed=1 |
+| Status | completed=103, pending=37, unknown=27, active=2, closed=1, deferred=1 |
 | Status source | body-marker=72, state-md-status=61, fallback=25, phase-log=8, bead-manifest=3, directory=2 |
 
 ## Inconsistencies
@@ -38,16 +38,14 @@ between `state.md` source-document references and on-disk reality.
 | `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
 | `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
 
-### Unknown-status — triage needed (29)
+### Unknown-status — triage needed (27)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
 | `docs/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-04-05 |
 | `docs/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-05 |
 | `docs/sdlc/closed/dedup-consolidation-20260404/state.md` | state | dedup-consolidation | 2026-04-05 |
-| `docs/sdlc/completed/audit-remediation-20260330/state.md` | state | audit-remediation | 2026-04-04 |
 | `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md` | bead | codex-transport-gaps | 2026-04-04 |
-| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | state | remaining-hardening | 2026-04-04 |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md` | handoff | fleet-charts | 2026-04-07 |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | handoff | fleet-charts | 2026-04-07 |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | fleet-charts | 2026-04-07 |
@@ -87,7 +85,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Parent |
 |------|------|--------|--------|
-| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | completed | docs/sdlc/closed/fleet-charts-20260407 |
+| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | deferred | docs/sdlc/closed/fleet-charts-20260407 |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md` | handoff | unknown | docs/superpowers/handoffs |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | handoff | unknown | docs/superpowers/handoffs |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | unknown | docs/superpowers/handoffs |
@@ -119,14 +117,14 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/active/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-04-05 |  |
 | `docs/sdlc/active/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-04-05 |  |
 | `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | active | state-md-status | agent-layer-hardening | 2026-04-05 |  |
-| `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | active | state-md-status | agent-layer-hardening | 2026-04-08 |  |
+| `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | active | state-md-status | agent-layer-hardening | 2026-04-23 |  |
 
 ### docs/sdlc/closed/add-line-wizard-20260401  _(2 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/add-line-wizard-20260401/implementation-plan.md` | doc | completed | state-md-status | add-line-wizard | 2026-04-05 |  |
-| `docs/sdlc/closed/add-line-wizard-20260401/state.md` | state | completed | state-md-status | add-line-wizard | 2026-04-05 |  |
+| `docs/sdlc/closed/add-line-wizard-20260401/state.md` | state | completed | state-md-status | add-line-wizard | 2026-04-23 |  |
 
 ### docs/sdlc/closed/control-plane-20260401  _(1 entries)_
 
@@ -150,13 +148,13 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/design-system-compliance-2026-04-06/state.md` | state | closed | directory | design-system-compliance | 2026-04-07 |  |
+| `docs/sdlc/closed/design-system-compliance-2026-04-06/state.md` | state | closed | directory | design-system-compliance | 2026-04-23 |  |
 
 ### docs/sdlc/closed/fleet-charts-20260407  _(1 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | completed | state-md-status | fleet-charts | 2026-04-08 |  |
+| `docs/sdlc/closed/fleet-charts-20260407/state.md` | state | deferred | state-md-status | fleet-charts | 2026-04-23 |  |
 
 ### docs/sdlc/closed/mark-read-api-20260408  _(4 entries)_
 
@@ -190,7 +188,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/handoff-frontend.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/review-provider-interface-2026-04-04.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/revised-provider-spec.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
-| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | state | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
+| `docs/sdlc/closed/multi-provider-runtime-2026-0404/state.md` | state | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-23 |  |
 | `docs/sdlc/closed/multi-provider-runtime-2026-0404/triage-backlog-scan-018.md` | doc | completed | state-md-status | multi-provider-runtime-2026-0404 | 2026-04-05 |  |
 
 ### docs/sdlc/closed/phase3-console-features-20260401  _(3 entries)_
@@ -199,7 +197,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/phase3-console-features-20260401/backlog-scan-20260405-agent-020.md` | doc | completed | state-md-status | phase3-console-features | 2026-04-05 |  |
 | `docs/sdlc/closed/phase3-console-features-20260401/implementation-plan.md` | doc | completed | state-md-status | phase3-console-features | 2026-04-05 |  |
-| `docs/sdlc/closed/phase3-console-features-20260401/state.md` | state | completed | state-md-status | phase3-console-features | 2026-04-05 |  |
+| `docs/sdlc/closed/phase3-console-features-20260401/state.md` | state | completed | state-md-status | phase3-console-features | 2026-04-23 |  |
 
 ### docs/sdlc/closed/session-leak-audit-20260406  _(33 entries)_
 
@@ -244,14 +242,14 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md` | doc | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
-| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
+| `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | completed | phase-log | whatsapp-mcp-features | 2026-04-23 |  |
 | `docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md` | doc | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/audit-remediation-20260330/state.md` | state | unknown | state-md-status | audit-remediation | 2026-04-04 |  |
+| `docs/sdlc/completed/audit-remediation-20260330/state.md` | state | completed | state-md-status | audit-remediation | 2026-04-23 |  |
 
 ### docs/sdlc/completed/codex-transport-gaps-20260404  _(31 entries)_
 
@@ -306,13 +304,13 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/p0-production-blockers-20260330/state.md` | state | completed | directory | p0-production-blockers | 2026-04-04 |  |
+| `docs/sdlc/completed/p0-production-blockers-20260330/state.md` | state | completed | directory | p0-production-blockers | 2026-04-23 |  |
 
 ### docs/sdlc/completed/remaining-hardening-20260330  _(1 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | state | unknown | state-md-status | remaining-hardening | 2026-04-04 |  |
+| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | state | completed | state-md-status | remaining-hardening | 2026-04-23 |  |
 
 ### docs/sdlc/completed/transport-hardening-20260404  _(13 entries)_
 
@@ -397,6 +395,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 ---
 
-_Scan HEAD: `b81a9c99d82121d393c4e7d4c775237664ce5cce` at 2026-04-24T02:28:35Z. Post-squash-merge, the landed commit SHA will 
+_Scan HEAD: `6ffad917593adf6e3ef831692f5870feeb5f7bb5` at 2026-04-24T02:33:51Z. Post-squash-merge, the landed commit SHA will 
 differ from this value — the row data and inconsistencies remain accurate._
 

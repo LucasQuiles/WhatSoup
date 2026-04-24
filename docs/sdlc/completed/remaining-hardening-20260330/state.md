@@ -2,7 +2,7 @@
 
 **ID:** remaining-hardening-20260330
 **Created:** 2026-03-30
-**Status:** frame
+**Status:** completed
 **Phase:** 1-frame
 **Complexity:** moderate
 **Source:** _2026-03-30 WhatSoup code audit (8 open findings) and 2026-03-30 production-hardening handoff (source docs not committed; findings are inlined below)_

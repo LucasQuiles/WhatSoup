@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-04-24T02:28:35Z",
+  "generated_at": "2026-04-24T02:33:51Z",
   "repo": "/Users/q/LAB/WhatSoup",
-  "git_head": "b81a9c99d82121d393c4e7d4c775237664ce5cce",
+  "git_head": "6ffad917593adf6e3ef831692f5870feeb5f7bb5",
   "git_head_note": "Captured at scan time. If this index is committed via squash-merge, the landed commit SHA will differ from this value \u2014 the row data remains accurate.",
   "total": 171,
   "schema_version": 5,
@@ -87,7 +87,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/active/agent-layer-hardening-20260405",
       "supersedes_hint": null,
-      "last_modified": "2026-04-08",
+      "last_modified": "2026-04-23",
       "size_bytes": 5250
     },
     {
@@ -111,7 +111,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/add-line-wizard-20260401",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-23",
       "size_bytes": 1949
     },
     {
@@ -159,7 +159,7 @@
       "status_source": "directory",
       "canonical_parent": "docs/sdlc/closed/design-system-compliance-2026-04-06",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-23",
       "size_bytes": 3211
     },
     {
@@ -167,11 +167,11 @@
       "kind": "state",
       "topic_raw": "fleet-charts-20260407",
       "topic": "fleet-charts",
-      "status": "completed",
+      "status": "deferred",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/fleet-charts-20260407",
       "supersedes_hint": null,
-      "last_modified": "2026-04-08",
+      "last_modified": "2026-04-23",
       "size_bytes": 3205
     },
     {
@@ -459,7 +459,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/multi-provider-runtime-2026-0404",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-23",
       "size_bytes": 2047
     },
     {
@@ -507,7 +507,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/phase3-console-features-20260401",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-23",
       "size_bytes": 1825
     },
     {
@@ -927,7 +927,7 @@
       "status_source": "phase-log",
       "canonical_parent": "docs/sdlc/closed/whatsapp-mcp-features",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-23",
       "size_bytes": 2795
     },
     {
@@ -947,12 +947,12 @@
       "kind": "state",
       "topic_raw": "audit-remediation-20260330",
       "topic": "audit-remediation",
-      "status": "unknown",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/completed/audit-remediation-20260330",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
-      "size_bytes": 2404
+      "last_modified": "2026-04-23",
+      "size_bytes": 2402
     },
     {
       "path": "docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md",
@@ -1431,7 +1431,7 @@
       "status_source": "directory",
       "canonical_parent": "docs/sdlc/completed/p0-production-blockers-20260330",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
+      "last_modified": "2026-04-23",
       "size_bytes": 1930
     },
     {
@@ -1439,12 +1439,12 @@
       "kind": "state",
       "topic_raw": "remaining-hardening-20260330",
       "topic": "remaining-hardening",
-      "status": "unknown",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/completed/remaining-hardening-20260330",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
-      "size_bytes": 1830
+      "last_modified": "2026-04-23",
+      "size_bytes": 1834
     },
     {
       "path": "docs/sdlc/completed/transport-hardening-20260404/beads/H01-budget-burst-mitigation.md",
@@ -2078,10 +2078,10 @@
     ]
   },
   "state_overrides": {
-    "docs/sdlc/completed/audit-remediation-20260330/": "unknown",
+    "docs/sdlc/completed/audit-remediation-20260330/": "completed",
     "docs/sdlc/completed/codex-transport-gaps-20260404/": "completed",
     "docs/sdlc/completed/whatsoup-full-hardening-20260331/": "completed",
-    "docs/sdlc/completed/remaining-hardening-20260330/": "unknown",
+    "docs/sdlc/completed/remaining-hardening-20260330/": "completed",
     "docs/sdlc/completed/heal-reliability-fixes-20260401/": "completed",
     "docs/sdlc/completed/transport-hardening-20260404/": "completed",
     "docs/sdlc/closed/control-plane-20260401/": "completed",
@@ -2089,7 +2089,7 @@
     "docs/sdlc/closed/design-fidelity-fixes-20260401/": "completed",
     "docs/sdlc/closed/mark-read-api-20260408/": "completed",
     "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "completed",
-    "docs/sdlc/closed/fleet-charts-20260407/": "completed",
+    "docs/sdlc/closed/fleet-charts-20260407/": "deferred",
     "docs/sdlc/closed/whatsapp-mcp-features/": "completed",
     "docs/sdlc/closed/dedup-consolidation-20260404/": "unknown",
     "docs/sdlc/closed/session-leak-audit-20260406/": "completed",
