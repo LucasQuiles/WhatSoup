@@ -33,8 +33,8 @@ export const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'document
 export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   if (!msg.message || !msg.key?.remoteJid) return null;
 
-  // Status broadcasts (status@broadcast) are now stored but marked non-response-worthy
-  // via isResponseWorthy check at line ~1385. They won't trigger agent sessions.
+  // Status broadcasts (status@broadcast) are stored but marked non-response-worthy
+  // via the isResponseWorthy check below — they won't trigger agent sessions.
 
   const innerMessage = unwrapMessage(msg.message);
 

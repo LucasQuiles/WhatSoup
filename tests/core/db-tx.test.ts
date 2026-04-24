@@ -96,14 +96,17 @@ describe('withTransaction', () => {
 
   it('does not run the callback or attempt rollback when BEGIN fails', () => {
     const callback = vi.fn();
+    const rollbackSpy = vi.fn();
     const fakeDb = stubDb({
       BEGIN: () => {
         throw new Error('begin-failed');
       },
+      ROLLBACK: rollbackSpy,
     });
 
     expect(() => withTransaction(fakeDb, callback)).toThrow('begin-failed');
     expect(callback).not.toHaveBeenCalled();
+    expect(rollbackSpy).not.toHaveBeenCalled();
   });
 
   it('attempts rollback and re-throws the original error when COMMIT fails', () => {
