@@ -9,7 +9,11 @@
 
 **Generated from:** `docs/work-index.json` (schema v5, 171 rows, 0 inconsistencies)
 **Policy:** [`docs/canonical-status-policy.md`](canonical-status-policy.md)
-**Status distribution:** completed=104, pending=37, unknown=27, active=2, deferred=1
+**Status distribution:** completed=113, pending=37, unknown=12, deferred=7, active=2
+
+> **Refresh history:** first cut used the pre-step-4 index (27 unknowns, 1 deferred,
+> 103 completed). This refresh reflects the post-step-4 state: 12 unknowns,
+> 7 deferred rows (1 epic + 6 inherited children), 113 completed.
 
 ---
 
@@ -27,30 +31,39 @@ Its state.md and `evidence-reconnect.md` are the two index rows classified `acti
 
 ## 2. Deferred (shelved, not finished, not superseded)
 
-| Epic | Status source | Reason |
-|---|---|---|
-| [`docs/sdlc/closed/fleet-charts-20260407/`](sdlc/closed/fleet-charts-20260407/) | `state-md-status` | Phase 4-Execute was incomplete when the folder was moved to `closed/`. Beads B01–B11 remain unimplemented. Shelved by decision. |
+One SDLC epic is explicitly declared `deferred` via its `state.md` Status field. Six child artifacts inherit that status through authored `**Status:** deferred` markers that point back to the parent epic (added in step 4).
 
-Per the policy, this epic lives in `closed/` by directory placement but its state.md explicitly declares `**Status:** deferred`. Authored intent, not a mismatch.
+| Path | Kind | Status source |
+|---|---|---|
+| [`docs/sdlc/closed/fleet-charts-20260407/state.md`](sdlc/closed/fleet-charts-20260407/state.md) | state | `state-md-status` |
+| [`docs/superpowers/plans/2026-04-07-fleet-charts.md`](superpowers/plans/2026-04-07-fleet-charts.md) | plan | `body-marker` |
+| [`docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md`](superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md) | spec | `body-marker` |
+| [`docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md`](superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md) | handoff | `body-marker` |
+| [`docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md`](superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md) | handoff | `body-marker` |
+| [`docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md`](superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md) | handoff | `body-marker` |
+| [`docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md`](superpowers/handoffs/2026-04-07-fleet-charts-sop.md) | handoff | `body-marker` |
+
+All six child rows cite the same reason: Phase 4-Execute was incomplete when the epic folder was moved to `closed/`; beads B01–B11 remain unimplemented. Work is shelved by authored decision, not superseded.
 
 ---
 
 ## 3. Completed epics and their current relevance
 
-16 SDLC epics are marked `completed`. "Still relevant" is a runtime judgment the index cannot make, so the table below gives:
+17 SDLC epics are marked `completed` (up from 16 pre-step-4; `dedup-consolidation-20260404` was resolved from unknown after its state.md Status was rewritten from a phase name to policy vocabulary). "Still relevant" is a runtime judgment the index cannot make, so the tables below give:
 
 - the authoritative status source
-- any **pending beads** left behind in the epic (policy's mark-read-api-style mixed state — the scanner reports these honestly; they are source-tree truth, not bugs)
+- any **pending beads** left behind in the epic (policy's mark-read-api-style mixed state — honest scanner output, not bugs)
 - the canonical path
 
 Reader can decide relevance against live system behavior.
 
-### Completed — no pending beads (11 epics)
+### Completed — no pending beads (12 epics)
 
 | Epic | Path |
 |---|---|
 | add-line-wizard-20260401 | [`docs/sdlc/closed/add-line-wizard-20260401/`](sdlc/closed/add-line-wizard-20260401/) |
 | control-plane-20260401 | [`docs/sdlc/closed/control-plane-20260401/`](sdlc/closed/control-plane-20260401/) |
+| dedup-consolidation-20260404 | [`docs/sdlc/closed/dedup-consolidation-20260404/`](sdlc/closed/dedup-consolidation-20260404/) |
 | design-fidelity-fixes-20260401 | [`docs/sdlc/closed/design-fidelity-fixes-20260401/`](sdlc/closed/design-fidelity-fixes-20260401/) |
 | design-system-compliance-2026-04-06 | [`docs/sdlc/closed/design-system-compliance-2026-04-06/`](sdlc/closed/design-system-compliance-2026-04-06/) |
 | phase3-console-features-20260401 | [`docs/sdlc/closed/phase3-console-features-20260401/`](sdlc/closed/phase3-console-features-20260401/) |
@@ -73,7 +86,7 @@ These epics declare `completed` at the state.md level but carry pending bead row
 | transport-hardening-20260404 | 6 | [`docs/sdlc/completed/transport-hardening-20260404/`](sdlc/completed/transport-hardening-20260404/) |
 | whatsoup-full-hardening-20260331 | 7 | [`docs/sdlc/completed/whatsoup-full-hardening-20260331/`](sdlc/completed/whatsoup-full-hardening-20260331/) |
 
-These 37 pending beads are the primary candidate set for a future triage pass.
+These 37 pending beads remain the primary candidate set for a future triage pass.
 
 ---
 
@@ -93,14 +106,14 @@ Cross-tree topic clusters exist (`fleet-charts` = 6 entries across 3 trees; `ant
 
 ## 5. Legacy / historical only
 
-Per the policy (§Directory Bucket Semantics), `docs/plans/` is the legacy plan bucket — entries there do not get an implied status.
+Step 4 drained the `docs/plans/` legacy bucket: the two entries moved to `docs/superpowers/plans/` with explicit `**Status:** unknown — stalled at SPEC DRAFT stage; never became an SDLC epic` markers that preserve the original authored status text inline. The `docs/plans/` directory no longer exists in the repo.
 
 | Path | Status | Notes |
 |---|---|---|
-| [`docs/plans/2026-04-05-phase4-realtime-performance.md`](plans/2026-04-05-phase4-realtime-performance.md) | unknown | No authored Status marker. Never became an SDLC epic. |
-| [`docs/plans/2026-04-05-phase5-analytics-observability.md`](plans/2026-04-05-phase5-analytics-observability.md) | unknown | Same. |
+| [`docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md`](superpowers/plans/2026-04-05-phase4-realtime-performance.md) | unknown | Drained from `docs/plans/`. Never implemented as an SDLC epic. |
+| [`docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md`](superpowers/plans/2026-04-05-phase5-analytics-observability.md) | unknown | Same. |
 
-Both are candidates for the step-4 "drain docs/plans/" pass.
+Both remain in the normalization backlog below but are flagged as historical.
 
 The `docs/superpowers/*` trees are planning/design surfaces per policy — not authoritative execution truth by themselves. Status for every entry under `docs/superpowers/plans|specs|handoffs|reviews` is either inherited from a linked epic or remains `unknown`. See **Normalization backlog** below.
 
@@ -108,77 +121,55 @@ The `docs/superpowers/*` trees are planning/design surfaces per policy — not a
 
 ## 6. Unknown-status epics
 
-One SDLC epic has an authoritative `state.md` but no authored Status value the scanner recognizes:
+**None.** Step 4 closed the sole remaining SDLC unknown (`dedup-consolidation-20260404`), whose state.md previously declared `**Status:** Execute` (a phase name, not a policy-vocabulary status). The Status field was rewritten to `completed` with a `Closed: 2026-04-11 via cf0dbf3` reference to the authored closure commit.
 
-| Epic | Status source | Disposition |
-|---|---|---|
-| [`docs/sdlc/closed/dedup-consolidation-20260404/`](sdlc/closed/dedup-consolidation-20260404/) | `state-md-status` (field present but value unrecognized by scanner) | Classify needed. The state.md carries `**Status:** Execute`, which is a phase name rather than a policy-vocabulary status, so the scanner returns unknown. Per commit `cf0dbf3` this epic was closed alongside `multi-provider-runtime`, so the authored status is likely `completed`, but until a human confirms and rewrites the state.md Status field into the policy vocabulary the row stays unknown. |
+All 19 SDLC epic state.md rows now resolve to a policy-vocabulary status via `state-md-status` or `phase-log`.
 
 ---
 
-## 7. Normalization backlog — 27 unknown rows for step 4
+## 7. Normalization backlog — 12 unknown rows for future triage
 
-These rows are classified `unknown` by the scanner. Per the policy they stay unknown until explicitly normalized. Listed here as the clean input to step 4 (the "drain / author / triage" pass).
+Step 4 reduced the backlog from 27 to 12. The remaining entries have no authored status AND no clear parent-epic evidence. Per policy they stay unknown until explicit markers are authored. All are in `docs/superpowers/` — the legacy `docs/plans/` bucket was drained.
 
-### docs/plans — 2 rows (drain target)
+### docs/superpowers/plans — 7 rows
 
-- `docs/plans/2026-04-05-phase4-realtime-performance.md`
-- `docs/plans/2026-04-05-phase5-analytics-observability.md`
+**Inherited legacy (drained):**
+- `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` — authored `unknown` with stalled-at-draft note
+- `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` — same
 
-### docs/sdlc — 2 rows
-
-- `docs/sdlc/closed/dedup-consolidation-20260404/state.md` — epic-level; see §6
-- `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md` — bead absent from parent's Bead Manifest; policy §orphan-bead rule says resolve via body-marker then directory then unknown, currently unknown
-
-### docs/superpowers/plans — 11 rows
-
+**No authored status yet:**
 - `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md`
 - `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md`
-- `docs/superpowers/plans/2026-04-05-sp1-media-access.md`
-- `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md`
-- `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md`
-- `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md`
 - `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md`
 - `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md`
-- `docs/superpowers/plans/2026-04-07-fleet-charts.md`
 - `docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md`
-- `docs/superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md`
 
-### docs/superpowers/specs — 7 rows
+### docs/superpowers/specs — 4 rows
 
 - `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md`
-- `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md`
-- `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md`
 - `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md`
 - `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md`
 - `docs/superpowers/specs/2026-04-07-provider-attribution.md`
-- `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md`
-
-### docs/superpowers/handoffs — 4 rows
-
-- `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md`
-- `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md`
-- `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md`
-- `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md`
 
 ### docs/superpowers/reviews — 1 row
 
 - `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md`
 
-### Triage heuristics for step 4 (non-prescriptive)
+### Triage heuristics for the next pass (non-prescriptive)
 
-- **docs/plans** entries: check whether their content was superseded by a subsequent SDLC epic or superpowers plan. If yes, mark superseded; if not, normalize to unknown with an explicit Status marker or remove.
-- **docs/superpowers/plans**: each should either point at its implementing SDLC epic (in which case inherit status) or declare its own lifecycle marker.
-- **docs/superpowers/specs**: same. Specs tied to a completed epic can be marked completed; specs never implemented should be marked deferred or superseded.
-- **fleet-charts handoffs** (4 of the 11 handoffs/plans): all tied to the deferred `fleet-charts-20260407` epic. Cluster decision is whether to inherit the epic's `deferred` status or mark these as historical references.
+- **phase4-realtime-performance / phase5-analytics-observability** (drained legacy plans): review whether any portion of this work became part of a later SDLC epic. If yes, mark superseded-by that epic. If not, leave as explicit `unknown`.
+- **colony-orchestration plan + spec**: cluster decision — was this implemented or abandoned? No matching SDLC epic exists.
+- **phase4-m2-websocket-console**: predates fleet-charts; likely superseded by later console work. Needs an author to confirm.
+- **mw-bot-group-protection** (dated 2026-04-22): recent; check whether it became an SDLC epic or remains in flight.
+- **scheduled-groups-tabs** (plan + spec): cluster decision — was this implemented? If yes, which epic?
 - **anti-echo-session-controls** (plan + spec in the cross-tree cluster; plus a separate review-handoff row): was this implemented? If yes, which epic? The review-handoff row, though not in the cluster, belongs to the same topic and should be triaged together.
-- **scheduled-groups-tabs** (plan + spec): same cluster question.
+- **provider-attribution spec**: single spec, no plan, no cluster. Needs author confirmation of implementation or abandonment.
 
 ---
 
 ## Generation metadata
 
-- Derived from `docs/work-index.json` (`schema_version: 5`, `git_head` matches current HEAD at generation time)
-- No scanner changes, no path moves, no status rewrites performed to produce this document
+- Derived from `docs/work-index.json` (`schema_version: 5`, `git_head` = current HEAD at regen time; see the `git_head_note` field for timing caveats)
+- No scanner changes were made to produce this refresh (the underlying index content comes from the post-step-4 regen)
 - All counts in this doc are mechanical reads of the index
 - Where the index lacks data (supersession, runtime relevance), this doc says `unknown`
