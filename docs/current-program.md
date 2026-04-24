@@ -115,7 +115,27 @@ Step 4 drained the `docs/plans/` legacy bucket: the two entries moved to `docs/s
 
 Both remain in the normalization backlog below but are flagged as historical.
 
-The `docs/superpowers/*` trees are planning/design surfaces per policy — not authoritative execution truth by themselves. Status for every entry under `docs/superpowers/plans|specs|handoffs|reviews` is either inherited from a linked epic or remains `unknown`. See **Normalization backlog** below.
+The `docs/superpowers/*` trees are planning/design surfaces per policy — not authoritative execution truth by themselves. Status for each entry resolves one of three ways: authored `body-marker`, inherited from a linked epic, or `unknown`. Step 4 added authored `body-marker` status to 13 files across this tree; the distribution among `docs/superpowers/*` is now:
+
+- **7 completed** via `body-marker` (SP1–SP4 plans and history-sync plan in `superpowers/plans/`; mcp-feature-gaps and phase2-mcp-features in `superpowers/specs/`) — enumerated in the Completed-plans-and-specs subsection below
+- **6 deferred** via `body-marker` (fleet-charts plan + spec + 4 handoffs) — already enumerated in §2
+- **12 unknown** — see **Normalization backlog** below
+
+### Completed plans and specs in docs/superpowers/*
+
+Seven non-SDLC artifacts now carry an authored `**Status:** completed` pointer to their implementing epic:
+
+| Path | Implementing epic |
+|---|---|
+| [`docs/superpowers/plans/2026-04-05-sp1-media-access.md`](superpowers/plans/2026-04-05-sp1-media-access.md) | `whatsapp-mcp-features` Phase 1 (SP1 bead, merged 2026-04-05) |
+| [`docs/superpowers/plans/2026-04-05-sp2-content-completeness.md`](superpowers/plans/2026-04-05-sp2-content-completeness.md) | `whatsapp-mcp-features` Phase 1 (SP2 bead) |
+| [`docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md`](superpowers/plans/2026-04-05-sp3-search-enhancement.md) | `whatsapp-mcp-features` Phase 1 (SP3 bead) |
+| [`docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md`](superpowers/plans/2026-04-05-sp4-two-way-voice.md) | `whatsapp-mcp-features` Phase 1 (SP4 bead) |
+| [`docs/superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md`](superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md) | PR #11 (f6a25d8) — history-sync refactor |
+| [`docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md`](superpowers/specs/2026-04-04-mcp-feature-gaps-design.md) | `whatsapp-mcp-features` Phase 1 (full phase) |
+| [`docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md`](superpowers/specs/2026-04-05-phase2-mcp-features-design.md) | `whatsapp-mcp-features` Phase 2 (full phase) |
+
+These 7 rows account for part of the 113 completed total. The remainder is 106 rows under SDLC epics: 17 epic state.md rows + 76 beads + 12 supporting docs + 1 handoff, all resolved via `bead-manifest`, `body-marker`, or inherited `state-md-status`.
 
 ---
 
@@ -123,7 +143,7 @@ The `docs/superpowers/*` trees are planning/design surfaces per policy — not a
 
 **None.** Step 4 closed the sole remaining SDLC unknown (`dedup-consolidation-20260404`), whose state.md previously declared `**Status:** Execute` (a phase name, not a policy-vocabulary status). The Status field was rewritten to `completed` with a `Closed: 2026-04-11 via cf0dbf3` reference to the authored closure commit.
 
-All 19 SDLC epic state.md rows now resolve to a policy-vocabulary status via `state-md-status` or `phase-log`.
+All 19 SDLC epic state.md rows now classify to a policy-vocabulary status. Resolution sources: `state-md-status` (16), `phase-log` (2), and `directory` (1 — `docs/sdlc/completed/p0-production-blockers-20260330/state.md` has no explicit Status field and inherits its `completed` classification from the `sdlc/completed/` bucket per policy fallback). No epic resolves to `unknown`.
 
 ---
 
