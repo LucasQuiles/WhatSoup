@@ -81,6 +81,14 @@ function stringifyWaMsg(waMsg: unknown, log?: Logger, msgId?: string): string {
   }
 }
 
+/**
+ * Sentinel value for the `content_type` column when a message is known to exist
+ * (message_id delivered) but its body has not yet been decrypted and parsed.
+ * Placeholders are replaced in place by the first body that arrives for them.
+ * Single source of truth — do not inline this literal in SQL or comparisons.
+ */
+const PLACEHOLDER_CONTENT_TYPE = 'history';
+
 interface Statements {
   check: ReturnType<Database['raw']['prepare']>;
   upsertBody: ReturnType<Database['raw']['prepare']>;
@@ -113,14 +121,14 @@ const UPSERT_BODY_SQL = `
     raw_message = excluded.raw_message,
     quoted_message_id = excluded.quoted_message_id,
     timestamp = excluded.timestamp
-  WHERE messages.content_type = 'history'
+  WHERE messages.content_type = '${PLACEHOLDER_CONTENT_TYPE}'
 `;
 
 const INSERT_PLACEHOLDER_SQL = `
   INSERT OR IGNORE INTO messages
     (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
   VALUES
-    (?, ?, ?, ?, 'history', ?, ?)
+    (?, ?, ?, ?, '${PLACEHOLDER_CONTENT_TYPE}', ?, ?)
 `;
 
 const CHECK_SQL = 'SELECT content_type FROM messages WHERE message_id = ?';
@@ -158,6 +166,11 @@ function processHistoryMessage(
   const hasBody = !!waMsg.message;
 
   if (hasBody) {
+    // HistoryInput is a structural subset of Baileys' WAMessage — this module
+    // deliberately does not import WAMessage to keep core/ decoupled from the
+    // transport layer. The cast is safe because parseIncomingMessage's only
+    // preconditions (`msg.message` and `msg.key?.remoteJid`) are already
+    // guaranteed by the hasBody / chatJid guards above.
     const parsedMsg = parseIncomingMessage(waMsg as any);
     if (!parsedMsg) {
       log?.debug({ msgId }, 'historyMessages: parseIncomingMessage returned null for message with body');
@@ -183,8 +196,8 @@ function processHistoryMessage(
     if (!before) return 'inserted';
     // A row existed. If it was a placeholder the WHERE clause just upgraded it.
     // If it was a live-path row the WHERE clause suppressed the update.
-    if (before.content_type === 'history' && result.changes > 0) return 'upgraded';
-    if (before.content_type === 'history' && result.changes === 0) {
+    if (before.content_type === PLACEHOLDER_CONTENT_TYPE && result.changes > 0) return 'upgraded';
+    if (before.content_type === PLACEHOLDER_CONTENT_TYPE && result.changes === 0) {
       // Defensive: placeholder row existed but UPSERT did not fire. Should not
       // be reachable under normal operation (WHERE clause matches 'history').
       // If we see this, parseIncomingMessage may have normalized messageId in

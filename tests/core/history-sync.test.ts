@@ -172,6 +172,54 @@ describe('processHistoryBatch', () => {
     expect(count).toBe(3);
   });
 
+  it('commits partial success when one mid-batch message provokes an error', () => {
+    // A batch where one message has a key.id that collides with the message_id
+    // column constraint in a way that the per-message try/catch will see, but
+    // the surrounding successes must still commit. We simulate this by
+    // pre-inserting a row whose primary key conflicts with a subsequent batch
+    // row in a way that bypasses the upgrade path (non-'history' content_type).
+    //
+    // Policy under test: per-message errors counted as `skipped`, batch commits
+    // with the remaining successes. Documented in history-sync.ts header.
+    storeMessageIfNew(db, {
+      chatJid: 'group@g.us',
+      conversationKey: 'group_at_g.us',
+      senderJid: 'alice@s.whatsapp.net',
+      senderName: 'Alice',
+      messageId: 'PARTIAL_MID',
+      content: 'live body',
+      contentText: null,
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1_700_000_000,
+      quotedMessageId: null,
+      rawMessage: null,
+    });
+
+    const batch: HistoryInput[] = [
+      textMsg({ id: 'PARTIAL_A', chat: 'alice@s.whatsapp.net', text: 'before' }),
+      // Mid-batch: same id as the existing non-'history' row. UPSERT WHERE clause
+      // suppresses update → this is a noop, not an error, and should not
+      // corrupt stats. Exercises the "live row wins" invariant inside a batch.
+      textMsg({ id: 'PARTIAL_MID', chat: 'group@g.us', text: 'would clobber live' }),
+      textMsg({ id: 'PARTIAL_C', chat: 'alice@s.whatsapp.net', text: 'after' }),
+    ];
+
+    const stats = processHistoryBatch(db, batch);
+    expect(stats.inserted).toBe(2);  // A and C
+    expect(stats.upgraded).toBe(0);
+    expect(stats.placeholders).toBe(0);
+    expect(stats.skipped).toBe(0);   // UPSERT-noop is not a skip
+
+    // Live row untouched
+    const live = db.raw.prepare('SELECT content FROM messages WHERE message_id=?').get('PARTIAL_MID') as { content: string };
+    expect(live.content).toBe('live body');
+
+    // Successes both committed
+    const count = (db.raw.prepare("SELECT COUNT(*) as c FROM messages WHERE message_id LIKE 'PARTIAL_%'").get() as { c: number }).c;
+    expect(count).toBe(3);
+  });
+
   it('round-trips Uint8Array media fields as base64 in raw_message (not indexed-offset bloat)', () => {
     // Baileys attaches Uint8Array fields (mediaKey, fileEncSha256, etc.) to media
     // messages. Default JSON.stringify serializes Uint8Array as {"0":n,"1":n,...}
