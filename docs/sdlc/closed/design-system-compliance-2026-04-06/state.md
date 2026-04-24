@@ -2,6 +2,7 @@
 
 - **ID**: design-system-compliance-2026-04-06
 - **Created**: 2026-04-06
+- **Status:** completed
 - **Phase**: Execute
 - **Plan**: _2026-04-06 design-system-compliance plan (source doc not committed; task content below is authoritative)_
 - **Complexity**: Complex (34 findings across 6 dimensions, 87 source files, CSS architecture changes)

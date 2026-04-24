@@ -46,16 +46,8 @@
 - When a state.md references external documents (specs, handoffs, audits) that were never committed to the repo, document them in italic prose rather than with a backticked path. Backticks signal a concrete file reference; prose preserves the semantic reference without faking disk presence.
 - When relocating an epic between `active/` → `closed/` or `closed/` → `completed/`, grep the state.md for self-references to the old directory prefix and update them in the same commit.
 
-These rules, together with the status-precedence order below, form the seed of `docs/canonical-status-policy.md` (next step in the program).
-
----
-
-## Canonical status precedence (to be formalized next)
-
-1. Epic's `state.md` `**Status:**` field
-2. Epic's `state.md` Phase Log table
-3. Epic's `state.md` Bead Manifest entry (for bead rows)
-4. In-body `**Status:**` marker in the file itself
-5. Directory placement (fallback)
-
-Directory placement is history, not truth. When it disagrees with state.md, state.md wins — fix the state.md to match reality, don't move the directory.
+These rules are now formalized in [`docs/canonical-status-policy.md`](canonical-status-policy.md).
+That policy is the authoritative source for status precedence (epic vs. child-artifact),
+authoring conventions, vocabulary, and scanner rules. An earlier draft of this matrix
+embedded an informal precedence list here; it was removed to avoid drifting from the
+canonical policy doc.

@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-04-24T02:33:51Z",
+  "generated_at": "2026-04-24T02:48:59Z",
   "repo": "/Users/q/LAB/WhatSoup",
-  "git_head": "6ffad917593adf6e3ef831692f5870feeb5f7bb5",
+  "git_head": "53504783ee9b9ec74914c76c07627a372eeb1e3a",
   "git_head_note": "Captured at scan time. If this index is committed via squash-merge, the landed commit SHA will differ from this value \u2014 the row data remains accurate.",
   "total": 171,
   "schema_version": 5,
@@ -155,12 +155,12 @@
       "kind": "state",
       "topic_raw": "design-system-compliance-2026-04-06",
       "topic": "design-system-compliance",
-      "status": "closed",
-      "status_source": "directory",
+      "status": "completed",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/design-system-compliance-2026-04-06",
       "supersedes_hint": null,
       "last_modified": "2026-04-23",
-      "size_bytes": 3211
+      "size_bytes": 3235
     },
     {
       "path": "docs/sdlc/closed/fleet-charts-20260407/state.md",
@@ -2094,6 +2094,7 @@
     "docs/sdlc/closed/dedup-consolidation-20260404/": "unknown",
     "docs/sdlc/closed/session-leak-audit-20260406/": "completed",
     "docs/sdlc/closed/phase3-console-features-20260401/": "completed",
+    "docs/sdlc/closed/design-system-compliance-2026-04-06/": "completed",
     "docs/sdlc/active/agent-layer-hardening-20260405/": "active"
   },
   "state_overrides_source": {
@@ -2113,6 +2114,7 @@
     "docs/sdlc/closed/dedup-consolidation-20260404/": "state-md-status",
     "docs/sdlc/closed/session-leak-audit-20260406/": "state-md-status",
     "docs/sdlc/closed/phase3-console-features-20260401/": "state-md-status",
+    "docs/sdlc/closed/design-system-compliance-2026-04-06/": "state-md-status",
     "docs/sdlc/active/agent-layer-hardening-20260405/": "state-md-status"
   },
   "bead_overrides": {
