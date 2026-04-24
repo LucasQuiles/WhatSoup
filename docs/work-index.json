@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-04-24T02:15:15Z",
+  "generated_at": "2026-04-24T02:19:00Z",
   "repo": "/Users/q/LAB/WhatSoup",
-  "git_head": "3c34d76ccc09ce4747548fac3f4e21ddeda6d7b9",
+  "git_head": "3da18d08c3babfeb4ee1d78c3827e9af893df9f8",
   "git_head_note": "Captured at scan time. If this index is committed via squash-merge, the landed commit SHA will differ from this value \u2014 the row data remains accurate.",
   "total": 171,
   "schema_version": 5,
@@ -95,8 +95,8 @@
       "kind": "doc",
       "topic_raw": "add-line-wizard-20260401",
       "topic": "add-line-wizard",
-      "status": "closed",
-      "status_source": "directory",
+      "status": "completed",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/add-line-wizard-20260401",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
@@ -107,8 +107,8 @@
       "kind": "state",
       "topic_raw": "add-line-wizard-20260401",
       "topic": "add-line-wizard",
-      "status": "closed",
-      "status_source": "directory",
+      "status": "completed",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/add-line-wizard-20260401",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
@@ -479,8 +479,8 @@
       "kind": "doc",
       "topic_raw": "phase3-console-features-20260401",
       "topic": "phase3-console-features",
-      "status": "closed",
-      "status_source": "directory",
+      "status": "completed",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/phase3-console-features-20260401",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
@@ -491,8 +491,8 @@
       "kind": "doc",
       "topic_raw": "phase3-console-features-20260401",
       "topic": "phase3-console-features",
-      "status": "closed",
-      "status_source": "directory",
+      "status": "completed",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/phase3-console-features-20260401",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
@@ -503,8 +503,8 @@
       "kind": "state",
       "topic_raw": "phase3-console-features-20260401",
       "topic": "phase3-console-features",
-      "status": "closed",
-      "status_source": "directory",
+      "status": "completed",
+      "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/phase3-console-features-20260401",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
@@ -2085,6 +2085,7 @@
     "docs/sdlc/completed/heal-reliability-fixes-20260401/": "completed",
     "docs/sdlc/completed/transport-hardening-20260404/": "completed",
     "docs/sdlc/closed/control-plane-20260401/": "completed",
+    "docs/sdlc/closed/add-line-wizard-20260401/": "completed",
     "docs/sdlc/closed/design-fidelity-fixes-20260401/": "completed",
     "docs/sdlc/closed/mark-read-api-20260408/": "completed",
     "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "active",
@@ -2092,6 +2093,7 @@
     "docs/sdlc/closed/whatsapp-mcp-features/": "active",
     "docs/sdlc/closed/dedup-consolidation-20260404/": "unknown",
     "docs/sdlc/closed/session-leak-audit-20260406/": "completed",
+    "docs/sdlc/closed/phase3-console-features-20260401/": "completed",
     "docs/sdlc/active/agent-layer-hardening-20260405/": "active"
   },
   "state_overrides_source": {
@@ -2102,6 +2104,7 @@
     "docs/sdlc/completed/heal-reliability-fixes-20260401/": "phase-log",
     "docs/sdlc/completed/transport-hardening-20260404/": "state-md-status",
     "docs/sdlc/closed/control-plane-20260401/": "state-md-status",
+    "docs/sdlc/closed/add-line-wizard-20260401/": "state-md-status",
     "docs/sdlc/closed/design-fidelity-fixes-20260401/": "state-md-status",
     "docs/sdlc/closed/mark-read-api-20260408/": "state-md-status",
     "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "state-md-status",
@@ -2109,6 +2112,7 @@
     "docs/sdlc/closed/whatsapp-mcp-features/": "phase-log",
     "docs/sdlc/closed/dedup-consolidation-20260404/": "state-md-status",
     "docs/sdlc/closed/session-leak-audit-20260406/": "state-md-status",
+    "docs/sdlc/closed/phase3-console-features-20260401/": "state-md-status",
     "docs/sdlc/active/agent-layer-hardening-20260405/": "state-md-status"
   },
   "bead_overrides": {
@@ -2149,12 +2153,12 @@
     {
       "kind": "dangling-source-ref",
       "from": "docs/sdlc/completed/remaining-hardening-20260330/state.md",
-      "references_missing": "docs/audit-2026-03-30.md"
+      "references_missing": "docs/handoff-2026-03-30-production-hardening.md"
     },
     {
       "kind": "dangling-source-ref",
       "from": "docs/sdlc/completed/remaining-hardening-20260330/state.md",
-      "references_missing": "docs/handoff-2026-03-30-production-hardening.md"
+      "references_missing": "docs/audit-2026-03-30.md"
     },
     {
       "kind": "dangling-source-ref",

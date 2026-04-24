@@ -22,8 +22,8 @@ between `state.md` source-document references and on-disk reality.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, state=19, plan=13, doc=13, spec=7, handoff=5, review=1 |
-| Status | completed=79, pending=37, unknown=29, active=20, closed=6 |
-| Status source | body-marker=72, state-md-status=55, fallback=25, phase-log=9, directory=7, bead-manifest=3 |
+| Status | completed=84, pending=37, unknown=29, active=20, closed=1 |
+| Status source | body-marker=72, state-md-status=60, fallback=25, phase-log=9, bead-manifest=3, directory=2 |
 
 ## Inconsistencies
 
@@ -43,8 +43,8 @@ between `state.md` source-document references and on-disk reality.
 |----------|-------------------------------|
 | `docs/sdlc/completed/audit-remediation-20260330/state.md` | `docs/audit-2026-03-30.md` |
 | `docs/sdlc/completed/p0-production-blockers-20260330/state.md` | `docs/handoff-2026-03-30-baileys-parity.md` |
-| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | `docs/audit-2026-03-30.md` |
 | `docs/sdlc/completed/remaining-hardening-20260330/state.md` | `docs/handoff-2026-03-30-production-hardening.md` |
+| `docs/sdlc/completed/remaining-hardening-20260330/state.md` | `docs/audit-2026-03-30.md` |
 | `docs/sdlc/closed/add-line-wizard-20260401/state.md` | `docs/superpowers/specs/2026-04-01-add-line-wizard-design.md` |
 | `docs/sdlc/closed/whatsapp-mcp-features/state.md` | `docs/sdlc/active/whatsapp-mcp-features/sp9-broadcast-proof.md` |
 | `docs/sdlc/closed/phase3-console-features-20260401/state.md` | `docs/plans/2026-04-01-phase3-roadmap.md` |
@@ -165,8 +165,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/add-line-wizard-20260401/implementation-plan.md` | doc | closed | directory | add-line-wizard | 2026-04-05 |  |
-| `docs/sdlc/closed/add-line-wizard-20260401/state.md` | state | closed | directory | add-line-wizard | 2026-04-05 |  |
+| `docs/sdlc/closed/add-line-wizard-20260401/implementation-plan.md` | doc | completed | state-md-status | add-line-wizard | 2026-04-05 |  |
+| `docs/sdlc/closed/add-line-wizard-20260401/state.md` | state | completed | state-md-status | add-line-wizard | 2026-04-05 |  |
 
 ### docs/sdlc/closed/control-plane-20260401  _(1 entries)_
 
@@ -237,9 +237,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/phase3-console-features-20260401/backlog-scan-20260405-agent-020.md` | doc | closed | directory | phase3-console-features | 2026-04-05 |  |
-| `docs/sdlc/closed/phase3-console-features-20260401/implementation-plan.md` | doc | closed | directory | phase3-console-features | 2026-04-05 |  |
-| `docs/sdlc/closed/phase3-console-features-20260401/state.md` | state | closed | directory | phase3-console-features | 2026-04-05 |  |
+| `docs/sdlc/closed/phase3-console-features-20260401/backlog-scan-20260405-agent-020.md` | doc | completed | state-md-status | phase3-console-features | 2026-04-05 |  |
+| `docs/sdlc/closed/phase3-console-features-20260401/implementation-plan.md` | doc | completed | state-md-status | phase3-console-features | 2026-04-05 |  |
+| `docs/sdlc/closed/phase3-console-features-20260401/state.md` | state | completed | state-md-status | phase3-console-features | 2026-04-05 |  |
 
 ### docs/sdlc/closed/session-leak-audit-20260406  _(33 entries)_
 
@@ -437,6 +437,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 ---
 
-_Scan HEAD: `3c34d76ccc09ce4747548fac3f4e21ddeda6d7b9` at 2026-04-24T02:15:15Z. Post-squash-merge, the landed commit SHA will 
+_Scan HEAD: `3da18d08c3babfeb4ee1d78c3827e9af893df9f8` at 2026-04-24T02:19:00Z. Post-squash-merge, the landed commit SHA will 
 differ from this value — the row data and inconsistencies remain accurate._
 
