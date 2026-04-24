@@ -1,5 +1,7 @@
 # SP2: Content Completeness Implementation Plan
 
+**Status:** completed — shipped as SP2 bead in the `whatsapp-mcp-features` epic (Phase 1, merged 2026-04-05).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix `parseIncomingMessage()` to capture structured data for all 10+ content types, persist audio transcriptions to the database, and add a `transcribe_audio` MCP tool — so agents work with complete message metadata instead of null/partial content.

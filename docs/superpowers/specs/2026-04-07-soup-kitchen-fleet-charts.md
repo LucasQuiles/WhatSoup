@@ -1,7 +1,8 @@
 # Soup Kitchen Fleet Charts Expansion
 
+**Status:** deferred — inherits from parent epic `docs/sdlc/closed/fleet-charts-20260407/` (Phase 4-Execute incomplete, 11 beads unimplemented). _Originally marked "Draft"._
+
 > **Date:** 2026-04-07
-> **Status:** Draft
 > **Scope:** Backend metric collection + frontend chart panels for Soup Kitchen page
 
 ---

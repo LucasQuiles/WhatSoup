@@ -1,35 +1,11 @@
 {
-  "generated_at": "2026-04-24T02:48:59Z",
+  "generated_at": "2026-04-24T04:38:24Z",
   "repo": "/Users/q/LAB/WhatSoup",
-  "git_head": "53504783ee9b9ec74914c76c07627a372eeb1e3a",
+  "git_head": "7612a48592e26d5b3d99cd5957c10363ac2eac52",
   "git_head_note": "Captured at scan time. If this index is committed via squash-merge, the landed commit SHA will differ from this value \u2014 the row data remains accurate.",
   "total": 171,
   "schema_version": 5,
   "rows": [
-    {
-      "path": "docs/plans/2026-04-05-phase4-realtime-performance.md",
-      "kind": "plan",
-      "topic_raw": "2026-04-05-phase4-realtime-performance",
-      "topic": "phase4-realtime-performance",
-      "status": "unknown",
-      "status_source": "fallback",
-      "canonical_parent": "docs/plans",
-      "supersedes_hint": null,
-      "last_modified": "2026-04-05",
-      "size_bytes": 8948
-    },
-    {
-      "path": "docs/plans/2026-04-05-phase5-analytics-observability.md",
-      "kind": "plan",
-      "topic_raw": "2026-04-05-phase5-analytics-observability",
-      "topic": "phase5-analytics-observability",
-      "status": "unknown",
-      "status_source": "fallback",
-      "canonical_parent": "docs/plans",
-      "supersedes_hint": null,
-      "last_modified": "2026-04-05",
-      "size_bytes": 4334
-    },
     {
       "path": "docs/sdlc/active/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md",
       "kind": "bead",
@@ -131,12 +107,12 @@
       "kind": "state",
       "topic_raw": "dedup-consolidation-20260404",
       "topic": "dedup-consolidation",
-      "status": "unknown",
+      "status": "completed",
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/dedup-consolidation-20260404",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 1150
+      "size_bytes": 1265
     },
     {
       "path": "docs/sdlc/closed/design-fidelity-fixes-20260401/state.md",
@@ -959,12 +935,12 @@
       "kind": "bead",
       "topic_raw": "codex-transport-gaps-20260404",
       "topic": "codex-transport-gaps",
-      "status": "unknown",
+      "status": "completed",
       "status_source": "body-marker",
       "canonical_parent": "docs/sdlc/completed/codex-transport-gaps-20260404",
       "supersedes_hint": null,
       "last_modified": "2026-04-04",
-      "size_bytes": 1364
+      "size_bytes": 1365
     },
     {
       "path": "docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-decision-trace.md",
@@ -1787,48 +1763,48 @@
       "kind": "handoff",
       "topic_raw": "2026-04-07-fleet-charts-guidelines",
       "topic": "fleet-charts",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "deferred",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
-      "size_bytes": 11867
+      "size_bytes": 12015
     },
     {
       "path": "docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md",
       "kind": "handoff",
       "topic_raw": "2026-04-07-fleet-charts-kickoff",
       "topic": "fleet-charts",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "deferred",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
-      "size_bytes": 13749
+      "size_bytes": 13897
     },
     {
       "path": "docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md",
       "kind": "handoff",
       "topic_raw": "2026-04-07-fleet-charts-project-statement",
       "topic": "fleet-charts",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "deferred",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
-      "size_bytes": 7988
+      "size_bytes": 8136
     },
     {
       "path": "docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md",
       "kind": "handoff",
       "topic_raw": "2026-04-07-fleet-charts-sop",
       "topic": "fleet-charts",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "deferred",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
-      "size_bytes": 10368
+      "size_bytes": 10516
     },
     {
       "path": "docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md",
@@ -1859,24 +1835,24 @@
       "kind": "plan",
       "topic_raw": "2026-04-07-fleet-charts",
       "topic": "fleet-charts",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "deferred",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
-      "size_bytes": 97118
+      "size_bytes": 97266
     },
     {
       "path": "docs/superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md",
       "kind": "plan",
       "topic_raw": "2026-04-23-history-sync-fitness-cleanup",
       "topic": "history-sync-fitness-cleanup",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "",
-      "size_bytes": 35290
+      "size_bytes": 35424
     },
     {
       "path": "docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md",
@@ -1903,12 +1879,36 @@
       "size_bytes": 19635
     },
     {
+      "path": "docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md",
+      "kind": "plan",
+      "topic_raw": "2026-04-05-phase4-realtime-performance",
+      "topic": "phase4-realtime-performance",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "",
+      "size_bytes": 9070
+    },
+    {
+      "path": "docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md",
+      "kind": "plan",
+      "topic_raw": "2026-04-05-phase5-analytics-observability",
+      "topic": "phase5-analytics-observability",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "",
+      "size_bytes": 4450
+    },
+    {
       "path": "docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md",
       "kind": "plan",
       "topic_raw": "2026-04-06-scheduled-groups-tabs",
       "topic": "scheduled-groups-tabs",
       "status": "unknown",
-      "status_source": "fallback",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-04-06",
@@ -1919,48 +1919,48 @@
       "kind": "plan",
       "topic_raw": "2026-04-05-sp1-media-access",
       "topic": "sp1-media-access",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 36285
+      "size_bytes": 36398
     },
     {
       "path": "docs/superpowers/plans/2026-04-05-sp2-content-completeness.md",
       "kind": "plan",
       "topic_raw": "2026-04-05-sp2-content-completeness",
       "topic": "sp2-content-completeness",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 55059
+      "size_bytes": 55172
     },
     {
       "path": "docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md",
       "kind": "plan",
       "topic_raw": "2026-04-05-sp3-search-enhancement",
       "topic": "sp3-search-enhancement",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 22244
+      "size_bytes": 22357
     },
     {
       "path": "docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md",
       "kind": "plan",
       "topic_raw": "2026-04-05-sp4-two-way-voice",
       "topic": "sp4-two-way-voice",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 30650
+      "size_bytes": 30763
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",
@@ -1980,7 +1980,7 @@
       "topic_raw": "2026-04-07-anti-echo-session-controls-design",
       "topic": "anti-echo-session-controls",
       "status": "unknown",
-      "status_source": "fallback",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
@@ -1992,7 +1992,7 @@
       "topic_raw": "2026-04-04-colony-orchestration-design",
       "topic": "colony-orchestration",
       "status": "unknown",
-      "status_source": "fallback",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-04-04",
@@ -2003,24 +2003,24 @@
       "kind": "spec",
       "topic_raw": "2026-04-04-mcp-feature-gaps-design",
       "topic": "mcp-feature-gaps",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 26974
+      "size_bytes": 27060
     },
     {
       "path": "docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md",
       "kind": "spec",
       "topic_raw": "2026-04-05-phase2-mcp-features-design",
       "topic": "phase2-mcp-features",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "completed",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-04-05",
-      "size_bytes": 29540
+      "size_bytes": 29626
     },
     {
       "path": "docs/superpowers/specs/2026-04-07-provider-attribution.md",
@@ -2040,7 +2040,7 @@
       "topic_raw": "2026-04-06-scheduled-groups-tabs-design",
       "topic": "scheduled-groups-tabs",
       "status": "unknown",
-      "status_source": "fallback",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-04-06",
@@ -2051,12 +2051,12 @@
       "kind": "spec",
       "topic_raw": "2026-04-07-soup-kitchen-fleet-charts",
       "topic": "soup-kitchen-fleet-charts",
-      "status": "unknown",
-      "status_source": "fallback",
+      "status": "deferred",
+      "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-04-07",
-      "size_bytes": 23558
+      "size_bytes": 23715
     }
   ],
   "cross_tree_topics": {
@@ -2091,7 +2091,7 @@
     "docs/sdlc/closed/multi-provider-runtime-2026-0404/": "completed",
     "docs/sdlc/closed/fleet-charts-20260407/": "deferred",
     "docs/sdlc/closed/whatsapp-mcp-features/": "completed",
-    "docs/sdlc/closed/dedup-consolidation-20260404/": "unknown",
+    "docs/sdlc/closed/dedup-consolidation-20260404/": "completed",
     "docs/sdlc/closed/session-leak-audit-20260406/": "completed",
     "docs/sdlc/closed/phase3-console-features-20260401/": "completed",
     "docs/sdlc/closed/design-system-compliance-2026-04-06/": "completed",

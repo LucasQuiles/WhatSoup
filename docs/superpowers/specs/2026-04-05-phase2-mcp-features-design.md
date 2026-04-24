@@ -1,7 +1,7 @@
 # WhatSoup MCP Phase 2 Features — Design Specification
 
 **Date:** 2026-04-05
-**Status:** Approved (SP5-SP7 by Q, SP8-SP11 by BES Bot, merged by Q)
+**Status:** completed — shipped as Phase 2 of the `whatsapp-mcp-features` epic. _Originally "Approved (SP5-SP7 by Q, SP8-SP11 by BES Bot, merged by Q)."_
 **Author:** Lucas + Q (brainstorming session)
 **Depends on:** Phase 1 spec (2026-04-04-mcp-feature-gaps-design.md) — SP1-SP4 must be deployed first for migrations 12-13
 

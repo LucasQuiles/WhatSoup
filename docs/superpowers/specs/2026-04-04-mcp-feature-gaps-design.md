@@ -1,7 +1,7 @@
 # WhatSoup MCP Feature Gaps — Design Specification
 
 **Date:** 2026-04-04
-**Status:** Approved (revised per council review 2026-04-05)
+**Status:** completed — shipped as Phase 1 of the `whatsapp-mcp-features` epic. _Originally "Approved (revised per council review 2026-04-05)."_
 **Author:** Lucas + Q (brainstorming session)
 **Reviewed by:** Code reviewer council — 3 critical, 5 important, 3 architectural findings addressed
 

@@ -1,5 +1,7 @@
 # Fleet Charts — Project Statement
 
+**Status:** deferred — inherits from parent epic `docs/sdlc/closed/fleet-charts-20260407/` (Phase 4-Execute incomplete, 11 beads unimplemented).
+
 > **Project:** Soup Kitchen Fleet Charts Expansion
 > **Date:** 2026-04-07
 > **Owner:** Q
