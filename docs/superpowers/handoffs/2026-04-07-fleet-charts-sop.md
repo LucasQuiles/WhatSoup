@@ -1,5 +1,7 @@
 # Fleet Charts — Standard Operating Protocol
 
+**Status:** deferred — inherits from parent epic `docs/sdlc/closed/fleet-charts-20260407/` (Phase 4-Execute incomplete, 11 beads unimplemented).
+
 > **Applies to:** All agents and contributors implementing the Fleet Charts Expansion
 > **Authority:** Design spec at `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md`
 

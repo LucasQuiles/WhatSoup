@@ -1,6 +1,6 @@
 # Phase 5: Analytics & Observability
 
-**Status:** SPEC — team consensus pending  
+**Status:** unknown — stalled at SPEC stage; never became an SDLC epic. Kept for historical reference. _Originally marked "SPEC — team consensus pending"._  
 **Date:** 2026-04-05  
 **Contributors:** Q (orchestrator), Shannon (data model analysis)
 

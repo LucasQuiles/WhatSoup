@@ -1,5 +1,7 @@
 # SP3: Search Enhancement Implementation Plan
 
+**Status:** completed — shipped as SP3 bead in the `whatsapp-mcp-features` epic (Phase 1, merged 2026-04-05).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a `search_messages_advanced` MCP tool with dual-path SQL (FTS-first when query is present, metadata-only when absent) supporting filters by sender, date range, content type, conversation, and media presence.

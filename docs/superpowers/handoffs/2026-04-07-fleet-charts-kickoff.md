@@ -1,5 +1,7 @@
 # Fleet Charts — Team Kickoff
 
+**Status:** deferred — inherits from parent epic `docs/sdlc/closed/fleet-charts-20260407/` (Phase 4-Execute incomplete, 11 beads unimplemented).
+
 > **Date:** 2026-04-07
 > **Handoff from:** Design system audit + fleet charts design session
 > **Status:** Spec locked, plan written, ready for implementation

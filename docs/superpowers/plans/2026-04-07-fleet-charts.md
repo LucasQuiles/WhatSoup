@@ -1,5 +1,7 @@
 # Fleet Charts Expansion Implementation Plan
 
+**Status:** deferred — inherits from parent epic `docs/sdlc/closed/fleet-charts-20260407/` (Phase 4-Execute incomplete, 11 beads unimplemented).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add token consumption and session activity charts to Soup Kitchen alongside existing message volume, surface media as a third series, and add a shared range picker with KPI-driven chart expansion.

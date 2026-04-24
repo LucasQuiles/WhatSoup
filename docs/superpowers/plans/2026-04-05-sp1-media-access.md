@@ -1,5 +1,7 @@
 # SP1: Media Access Implementation Plan
 
+**Status:** completed — shipped as SP1 bead in the `whatsapp-mcp-features` epic (Phase 1, merged 2026-04-05).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enable MCP clients to download and access received WhatsApp media (images, audio, video, documents, stickers) via a new `download_media` tool, with automatic persistence at ingest time.
