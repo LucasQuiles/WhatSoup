@@ -25,8 +25,8 @@ authored status, or between `state.md` source-document references and on-disk re
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, state=19, plan=13, doc=13, spec=7, handoff=5, review=1 |
-| Status | completed=103, pending=37, unknown=27, active=2, closed=1, deferred=1 |
-| Status source | body-marker=72, state-md-status=61, fallback=25, phase-log=8, bead-manifest=3, directory=2 |
+| Status | completed=104, pending=37, unknown=27, active=2, deferred=1 |
+| Status source | body-marker=72, state-md-status=62, fallback=25, phase-log=8, bead-manifest=3, directory=1 |
 
 ## Inconsistencies
 
@@ -151,7 +151,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/design-system-compliance-2026-04-06/state.md` | state | closed | directory | design-system-compliance | 2026-04-23 |  |
+| `docs/sdlc/closed/design-system-compliance-2026-04-06/state.md` | state | completed | state-md-status | design-system-compliance | 2026-04-23 |  |
 
 ### docs/sdlc/closed/fleet-charts-20260407  _(1 entries)_
 
@@ -398,6 +398,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 ---
 
-_Scan HEAD: `bfbbedb5ee7eb3f35209705815c807a2efcd7989` at 2026-04-24T02:44:53Z. Post-squash-merge, the landed commit SHA will 
+_Scan HEAD: `53504783ee9b9ec74914c76c07627a372eeb1e3a` at 2026-04-24T02:48:59Z. Post-squash-merge, the landed commit SHA will 
 differ from this value — the row data and inconsistencies remain accurate._
 

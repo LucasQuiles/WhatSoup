@@ -108,6 +108,7 @@ This is why `work-index` records row-level `status_source` values such as:
 - Child-local truth beats parent inheritance, except for explicit `Bead Manifest` rows, which are authoritative for the listed work unit.
 - Do not auto-promote a bead to `completed` just because its epic is complete.
 - Parent `active` should not spread blindly to sibling docs when those docs have their own explicit markers or are clearly historical evidence.
+- If a bead file exists but its parent epic has no `state.md` (or the bead ID is absent from the Bead Manifest), resolve via body-marker, then directory, then `unknown`. Do not invent a status.
 - If no trustworthy authored source exists, return `unknown`, not a guessed status.
 
 ## Authoring Rules
