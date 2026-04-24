@@ -48,7 +48,7 @@ authored status, or between `state.md` source-document references and on-disk re
 | `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | anti-echo-session-controls | 2026-04-07 |
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | colony-orchestration-phase1 | 2026-04-04 |
 | `docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md` | plan | mw-bot-group-protection |  |
-| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | phase4 | 2026-04-05 |
+| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | phase4-m2-websocket-console | 2026-04-05 |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
@@ -349,7 +349,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md` | plan | completed | body-marker | history-sync-fitness-cleanup |  |  |
 | `docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md` | plan | unknown | fallback | mw-bot-group-protection |  |  |
-| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | unknown | fallback | phase4 | 2026-04-05 |  |
+| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | unknown | fallback | phase4-m2-websocket-console | 2026-04-05 |  |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | unknown | body-marker | phase4-realtime-performance | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | unknown | body-marker | phase5-analytics-observability | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | unknown | body-marker | scheduled-groups-tabs | 2026-04-06 |  |
@@ -378,6 +378,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 ---
 
-_Scan HEAD: `173ee7309b646d9977fdbe22379bb71d45d13c6c` at 2026-04-24T04:44:52Z. Post-squash-merge, the landed commit SHA will 
+_Scan HEAD: `96e4703564f525c6431c9e6ec4d4c473014394c0` at 2026-04-24T07:31:08Z. Post-squash-merge, the landed commit SHA will 
 differ from this value — the row data and inconsistencies remain accurate._
 
