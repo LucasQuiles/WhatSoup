@@ -172,15 +172,16 @@ describe('processHistoryBatch', () => {
     expect(count).toBe(3);
   });
 
-  it('commits partial success when one mid-batch message provokes an error', () => {
-    // A batch where one message has a key.id that collides with the message_id
-    // column constraint in a way that the per-message try/catch will see, but
-    // the surrounding successes must still commit. We simulate this by
-    // pre-inserting a row whose primary key conflicts with a subsequent batch
-    // row in a way that bypasses the upgrade path (non-'history' content_type).
+  it('commits surrounding successes when one mid-batch message hits an UPSERT-noop (live row wins)', () => {
+    // Policy under test: the batch is one transaction, but a mid-batch UPSERT
+    // that the WHERE guard suppresses (live-path row, not 'history') does not
+    // abort the surrounding writes. This exercises the `noop` action inside a
+    // batch rather than the catch-branch error path.
     //
-    // Policy under test: per-message errors counted as `skipped`, batch commits
-    // with the remaining successes. Documented in history-sync.ts header.
+    // The error-catch branch (per-message exception → stats.skipped++) is not
+    // exercised here — it would require a truly failing per-message operation,
+    // which is hard to provoke in-transaction without corrupting the DB. The
+    // branch remains defensive-only code.
     storeMessageIfNew(db, {
       chatJid: 'group@g.us',
       conversationKey: 'group_at_g.us',
