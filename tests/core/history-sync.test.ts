@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
@@ -7,17 +7,19 @@ import { Database } from '../../src/core/database.ts';
 import { processHistoryBatch, type HistoryInput } from '../../src/core/history-sync.ts';
 import { storeMessageIfNew } from '../../src/core/messages.ts';
 
-const dbPath = join(tmpdir(), `whatsoup-history-sync-${randomBytes(4).toString('hex')}.db`);
-const db = new Database(dbPath);
-db.open();
+function makeDb(): { db: Database; path: string } {
+  const path = join(tmpdir(), `whatsoup-history-sync-${randomBytes(4).toString('hex')}.db`);
+  const db = new Database(path);
+  db.open();
+  return { db, path };
+}
 
-afterAll(() => {
-  db.close();
+function cleanup(path: string): void {
   for (const suffix of ['', '-wal', '-shm']) {
-    const fp = dbPath + suffix;
+    const fp = path + suffix;
     if (existsSync(fp)) unlinkSync(fp);
   }
-});
+}
 
 function textMsg(opts: { id: string; chat: string; from?: string; text: string; ts?: number; participant?: string; fromMe?: boolean }): HistoryInput {
   return {
@@ -38,8 +40,18 @@ function envelopeOnlyMsg(opts: { id: string; chat: string; participant?: string;
 }
 
 describe('processHistoryBatch', () => {
+  let db: Database;
+  let path: string;
+
   beforeEach(() => {
-    db.raw.prepare('DELETE FROM messages').run();
+    const made = makeDb();
+    db = made.db;
+    path = made.path;
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanup(path);
   });
 
   it('inserts a full-body row when no prior row exists', () => {
