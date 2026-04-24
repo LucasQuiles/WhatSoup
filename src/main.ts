@@ -352,6 +352,9 @@ connectionManager.on('historyMessages', (messages) => {
     return;
   }
   const stats = processHistoryBatch(db, messages as HistoryInput[], log);
+  // Deliberately silent for all-noop batches (row already existed at a real
+  // content_type): re-syncs on existing history would otherwise spam logs.
+  // If you need visibility into empty-batch cadence, move to log.debug.
   if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped) {
     log.info(stats, 'historyMessages: batch processed');
   }
