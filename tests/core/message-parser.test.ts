@@ -50,7 +50,7 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { parseIncomingMessage, unwrapMessage } from '../../src/transport/connection.ts';
+import { parseIncomingMessage, unwrapMessage } from '../../src/core/message-parser.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers

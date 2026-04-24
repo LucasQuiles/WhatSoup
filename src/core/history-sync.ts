@@ -24,7 +24,7 @@
  */
 import type { Logger } from 'pino';
 import type { Database } from './database.ts';
-import { parseIncomingMessage } from '../transport/connection.ts';
+import { parseIncomingMessage } from './message-parser.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
 
@@ -166,11 +166,12 @@ function processHistoryMessage(
   const hasBody = !!waMsg.message;
 
   if (hasBody) {
-    // HistoryInput is a structural subset of Baileys' WAMessage — this module
-    // deliberately does not import WAMessage to keep core/ decoupled from the
-    // transport layer. The cast is safe because parseIncomingMessage's only
-    // preconditions (`msg.message` and `msg.key?.remoteJid`) are already
-    // guaranteed by the hasBody / chatJid guards above.
+    // HistoryInput is a structural subset of Baileys' WAMessage. parseIncomingMessage
+    // (src/core/message-parser.ts) imports WAMessage directly; we keep HistoryInput
+    // narrow to avoid a cross-module type dependency from this module. The cast is
+    // safe because parseIncomingMessage's only preconditions (`msg.message` and
+    // `msg.key?.remoteJid`) are already guaranteed by the hasBody / chatJid guards
+    // above.
     const parsedMsg = parseIncomingMessage(waMsg as any);
     if (!parsedMsg) {
       log?.debug({ msgId }, 'historyMessages: parseIncomingMessage returned null for message with body');
