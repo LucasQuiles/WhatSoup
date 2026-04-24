@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-04-24T04:38:24Z",
+  "generated_at": "2026-04-24T04:44:52Z",
   "repo": "/Users/q/LAB/WhatSoup",
-  "git_head": "7612a48592e26d5b3d99cd5957c10363ac2eac52",
-  "git_head_note": "Captured at scan time. If this index is committed via squash-merge, the landed commit SHA will differ from this value \u2014 the row data remains accurate.",
+  "git_head": "173ee7309b646d9977fdbe22379bb71d45d13c6c",
+  "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran \u2014 NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 171,
   "schema_version": 5,
   "rows": [
@@ -111,7 +111,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/dedup-consolidation-20260404",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 1265
     },
     {
@@ -939,8 +939,8 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/sdlc/completed/codex-transport-gaps-20260404",
       "supersedes_hint": null,
-      "last_modified": "2026-04-04",
-      "size_bytes": 1365
+      "last_modified": "2026-04-24",
+      "size_bytes": 1362
     },
     {
       "path": "docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-decision-trace.md",
@@ -1767,7 +1767,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-24",
       "size_bytes": 12015
     },
     {
@@ -1779,7 +1779,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-24",
       "size_bytes": 13897
     },
     {
@@ -1791,7 +1791,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-24",
       "size_bytes": 8136
     },
     {
@@ -1803,7 +1803,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/handoffs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-24",
       "size_bytes": 10516
     },
     {
@@ -1839,7 +1839,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-24",
       "size_bytes": 97266
     },
     {
@@ -1887,7 +1887,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "",
+      "last_modified": "2026-04-24",
       "size_bytes": 9070
     },
     {
@@ -1899,7 +1899,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "",
+      "last_modified": "2026-04-24",
       "size_bytes": 4450
     },
     {
@@ -1923,7 +1923,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 36398
     },
     {
@@ -1935,7 +1935,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 55172
     },
     {
@@ -1947,7 +1947,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 22357
     },
     {
@@ -1959,7 +1959,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 30763
     },
     {
@@ -2007,7 +2007,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 27060
     },
     {
@@ -2019,7 +2019,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-05",
+      "last_modified": "2026-04-24",
       "size_bytes": 29626
     },
     {
@@ -2055,7 +2055,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-04-07",
+      "last_modified": "2026-04-24",
       "size_bytes": 23715
     }
   ],

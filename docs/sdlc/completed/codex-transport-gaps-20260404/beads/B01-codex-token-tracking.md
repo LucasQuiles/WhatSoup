@@ -1,5 +1,5 @@
 # Bead: B01
-**Status:** completed
+**Status:** merged
 **Type:** implement
 **Runner:** ac2ace977d2438ef1
 **Dependencies:** none

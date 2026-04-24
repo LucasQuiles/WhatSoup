@@ -49,8 +49,8 @@ authored status, or between `state.md` source-document references and on-disk re
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | colony-orchestration-phase1 | 2026-04-04 |
 | `docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md` | plan | mw-bot-group-protection |  |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | phase4 | 2026-04-05 |
-| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance |  |
-| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability |  |
+| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-04-24 |
+| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | anti-echo | 2026-04-07 |
 | `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | anti-echo-session-controls | 2026-04-07 |
@@ -117,7 +117,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/dedup-consolidation-20260404/state.md` | state | completed | state-md-status | dedup-consolidation | 2026-04-05 |  |
+| `docs/sdlc/closed/dedup-consolidation-20260404/state.md` | state | completed | state-md-status | dedup-consolidation | 2026-04-24 |  |
 
 ### docs/sdlc/closed/design-fidelity-fixes-20260401  _(1 entries)_
 
@@ -236,7 +236,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md` | bead | completed | body-marker | codex-transport-gaps | 2026-04-04 |  |
+| `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-codex-token-tracking.md` | bead | completed | body-marker | codex-transport-gaps | 2026-04-24 |  |
 | `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B01-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
 | `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B02-decision-trace.md` | bead | completed | state-md-status | codex-transport-gaps | 2026-04-04 |  |
 | `docs/sdlc/completed/codex-transport-gaps-20260404/beads/B02-system-prompt-identity.md` | bead | pending | body-marker | codex-transport-gaps | 2026-04-04 |  |
@@ -335,10 +335,10 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-07 |  |
-| `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-07 |  |
-| `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-07 |  |
-| `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-07 |  |
+| `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-24 |  |
+| `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-24 |  |
+| `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-24 |  |
+| `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts | 2026-04-24 |  |
 
 ### docs/superpowers/plans  _(13 entries)_
 
@@ -346,17 +346,17 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | unknown | fallback | anti-echo-session-controls | 2026-04-07 |  |
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | unknown | fallback | colony-orchestration-phase1 | 2026-04-04 |  |
-| `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-07 |  |
+| `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md` | plan | completed | body-marker | history-sync-fitness-cleanup |  |  |
 | `docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md` | plan | unknown | fallback | mw-bot-group-protection |  |  |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | unknown | fallback | phase4 | 2026-04-05 |  |
-| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | unknown | body-marker | phase4-realtime-performance |  |  |
-| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | unknown | body-marker | phase5-analytics-observability |  |  |
+| `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | unknown | body-marker | phase4-realtime-performance | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | unknown | body-marker | phase5-analytics-observability | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | unknown | body-marker | scheduled-groups-tabs | 2026-04-06 |  |
-| `docs/superpowers/plans/2026-04-05-sp1-media-access.md` | plan | completed | body-marker | sp1-media-access | 2026-04-05 |  |
-| `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md` | plan | completed | body-marker | sp2-content-completeness | 2026-04-05 |  |
-| `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-05 |  |
-| `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-04-05 |  |
+| `docs/superpowers/plans/2026-04-05-sp1-media-access.md` | plan | completed | body-marker | sp1-media-access | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md` | plan | completed | body-marker | sp2-content-completeness | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-04-24 |  |
 
 ### docs/superpowers/reviews  _(1 entries)_
 
@@ -370,14 +370,14 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | unknown | body-marker | anti-echo-session-controls | 2026-04-07 |  |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | unknown | body-marker | colony-orchestration | 2026-04-04 |  |
-| `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | spec | completed | body-marker | mcp-feature-gaps | 2026-04-05 |  |
-| `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | spec | completed | body-marker | phase2-mcp-features | 2026-04-05 |  |
+| `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | spec | completed | body-marker | mcp-feature-gaps | 2026-04-24 |  |
+| `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | spec | completed | body-marker | phase2-mcp-features | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-07-provider-attribution.md` | spec | unknown | fallback | provider-attribution | 2026-04-07 |  |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | unknown | body-marker | scheduled-groups-tabs | 2026-04-06 |  |
-| `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md` | spec | deferred | body-marker | soup-kitchen-fleet-charts | 2026-04-07 |  |
+| `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md` | spec | deferred | body-marker | soup-kitchen-fleet-charts | 2026-04-24 |  |
 
 ---
 
-_Scan HEAD: `7612a48592e26d5b3d99cd5957c10363ac2eac52` at 2026-04-24T04:38:24Z. Post-squash-merge, the landed commit SHA will 
+_Scan HEAD: `173ee7309b646d9977fdbe22379bb71d45d13c6c` at 2026-04-24T04:44:52Z. Post-squash-merge, the landed commit SHA will 
 differ from this value — the row data and inconsistencies remain accurate._
 
