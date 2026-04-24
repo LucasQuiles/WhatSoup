@@ -46,7 +46,7 @@
 - When a state.md references external documents (specs, handoffs, audits) that were never committed to the repo, document them in italic prose rather than with a backticked path. Backticks signal a concrete file reference; prose preserves the semantic reference without faking disk presence.
 - When relocating an epic between `active/` → `closed/` or `closed/` → `completed/`, grep the state.md for self-references to the old directory prefix and update them in the same commit.
 
-These rules, together with the status-precedence order below, form the seed of `docs/canonical-status-policy.md` (next step in the program).
+These rules are now formalized in `docs/canonical-status-policy.md`.
 
 ---
 
