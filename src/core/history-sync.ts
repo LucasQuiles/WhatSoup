@@ -261,6 +261,8 @@ export function processHistoryBatch(
   } catch (err) {
     if (transactionOpen) {
       try { rollback.run(); } catch { /* best-effort rollback */ }
+      // Not resetting transactionOpen=false here is deliberate: the catch is
+      // the terminal path (we re-throw), so further flag reads are impossible.
     }
     throw err;
   }
