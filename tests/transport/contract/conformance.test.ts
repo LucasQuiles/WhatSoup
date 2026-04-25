@@ -378,5 +378,35 @@ for (const fx of fixtures) {
       expect(seen[0].status).toBe('sent');
       expect(seen[0].candidateRef).toEqual(ref);
     });
+
+    // C19 — Idempotency declaration must match observed behavior. An adapter
+    // that declares `idempotency.sendText === 'simulated'` (or 'native') MUST
+    // return the same MessageRef when sendText is called twice with the same
+    // idempotencyKey. An adapter that declares 'none' MUST NOT collapse
+    // duplicates — each call produces a fresh MessageRef.
+    it('C19 — sendText with duplicate idempotencyKey honors declared behavior', async () => {
+      const a = fx.make();
+      await a.connect();
+      const declared = a.capabilities.idempotency.sendText;
+      const key = 'idem-c19-dup';
+      const ref1 = await a.sendText(fx.textConv(), 'hello', { idempotencyKey: key });
+      const ref2 = await a.sendText(fx.textConv(), 'hello', { idempotencyKey: key });
+      if (declared === 'simulated' || declared === 'native') {
+        // Declared idempotent: duplicate key returns the prior MessageRef verbatim.
+        expect(ref2).toEqual(ref1);
+      } else {
+        // Declared non-idempotent: each send is independent.
+        expect(ref2).not.toEqual(ref1);
+      }
+    });
+
+    it('C19b — distinct idempotencyKeys always yield distinct MessageRefs', async () => {
+      const a = fx.make();
+      await a.connect();
+      const ref1 = await a.sendText(fx.textConv(), 'hello', { idempotencyKey: 'idem-c19-a' });
+      const ref2 = await a.sendText(fx.textConv(), 'hello', { idempotencyKey: 'idem-c19-b' });
+      // Independent of declared idempotency: different keys must never collapse.
+      expect(ref2).not.toEqual(ref1);
+    });
   });
 }
