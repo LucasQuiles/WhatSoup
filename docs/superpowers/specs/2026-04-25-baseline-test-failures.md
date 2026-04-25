@@ -5,7 +5,7 @@
 | Snapshot date | 2026-04-25 |
 | Cited SHA | `29a0baf` (`main` branch) |
 | Status | Descriptive only — no fix is implemented in this spec. |
-| Drift detection | Invoked via `bash scripts/check-baseline-test-drift.sh` |
+| Drift detection | Invoked via `scripts/check-baseline-test-drift.sh` |
 | Cleanup pointers | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md`, `docs/superpowers/specs/2026-04-25-instance-loader-fixture-fix.md` |
 | Failure categories | Group A (named-test jsx failures), Group B (instance-loader fixture), Group C (file-level collection failures) |
 

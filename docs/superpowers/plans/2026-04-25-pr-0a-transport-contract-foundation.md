@@ -76,7 +76,7 @@ Before judging scope, readiness, or completion, run from repo root and save:
 |---|---|---|---|
 | Targeted unit tests | `npx vitest run tests/core/transport-refs.test.ts tests/transport/contract/*.test.ts --pool=forks` | `artifacts/transport_contract_tests.txt` | Any failing targeted test. |
 | Full typecheck | `npm run typecheck` | `artifacts/typecheck.txt` | Any new type error. |
-| Existing suite | `bash scripts/check-baseline-test-drift.sh` | `artifacts/baseline_drift.txt` | Drift script returns non-zero (new failures or unexpected baseline disappearance). |
+| Existing suite | `scripts/check-baseline-test-drift.sh` | `artifacts/baseline_drift.txt` | Drift script returns non-zero (new failures or unexpected baseline disappearance). |
 | Scope guard | `git diff --name-only HEAD` | `artifacts/changed_files.txt` | Any production file outside PR 0a allowed paths without explicit plan amendment. |
 | Import guard (inspection only) | `rg "@whiskeysockets/baileys" src tests` | `artifacts/baileys_import_scan.txt` | New Baileys imports in PR 0a files. Do not add CI enforcement in this PR. |
 | Artifact consistency | `python3 /Users/q/.codex/skills/planprompt-review/scripts/check_artifact_consistency.py --artifacts-dir artifacts` | `artifacts/contracts/consistency.json` | Invalid readiness / contradiction / final-review relationship. |

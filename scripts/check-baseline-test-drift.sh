@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # check-baseline-test-drift.sh — Compare current vitest failures against a frozen baseline.
-# Usage: bash scripts/check-baseline-test-drift.sh [options]
+# Usage: scripts/check-baseline-test-drift.sh [options]
+#        bash scripts/check-baseline-test-drift.sh [options]
 #
 # Options:
 #   --baseline <path>        Baseline file (default: docs/superpowers/specs/2026-04-25-baseline-test-failures.md)
