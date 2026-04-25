@@ -13,17 +13,19 @@ export default defineConfig({
       'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
       'react/jsx-runtime': path.resolve(__dirname, 'node_modules/react/jsx-runtime'),
       'react/jsx-dev-runtime': path.resolve(__dirname, 'node_modules/react/jsx-dev-runtime'),
-      // Allow console component tests to resolve console workspace deps.
-      // Some packages hoist to root node_modules, others stay in console/node_modules.
-      // Resolve from console workspace first, fall back to root.
+      // Console component test deps. All these packages exist at the root with
+      // versions equal to or newer than console/node_modules. Resolve from root
+      // so they share the root react/react-dom singletons enforced above —
+      // pulling them from console/node_modules pulls a stale react@19.2.4 alongside
+      // root's react-dom@19.2.5 and produces "Invalid hook call" failures.
       '@tanstack/react-query': path.resolve(__dirname, 'node_modules/@tanstack/react-query'),
-      '@tanstack/react-virtual': path.resolve(__dirname, 'console/node_modules/@tanstack/react-virtual'),
-      'framer-motion': path.resolve(__dirname, 'console/node_modules/framer-motion'),
-      'lucide-react': path.resolve(__dirname, 'console/node_modules/lucide-react'),
-      'qrcode': path.resolve(__dirname, 'console/node_modules/qrcode'),
-      'react-router-dom': path.resolve(__dirname, 'console/node_modules/react-router-dom'),
+      '@tanstack/react-virtual': path.resolve(__dirname, 'node_modules/@tanstack/react-virtual'),
+      'framer-motion': path.resolve(__dirname, 'node_modules/framer-motion'),
+      'lucide-react': path.resolve(__dirname, 'node_modules/lucide-react'),
+      'qrcode': path.resolve(__dirname, 'node_modules/qrcode'),
+      'react-router-dom': path.resolve(__dirname, 'node_modules/react-router-dom'),
       'react-is': path.resolve(__dirname, 'node_modules/react-is'),
-      'recharts': path.resolve(__dirname, 'console/node_modules/recharts'),
+      'recharts': path.resolve(__dirname, 'node_modules/recharts'),
     },
   },
   test: {
