@@ -1488,7 +1488,7 @@ describe('AgentRuntime', () => {
     expect(state.resumeFailedHandling.has(survivorKey)).toBe(true);
   });
 
-  it('cleanupPerChatState structurally covers all seven auxiliary per-chat maps', async () => {
+  it('cleanupPerChatState structurally covers all eight auxiliary per-chat maps', async () => {
     const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
     const match = source.match(/private cleanupPerChatState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
 
@@ -1503,6 +1503,7 @@ describe('AgentRuntime', () => {
       'this.perChatAssistantItemText.delete(mapKey);',
       'this.pendingTurnText.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
+      'this.operationTrackers.delete(mapKey);',
     ];
 
     for (const expectedDelete of expectedDeletes) {

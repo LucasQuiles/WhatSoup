@@ -55,6 +55,8 @@ import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
+import { OperationTracker } from './operation-tracker.ts';
+import type { ProgressEvent } from './operation-tracker.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -555,6 +557,11 @@ export class AgentRuntime implements Runtime {
   // When sandboxPerChat=true, maps are keyed by workspaceKey; when false, keyed by raw chatJid.
   private chatSessions: Map<string, SessionManager> = new Map();
   private chatQueues: Map<string, IOutboundQueue> = new Map();
+
+  // Operation tracker: per-session progress reporting & stall detection
+  // Parallels session storage — single/shared uses operationTracker, per_chat uses operationTrackers map.
+  private operationTracker: OperationTracker | null = null;
+  private operationTrackers: Map<string, OperationTracker> = new Map();
   private workspaceResources: Map<string, {
     socketPath: string;
     workspacePath: string;
@@ -809,6 +816,12 @@ export class AgentRuntime implements Runtime {
     this.perChatAssistantItemText.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
+    // Clean up operation tracker for this chat
+    const tracker = this.operationTrackers.get(mapKey);
+    if (tracker) {
+      tracker.shutdown();
+      this.operationTrackers.delete(mapKey);
+    }
   }
 
   private normalizeAssistantTextForDelivery(
@@ -1203,6 +1216,10 @@ export class AgentRuntime implements Runtime {
         const perChatQ = this.createOutboundQueue(chatJid, 'startup proactive per-chat resume');
         this.chatQueues.set(initialMapKey, perChatQ);
 
+        // Wire operation tracker for this proactively-resumed per-chat session
+        const startupTracker = this.createOperationTracker(session, () => this.chatQueues.get(initialMapKey));
+        if (startupTracker) this.operationTrackers.set(initialMapKey, startupTracker);
+
         // Attempt resume, then inject any messages the agent missed during
         // downtime and send a continuation turn so the agent picks up where it
         // left off without requiring the user to send "proceed".
@@ -1333,6 +1350,9 @@ export class AgentRuntime implements Runtime {
           }
         }
 
+        // Wire operation tracker for resumed single/shared session
+        this.operationTracker = this.createOperationTracker(this.session, () => this.getActiveQueue());
+
         // Bug C1 fix: Wrap spawnSession in try/catch — every other call site does this.
         // If spawn fails (bad session ID, corrupted state, claude-cli not found), clean up
         // gracefully instead of crashing the runtime.
@@ -1340,6 +1360,8 @@ export class AgentRuntime implements Runtime {
           await this.session.spawnSession(resumeSessionId, priorSession.id);
         } catch (err) {
           log.warn({ err, sessionId: resumeSessionId, chatJid: resumeChatJid }, 'spawnSession failed during resume — cleaning up');
+          this.operationTracker?.shutdown();
+          this.operationTracker = null;
           this.session = null;
           this.activeChatJid = null;
           if (this.shared) {
@@ -1719,6 +1741,8 @@ export class AgentRuntime implements Runtime {
               break;
             }
             this.getActiveQueue()?.abortTurn();
+            this.operationTracker?.shutdown();
+            this.operationTracker = null;
             await this.session.shutdown(false);
             this.session = null;
             this.queue = null;
@@ -1974,6 +1998,7 @@ export class AgentRuntime implements Runtime {
    * so concurrent per_chat events do not overwrite each other's context.
    */
   private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string, toolScopeKey: string = mapKey ?? GLOBAL_TOOL_SCOPE_KEY): void {
+    const tracker = this.getTracker(mapKey);
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -1981,6 +2006,7 @@ export class AgentRuntime implements Runtime {
 
       case 'assistant_text':
         session?.tickWatchdog();
+        tracker?.onAnyActivity();
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
@@ -2001,11 +2027,16 @@ export class AgentRuntime implements Runtime {
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
-        queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
+        {
+          const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
+          queue.enqueueToolUpdate(toolUpdate);
+          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
+        }
         break;
 
       case 'compact_boundary':
         session?.tickWatchdog();
+        tracker?.onAnyActivity();
         queue.indicateTyping();
         queue.enqueueText(
           'Context compacted — older details summarized. Restate any important context I should carry forward.',
@@ -2015,6 +2046,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_result':
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
+        tracker?.onToolEnd(event.toolId);
         const toolNames = this.activeToolNames.get(toolScopeKey);
         if (event.isError) {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
@@ -2030,6 +2062,7 @@ export class AgentRuntime implements Runtime {
 
       case 'result':
         session?.clearTurnWatchdog();
+        tracker?.onTurnComplete();
         this.clearToolNames(toolScopeKey);
         if (event.text) {
           // Suppress usage-limit messages — log and skip instead of forwarding
@@ -2265,6 +2298,10 @@ export class AgentRuntime implements Runtime {
         const controlQueue = new ControlQueue(syntheticJid, this.messenger);
         this.chatQueues.set(syntheticJid, controlQueue);
         this.chatSessions.set(syntheticJid, this.controlSession);
+
+        // Wire operation tracker for control session
+        const controlTracker = this.createOperationTracker(this.controlSession, () => this.chatQueues.get(syntheticJid));
+        if (controlTracker) this.operationTrackers.set(syntheticJid, controlTracker);
       }
 
       // Spawn session if not active
@@ -2442,6 +2479,14 @@ export class AgentRuntime implements Runtime {
     this.activeChatJid = null;
     this.currentTurnChatJid = null;
 
+    // Shutdown all operation trackers
+    this.operationTracker?.shutdown();
+    this.operationTracker = null;
+    for (const tracker of this.operationTrackers.values()) {
+      tracker.shutdown();
+    }
+    this.operationTrackers.clear();
+
     // Stop global socket server
     if (this.globalSocketServer) {
       try {
@@ -2555,6 +2600,41 @@ export class AgentRuntime implements Runtime {
       return this.outboundQueues.get(chatJid) ?? null;
     }
     return this.queue;
+  }
+
+  /**
+   * Create an OperationTracker for a session and wire its callbacks to the
+   * appropriate queue and session methods. Returns null if tracking is disabled.
+   */
+  private createOperationTracker(
+    session: SessionManager,
+    resolveQueue: () => IOutboundQueue | null | undefined,
+  ): OperationTracker | null {
+    if (!config.operationTracker?.enabled) return null;
+    return new OperationTracker(
+      this.instanceName,
+      config.operationTracker,
+      {
+        onProgress: (event: ProgressEvent) => {
+          const q = resolveQueue();
+          if (q) q.enqueueProgressUpdate(event, this.instanceName);
+        },
+        onStalled: (toolId: string, toolName: string) => {
+          session.recoverStalledOperation(toolId, toolName);
+        },
+        onThinkingStalled: () => {
+          session.probeLiveness();
+        },
+      },
+    );
+  }
+
+  /** Resolve the operation tracker for a given mapKey (per_chat) or the singleton (single/shared). */
+  private getTracker(mapKey?: string): OperationTracker | null {
+    if (this.sessionScope === 'per_chat' && mapKey !== undefined) {
+      return this.operationTrackers.get(mapKey) ?? null;
+    }
+    return this.operationTracker;
   }
 
   private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
@@ -2738,6 +2818,10 @@ export class AgentRuntime implements Runtime {
         const chatQ = this.createOutboundQueue(chatJid, 'sandbox per-chat session init');
         this.chatQueues.set(workspaceKey, chatQ);
 
+        // Wire operation tracker for this sandbox session
+        const tracker = this.createOperationTracker(session, () => this.chatQueues.get(workspaceKey));
+        if (tracker) this.operationTrackers.set(workspaceKey, tracker);
+
         // Spawn with resume if available — fall back to fresh session if resume fails
         if (resumable) {
           try {
@@ -2824,6 +2908,10 @@ export class AgentRuntime implements Runtime {
         this.chatSessions.set(initialMapKey, session);
         const perChatQ = this.createOutboundQueue(chatJid, 'per-chat session init');
         this.chatQueues.set(initialMapKey, perChatQ);
+
+        // Wire operation tracker for this per-chat session
+        const tracker = this.createOperationTracker(session, () => this.chatQueues.get(initialMapKey));
+        if (tracker) this.operationTrackers.set(initialMapKey, tracker);
       }
       this.chatQueues.get(initialMapKey)?.updateDeliveryJid(chatJid);
       // per_chat mode: do NOT set this.session/this.queue shared fields.
@@ -2869,6 +2957,9 @@ export class AgentRuntime implements Runtime {
         const singletonQ = this.createOutboundQueue(chatJid, 'single session init');
         this.queue = singletonQ;
       }
+
+      // Wire operation tracker for single/shared session
+      this.operationTracker = this.createOperationTracker(this.session, () => this.getActiveQueue());
     } else if (this.shared) {
       this.ensureOutboundQueue(chatJid);
     }
@@ -2889,6 +2980,8 @@ export class AgentRuntime implements Runtime {
     this.recordCrash(mapKey);
     const crashCount = this.getCrashCount(mapKey);
     this.chatQueues.get(mapKey)?.abortTurn();
+    // Shutdown operation tracker for this crashed session
+    this.operationTrackers.get(mapKey)?.shutdown();
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];
     if (this.durability && inboundSeq !== undefined) {
@@ -2965,6 +3058,8 @@ export class AgentRuntime implements Runtime {
     this.currentTurnInboundContentType = null;
     this.currentTurnAssistantText = '';
     this.currentTurnAssistantItemText.clear();
+    // Shutdown operation tracker on crash (timers must be cleared)
+    this.operationTracker?.shutdown();
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
@@ -3182,6 +3277,8 @@ export class AgentRuntime implements Runtime {
 
     if (!queue) return;
 
+    const tracker = this.operationTracker;
+
     switch (event.type) {
       case 'init':
         log.debug({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, sessionId: event.sessionId }, 'session init');
@@ -3189,6 +3286,7 @@ export class AgentRuntime implements Runtime {
 
       case 'assistant_text':
         this.session?.tickWatchdog();
+        tracker?.onAnyActivity();
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
           if (!normalizedText) break;
@@ -3208,13 +3306,18 @@ export class AgentRuntime implements Runtime {
         this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
-        queue.enqueueToolUpdate(buildToolUpdate(event.toolName, event.toolInput ?? {}));
+        {
+          const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
+          queue.enqueueToolUpdate(toolUpdate);
+          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
+        }
         break;
 
       // @check CHK-023
       // @traces REQ-005.AC-05
       case 'compact_boundary':
         this.session?.tickWatchdog();
+        tracker?.onAnyActivity();
         // Start the composing indicator so the user sees activity during compaction,
         // then send the notification. The indicator stays alive via the heartbeat
         // until the turn's result event fires flush().
@@ -3228,6 +3331,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_result':
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
+        tracker?.onToolEnd(event.toolId);
         const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
         if (event.isError) {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
@@ -3248,6 +3352,7 @@ export class AgentRuntime implements Runtime {
 
       case 'result':
         this.session?.clearTurnWatchdog();
+        tracker?.onTurnComplete();
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
