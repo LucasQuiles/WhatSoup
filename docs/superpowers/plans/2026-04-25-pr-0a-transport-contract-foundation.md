@@ -74,7 +74,7 @@ Before judging scope, readiness, or completion, run from repo root and save:
 
 | Gate | Command or inspection | Artifact | Blocking condition |
 |---|---|---|---|
-| Targeted unit tests | `npx vitest run tests/core/transport-refs.test.ts tests/transport/contract/*.test.ts --pool=forks` | `artifacts/transport_contract_tests.txt` | Any failing targeted test. |
+| Targeted unit tests | `npm run strip-types-compat && npx vitest run tests/core/transport-refs.test.ts tests/transport/contract/*.test.ts --pool=forks` | `artifacts/transport_contract_tests.txt` | Any failing targeted test or strip-types incompatibility. |
 | Full typecheck | `npm run typecheck` | `artifacts/typecheck.txt` | Any new type error. |
 | Existing suite | `scripts/check-baseline-test-drift.sh` | `artifacts/baseline_drift.txt` | Drift script returns non-zero (new failures or unexpected baseline disappearance). |
 | Scope guard | `git diff --name-only HEAD` | `artifacts/changed_files.txt` | Any production file outside PR 0a allowed paths without explicit plan amendment. |
@@ -1003,6 +1003,10 @@ export interface InboundMessage {
   readonly ingestSeq: number;
 }
 
+// `fromMe` is included in PR 0a so the contract shape is stable, but the
+// self-echo/reconciliation behavior that depends on it is exercised in PR 6.
+// PR 0a only asserts that the field is preserved across inbound delivery.
+
 /** Adapter-private extension. Never crosses the fanout boundary. */
 export interface InboundMessageInternal extends InboundMessage {
   readonly raw: unknown;
@@ -1346,15 +1350,16 @@ git commit -m "feat(transport): 11 extension interfaces with type guards"
 ```typescript
 // tests/transport/contract/fanout.test.ts
 import { describe, it, expect, vi } from 'vitest';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { FanoutDispatcher, type FanoutOptions } from '../../../src/transport/contract/fanout.ts';
 import type { InboundEvent } from '../../../src/transport/contract/events.ts';
 
 const ev = (n: number): InboundEvent => ({
   kind: 'message',
   data: {
-    ref: { channel: 'whatsapp:test' as never, conversation: 'c', id: String(n) },
-    conversation: { channel: 'whatsapp:test' as never, id: 'c' },
-    sender: { channel: 'whatsapp:test' as never, id: 's' },
+    ref: { channel: makeChannelId('whatsapp', 'test'), conversation: 'c', id: String(n) },
+    conversation: { channel: makeChannelId('whatsapp', 'test'), id: 'c' },
+    sender: { channel: makeChannelId('whatsapp', 'test'), id: 's' },
     fromMe: false,
     text: `m${n}`,
     attachments: [],
@@ -2503,7 +2508,7 @@ git commit -m "test(transport): conformance C12-C14 (subscriber lifecycle)"
 
 ---
 
-### Task 17: Conformance C15–C16, C18 (ambiguous classification + extension reachability)
+### Task 17: Conformance C15–C16, C18/C18b (classification + extension reachability + outbound status)
 
 **Files:**
 - Modify: `tests/transport/contract/conformance.test.ts`
@@ -2562,6 +2567,23 @@ git commit -m "test(transport): conformance C12-C14 (subscriber lifecycle)"
         expect(guard(a)).toBe(a.capabilities.extensions.has(name as any));
       }
     });
+
+    it('C18b — SupportsOutboundStatus emits sent status for successful sendText', async () => {
+      const a = fx.make();
+      await a.connect();
+      const { hasOutboundStatus } = await import('../../../src/transport/contract/extensions.ts');
+      if (!hasOutboundStatus(a)) return;
+
+      const seen: any[] = [];
+      a.on('outbound-status', e => { seen.push(e); });
+      const correlationId = 'corr-outbound-status';
+      const ref = await a.sendText(fx.textConv(), 'hi', { correlationId });
+
+      expect(seen.length).toBe(1);
+      expect(seen[0].correlationId).toBe(correlationId);
+      expect(seen[0].status).toBe('sent');
+      expect(seen[0].candidateRef).toEqual(ref);
+    });
 ```
 
 - [ ] **Step 2: Run tests**
@@ -2573,7 +2595,7 @@ Expected: PASS.
 
 ```bash
 git add tests/transport/contract/conformance.test.ts
-git commit -m "test(transport): conformance C15, C16, C18 (classification + extension reachability)"
+git commit -m "test(transport): conformance C15-C18 (classification + outbound status)"
 ```
 
 ---
@@ -2792,7 +2814,12 @@ git commit -m "test(transport): subscriber-lifecycle S1-S3"
 
 **Files:** none new; verification + summary commit.
 
-- [ ] **Step 1: Run the entire transport-contract test surface**
+- [ ] **Step 1: Run the strip-types compatibility guard**
+
+Run: `npm run strip-types-compat`
+Expected: PASS — no TypeScript syntax unsupported by Node's `--experimental-strip-types` runtime (especially parameter properties) exists in the new PR 0a files.
+
+- [ ] **Step 2: Run the entire transport-contract test surface**
 
 Run: `npx vitest run tests/core/transport-refs.test.ts tests/transport/contract/ --pool=forks`
 Expected: PASS — all suites green:
@@ -2806,17 +2833,17 @@ Expected: PASS — all suites green:
   - `tests/transport/contract/capability-negative.test.ts`
   - `tests/transport/contract/subscriber-lifecycle.test.ts`
 
-- [ ] **Step 2: Typecheck the whole repo**
+- [ ] **Step 3: Typecheck the whole repo**
 
 Run: `npm run typecheck`
 Expected: PASS — no new errors.
 
-- [ ] **Step 3: Run the existing repo test suite to confirm zero regression**
+- [ ] **Step 4: Run the existing-suite drift gate**
 
-Run: `npm test` (or `npx vitest run --pool=forks` for parity).
-Expected: PASS — pre-existing tests unaffected (PR 0a is behavior-neutral).
+Run: `scripts/check-baseline-test-drift.sh | tee artifacts/baseline_drift.txt`
+Expected: PASS — current failures exactly match the frozen baseline. Any new or unexpectedly resolved baseline failure blocks closure until the baseline doc and follow-up specs are updated deliberately.
 
-- [ ] **Step 4: Commit a closing summary**
+- [ ] **Step 5: Commit a closing summary**
 
 If there are any test/format adjustments, stage them and:
 
@@ -2856,7 +2883,7 @@ Deferral rationale: each of those items requires touching files outside `src/tra
 - §5.1 Error envelope — Task 5 ✓
 - §5.2 Error classes — Task 5 ✓
 - §6.1 Test adapters — Tasks 12–13 ✓
-- §6.2 Conformance suite C1–C7, C11, C17 — Task 14 ✓; C8–C10 — Task 15 ✓; C12–C14 — Task 16 ✓; C15, C16, C18 — Task 17 ✓; C19 — Task 18 ✓; **C20 deferred to PR 0d** (documented above)
+- §6.2 Conformance suite C1–C7, C11, C17 — Task 14 ✓; C8–C10 — Task 15 ✓; C12–C14 — Task 16 ✓; C15, C16, C18/C18b — Task 17 ✓; C19 — Task 18 ✓; **C20 deferred to PR 0d** (documented above)
 - §6.9 Subscriber lifecycle S1–S3 — Task 20 ✓
 - §6.12 Capability-negative N1–N4 — Task 19 ✓
 
