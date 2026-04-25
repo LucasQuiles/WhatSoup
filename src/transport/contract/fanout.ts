@@ -57,7 +57,14 @@ export class FanoutDispatcher {
       consecutiveOverflows: 0,
     };
     this.subs.set(id, sub);
-    return makeSubscription(() => { this.subs.delete(id); });
+    return makeSubscription(() => {
+      // Mark suspended BEFORE removing from the map so an already-running
+      // drainLoop sees the signal on its next iteration and stops delivering
+      // already-queued events to the disposed handler.
+      const live = this.subs.get(id);
+      if (live !== undefined) live.suspended = true;
+      this.subs.delete(id);
+    });
   }
 
   isSuspended(id: string): boolean {

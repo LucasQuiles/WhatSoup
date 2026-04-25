@@ -100,4 +100,50 @@ describe('FanoutDispatcher', () => {
     sub.dispose(); sub.dispose(); sub.dispose();
     expect(() => sub.dispose()).not.toThrow();
   });
+
+  it('A3 — dispose() while events are queued: at most the in-flight event delivers', async () => {
+    // Subscribe with a slow handler. Enqueue several events so the queue fills.
+    // Dispose mid-drain. The currently-awaited handler completes (it cannot be
+    // cancelled mid-await), but the remaining queued events MUST NOT deliver
+    // because dispose marks the subscriber suspended.
+    const d = new FanoutDispatcher({ ...opts, subscriberTimeoutMs: 1000 });
+    let inflight = 0;
+    let started = 0;
+    const handler = vi.fn(async () => {
+      started += 1;
+      inflight += 1;
+      await new Promise(r => setTimeout(r, 20));
+      inflight -= 1;
+    });
+    const sub = d.subscribe('s', handler);
+    d.enqueue(ev(1));
+    d.enqueue(ev(2));
+    d.enqueue(ev(3));
+    d.enqueue(ev(4));
+    // Let the drainLoop start processing the first event.
+    await new Promise(r => setTimeout(r, 5));
+    expect(started).toBe(1);
+    expect(inflight).toBe(1);
+    sub.dispose();
+    await d.flush();
+    // After dispose, no further handler invocations.
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(inflight).toBe(0);
+  });
+
+  it('A8 — flush() awaits re-entrant enqueue from inside a handler', async () => {
+    // The handler enqueues another event synchronously on its first invocation.
+    // flush() must observe the second event's drain and not return until both
+    // invocations complete. This locks in the current re-entrancy contract.
+    const d = new FanoutDispatcher(opts);
+    let calls = 0;
+    const handler = vi.fn((_e: InboundEvent) => {
+      calls += 1;
+      if (calls === 1) d.enqueue(ev(2));
+    });
+    d.subscribe('reenter', handler);
+    d.enqueue(ev(1));
+    await d.flush();
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
 });
