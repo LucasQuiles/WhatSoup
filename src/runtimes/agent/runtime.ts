@@ -3060,6 +3060,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnAssistantItemText.clear();
     // Shutdown operation tracker on crash (timers must be cleared)
     this.operationTracker?.shutdown();
+    this.operationTracker = null;
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {

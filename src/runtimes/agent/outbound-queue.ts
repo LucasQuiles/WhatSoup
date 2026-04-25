@@ -467,8 +467,10 @@ export class OutboundQueue implements IOutboundQueue {
     this.flushToolBuffer();
     // Wait for the current chain to drain
     await this.chain;
-    // All messages delivered — clear typing indicator
+    // All messages delivered — clear typing indicator and per-turn state
     this.stopTyping();
+    this.friendlyProgressSent.clear();
+    this.turnHasVisibleText = false;
   }
 
   /** Flush pending messages and clear all timers. */

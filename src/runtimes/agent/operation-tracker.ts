@@ -165,6 +165,8 @@ export class OperationTracker {
     op.stallTimer = setTimeout(() => {
       op.stallTimer = null;
       op.state = 'stalled';
+      // Stop periodic progress — stall recovery has been triggered
+      if (op.progressTimer !== null) { clearInterval(op.progressTimer); op.progressTimer = null; }
       const elapsed = Date.now() - op.startedAt;
       log.warn({ toolId: op.toolId, toolName: op.toolName, elapsedMs: elapsed }, 'operation stalled — triggering recovery');
       this.callbacks.onProgress({

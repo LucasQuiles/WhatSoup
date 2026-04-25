@@ -206,7 +206,8 @@ describe('OperationTracker', () => {
       const { callbacks, progressEvents } = makeCallbacks();
       const tracker = makeTracker(callbacks);
 
-      tracker.onToolStart('t1', 'Bash', 'running');
+      // Use agent category (stalls at 360s) so 3 progress events fire before stall
+      tracker.onToolStart('t1', 'Agent', 'agent');
 
       vi.advanceTimersByTime(30_000);
       vi.advanceTimersByTime(30_000);
