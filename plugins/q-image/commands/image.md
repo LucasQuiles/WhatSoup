@@ -132,7 +132,7 @@ print(json.dumps({'ok': True, 'path': outpath}))
    ```
 
 4. **Handle the result:**
-   - If `ok: true` → send the image via `send_media` with the original user prompt as caption, then delete the temp file.
+   - If `ok: true` → send the image via `send_media` with the original user prompt as caption, then delete the temp file. After the image is sent, send a second text message showing the enhanced prompt: `_Enhanced prompt: "<the enhanced prompt that was sent to the API>"_` (WhatsApp italic formatting via underscores). This goes as a regular text reply, not media.
    - If `error: content_policy` → reply: "I can't generate that image. Please try a different description."
    - If `error: rate_limit` → reply: "Service is busy. Try again in a moment."
    - If `error: auth` or `invalid_api_key` → reply: "Image generation isn't set up. Contact admin."
