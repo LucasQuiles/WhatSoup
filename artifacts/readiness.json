@@ -1,0 +1,19 @@
+{
+  "readiness_state": "Ready with Constraints",
+  "date": "2026-04-25",
+  "evidence_reviewed": [
+    "artifacts/git_sha.txt",
+    "artifacts/git_status.txt",
+    "artifacts/changed_files.txt",
+    "artifacts/typecheck.txt",
+    "artifacts/npm_test.txt",
+    "artifacts/primary_validation.md"
+  ],
+  "open_risks": [
+    "Repo-wide npm test baseline currently fails in existing console tests due react/jsx-dev-runtime resolution; PR 0a must provide a targeted green transport-contract lane and must not claim full-suite clean unless this baseline is fixed."
+  ],
+  "blockers": [],
+  "decision_rationale": "Plan can proceed to implementation because PR 0a is behavior-neutral and scoped to new contract/test files, but acceptance must not mask the current full-suite baseline failure. Baseline failure list is now frozen at docs/superpowers/specs/2026-04-25-baseline-test-failures.md; drift detection via scripts/check-baseline-test-drift.sh; unrelated fixes are queued in the console JSX-runtime and instance-loader fixture specs.",
+  "decision_authority": "PlanPrompt review run by Codex at commit 29a0baf with artifacts in repo-local artifacts/.",
+  "next_allowed_action": "Implement PR 0a task-by-task within the allowed write scope; stop if production paths are touched."
+}

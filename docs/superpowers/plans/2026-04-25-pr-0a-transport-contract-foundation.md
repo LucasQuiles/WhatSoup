@@ -8,11 +8,148 @@
 
 **Tech Stack:** TypeScript (Node ≥ 23.10, native strip-types, no build step), Vitest with `pool: 'forks'`, Pino, real SQLite in tests.
 
-**Spec reference:** `docs/superpowers/specs/2026-04-25-transport-layer-design.md` — sections 2.1, 2.2, 3.1–3.7, 4.1, 5.1–5.2, 5.10–5.11, 6.1, 6.2 (C1–C20), 6.9 (S1–S3), 6.12 (N1–N4).
+**Spec reference:** `docs/superpowers/specs/2026-04-25-transport-layer-design.md` — sections 2.1, 2.2, 3.1–3.7, 4.1, 5.1–5.2, 5.10–5.11, 6.1, 6.2 (C1–C19 for PR 0a; C20 redaction is PR 0d), 6.9 (S1–S3), 6.12 (N1–N4).
 
 **This plan covers PR 0a only.** Plans for PRs 0b through 11 will be written when their respective predecessor lands. PR 0a is fully behavior-neutral: nothing in `src/runtimes/`, `src/mcp/`, or `src/core/` (other than the new `transport-refs.ts`) is modified. Production WhatsApp behavior is unchanged.
 
 ---
+
+## PlanPrompt review control contract
+
+This section is the operating contract for reviewing and executing this plan. It is intentionally stricter than the task list. A worker may not mark PR 0a ready, complete, or safe unless the referenced evidence exists.
+
+### Verdict taxonomy
+
+Use only these verdicts in review artifacts and handoff notes:
+
+| Verdict | Meaning | Allowed next action |
+|---|---|---|
+| `Pass` | Evidence artifact exists and satisfies the stated gate. | Continue. |
+| `Fail` | Evidence exists and shows the gate failed. | Fix the plan or implementation before continuing. |
+| `Inconclusive` | Evidence was collected but does not prove the claim. | Add stronger evidence or explicitly accept a constrained risk. |
+| `Blocked` | Required evidence, tooling, or repo context is missing. | Stop until blocker is resolved or scope is changed. |
+
+### Evidence root and command ledger
+
+- Evidence root: `artifacts/`.
+- Run ledger: `artifacts/run_manifest.json`.
+- Every command used to support readiness must be recorded in `artifacts/run_manifest.json` with command text, exit code, status, and output artifact path.
+- Missing optional tools must be recorded as `not installed` or `skipped` in an artifact. Missing evidence is never silently ignored.
+- The plan file is the source of truth; chat summaries are non-authoritative.
+
+### Repo-root grounding
+
+Before judging scope, readiness, or completion, run from repo root and save:
+
+| Artifact | Purpose |
+|---|---|
+| `artifacts/git_sha.txt` | Exact commit reviewed. |
+| `artifacts/git_status.txt` | Dirty-worktree / untracked-artifact state. |
+| `artifacts/git_remotes.txt` | Remote provenance. |
+| `artifacts/git_branches.txt` | Branch and worktree context. |
+| `artifacts/build_manifests.txt` | Build/test tool discovery. |
+| `artifacts/top_level_dirs.txt` | Repo structure grounding. |
+
+### Objective, scope, and non-goals
+
+| Item | PR 0a rule | Evidence |
+|---|---|---|
+| Objective | Add behavior-neutral transport contract foundation only. | Final diff must touch only allowed paths listed below. |
+| In scope | `src/core/transport-refs.ts`, `src/transport/contract/**`, `src/transport/testing/**`, matching tests under `tests/core/**` and `tests/transport/contract/**`. | `artifacts/changed_files.txt`, `git diff --name-only`. |
+| Out of scope | Runtime wiring, MCP wiring, database migrations, instance config, fleet routes, logger redaction, Baileys import enforcement, real Baileys/Telegram adapters. | Diff inspection and contradiction check. |
+| Success | New in-memory contract/test surface is green and whole repo typecheck/test baseline remains green or any masked failure is explicitly marked inconclusive. | `artifacts/npm_test.txt`, `artifacts/typecheck.txt`, transport-specific test outputs. |
+| Failure | Any production path changes, direct Baileys import enforcement added, schema changed, logger config changed, or tests only assert type existence without behavioral proof. | `artifacts/blast_radius.md`, `artifacts/contradiction_check.md`. |
+
+### Assumption register
+
+| ID | Assumption | Evidence quality | Validation method | Disposition |
+|---|---|---|---|---|
+| A1 | Adding new files under `src/transport/contract/**` and `src/transport/testing/**` is behavior-neutral while no production code imports them. | Medium until final diff is known. | `git diff --name-only`, import graph scan, existing suite. | Blocks readiness if any runtime/MCP/database file changes. |
+| A2 | `ChannelId` branding and string helpers can land without schema migration. | High. | Unit tests in `tests/core/transport-refs.test.ts`. | Accepted for PR 0a. |
+| A3 | Capability-negative behavior can be proven without touching `ToolRegistry`. | Medium. | Tests must assert type guards and forced unsupported errors against `MinimalTextAdapter`; registry hiding stays deferred. | Do not claim N2 registry hiding in PR 0a unless a test-only registry seam is added without production wiring. |
+| A4 | `InMemoryAdapter` may declare `idempotency: 'simulated'` for tests while real adapters stay `none`. | High. | C19 idempotency conformance test. | Accepted for PR 0a only. |
+| A5 | C20 hostile-log redaction is not part of PR 0a. | High. | Deferred-scope section and absence of logger edits. | Must remain deferred to PR 0d. |
+
+### Validation gates
+
+| Gate | Command or inspection | Artifact | Blocking condition |
+|---|---|---|---|
+| Targeted unit tests | `npx vitest run tests/core/transport-refs.test.ts tests/transport/contract/*.test.ts --pool=forks` | `artifacts/transport_contract_tests.txt` | Any failing targeted test. |
+| Full typecheck | `npm run typecheck` | `artifacts/typecheck.txt` | Any new type error. |
+| Existing suite | `bash scripts/check-baseline-test-drift.sh` | `artifacts/baseline_drift.txt` | Drift script returns non-zero (new failures or unexpected baseline disappearance). |
+| Scope guard | `git diff --name-only HEAD` | `artifacts/changed_files.txt` | Any production file outside PR 0a allowed paths without explicit plan amendment. |
+| Import guard (inspection only) | `rg "@whiskeysockets/baileys" src tests` | `artifacts/baileys_import_scan.txt` | New Baileys imports in PR 0a files. Do not add CI enforcement in this PR. |
+| Artifact consistency | `python3 /Users/q/.codex/skills/planprompt-review/scripts/check_artifact_consistency.py --artifacts-dir artifacts` | `artifacts/contracts/consistency.json` | Invalid readiness / contradiction / final-review relationship. |
+
+### Verification matrix
+
+| Task group | What must be proven | Artifact |
+|---|---|---|
+| Domain refs | Valid/invalid channel IDs, stable ref serialization, brand-safe constructors. | `artifacts/test_evidence/transport_refs.txt` |
+| Contract types | Interfaces compile, extension names match spec, helper type guards narrow correctly. | `artifacts/test_evidence/contract_types.txt` |
+| Error model | Eight subclasses carry full payload shape and stable codes. | `artifacts/test_evidence/errors.txt` |
+| Queue/fanout | Overflow policy, per-subscriber isolation, dispose idempotency, no listener growth. | `artifacts/test_evidence/queue_fanout.txt` |
+| Test adapters | `MinimalTextAdapter` core-only behavior; `InMemoryAdapter` full-extension behavior. | `artifacts/test_evidence/test_adapters.txt` |
+| Conformance | C1-C19 pass for applicable adapters; C20 explicitly deferred to PR 0d. | `artifacts/test_evidence/conformance.txt` |
+
+### Readiness gate
+
+Before implementation starts, write `artifacts/readiness.json`:
+
+```json
+{
+  "readiness_state": "Ready with Constraints",
+  "blockers": [],
+  "constraints": [
+    "PR 0a is behavior-neutral and cannot touch runtime, MCP, database, logger, config, fleet routes, or CI import enforcement.",
+    "C20 redaction and Baileys import CI enforcement are deferred to PR 0d and PR 0c respectively."
+  ],
+  "required_artifacts": [
+    "artifacts/git_status.txt",
+    "artifacts/changed_files.txt",
+    "artifacts/verification_matrix.md",
+    "artifacts/test_strategy.md",
+    "artifacts/regression_protection.md"
+  ]
+}
+```
+
+If any blocker is present, readiness state must be `Not Ready`.
+
+### Error model and observability for PR 0a
+
+PR 0a introduces error types and test-only dispatch machinery. It does not change production logging. The plan must still make failures reconstructable:
+
+- `TransportErrorPayload` must include `code`, `message`, `retryable`, `channelId`, `operation`, `correlationId`, `scope`, optional `phase`, and optional `callerKind`.
+- `BoundedQueue` and `FanoutDispatcher` tests must assert counters for enqueue/dequeue/drop/overflow/subscriber failure.
+- Test logs may use console output, but production Pino redaction is out of scope and must not be claimed.
+- Silent failure is disallowed: every dropped lossy event, suspended subscriber, thrown handler, and duplicate dispose path must have a counter or observable test assertion.
+
+### Regression protection
+
+PR 0a protects existing behavior by isolation:
+
+- No production import points are added.
+- No existing runtime, MCP, database, config, fleet, deploy, or logger file is changed.
+- Any unavoidable existing-test failure must be classified as `Fail` or `Inconclusive` with artifact evidence; do not call masked failures clean.
+- Final diff review must prove only allowed new files and test files changed.
+
+### Tooling and execution lanes
+
+| Work lane | Allowed tools | Write scope | Evidence |
+|---|---|---|---|
+| Local implementation | Codex/Claude worker executing this plan | Files listed in PR 0a scope only. | `artifacts/changed_files.txt`, test outputs. |
+| Parallel subagent lane | Optional only if explicitly requested by conductor | Disjoint file groups: refs/types, queue/fanout, test adapters/tests. | Each subagent reports changed paths and test commands. |
+| MCP/search lane | Read-only code search / docs search | No writes. | `artifacts/reuse_audit.md`. |
+
+### Final handoff requirements
+
+Final handoff must include:
+
+- `artifacts/final_review.md` with final verdict, sections updated, unresolved risks, and reproduction commands.
+- `artifacts/contradiction_check.md` showing deferred PR 0c/0d work is not accidentally included in PR 0a.
+- `artifacts/linting_plan.md`, `artifacts/regression_protection.md`, and `artifacts/test_strategy.md`.
+- A final `git diff --name-only HEAD` artifact showing the PR 0a scope boundary.
 
 ## File structure
 
@@ -46,14 +183,12 @@ tests/transport/contract/
   adapter-types.test.ts                        # type-level smoke tests
   capability-negative.test.ts                  # N1–N4 (uses MinimalTextAdapter)
   capabilities.test.ts
-  conformance.test.ts                          # C1–C20 parameterized over [InMemoryAdapter, MinimalTextAdapter]
+  conformance.test.ts                          # C1–C19 parameterized over [InMemoryAdapter, MinimalTextAdapter]; C20 deferred to PR 0d
   errors.test.ts
   fanout.test.ts
   queue.test.ts
   subscriber-lifecycle.test.ts                 # S1–S3
   subscription.test.ts
-
-eslint.config.js (or equivalent)               # rule blocking direct '@whiskeysockets/baileys' imports outside src/transport/baileys/**
 ```
 
 ### Files NOT modified in PR 0a
