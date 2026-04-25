@@ -124,5 +124,84 @@ for (const fx of fixtures) {
         expect(e.payload.code).toBeDefined();
       }
     });
+
+    // ─── Inbound (only for adapters that support injection) ─────────────────
+    it('C8 — inbound message events arrive with all required fields populated', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return; // skip for MinimalTextAdapter
+      await a.connect();
+      const seen: any[] = [];
+      a.on('message', m => seen.push(m));
+      a.injectInbound({
+        kind: 'message',
+        data: {
+          ref: { channel: a.capabilities.channel, conversation: 'C', id: 'm1' },
+          conversation: { channel: a.capabilities.channel, id: 'C' },
+          sender: { channel: a.capabilities.channel, id: 'S' },
+          fromMe: false,
+          text: 'hello',
+          attachments: [],
+          timestamp: new Date(),
+          inboundEventKey: 'k-m1',
+          transportTimestamp: new Date(),
+          ingestSeq: 1,
+        },
+      });
+      expect(seen.length).toBe(1);
+      const m = seen[0];
+      expect(m.text).toBe('hello');
+      expect(m.fromMe).toBe(false);
+      expect(m.inboundEventKey).toBe('k-m1');
+    });
+
+    it('C9 — inboundEventKey survives a round-trip serialization', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+      let captured: any;
+      a.on('message', m => { captured = m; });
+      a.injectInbound({
+        kind: 'message',
+        data: {
+          ref: { channel: a.capabilities.channel, conversation: 'C', id: 'm2' },
+          conversation: { channel: a.capabilities.channel, id: 'C' },
+          sender: { channel: a.capabilities.channel, id: 'S' },
+          fromMe: false, text: null, attachments: [],
+          timestamp: new Date(), inboundEventKey: 'k-m2',
+          transportTimestamp: new Date(), ingestSeq: 2,
+        },
+      });
+      const round = JSON.parse(JSON.stringify(captured));
+      expect(round.inboundEventKey).toBe('k-m2');
+    });
+
+    // C10 — Duplicate dedup is enforced by the adapter's own bookkeeping.
+    // For InMemoryAdapter we exercise that subscribers see exactly one delivery
+    // when the same inbound event arrives twice IF the adapter's contract honors
+    // dedup. The bare InMemoryAdapter does NOT dedup (that's the persistent
+    // dedup table's job in PR 0b/3); this test asserts the *capability* —
+    // duplicate events delivered N times with N=2 yields N message handler
+    // invocations of length 2. The persistent-dedup wiring lands in PR 3.
+    it('C10 — adapter delivers each injectInbound exactly as many times as called', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+      let count = 0;
+      a.on('message', () => { count += 1; });
+      const sample = {
+        kind: 'message' as const,
+        data: {
+          ref: { channel: a.capabilities.channel, conversation: 'C', id: 'm3' },
+          conversation: { channel: a.capabilities.channel, id: 'C' },
+          sender: { channel: a.capabilities.channel, id: 'S' },
+          fromMe: false, text: 'x', attachments: [],
+          timestamp: new Date(), inboundEventKey: 'k-m3',
+          transportTimestamp: new Date(), ingestSeq: 3,
+        },
+      };
+      a.injectInbound(sample);
+      a.injectInbound(sample);
+      expect(count).toBe(2);
+    });
   });
 }
