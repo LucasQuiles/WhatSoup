@@ -20,10 +20,10 @@ Repo-wide `npm test -- --pool=forks` currently fails in existing console tests d
 
 # Reproduction and Closeout Steps
 
-1. Review `artifacts/run_manifest.json`.
-2. Run targeted PR 0a tests and store output under `artifacts/test_evidence/`.
+1. Review `artifacts/run_manifest.json` (gitignored — present only in workspaces that ran the original review; reproduce by re-running the review pipeline).
+2. Run targeted PR 0a tests and store output under `artifacts/test_evidence/` (directory is gitignored — `mkdir -p` it first if absent).
 3. Run `npm run typecheck`.
-4. Run full suite or document pre-existing console failure as inconclusive.
+4. Run `bash scripts/check-baseline-test-drift.sh` against the frozen baseline at `docs/superpowers/specs/2026-04-25-baseline-test-failures.md`. Drift script returning non-zero blocks closure; do not classify drift as "inconclusive".
 5. Confirm final diff stays inside PR 0a allowed paths.
 
 Final verdict: Inconclusive

@@ -49,6 +49,7 @@ The test at line 522–544 of `tests/instance-loader.test.ts` reads the real fil
 - What to change: create `instances/.examples/loops/instance.json` with placeholder values; add a `!instances/.examples/` exception to `.gitignore`; update the test path.
 - When this is the right fix: other tooling (docs, onboarding scripts) also needs a reference instance config under the `instances/` tree.
 - Smallest verifiable test: `git check-ignore -v instances/.examples/loops/instance.json` returns no match; the failing test passes.
+- **Scope note:** unlike (a) and (b), this option requires a `.gitignore` amendment (a single-line exception). Reviewers should treat it as a slightly larger-surface change touching repo-wide ignore semantics, even though the test-side delta is small.
 
 ---
 

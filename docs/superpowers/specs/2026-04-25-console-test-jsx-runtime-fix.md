@@ -47,6 +47,8 @@ All failures originate in test files under `tests/console/` that import `.tsx` s
 
 ## 4. Candidate Fixes (ranked by minimal-impact)
 
+> **Investigate before picking.** The ranking below is an inference from the Vitest error message and typical Node/React module-resolution failure modes — not an instruction. The §3 investigation tasks must run first. Whichever candidate the actual evidence supports is the right one regardless of position in this list.
+
 **(a) Install `vite-tsconfig-paths` and add it to `vitest.config.ts` plugins**
 
 - **What to change:** `npm install --save-dev vite-tsconfig-paths`; add `tsconfigPaths()` to the `plugins` array in `vitest.config.ts`.

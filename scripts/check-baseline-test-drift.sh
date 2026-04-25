@@ -8,6 +8,7 @@
 #   --cmd <shell-cmd>        Override the test command (default: npm test -- --pool=forks --reporter=verbose)
 #   --repo-root <path>       Repo root (default: git rev-parse --show-toplevel)
 #   --help                   Print this help message
+# --- end usage ---
 
 set -euo pipefail
 
@@ -25,8 +26,15 @@ REPO_ROOT=""
 # Argument parsing
 # ---------------------------------------------------------------------------
 print_usage() {
-  # Print header comment block up to (not including) the first blank comment line after the options block
-  awk '/^#!/{next} /^#/{print substr($0, 3)} /^[^#]/{exit}' "$0"
+  # Print header comment block up to the explicit `# --- end usage ---` sentinel.
+  # The sentinel makes the boundary robust against future header edits; without it,
+  # any non-comment line (e.g. `set -euo pipefail`) silently terminated the block.
+  awk '
+    /^#!/ { next }
+    /^# --- end usage ---/ { exit }
+    /^#/ { print substr($0, 3); next }
+    /^[^#]/ { exit }
+  ' "$0"
 }
 
 while [ $# -gt 0 ]; do
@@ -115,6 +123,11 @@ fi
 ACTUAL_SOURCE=""
 VITEST_TEXT=""
 
+# Run from repo root for both branches so relative paths in the parser, baseline,
+# and any future git-aware checks resolve identically. (Process-substitution paths
+# like /dev/fd/N are absolute and unaffected.)
+cd "$REPO_ROOT"
+
 if [ -n "$VITEST_OUTPUT" ]; then
   # Read from pre-captured file (or process substitution fd)
   if [ ! -r "$VITEST_OUTPUT" ] && [ "$VITEST_OUTPUT" != "/dev/stdin" ]; then
@@ -128,7 +141,6 @@ if [ -n "$VITEST_OUTPUT" ]; then
   ACTUAL_SOURCE="$VITEST_OUTPUT"
 else
   ACTUAL_SOURCE="<live run: ${CMD}>"
-  cd "$REPO_ROOT"
   VITEST_TEXT="$(eval "$CMD" 2>&1)" || true  # vitest exits non-zero on failures; we capture anyway
 fi
 
