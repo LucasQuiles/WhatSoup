@@ -94,7 +94,9 @@ export class InMemoryAdapter implements
       readReceipts: 'message',
       reactions: 'multiple',
       media: { maxBytes: 16 * 1024 * 1024, mimeAllowlist: ['image/jpeg', 'image/png', 'audio/ogg', 'video/mp4', 'application/pdf'] },
-      idempotency: { sendText: 'simulated', sendMedia: 'simulated', react: 'simulated', editText: 'simulated', delete: 'simulated' },
+      // sendText/sendMedia route through sendCore() which honors idempotencyKey.
+      // react/editText/delete do not currently accept idempotency keys; declare 'none' to match behavior.
+      idempotency: { sendText: 'simulated', sendMedia: 'simulated', react: 'none', editText: 'none', delete: 'none' },
     };
     this.self = { channel, id: 'in-memory-self' };
   }
@@ -207,9 +209,10 @@ export class InMemoryAdapter implements
   ): Promise<MessageRef> {
     const correlationId = this.nextCorrId(operation, opts);
 
-    // Idempotency replay
+    // Idempotency replay — keyed by (operation, idempotencyKey) so the same key
+    // reused across different operations does not collapse onto the wrong MessageRef.
     if (opts?.idempotencyKey !== undefined) {
-      const prior = this.idempotencyLedger.get(opts.idempotencyKey);
+      const prior = this.idempotencyLedger.get(`${operation}:${opts.idempotencyKey}`);
       if (prior !== undefined) return prior;
     }
 
@@ -263,7 +266,7 @@ export class InMemoryAdapter implements
     };
     this.captured.push({ operation, target, payload: payload ?? text, correlationId, idempotencyKey: opts?.idempotencyKey, at: new Date(), resultRef: ref });
     if (opts?.idempotencyKey !== undefined) {
-      this.idempotencyLedger.set(opts.idempotencyKey, ref);
+      this.idempotencyLedger.set(`${operation}:${opts.idempotencyKey}`, ref);
     }
     // Synchronous outbound-status emission
     for (const h of this.listeners['outbound-status']) {

@@ -410,3 +410,34 @@ for (const fx of fixtures) {
     });
   });
 }
+
+// C19c — Cross-operation idempotency isolation. Same idempotencyKey reused across
+// two distinct operations (e.g. sendText then sendMedia) MUST NOT collapse onto
+// the first operation's MessageRef. Specific to InMemoryAdapter because it is the
+// only fixture that supports both operations.
+describe('Conformance — InMemoryAdapter cross-operation idempotency', () => {
+  it('C19c — same idempotencyKey across sendText and sendMedia does not collapse', async () => {
+    const channel = makeChannelId('whatsapp', 'in-memory');
+    const a = new InMemoryAdapter(channel);
+    await a.connect();
+    const conv: ConversationRef = { channel, id: 'auto-create' };
+    const sharedKey = 'idem-c19c-shared';
+    const textRef = await a.sendText(conv, 'hello', { idempotencyKey: sharedKey });
+    const mediaRef = await a.sendMedia(
+      conv,
+      { caption: 'pic', bytes: new Uint8Array([1, 2, 3]), mime: 'image/png' },
+      { idempotencyKey: sharedKey, correlationId: 'c19c-media' },
+    );
+    expect(mediaRef).not.toEqual(textRef);
+    // Replay each operation with its own key — both must still be idempotent within
+    // their own operation scope.
+    const textRefReplay = await a.sendText(conv, 'hello', { idempotencyKey: sharedKey });
+    const mediaRefReplay = await a.sendMedia(
+      conv,
+      { caption: 'pic', bytes: new Uint8Array([1, 2, 3]), mime: 'image/png' },
+      { idempotencyKey: sharedKey, correlationId: 'c19c-media-replay' },
+    );
+    expect(textRefReplay).toEqual(textRef);
+    expect(mediaRefReplay).toEqual(mediaRef);
+  });
+});
