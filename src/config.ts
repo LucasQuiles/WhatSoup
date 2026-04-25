@@ -11,6 +11,21 @@ export const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
 
 export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 
+export interface ToolThreshold {
+  expectedMs: number;
+  slowMultiplier: number;
+  stallMultiplier: number;
+}
+
+export interface OperationTrackerConfig {
+  enabled: boolean;
+  progressIntervalMs: number;
+  thinkingLongMs: number;
+  thinkingStallMs: number;
+  recoveryGraceMs: number;
+  toolThresholds: Record<string, ToolThreshold>;
+}
+
 // ---------------------------------------------------------------------------
 // Env helpers
 // ---------------------------------------------------------------------------
@@ -27,6 +42,37 @@ function intEnv(key: string, fallback: number): number {
 // INSTANCE_CONFIG — set by bootstrap/instance-loader for multi-instance mode
 // When absent, behavior is identical to before (backward compat for all tests).
 // ---------------------------------------------------------------------------
+const DEFAULT_TOOL_THRESHOLDS: Record<string, ToolThreshold> = {
+  agent:   { expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3 },
+  bash:    { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },
+  read:    { expectedMs: 3_000,   slowMultiplier: 3,   stallMultiplier: 10 },
+  edit:    { expectedMs: 2_000,   slowMultiplier: 3,   stallMultiplier: 10 },
+  web:     { expectedMs: 10_000,  slowMultiplier: 2,   stallMultiplier: 4 },
+  mcp:     { expectedMs: 15_000,  slowMultiplier: 2,   stallMultiplier: 5 },
+  skill:   { expectedMs: 3_000,   slowMultiplier: 3,   stallMultiplier: 10 },
+  default: { expectedMs: 10_000,  slowMultiplier: 2,   stallMultiplier: 5 },
+};
+
+function mergeToolThresholds(
+  overrides?: Record<string, Partial<ToolThreshold>> | unknown,
+): Record<string, ToolThreshold> {
+  const result = { ...DEFAULT_TOOL_THRESHOLDS };
+  if (typeof overrides !== 'object' || overrides === null || Array.isArray(overrides)) {
+    return result;
+  }
+  for (const [key, partial] of Object.entries(overrides as Record<string, unknown>)) {
+    if (typeof partial !== 'object' || partial === null) continue;
+    const base = result[key] ?? result.default;
+    const p = partial as Partial<ToolThreshold>;
+    result[key] = {
+      expectedMs: typeof p.expectedMs === 'number' ? p.expectedMs : base.expectedMs,
+      slowMultiplier: typeof p.slowMultiplier === 'number' ? p.slowMultiplier : base.slowMultiplier,
+      stallMultiplier: typeof p.stallMultiplier === 'number' ? p.stallMultiplier : base.stallMultiplier,
+    };
+  }
+  return result;
+}
+
 const instanceRaw = process.env.INSTANCE_CONFIG;
 let instance: Record<string, any> | null = null;
 if (instanceRaw) {
@@ -213,6 +259,16 @@ export const config = {
   // 'friendly' (all updates in plain language for non-technical users),
   // 'minimal' (suppress most updates — only critical status shown)
   toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'friendly' | 'minimal',
+
+  // Operation tracker: per-tool progress reporting & stall detection
+  operationTracker: {
+    enabled: (instance?.operationTracker?.enabled as boolean | undefined) ?? true,
+    progressIntervalMs: (instance?.operationTracker?.progressIntervalMs as number | undefined) ?? 30_000,
+    thinkingLongMs: (instance?.operationTracker?.thinkingLongMs as number | undefined) ?? 45_000,
+    thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 300_000,
+    recoveryGraceMs: (instance?.operationTracker?.recoveryGraceMs as number | undefined) ?? 15_000,
+    toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
+  } satisfies OperationTrackerConfig,
 
   // Health
   healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),

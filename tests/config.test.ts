@@ -661,3 +661,26 @@ describe('config — apiTimeoutMs env-var override (P3.6 D-2)', () => {
     expect(config.apiTimeoutMs).toBe(30_000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Test 10: operationTracker config
+// ---------------------------------------------------------------------------
+
+describe('operationTracker config', () => {
+  it('provides default operationTracker config when instance has none', async () => {
+    const { config } = await import('../src/config.ts');
+    expect(config.operationTracker).toBeDefined();
+    expect(config.operationTracker.enabled).toBe(true);
+    expect(config.operationTracker.progressIntervalMs).toBe(30_000);
+    expect(config.operationTracker.thinkingLongMs).toBe(45_000);
+    expect(config.operationTracker.thinkingStallMs).toBe(300_000);
+    expect(config.operationTracker.recoveryGraceMs).toBe(15_000);
+    expect(config.operationTracker.toolThresholds).toBeDefined();
+    expect(config.operationTracker.toolThresholds.agent).toEqual({
+      expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3,
+    });
+    expect(config.operationTracker.toolThresholds.default).toEqual({
+      expectedMs: 10_000, slowMultiplier: 2, stallMultiplier: 5,
+    });
+  });
+});
