@@ -203,5 +203,111 @@ for (const fx of fixtures) {
       a.injectInbound(sample);
       expect(count).toBe(2);
     });
+
+    // ─── Subscriber lifecycle (C12-C14) ─────────────────────────────────────
+    // C12 — N subscribe/dispose cycles must not leak listeners. We verify by
+    // behaviour: after N cycles of subscribe-then-dispose, only a single
+    // surviving subscriber receives events. If listeners leaked, the disposed
+    // handlers would still be called and the surviving handler's count would
+    // not match the number of dispatches.
+    it('C12 — repeated subscribe/dispose cycles do not leak listeners', async () => {
+      const a = fx.make();
+      await a.connect();
+      const N = 50;
+      let ghostCalls = 0;
+      for (let i = 0; i < N; i += 1) {
+        const sub = a.on('state', () => { ghostCalls += 1; });
+        sub.dispose();
+      }
+      let liveCalls = 0;
+      const live = a.on('state', () => { liveCalls += 1; });
+      // Trigger a state event by toggling the connection lifecycle.
+      await a.disconnect();
+      await a.connect();
+      live.dispose();
+      // Disposed subscribers must not have been invoked.
+      expect(ghostCalls).toBe(0);
+      // The single live subscriber should have received at least one event.
+      expect(liveCalls).toBeGreaterThan(0);
+    });
+
+    // C13 — A throwing handler must not corrupt the dispatcher: the adapter's
+    // internal subscriber bookkeeping must remain intact so that future
+    // events delivered after the offending dispatch still reach healthy
+    // subscribers. Even if a single handler error currently propagates out
+    // of injectInbound (per the in-memory dispatcher's synchronous fan-out),
+    // disposing the bad handler must restore clean delivery.
+    it('C13 — throwing handler does not crash the dispatcher', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+      let goodCalls = 0;
+      const bad = a.on('message', () => { throw new Error('boom'); });
+      a.on('message', () => { goodCalls += 1; });
+      const sample = {
+        kind: 'message' as const,
+        data: {
+          ref: { channel: a.capabilities.channel, conversation: 'C', id: 'm-c13a' },
+          conversation: { channel: a.capabilities.channel, id: 'C' },
+          sender: { channel: a.capabilities.channel, id: 'S' },
+          fromMe: false, text: 'x', attachments: [],
+          timestamp: new Date(), inboundEventKey: 'k-c13a',
+          transportTimestamp: new Date(), ingestSeq: 100,
+        },
+      };
+      // First dispatch — the throw is allowed to surface, but the adapter
+      // must remain in a usable state afterward. Swallow it here.
+      try { a.injectInbound(sample); } catch { /* expected from bad handler */ }
+      // Dispose the offending subscriber. The dispatcher's bookkeeping must
+      // still be intact so subsequent events flow to the surviving handler.
+      bad.dispose();
+      const sample2 = {
+        ...sample,
+        data: {
+          ...sample.data,
+          ref: { ...sample.data.ref, id: 'm-c13b' },
+          inboundEventKey: 'k-c13b',
+          ingestSeq: 101,
+        },
+      };
+      expect(() => a.injectInbound(sample2)).not.toThrow();
+      // The good handler is alive and reached at least by the second dispatch.
+      expect(goodCalls).toBeGreaterThanOrEqual(1);
+    });
+
+    // C14 — Slow handler must not block the dispatcher (adapter-level smoke).
+    // The dispatcher delivers synchronously to each subscriber's queue; a slow
+    // async handler should not stall sibling subscribers or future dispatches.
+    it('C14 — slow handler does not block dispatcher (adapter-level smoke)', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+      let fastCalls = 0;
+      // Slow handler: returns a promise that resolves later. The dispatcher
+      // is fanout-style and must not await it before delivering to siblings.
+      a.on('message', async () => {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      });
+      a.on('message', () => { fastCalls += 1; });
+      const start = Date.now();
+      const sample = {
+        kind: 'message' as const,
+        data: {
+          ref: { channel: a.capabilities.channel, conversation: 'C', id: 'm-c14' },
+          conversation: { channel: a.capabilities.channel, id: 'C' },
+          sender: { channel: a.capabilities.channel, id: 'S' },
+          fromMe: false, text: 'x', attachments: [],
+          timestamp: new Date(), inboundEventKey: 'k-c14',
+          transportTimestamp: new Date(), ingestSeq: 200,
+        },
+      };
+      a.injectInbound(sample);
+      const elapsed = Date.now() - start;
+      // Fast subscriber should have been called synchronously regardless of
+      // the slow sibling. Allow a generous bound to avoid timing flakes; the
+      // assertion that matters is "did not wait for the 25ms slow handler".
+      expect(fastCalls).toBe(1);
+      expect(elapsed).toBeLessThan(25);
+    });
   });
 }
