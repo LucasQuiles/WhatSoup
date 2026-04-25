@@ -1,0 +1,111 @@
+// src/transport/contract/errors.ts
+import type { ChannelId } from '../../core/transport-refs.ts';
+import { ErrorCode } from './error-codes.ts';
+
+export type ErrorScope = 'request' | 'conversation' | 'channel' | 'provider' | 'runtime';
+export type CallerKind = 'internal' | 'mcp' | 'tool' | 'reconciliation';
+export type OperationPhase = 'not_started' | 'provider_call_started' | 'ack_received';
+
+export interface TransportErrorPayload {
+  readonly code: string;
+  readonly message: string;
+  readonly hint?: string;
+  readonly retryable: boolean;
+  readonly providerCode?: string;
+  readonly channelId: ChannelId;
+  readonly operation: string;
+  readonly correlationId: string;
+  readonly idempotencyKey?: string;
+  readonly scope: ErrorScope;
+  readonly phase?: OperationPhase;
+  readonly callerKind?: CallerKind;
+}
+
+export abstract class TransportError extends Error {
+  abstract readonly payload: TransportErrorPayload;
+
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+interface BaseInput {
+  readonly channelId: ChannelId;
+  readonly operation: string;
+  readonly correlationId: string;
+  readonly message: string;
+  readonly scope: ErrorScope;
+  readonly hint?: string;
+  readonly providerCode?: string;
+  readonly idempotencyKey?: string;
+  readonly callerKind?: CallerKind;
+}
+
+function build(code: string, retryable: boolean, input: BaseInput, extra: Partial<TransportErrorPayload> = {}): TransportErrorPayload {
+  return { code, retryable, ...input, ...extra };
+}
+
+export class UnsupportedCapabilityError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput) {
+    super(input.message);
+    this.payload = build(ErrorCode.UNSUPPORTED_CAPABILITY, false, input);
+  }
+}
+
+export class PayloadTooLargeError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput) {
+    super(input.message);
+    this.payload = build(ErrorCode.PAYLOAD_TOO_LARGE, false, input);
+  }
+}
+
+export class ConversationNotFoundError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput) {
+    super(input.message);
+    this.payload = build(ErrorCode.CONVERSATION_NOT_FOUND, false, input);
+  }
+}
+
+export class AuthRequiredError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput) {
+    super(input.message);
+    this.payload = build(ErrorCode.AUTH_REQUIRED, false, input);
+  }
+}
+
+export class RateLimitedError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput & { readonly retryAfterMs?: number }) {
+    super(input.message);
+    this.payload = build(ErrorCode.RATE_LIMITED, true, input, { hint: input.retryAfterMs ? `retry-after-ms=${input.retryAfterMs}` : input.hint });
+  }
+}
+
+export class TransientProviderError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput) {
+    super(input.message);
+    this.payload = build(ErrorCode.TRANSIENT_PROVIDER, true, input);
+  }
+}
+
+export class PermanentProviderError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput) {
+    super(input.message);
+    this.payload = build(ErrorCode.PERMANENT_PROVIDER, false, input);
+  }
+}
+
+export class SendAmbiguousError extends TransportError {
+  readonly payload: TransportErrorPayload;
+  constructor(input: BaseInput & { readonly phase: OperationPhase }) {
+    super(input.message);
+    this.payload = build(ErrorCode.SEND_AMBIGUOUS, false, input, { phase: input.phase });
+  }
+}
