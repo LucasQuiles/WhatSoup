@@ -152,10 +152,11 @@ fi
 # Uses awk — POSIX compatible, no mapfile required.
 EXPECTED_BLOCK="$(awk '/^```baseline-failures$/{found=1; next} found && /^```$/{exit} found{print}' "$BASELINE")"
 
-if [ -z "$EXPECTED_BLOCK" ]; then
+if ! grep -q '^```baseline-failures$' "$BASELINE"; then
   echo "ERROR: No 'baseline-failures' fenced block found in: $BASELINE" >&2
   exit 2
 fi
+# EXPECTED_BLOCK may be empty — that is valid and means 0 expected failures (clean baseline).
 
 # Parse EXPECTED collection failures from baseline (fenced ```collection-failures block)
 COLLECTION_EXPECTED_BLOCK="$(awk '/^```collection-failures$/{found=1; next} found && /^```$/{exit} found{print}' "$BASELINE")"
@@ -252,7 +253,7 @@ COLLECTION_ACTUAL_COUNT="$(wc -l < "$COLLECTION_ACTUAL_TMP" | tr -d ' ')"
 # An empty/truncated capture would show 0 FAILs without those summary lines.
 # ---------------------------------------------------------------------------
 if [ "$ACTUAL_COUNT" -eq 0 ] && [ "$COLLECTION_ACTUAL_COUNT" -eq 0 ]; then
-  if ! printf '%s' "$VITEST_TEXT" | grep -qE '^(Test Files|Tests) '; then
+  if ! printf '%s' "$VITEST_TEXT" | grep -qE '(^|[[:space:]])(Test Files|Tests)[[:space:]]'; then
     echo "ERROR: vitest output appears truncated or empty (no FAIL lines and no Test Files/Tests summary): $ACTUAL_SOURCE" >&2
     echo "       This is treated as a parser error (exit 2), NOT 'all baseline failures resolved'." >&2
     exit 2

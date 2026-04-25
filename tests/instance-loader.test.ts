@@ -520,13 +520,20 @@ describe('passive instance type', () => {
 
 describe('loadInstance — loops instance config', () => {
   it('loads the loops instance.json from repo and validates correctly', () => {
-    // Read the actual loops instance.json from repo
-    const repoRoot = path.resolve(import.meta.dirname, '..');
-    const loopsJson = fs.readFileSync(
-      path.join(repoRoot, 'instances', 'loops', 'instance.json'),
-      'utf8',
-    );
-    const loops = JSON.parse(loopsJson) as Record<string, unknown>;
+    // Sanitized fixture — mirrors the real loops config shape without committing
+    // phone numbers or API keys. Real instances/*/instance.json is .gitignored.
+    const loops: Record<string, unknown> = {
+      name: 'loops',
+      type: 'agent',
+      adminPhones: ['+15555550100'],
+      accessMode: 'allowlist',
+      agentOptions: {
+        sessionScope: 'per_chat',
+        sandboxPerChat: true,
+        cwd: '~/LAB/Loops',
+        instructionsPath: 'CLAUDE.md',
+      },
+    };
 
     // Write to temp dir and load
     writeInstance(path.join(tmpDir, 'config'), 'loops', loops);
