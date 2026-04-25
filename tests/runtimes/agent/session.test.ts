@@ -1556,6 +1556,93 @@ describe('Codex session resume via thread ID', () => {
   });
 });
 
+// ─── Session recovery hooks ──────────────────────────────────────────────────
+
+describe('recoverStalledOperation', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sends Ctrl+C to provider stdin', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+    sm.recoverStalledOperation('tool_123', 'Bash');
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith('\x03');
+  });
+
+  it('is a no-op when session is not active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    // Shut down the session so active = false
+    await sm.shutdown();
+
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+    sm.recoverStalledOperation('tool_123', 'Bash');
+
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
+  });
+});
+
+describe('probeLiveness', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sends newline to provider stdin', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+    sm.probeLiveness();
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith('\n');
+  });
+
+  it('is a no-op when session is not active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await sm.spawnSession();
+
+    await sm.shutdown();
+
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+    sm.probeLiveness();
+
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
+  });
+});
+
 // ─── formatAge tests ──────────────────────────────────────────────────────────
 
 describe('formatAge', () => {

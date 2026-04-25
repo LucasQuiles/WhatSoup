@@ -914,6 +914,38 @@ export class SessionManager {
     this.armWatchdog();
   }
 
+  /**
+   * Attempt to recover a stalled tool operation by interrupting the provider.
+   * Called by the operation tracker when an individual tool exceeds its stall threshold.
+   * This is a softer intervention than the hard watchdog — it tries stdin interrupt
+   * first and lets the provider handle the tool abort gracefully.
+   */
+  recoverStalledOperation(toolId: string, toolName: string): void {
+    if (!this.active || this.child === null) return;
+    log.warn({ toolId, toolName, pid: this.child.pid, sessionId: this.sessionId }, 'recovering stalled operation — sending interrupt');
+    try {
+      this.child.stdin?.write('\x03');
+    } catch (err) {
+      log.error({ err, toolId, toolName }, 'failed to send interrupt for stalled operation');
+    }
+  }
+
+  /**
+   * Probe provider liveness when no events have been received for an extended period
+   * (thinking stall). Sends a newline to stdin as a keepalive check — if the provider
+   * is alive, it will produce some event in response. If no response comes within
+   * the recovery grace period, the hard watchdog backstop will handle termination.
+   */
+  probeLiveness(): void {
+    if (!this.active || this.child === null) return;
+    log.warn({ pid: this.child.pid, sessionId: this.sessionId }, 'probing liveness — no events received');
+    try {
+      this.child.stdin?.write('\n');
+    } catch (err) {
+      log.error({ err }, 'failed to send liveness probe');
+    }
+  }
+
   private armWatchdog(): void {
     this.watchdogSoft = setTimeout(() => this.handleWatchdogSoft(), WATCHDOG_SOFT_MS);
     this.watchdogWarn = setTimeout(() => this.handleWatchdogWarn(), WATCHDOG_WARN_MS);
