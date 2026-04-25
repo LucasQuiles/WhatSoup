@@ -2629,11 +2629,16 @@ export class AgentRuntime implements Runtime {
     );
   }
 
-  /** Resolve the operation tracker for a given mapKey (per_chat) or the singleton (single/shared). */
+  /** Resolve the operation tracker for a given mapKey (per_chat) or the singleton (single/shared).
+   *  Always checks the per-key map first — control sessions store their tracker there even in
+   *  single/shared scope, so the map lookup must precede the singleton fallback to prevent
+   *  control session stalls from triggering recovery on the main session's process. */
   private getTracker(mapKey?: string): OperationTracker | null {
-    if (this.sessionScope === 'per_chat' && mapKey !== undefined) {
-      return this.operationTrackers.get(mapKey) ?? null;
+    if (mapKey !== undefined) {
+      const perKeyTracker = this.operationTrackers.get(mapKey);
+      if (perKeyTracker) return perKeyTracker;
     }
+    if (this.sessionScope === 'per_chat') return null;
     return this.operationTracker;
   }
 
