@@ -674,7 +674,6 @@ describe('operationTracker config', () => {
     expect(config.operationTracker.progressIntervalMs).toBe(30_000);
     expect(config.operationTracker.thinkingLongMs).toBe(45_000);
     expect(config.operationTracker.thinkingStallMs).toBe(300_000);
-    expect(config.operationTracker.recoveryGraceMs).toBe(15_000);
     expect(config.operationTracker.toolThresholds).toBeDefined();
     expect(config.operationTracker.toolThresholds.agent).toEqual({
       expectedMs: 120_000, slowMultiplier: 1.5, stallMultiplier: 3,

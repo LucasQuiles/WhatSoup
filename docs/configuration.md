@@ -180,7 +180,6 @@ Set `"enabled": false` to disable the tracker entirely and fall back to the lega
 | `progressIntervalMs` | integer | `30000` | Interval (ms) between periodic progress updates sent to the user while a tool runs. |
 | `thinkingLongMs` | integer | `45000` | Time (ms) without any event before a "still thinking" notification is sent. |
 | `thinkingStallMs` | integer | `300000` | Time (ms) without any event before a liveness probe (newline to stdin) is triggered. |
-| `recoveryGraceMs` | integer | `15000` | Time (ms) to wait for the provider to respond after a recovery action before the hard watchdog takes over. |
 | `toolThresholds` | object | see below | Per-tool-category timing thresholds. Keys are tool category names; values are `ToolThreshold` objects. |
 
 #### Tool Thresholds

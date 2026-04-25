@@ -22,7 +22,6 @@ export interface OperationTrackerConfig {
   progressIntervalMs: number;
   thinkingLongMs: number;
   thinkingStallMs: number;
-  recoveryGraceMs: number;
   toolThresholds: Record<string, ToolThreshold>;
 }
 
@@ -266,7 +265,6 @@ export const config = {
     progressIntervalMs: (instance?.operationTracker?.progressIntervalMs as number | undefined) ?? 30_000,
     thinkingLongMs: (instance?.operationTracker?.thinkingLongMs as number | undefined) ?? 45_000,
     thinkingStallMs: (instance?.operationTracker?.thinkingStallMs as number | undefined) ?? 300_000,
-    recoveryGraceMs: (instance?.operationTracker?.recoveryGraceMs as number | undefined) ?? 15_000,
     toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
   } satisfies OperationTrackerConfig,
 

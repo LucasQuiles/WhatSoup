@@ -6,7 +6,7 @@ const log = createChildLogger('operation-tracker');
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type OperationState = 'running' | 'slow' | 'stalled' | 'recovered';
+export type OperationState = 'running' | 'slow' | 'stalled';
 
 export interface TrackedOperation {
   toolId: string;
