@@ -6,6 +6,7 @@ import {
   TYPING_REFRESH_MS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
+import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
@@ -825,5 +826,248 @@ describe('OutboundQueue', () => {
     expect(typeof errorArg.textLength).toBe('number');
     expect(errorArg.textLength).toBe('terminal shape test'.length);
     expect(errorArg.err).toBeDefined();
+  });
+
+  // ─── enqueueProgressUpdate ──────────────────────────────────────────────
+
+  describe('enqueueProgressUpdate', () => {
+    const INSTANCE = 'TestBot';
+
+    it('renders thinking_long in full mode', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('full');
+
+      const event: ProgressEvent = { type: 'thinking_long', gapMs: 10_000 };
+      queue.enqueueProgressUpdate(event, INSTANCE);
+      await vi.runAllTimersAsync();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain(INSTANCE);
+      expect(calls[0]).toContain('thinking');
+    });
+
+    it('renders operation_progress with elapsed time in full mode', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('full');
+
+      const event: ProgressEvent = {
+        type: 'operation_progress',
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running',
+        elapsedMs: 135_000,
+        state: 'running',
+      };
+      queue.enqueueProgressUpdate(event, INSTANCE);
+      await vi.runAllTimersAsync();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain('2m 15s');
+      expect(calls[0]).toContain('running Bash');
+    });
+
+    it('renders operation_progress for Agent tool as "running a subagent" in full mode', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('full');
+
+      const event: ProgressEvent = {
+        type: 'operation_progress',
+        toolId: 'tool-2',
+        toolName: 'Agent',
+        category: 'agent',
+        elapsedMs: 30_000,
+        state: 'running',
+      };
+      queue.enqueueProgressUpdate(event, INSTANCE);
+      await vi.runAllTimersAsync();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain('running a subagent');
+      expect(calls[0]).toContain('30s');
+    });
+
+    it('renders only first operation_progress in friendly mode', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      const event1: ProgressEvent = {
+        type: 'operation_progress',
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running',
+        elapsedMs: 10_000,
+        state: 'running',
+      };
+      const event2: ProgressEvent = {
+        type: 'operation_progress',
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running',
+        elapsedMs: 20_000,
+        state: 'running',
+      };
+
+      queue.enqueueProgressUpdate(event1, INSTANCE);
+      await vi.runAllTimersAsync();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain('working on something');
+
+      queue.enqueueProgressUpdate(event2, INSTANCE);
+
+      // Second event for same toolId only triggers typing, no new message
+      expect(calls).toHaveLength(1);
+      expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+      await queue.flush(); // clean up typing interval
+    });
+
+    it('suppresses operation_progress in minimal mode', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      const event: ProgressEvent = {
+        type: 'operation_progress',
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running',
+        elapsedMs: 10_000,
+        state: 'running',
+      };
+      queue.enqueueProgressUpdate(event, INSTANCE);
+
+      // No message sent, only typing
+      expect(calls).toHaveLength(0);
+      expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+      queue.abortTurn(); // clean up typing interval
+    });
+
+    it('renders operation_stalled in all three modes', async () => {
+      const baseEvent = {
+        type: 'operation_stalled' as const,
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running' as const,
+        elapsedMs: 60_000,
+      };
+
+      for (const mode of ['full', 'friendly', 'minimal'] as const) {
+        const { messenger, calls } = makeMessenger();
+        const queue = new OutboundQueue(messenger, CHAT_JID);
+        queue.setToolUpdateMode(mode);
+
+        queue.enqueueProgressUpdate(baseEvent, INSTANCE);
+        await vi.runAllTimersAsync();
+
+        expect(calls.length).toBeGreaterThanOrEqual(1);
+      }
+    });
+
+    it('renders operation_slow differently per mode', async () => {
+      const baseEvent = {
+        type: 'operation_slow' as const,
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running' as const,
+        elapsedMs: 45_000,
+        expectedMs: 15_000,
+      };
+
+      // Full mode — contains elapsed and instance name
+      const full = makeMessenger();
+      const qFull = new OutboundQueue(full.messenger, CHAT_JID);
+      qFull.setToolUpdateMode('full');
+      qFull.enqueueProgressUpdate(baseEvent, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(full.calls).toHaveLength(1);
+      expect(full.calls[0]).toContain('45s');
+      expect(full.calls[0]).toContain(INSTANCE);
+
+      // Friendly mode — contains instance name, simpler language
+      const friendly = makeMessenger();
+      const qFriendly = new OutboundQueue(friendly.messenger, CHAT_JID);
+      qFriendly.setToolUpdateMode('friendly');
+      qFriendly.enqueueProgressUpdate(baseEvent, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(friendly.calls).toHaveLength(1);
+      expect(friendly.calls[0]).toContain('still working');
+      expect(friendly.calls[0]).toContain(INSTANCE);
+
+      // Minimal mode — generic, no instance name
+      const minimal = makeMessenger();
+      const qMinimal = new OutboundQueue(minimal.messenger, CHAT_JID);
+      qMinimal.setToolUpdateMode('minimal');
+      qMinimal.enqueueProgressUpdate(baseEvent, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(minimal.calls).toHaveLength(1);
+      expect(minimal.calls[0]).toContain('Still working');
+    });
+
+    it('suppresses thinking_long in minimal mode', async () => {
+      const { messenger, calls, typingCalls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, INSTANCE);
+
+      expect(calls).toHaveLength(0);
+      expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+      queue.abortTurn(); // clean up typing interval
+    });
+
+    it('renders thinking_stalled in both full/friendly and minimal modes', async () => {
+      // Full mode
+      const full = makeMessenger();
+      const qFull = new OutboundQueue(full.messenger, CHAT_JID);
+      qFull.setToolUpdateMode('full');
+      qFull.enqueueProgressUpdate({ type: 'thinking_stalled', gapMs: 60_000 }, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(full.calls).toHaveLength(1);
+      expect(full.calls[0]).toContain('gone silent');
+
+      // Minimal mode
+      const minimal = makeMessenger();
+      const qMinimal = new OutboundQueue(minimal.messenger, CHAT_JID);
+      qMinimal.setToolUpdateMode('minimal');
+      qMinimal.enqueueProgressUpdate({ type: 'thinking_stalled', gapMs: 60_000 }, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(minimal.calls).toHaveLength(1);
+      expect(minimal.calls[0]).toContain('may be stuck');
+    });
+
+    it('clears friendlyProgressSent on abortTurn', async () => {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('friendly');
+
+      const event: ProgressEvent = {
+        type: 'operation_progress',
+        toolId: 'tool-1',
+        toolName: 'Bash',
+        category: 'running',
+        elapsedMs: 10_000,
+        state: 'running',
+      };
+
+      // First progress shows message
+      queue.enqueueProgressUpdate(event, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(calls).toHaveLength(1);
+
+      // Abort clears dedup set
+      queue.abortTurn();
+
+      // Same toolId now shows message again
+      queue.enqueueProgressUpdate(event, INSTANCE);
+      await vi.runAllTimersAsync();
+      expect(calls).toHaveLength(2);
+    });
   });
 });

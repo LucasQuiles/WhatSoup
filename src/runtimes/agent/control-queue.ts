@@ -7,6 +7,7 @@ import type { Messenger } from '../../core/types.ts';
 import { sendTracked } from '../../core/durability.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { IOutboundQueue, ToolUpdate } from './outbound-queue.ts';
+import type { ProgressEvent } from './operation-tracker.ts';
 
 export class ControlQueue implements IOutboundQueue {
   private chatJid: string;
@@ -35,6 +36,11 @@ export class ControlQueue implements IOutboundQueue {
 
   enqueueToolUpdate(update: ToolUpdate): void {
     this.log.push(`[${update.category}] ${update.detail}`);
+  }
+
+  /** No-op — control sessions don't surface progress events to users. */
+  enqueueProgressUpdate(_event: ProgressEvent, _instanceName: string): void {
+    // intentional no-op
   }
 
   /** No-op — control sessions don't surface tool updates to users. */

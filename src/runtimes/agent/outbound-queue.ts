@@ -11,6 +11,7 @@ import { config } from '../../config.ts';
 import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
+import type { ProgressEvent } from './operation-tracker.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -104,6 +105,15 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
   return chunks;
 }
 
+/** Format milliseconds as human-readable elapsed: "30s", "1m", "2m 15s". */
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
 /**
  * Public interface of OutboundQueue. Imported by tests to enforce that mocks
  * stay in sync with the real implementation — if a new public method is added
@@ -117,6 +127,7 @@ export interface IOutboundQueue {
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
   enqueueResultText(text: string): void;
   enqueueToolUpdate(update: ToolUpdate): void;
+  enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
   setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void;
   /** Start the composing indicator immediately without adding any content to the queue. */
@@ -180,12 +191,8 @@ export class OutboundQueue implements IOutboundQueue {
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
 
-  /** In minimal mode: detail strings already sent this turn (dedup across batches). */
-  private minimalSentDetails = new Set<string>();
-  /** In minimal mode: timestamp of the last message (text or status) sent to user. Initialized to now to prevent premature heartbeat. */
-  private minimalLastSentAt = Date.now();
-  /** In minimal mode: timer for "still working" heartbeat when silence exceeds threshold. */
-  private minimalHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  /** In friendly mode: progress event tool IDs already reported (dedup — only first per tool). */
+  private friendlyProgressSent = new Set<string>();
   public lastActivity = Date.now();
 
   constructor(messenger: Messenger, chatJid: string) {
@@ -283,10 +290,6 @@ export class OutboundQueue implements IOutboundQueue {
     if (!text || text.trim() === '') return;
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
-    if (this.toolUpdateMode === 'minimal') {
-      this.minimalLastSentAt = Date.now();
-      this.clearMinimalHeartbeat();
-    }
     this.turnHasVisibleText = true;
     const chunks = repairChunkFormatting(splitMessage(preprocessText(text)));
     for (const chunk of chunks) {
@@ -302,10 +305,6 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueStreamingText(text: string): void {
     if (!text) return;
-    if (this.toolUpdateMode === 'minimal') {
-      this.minimalLastSentAt = Date.now();
-      this.clearMinimalHeartbeat();
-    }
     this.turnHasVisibleText = true;
     this.streamBufferParts.push(text);
     if (this.streamTimer) clearTimeout(this.streamTimer);
@@ -358,24 +357,7 @@ export class OutboundQueue implements IOutboundQueue {
       const pass = this.shouldShowMinimal(update);
       if (!pass) {
         this.startTyping();
-        this.scheduleMinimalHeartbeat();
         return;
-      }
-      // Deduplicate: if we've already sent this exact detail string, suppress
-      if (this.minimalSentDetails.has(update.detail)) {
-        this.startTyping();
-        this.scheduleMinimalHeartbeat();
-        return;
-      }
-      // If we've sent any status this turn, only allow through if it's been >15s
-      // since the last message (avoid rapid-fire status spam, but prevent dead silence)
-      if (this.minimalSentDetails.size > 0) {
-        const elapsed = Date.now() - this.minimalLastSentAt;
-        if (elapsed < 15_000) {
-          this.startTyping();
-          this.scheduleMinimalHeartbeat();
-          return;
-        }
       }
     }
     // Friendly mode: let everything through (no filtering), but skip internal noise
@@ -405,6 +387,74 @@ export class OutboundQueue implements IOutboundQueue {
     }
   }
 
+  enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void {
+    const name = instanceName;
+
+    switch (event.type) {
+      case 'thinking_long': {
+        if (this.toolUpdateMode === 'minimal') {
+          this.startTyping();
+          return;
+        }
+        this.enqueue(`_${name} is thinking..._`);
+        return;
+      }
+
+      case 'thinking_stalled': {
+        if (this.toolUpdateMode === 'minimal') {
+          this.enqueue(`_${name} may be stuck..._`);
+        } else {
+          this.enqueue(`_${name} has gone silent \u2014 checking..._`);
+        }
+        return;
+      }
+
+      case 'operation_progress': {
+        if (this.toolUpdateMode === 'minimal') {
+          this.startTyping();
+          return;
+        }
+        if (this.toolUpdateMode === 'friendly') {
+          if (this.friendlyProgressSent.has(event.toolId)) {
+            this.startTyping();
+            return;
+          }
+          this.friendlyProgressSent.add(event.toolId);
+          this.enqueue(`_${name} is working on something, this might take a moment..._`);
+          return;
+        }
+        // full mode
+        const elapsed = formatElapsed(event.elapsedMs);
+        const desc = event.toolName === 'Agent' ? 'running a subagent' : `running ${event.toolName}`;
+        this.enqueue(`_${name} has been ${desc} for ${elapsed}..._`);
+        return;
+      }
+
+      case 'operation_slow': {
+        if (this.toolUpdateMode === 'minimal') {
+          this.enqueue('_Still working..._');
+        } else if (this.toolUpdateMode === 'friendly') {
+          this.enqueue(`_${name} is still working on it..._`);
+        } else {
+          const elapsed = formatElapsed(event.elapsedMs);
+          this.enqueue(`_\u23f3 ${name} is taking longer than expected (${elapsed})..._`);
+        }
+        return;
+      }
+
+      case 'operation_stalled': {
+        if (this.toolUpdateMode === 'minimal') {
+          this.enqueue('_Something went wrong \u2014 retrying..._');
+        } else if (this.toolUpdateMode === 'friendly') {
+          this.enqueue(`_${name} got stuck \u2014 trying again..._`);
+        } else {
+          this.enqueue(`_\u26a0\ufe0f ${name} appears stuck \u2014 recovering..._`);
+        }
+        return;
+      }
+    }
+  }
+
   /** Start the composing indicator immediately without queuing any content. */
   indicateTyping(): void {
     this.startTyping();
@@ -424,7 +474,6 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush pending messages and clear all timers. */
   async shutdown(): Promise<void> {
     await this.flush();
-    this.clearMinimalHeartbeat();
     if (this.toolTimer !== null) {
       clearTimeout(this.toolTimer);
       this.toolTimer = null;
@@ -443,10 +492,8 @@ export class OutboundQueue implements IOutboundQueue {
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
     this.streamBufferParts = [];
     this.toolBuffer = [];
-    this.minimalSentDetails.clear();
-    this.minimalLastSentAt = Date.now();
+    this.friendlyProgressSent.clear();
     this.turnHasVisibleText = false;
-    this.clearMinimalHeartbeat();
     this.stopTyping(false);
   }
 
@@ -460,8 +507,7 @@ export class OutboundQueue implements IOutboundQueue {
       || this.isTyping
       || this.toolTimer !== null
       || this.toolMaxAgeTimer !== null
-      || this.streamTimer !== null
-      || this.minimalHeartbeatTimer !== null;
+      || this.streamTimer !== null;
   }
 
   /** Retarget all subsequent sends to a different JID variant. */
@@ -501,44 +547,6 @@ export class OutboundQueue implements IOutboundQueue {
     }
   }
 
-  /**
-   * In minimal mode, schedule a heartbeat message if the user has been in silence
-   * for too long. Fires 20s after the last message sent. Keeps the user aware
-   * that work is happening without spamming tool-level detail.
-   */
-  /**
-   * In minimal mode, schedule a heartbeat if the user has been in silence too long.
-   * Fires once, 20s after the last message. Does not reschedule — subsequent tool
-   * calls just maintain the typing indicator without additional text.
-   */
-  private scheduleMinimalHeartbeat(): void {
-    if (this.toolUpdateMode !== 'minimal') return;
-    if (this.minimalHeartbeatTimer !== null) return; // already scheduled
-
-    // Only schedule if we've already sent at least one status — the first status
-    // message is the primary feedback; heartbeat is for extended silence after that.
-    if (this.minimalSentDetails.size === 0) return;
-
-    const sinceLastSent = Date.now() - this.minimalLastSentAt;
-    const delay = Math.max(0, 20_000 - sinceLastSent);
-
-    this.minimalHeartbeatTimer = setTimeout(() => {
-      this.minimalHeartbeatTimer = null;
-      const elapsed = Date.now() - this.minimalLastSentAt;
-      if (elapsed >= 18_000 && this.isTyping) {
-        this.minimalLastSentAt = Date.now();
-        this.enqueue('_still working on it..._');
-      }
-    }, delay);
-  }
-
-  private clearMinimalHeartbeat(): void {
-    if (this.minimalHeartbeatTimer !== null) {
-      clearTimeout(this.minimalHeartbeatTimer);
-      this.minimalHeartbeatTimer = null;
-    }
-  }
-
   private flushToolBuffer(): void {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
@@ -557,17 +565,6 @@ export class OutboundQueue implements IOutboundQueue {
       if (!existing.includes(detail)) {
         existing.push(detail);
       }
-    }
-
-    // Track sent details for minimal mode dedup and update sent timestamp
-    if (this.toolUpdateMode === 'minimal') {
-      for (const details of groups.values()) {
-        for (const d of details) {
-          this.minimalSentDetails.add(d);
-        }
-      }
-      this.minimalLastSentAt = Date.now();
-      this.clearMinimalHeartbeat();
     }
 
     // Render each group as "{emoji} {Label}:\n  • detail\n  • detail"
