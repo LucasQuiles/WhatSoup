@@ -5,7 +5,7 @@ import type {
   Subscription, TransportAdapter, TransportError,
 } from '../contract/index.ts';
 import { makeSubscription } from '../contract/subscription.ts';
-import { ConversationNotFoundError } from '../contract/errors.ts';
+import { ConversationNotFoundError, PayloadTooLargeError } from '../contract/errors.ts';
 
 interface Listeners {
   message: Set<(e: InboundMessage) => void>;
@@ -59,6 +59,15 @@ export class MinimalTextAdapter implements TransportAdapter {
   }
 
   async sendText(target: ConversationRef, text: string, _opts?: SendTextOptions): Promise<MessageRef> {
+    if (text.length > this.capabilities.maxTextLength) {
+      throw new PayloadTooLargeError({
+        channelId: this.capabilities.channel,
+        operation: 'sendText',
+        correlationId: 'min-' + (++this.msgCounter),
+        scope: 'request',
+        message: `text length ${text.length} exceeds maxTextLength ${this.capabilities.maxTextLength}`,
+      });
+    }
     if (target.channel !== this.capabilities.channel) {
       throw new ConversationNotFoundError({
         channelId: this.capabilities.channel,
