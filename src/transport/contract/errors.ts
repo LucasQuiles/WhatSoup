@@ -78,9 +78,12 @@ export class AuthRequiredError extends TransportError {
   }
 }
 
+export interface RateLimitedInput extends BaseInput {
+  readonly retryAfterMs?: number;
+}
 export class RateLimitedError extends TransportError {
   readonly payload: TransportErrorPayload;
-  constructor(input: BaseInput & { readonly retryAfterMs?: number }) {
+  constructor(input: RateLimitedInput) {
     super(input.message);
     this.payload = build(ErrorCode.RATE_LIMITED, true, input, { hint: input.retryAfterMs ? `retry-after-ms=${input.retryAfterMs}` : input.hint });
   }
@@ -102,9 +105,12 @@ export class PermanentProviderError extends TransportError {
   }
 }
 
+export interface SendAmbiguousInput extends BaseInput {
+  readonly phase: OperationPhase;
+}
 export class SendAmbiguousError extends TransportError {
   readonly payload: TransportErrorPayload;
-  constructor(input: BaseInput & { readonly phase: OperationPhase }) {
+  constructor(input: SendAmbiguousInput) {
     super(input.message);
     this.payload = build(ErrorCode.SEND_AMBIGUOUS, false, input, { phase: input.phase });
   }
