@@ -7,6 +7,7 @@
 | Status | Descriptive only — no fix is implemented in this spec. |
 | Drift detection | Invoked via `bash scripts/check-baseline-test-drift.sh` |
 | Cleanup pointers | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md`, `docs/superpowers/specs/2026-04-25-instance-loader-fixture-fix.md` |
+| Failure categories | Group A (named-test jsx failures), Group B (instance-loader fixture), Group C (file-level collection failures) |
 
 ---
 
@@ -14,9 +15,10 @@
 
 | Error class | Count | Affected files |
 |---|---|---|
-| `Cannot find module 'react/jsx-dev-runtime'` | 18 | 13 |
+| `Cannot find module 'react/jsx-dev-runtime'` (named tests) | 18 | 6 |
+| `Cannot find module 'react/jsx-dev-runtime'` (collection failures) | 7 | 7 |
 | `ENOENT instances/loops/instance.json` | 1 | 1 |
-| **Total** | **19** | **14** |
+| **Total** | **26** | **14** |
 
 ---
 
@@ -58,9 +60,25 @@ These 18 tests fail because the Vitest environment cannot resolve `react/jsx-dev
 
 ---
 
+## Group C — File-level collection failures
+
+These 7 test files fail at the collection stage — the entire file cannot be loaded before any individual test runs. The root cause is the same as Group A (`Cannot find module 'react/jsx-dev-runtime'`); the collection-failure manifestation occurs when ALL imports in the file fail, preventing vitest from even enumerating tests.
+
+| # | Test file | Error class |
+|---|---|---|
+| 1 | `tests/console/design-system-accessibility.test.tsx` | `Cannot find module 'react/jsx-dev-runtime'` |
+| 2 | `tests/console/error-boundary.test.ts` | `Cannot find module 'react/jsx-dev-runtime'` |
+| 3 | `tests/console/line-detail-card-shells.test.tsx` | `Cannot find module 'react/jsx-dev-runtime'` |
+| 4 | `tests/console/line-detail-mode-tab.test.ts` | `Cannot find module 'react/jsx-dev-runtime'` |
+| 5 | `tests/console/nav-status.test.tsx` | `Cannot find module 'react/jsx-dev-runtime'` |
+| 6 | `tests/console/search-highlight.test.ts` | `Cannot find module 'react/jsx-dev-runtime'` |
+| 7 | `tests/console/structural-sharing.test.ts` | `Cannot find module 'react/jsx-dev-runtime'` |
+
+---
+
 ## Drift detection format
 
-The block below is the canonical machine-readable form consumed by `scripts/check-baseline-test-drift.sh`. Each line is a `<test_file_path>::<test_description>` tuple. When a follow-up spec lands its fix, the corresponding rows should be removed from this block.
+The blocks below are the canonical machine-readable form consumed by `scripts/check-baseline-test-drift.sh`. The `baseline-failures` block contains one `<test_file_path>::<test_description>` tuple per line (named-test failures). The `collection-failures` block contains one file path per line (file-level collection failures). When a follow-up spec lands its fix, the corresponding rows should be removed from each block.
 
 ```baseline-failures
 tests/console/chart-panel.test.ts::ChartPanel > renders loading shimmer when isLoading is true
@@ -82,6 +100,16 @@ tests/console/ops-actions.test.ts::Ops page structure > Ops component is a defau
 tests/console/ops-actions.test.ts::Ops page structure > imports required hooks and components
 tests/console/soup-kitchen.test.tsx::SoupKitchen structural composition > is exported as default
 tests/instance-loader.test.ts::loadInstance — loops instance config > loads the loops instance.json from repo and validates correctly
+```
+
+```collection-failures
+tests/console/design-system-accessibility.test.tsx
+tests/console/error-boundary.test.ts
+tests/console/line-detail-card-shells.test.tsx
+tests/console/line-detail-mode-tab.test.ts
+tests/console/nav-status.test.tsx
+tests/console/search-highlight.test.ts
+tests/console/structural-sharing.test.ts
 ```
 
 ---
