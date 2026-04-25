@@ -309,5 +309,74 @@ for (const fx of fixtures) {
       expect(fastCalls).toBe(1);
       expect(elapsed).toBeLessThan(25);
     });
+
+    it('C15 — ambiguous send classification fires with phase=provider_call_started', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+      a.injectAmbiguousFailure('sendText');
+      try {
+        await a.sendText(fx.textConv(), 'hi');
+        expect.fail('should have thrown');
+      } catch (e: any) {
+        expect(e.payload.code).toBe('transport.send_ambiguous');
+        expect(e.payload.phase).toBe('provider_call_started');
+        expect(e.payload.retryable).toBe(false);
+      }
+    });
+
+    it('C16 — pre-I/O failure classifies as TransientProviderError(retryable=true)', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+      const { TransientProviderError } = await import('../../../src/transport/contract/errors.ts');
+      a.injectProviderError('sendText', TransientProviderError);
+      try {
+        await a.sendText(fx.textConv(), 'hi');
+        expect.fail('should have thrown');
+      } catch (e: any) {
+        expect(e.payload.code).toBe('transport.transient_provider');
+        expect(e.payload.retryable).toBe(true);
+      }
+    });
+
+    it('C18 — every claimed extension is reachable on a fresh connection', async () => {
+      const a = fx.make();
+      await a.connect();
+      const {
+        isMediaCapable, isReactive, isEditable, isDeletable, isTypingCapable,
+        isPresenceCapable, isGroupsCapable, isReadReceiptCapable, isInlineKeyboardCapable,
+        hasOutboundStatus, isVoiceCapable,
+      } = await import('../../../src/transport/contract/extensions.ts');
+      // For each extension the adapter claims, the corresponding type guard should be true.
+      // Conversely, for extensions it does NOT claim, the guard should be false.
+      const guards: Array<[string, (a: any) => boolean]> = [
+        ['media', isMediaCapable], ['voice-notes', isVoiceCapable],
+        ['reactions', isReactive], ['edit', isEditable], ['delete', isDeletable],
+        ['typing', isTypingCapable], ['presence', isPresenceCapable],
+        ['groups', isGroupsCapable], ['read-receipts', isReadReceiptCapable],
+        ['inline-keyboards', isInlineKeyboardCapable], ['outbound-status', hasOutboundStatus],
+      ];
+      for (const [name, guard] of guards) {
+        expect(guard(a)).toBe(a.capabilities.extensions.has(name as any));
+      }
+    });
+
+    it('C18b — SupportsOutboundStatus emits sent status for successful sendText', async () => {
+      const a = fx.make();
+      await a.connect();
+      const { hasOutboundStatus } = await import('../../../src/transport/contract/extensions.ts');
+      if (!hasOutboundStatus(a)) return;
+
+      const seen: any[] = [];
+      a.on('outbound-status', e => { seen.push(e); });
+      const correlationId = 'corr-outbound-status';
+      const ref = await a.sendText(fx.textConv(), 'hi', { correlationId });
+
+      expect(seen.length).toBe(1);
+      expect(seen[0].correlationId).toBe(correlationId);
+      expect(seen[0].status).toBe('sent');
+      expect(seen[0].candidateRef).toEqual(ref);
+    });
   });
 }
