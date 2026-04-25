@@ -463,6 +463,55 @@ curl -s http://127.0.0.1:9091/health | python3 -c \
 
 ---
 
+### 5.8 Operation Tracker — Stall Detection and Recovery
+
+**Symptoms:** User sees "stuck" or "retrying" messages, or an agent session restarts unexpectedly during a long tool invocation.
+
+The operation tracker monitors each tool invocation and thinking gap. When a tool exceeds its stall threshold, automatic recovery kicks in:
+
+**Recovery cascade:**
+
+1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
+   - Tracker sends `\x03` (Ctrl+C) to the provider's stdin
+   - User receives a stall warning (format depends on `toolUpdateMode`)
+   - Provider is expected to abort the tool and continue
+
+2. **Thinking stall detected** — no events from the provider for `thinkingStallMs` (default 5 min)
+   - Tracker sends a newline (`\n`) to stdin as a liveness probe
+   - If the provider is alive, it will produce an event in response
+
+3. **Hard watchdog backstop** — no activity for 30 minutes (not configurable via `operationTracker`)
+   - Sends SIGKILL to the provider process
+   - User receives "_Session terminated after 30 minutes of inactivity — restarting._"
+   - Session is marked as crashed; a new session spawns on the next inbound message
+
+**Diagnostic steps:**
+
+```bash
+# Check for recent stall events in logs
+journalctl --user -u whatsoup@q -n 200 | grep -E 'stall|liveness|interrupt|recovering'
+
+# Check operation tracker config in use
+grep -A 20 'operationTracker' ~/.config/whatsoup/instances/q/config.json
+
+# Check if the tracker is disabled (falls back to watchdog-only)
+grep '"enabled"' ~/.config/whatsoup/instances/q/config.json
+```
+
+**Tuning:** If a specific tool category triggers false-positive stalls (e.g. long Bash builds), increase its thresholds in `operationTracker.toolThresholds`:
+
+```json
+"operationTracker": {
+  "toolThresholds": {
+    "bash": { "expectedMs": 60000, "stallMultiplier": 5 }
+  }
+}
+```
+
+See `docs/configuration.md` — [operationTracker](#operationtracker) for the full reference.
+
+---
+
 ## 6. Recovery Procedures
 
 ### 6.1 Re-pairing WhatsApp (QR Code Flow)

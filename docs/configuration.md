@@ -142,6 +142,8 @@ into place during deployment.
 | `rateLimitPerHour` | integer | no | `45` | Per-user rate limit. Overrides `RATE_LIMIT_PER_HOUR`. |
 | `healthPort` | integer | no | `9090` | Health server port. Overrides `HEALTH_PORT`. |
 | `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |
+| `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only, brief text for warnings. |
+| `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
 
 ### Access Modes
@@ -165,6 +167,69 @@ into place during deployment.
 ```
 
 Omit any key to inherit the env var or hardcoded default for that slot.
+
+### `operationTracker`
+
+Controls per-tool progress reporting, slow/stall detection, and automatic recovery for agent instances. When enabled (the default), the tracker monitors each tool invocation and thinking gap, sending progress updates to the user and triggering recovery actions when operations exceed their thresholds.
+
+Set `"enabled": false` to disable the tracker entirely and fall back to the legacy watchdog-only behavior (30-minute hard timeout with no per-tool granularity).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable or disable the operation tracker. |
+| `progressIntervalMs` | integer | `30000` | Interval (ms) between periodic progress updates sent to the user while a tool runs. |
+| `thinkingLongMs` | integer | `45000` | Time (ms) without any event before a "still thinking" notification is sent. |
+| `thinkingStallMs` | integer | `300000` | Time (ms) without any event before a liveness probe (newline to stdin) is triggered. |
+| `recoveryGraceMs` | integer | `15000` | Time (ms) to wait for the provider to respond after a recovery action before the hard watchdog takes over. |
+| `toolThresholds` | object | see below | Per-tool-category timing thresholds. Keys are tool category names; values are `ToolThreshold` objects. |
+
+#### Tool Thresholds
+
+Each tool category has three timing parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| `expectedMs` | Baseline expected duration for the tool. |
+| `slowMultiplier` | After `expectedMs * slowMultiplier`, a "slow" warning is sent to the user. |
+| `stallMultiplier` | After `expectedMs * stallMultiplier`, the tool is considered stalled and recovery is triggered (Ctrl+C to stdin). |
+
+**Platform defaults:**
+
+| Category | `expectedMs` | `slowMultiplier` | `stallMultiplier` | Slow at | Stall at |
+|----------|-------------|-------------------|--------------------| --------|----------|
+| `agent` | 120000 | 1.5 | 3 | 3 min | 6 min |
+| `bash` | 15000 | 2 | 5 | 30s | 75s |
+| `read` | 3000 | 3 | 10 | 9s | 30s |
+| `edit` | 2000 | 3 | 10 | 6s | 20s |
+| `web` | 10000 | 2 | 4 | 20s | 40s |
+| `mcp` | 15000 | 2 | 5 | 30s | 75s |
+| `skill` | 3000 | 3 | 10 | 9s | 30s |
+| `default` | 10000 | 2 | 5 | 20s | 50s |
+
+Override individual categories by providing partial objects — unspecified fields inherit from the category default (or the `default` category for custom keys).
+
+**Example — override bash and add a custom category:**
+
+```json
+"operationTracker": {
+  "enabled": true,
+  "progressIntervalMs": 30000,
+  "toolThresholds": {
+    "bash": { "expectedMs": 30000, "stallMultiplier": 3 },
+    "my_custom_tool": { "expectedMs": 60000, "slowMultiplier": 2, "stallMultiplier": 4 }
+  }
+}
+```
+
+#### Interaction with `toolUpdateMode`
+
+The operation tracker detects and recovers from stuck operations regardless of the `toolUpdateMode` setting. The mode only controls what the user sees:
+
+| Mode | Progress updates | Slow warning | Stall warning |
+|------|-----------------|--------------|---------------|
+| `full` | Elapsed time every 30s | Timing details and expected duration | Technical details with elapsed time |
+| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "Got stuck — trying again..." |
+| `minimal` | Typing indicator only | "Still working..." | "Something went wrong — retrying..." |
 
 ### `agentOptions`
 
