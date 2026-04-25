@@ -256,7 +256,7 @@ describe('PineconeMemory', () => {
       });
       const result = await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same text');
       expect(result.existingId).toBe('existing-123');
-      expect(result.score).toBe(0.96);
+      expect(result.score).toBeCloseTo(0.96, 6);
     });
 
     it('returns isDuplicate: true at exactly the threshold (0.95)', async () => {
