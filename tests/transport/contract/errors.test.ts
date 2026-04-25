@@ -48,6 +48,28 @@ describe('TransportError subclasses', () => {
     expect(e.payload.phase).toBe('provider_call_started');
   });
 
+  it('RateLimitedError preserves retryAfterMs structurally and exposes the human hint', () => {
+    const e = new RateLimitedError({
+      ...base,
+      scope: 'provider',
+      message: 'rate limited',
+      retryAfterMs: 1500,
+    });
+    expect(e.payload.retryAfterMs).toBe(1500);
+    expect(e.payload.hint).toBe('retry-after-ms=1500');
+  });
+
+  it('RateLimitedError leaves retryAfterMs undefined when input has none', () => {
+    const e = new RateLimitedError({
+      ...base,
+      scope: 'provider',
+      message: 'rate limited',
+      hint: 'try again later',
+    });
+    expect(e.payload.retryAfterMs).toBeUndefined();
+    expect(e.payload.hint).toBe('try again later');
+  });
+
   it('UnsupportedCapabilityError captures caller_kind', () => {
     const e = new UnsupportedCapabilityError({
       ...base,

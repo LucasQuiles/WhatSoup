@@ -19,6 +19,8 @@ export interface TransportErrorPayload {
   readonly scope: ErrorScope;
   readonly phase?: OperationPhase;
   readonly callerKind?: CallerKind;
+  /** Set on RateLimitedError. Preserved structurally so retry logic does not regex-parse `hint`. */
+  readonly retryAfterMs?: number;
 }
 
 export abstract class TransportError extends Error {
@@ -85,7 +87,10 @@ export class RateLimitedError extends TransportError {
   readonly payload: TransportErrorPayload;
   constructor(input: RateLimitedInput) {
     super(input.message);
-    this.payload = build(ErrorCode.RATE_LIMITED, true, input, { hint: input.retryAfterMs ? `retry-after-ms=${input.retryAfterMs}` : input.hint });
+    this.payload = build(ErrorCode.RATE_LIMITED, true, input, {
+      hint: input.retryAfterMs ? `retry-after-ms=${input.retryAfterMs}` : input.hint,
+      retryAfterMs: input.retryAfterMs,
+    });
   }
 }
 
