@@ -523,7 +523,7 @@ describe('SessionManager', () => {
 
   // ─── P3-A: Watchdog tests ─────────────────────────────────────────────────
 
-  it('sendTurn arms the 3-tier watchdog and SIGKILL fires after WATCHDOG_HARD_MS (30 min)', async () => {
+  it('sendTurn arms only the hard watchdog backstop — SIGKILL fires after WATCHDOG_HARD_MS (30 min)', async () => {
     vi.useFakeTimers();
 
     const db = makeDb();
@@ -534,20 +534,14 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.sendTurn('test message');
 
-    // Nothing should fire before 10 min
-    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    // armWatchdog should only arm the hard timer — soft/warn should be null
+    expect((sm as unknown as { watchdogSoft: unknown }).watchdogSoft).toBeNull();
+    expect((sm as unknown as { watchdogWarn: unknown }).watchdogWarn).toBeNull();
+    expect((sm as unknown as { watchdogHard: unknown }).watchdogHard).not.toBeNull();
+
+    // No notifications before 30 min (soft/warn are no longer armed)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS + 1);
     expect(notifyUser).not.toHaveBeenCalled();
-
-    // Advance to soft probe (10 min)
-    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS + 1);
-    expect(notifyUser).toHaveBeenCalledTimes(1);
-    expect(notifyUser.mock.calls[0][0]).toContain('10+ minutes');
-    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
-
-    // Advance to warn probe (20 min)
-    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS - WATCHDOG_SOFT_MS);
-    expect(notifyUser).toHaveBeenCalledTimes(2);
-    expect(notifyUser.mock.calls[1][0]).toContain('20+ minutes');
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
     // Advance to hard kill (30 min)
@@ -592,8 +586,9 @@ describe('SessionManager', () => {
     await sm.sendTurn('test message');
     sm.trackToolStart('tool-after-crash');
 
-    expect((sm as unknown as { watchdogSoft: unknown }).watchdogSoft).not.toBeNull();
-    expect((sm as unknown as { watchdogWarn: unknown }).watchdogWarn).not.toBeNull();
+    // Only hard timer is armed (soft/warn demoted to no-ops)
+    expect((sm as unknown as { watchdogSoft: unknown }).watchdogSoft).toBeNull();
+    expect((sm as unknown as { watchdogWarn: unknown }).watchdogWarn).toBeNull();
     expect((sm as unknown as { watchdogHard: unknown }).watchdogHard).not.toBeNull();
     expect(sm.hasPendingTools).toBe(true);
 
@@ -731,7 +726,7 @@ describe('SessionManager', () => {
     expect(mockChild.kill).not.toHaveBeenCalled();
   });
 
-  it('tickWatchdog resets all tiers — agent activity prevents kill', async () => {
+  it('tickWatchdog resets the hard backstop — agent activity prevents kill', async () => {
     vi.useFakeTimers();
 
     const db = makeDb();
@@ -742,22 +737,20 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.sendTurn('test message');
 
-    // Advance to just before soft probe
-    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS - 1_000);
-    expect(notifyUser).not.toHaveBeenCalled();
+    // Advance to 20 min — no kill yet (hard is 30 min)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS);
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
-    // Simulate agent activity — resets all timers
+    // Simulate agent activity — resets the hard timer
     sm.tickWatchdog();
 
-    // Advance another 9 minutes — no probe should fire (timer was reset)
-    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS - 1_000);
-    expect(notifyUser).not.toHaveBeenCalled();
+    // Advance another 20 min — no kill (timer was reset at minute 20)
+    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS);
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
-    // Now advance past the reset soft threshold
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(notifyUser).toHaveBeenCalledTimes(1);
-    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+    // Advance to 30 min after the reset — now it fires
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS - WATCHDOG_WARN_MS);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
   });
@@ -1031,9 +1024,7 @@ describe('SessionManager', () => {
     expect(sm.hasPendingTools).toBe(false);
   });
 
-  it('soft watchdog shows busy message when tools are pending', async () => {
-    vi.useFakeTimers();
-
+  it('soft/warn watchdog handlers are no-ops (deprecated, replaced by operation tracker)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const notifyUser = vi.fn();
@@ -1042,37 +1033,12 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.sendTurn('test message');
 
-    sm.trackToolStart('long-tool-1');
+    // Directly invoke the deprecated handlers — they should be no-ops
+    (sm as unknown as { handleWatchdogSoft: () => void }).handleWatchdogSoft();
+    (sm as unknown as { handleWatchdogWarn: () => void }).handleWatchdogWarn();
 
-    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS + 1);
-    expect(notifyUser).toHaveBeenCalledTimes(1);
-    expect(notifyUser.mock.calls[0][0]).toContain('long operation');
-    expect(notifyUser.mock.calls[0][0]).toContain('10+ min');
-
-    vi.useRealTimers();
-  });
-
-  it('warn watchdog shows busy message when tools are pending', async () => {
-    vi.useFakeTimers();
-
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const notifyUser = vi.fn();
-
-    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
-    await sm.spawnSession();
-    await sm.sendTurn('test message');
-
-    sm.trackToolStart('long-tool-2');
-
-    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS + 1);
-    expect(notifyUser).toHaveBeenCalledTimes(2);
-    // soft fires first (busy message)
-    expect(notifyUser.mock.calls[0][0]).toContain('long operation');
-    // warn fires second (busy message)
-    expect(notifyUser.mock.calls[1][0]).toContain('20+ min');
-
-    vi.useRealTimers();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalled();
   });
 
   it('hard watchdog kills regardless of pending tools', async () => {
@@ -1090,29 +1056,6 @@ describe('SessionManager', () => {
 
     await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
     expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
-
-    vi.useRealTimers();
-  });
-
-  it('soft/warn watchdog shows idle message when no tools pending', async () => {
-    vi.useFakeTimers();
-
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const notifyUser = vi.fn();
-
-    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
-    await sm.spawnSession();
-    await sm.sendTurn('test message');
-
-    // No pending tools — should show idle message
-    await vi.advanceTimersByTimeAsync(WATCHDOG_SOFT_MS + 1);
-    expect(notifyUser).toHaveBeenCalledTimes(1);
-    expect(notifyUser.mock.calls[0][0]).toContain('without responding');
-
-    await vi.advanceTimersByTimeAsync(WATCHDOG_WARN_MS - WATCHDOG_SOFT_MS);
-    expect(notifyUser).toHaveBeenCalledTimes(2);
-    expect(notifyUser.mock.calls[1][0]).toContain('silent for 20+ minutes');
 
     vi.useRealTimers();
   });

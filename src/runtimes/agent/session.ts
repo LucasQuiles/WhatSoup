@@ -947,33 +947,20 @@ export class SessionManager {
   }
 
   private armWatchdog(): void {
-    this.watchdogSoft = setTimeout(() => this.handleWatchdogSoft(), WATCHDOG_SOFT_MS);
-    this.watchdogWarn = setTimeout(() => this.handleWatchdogWarn(), WATCHDOG_WARN_MS);
+    // Only the hard backstop remains — soft/warn probes are replaced by the operation tracker
     this.watchdogHard = setTimeout(() => this.handleWatchdogHard(), WATCHDOG_HARD_MS);
   }
 
+  /** @deprecated Replaced by OperationTracker. Kept for one release cycle. */
   private handleWatchdogSoft(): void {
     this.watchdogSoft = null;
-    if (!this.active || this.child === null) return;
-    if (this.hasPendingTools) {
-      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_soft', pendingTools: this.pendingToolIds.size }, 'agent busy 10 min — long-running tool in progress');
-      this.notifyUser?.('_Agent is running a long operation (10+ min). Still working..._');
-    } else {
-      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_soft' }, 'agent idle 10 min — still alive, notifying user');
-      this.notifyUser?.('_Agent has been working for 10+ minutes without responding. Still running..._');
-    }
+    // No-op — operation tracker handles per-tool slow detection
   }
 
+  /** @deprecated Replaced by OperationTracker. Kept for one release cycle. */
   private handleWatchdogWarn(): void {
     this.watchdogWarn = null;
-    if (!this.active || this.child === null) return;
-    if (this.hasPendingTools) {
-      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_warn', pendingTools: this.pendingToolIds.size }, 'agent busy 20 min — long-running tool, may be stalled');
-      this.notifyUser?.('⚠️ _Agent has been running a long operation for 20+ min. Send any message to check in._');
-    } else {
-      log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'watchdog_warn' }, 'agent idle 20 min — may be stalled');
-      this.notifyUser?.('⚠️ _Agent has been silent for 20+ minutes. Will be terminated in 10 minutes if no activity. Send any message to keep alive._');
-    }
+    // No-op — operation tracker handles per-tool stall detection
   }
 
   private handleWatchdogHard(): void {
