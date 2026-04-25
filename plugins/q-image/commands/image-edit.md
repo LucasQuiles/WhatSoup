@@ -32,11 +32,21 @@ python3 ~/.claude/plugins/q-image/tools/image-tools.py resize "$SOURCE_IMAGE" "<
 ```
 Send the output file via `send_media`. Default preserves aspect ratio. Add `--stretch` for exact dimensions.
 
+**Smart defaults** — if no size given:
+- Photos > 4000px: resize to 2048px on longest side
+- Photos > 2000px: resize to 1024px on longest side
+- Otherwise: resize to 50% of original
+
 ### compress <quality:1-100>
 ```bash
 python3 ~/.claude/plugins/q-image/tools/image-tools.py compress "$SOURCE_IMAGE" "/tmp/q-imagegen/$(uuidgen).jpg" <quality>
 ```
 Send the output file. Quality 1-100 (higher = better quality, larger file).
+
+**Smart defaults** — if no quality given:
+- Files > 5MB: quality 60
+- Files > 1MB: quality 75
+- Otherwise: quality 85
 
 ### crop <spec>
 Spec can be a ratio (`16:9`, `1:1`, `4:3`) or explicit (`WxH+X+Y`).
@@ -45,12 +55,28 @@ python3 ~/.claude/plugins/q-image/tools/image-tools.py crop "$SOURCE_IMAGE" "/tm
 ```
 Send the output file.
 
+**Common presets:**
+
+| Preset | Ratio | Use case |
+|--------|-------|----------|
+| square | 1:1 | Profile pics, Instagram |
+| portrait | 3:4 | Mobile wallpaper, Pinterest |
+| landscape | 16:9 | Desktop wallpaper, YouTube |
+| story | 9:16 | Instagram/TikTok stories |
+| banner | 3:1 | Website banners, Twitter header |
+
 ### convert <format>
 Format: `png`, `jpg`, `webp`, `gif`
 ```bash
 python3 ~/.claude/plugins/q-image/tools/image-tools.py convert "$SOURCE_IMAGE" "/tmp/q-imagegen/$(uuidgen).<format>"
 ```
 Send the output file.
+
+**Format guidance:**
+- `png` — lossless, supports transparency, larger files
+- `jpg` — lossy, no transparency, smallest for photos
+- `webp` — best of both worlds, smallest with good quality, wide browser support
+- `gif` — only for simple graphics, limited to 256 colors
 
 ### info
 ```bash
@@ -68,85 +94,113 @@ Color mode: RGB
 ### remove-bg
 First send acknowledgment: "Editing your image..." and typing indicator.
 
-Then call OpenAI. IMPORTANT: Pass source path via environment variable — NEVER interpolate paths into Python source:
+Then call OpenAI via curl. IMPORTANT: Pass source path via environment variable:
 ```bash
-IMG_SOURCE='<SOURCE_IMAGE>' python3 << 'PY'
-import base64, json, os, sys, uuid
-from openai import OpenAI
-
-client = OpenAI()
-source = os.environ["IMG_SOURCE"]
-
-try:
-    with open(source, "rb") as f:
-        response = client.images.edit(
-            model="gpt-image-1",
-            image=f,
-            prompt="Remove the background completely, make it transparent. Keep the foreground subject exactly as-is.",
-            size="1024x1024",
-            quality="high",
-            n=1
-        )
-    outdir = "/tmp/q-imagegen"
-    os.makedirs(outdir, exist_ok=True)
-    outpath = os.path.join(outdir, f"{uuid.uuid4().hex}.png")
-    with open(outpath, "wb") as f:
-        f.write(base64.b64decode(response.data[0].b64_json))
-    print(json.dumps({"ok": True, "path": outpath}))
-except Exception as e:
-    err = str(e)
-    if "content_policy" in err or "safety" in err.lower():
-        print(json.dumps({"ok": False, "error": "content_policy"}))
-    elif "401" in err:
-        print(json.dumps({"ok": False, "error": "auth"}))
-    else:
-        print(json.dumps({"ok": False, "error": "server", "detail": err[:200]}))
+mkdir -p /tmp/q-imagegen
+export IMG_SOURCE='<SOURCE_IMAGE>'
+export IMG_OUTPATH="/tmp/q-imagegen/$(uuidgen).png"
+bash << 'EDITEOF'
+set -euo pipefail
+OKEY=$(secret-tool lookup service openai)
+RESP=$(curl -sf https://api.openai.com/v1/images/edits \
+  -H "Authorization: Bearer $OKEY" \
+  -F model="gpt-image-1" \
+  -F "image=@$IMG_SOURCE" \
+  -F prompt="Remove the background completely and make it fully transparent. Keep the foreground subject perfectly intact — preserve all edges, hair, fine details, and semi-transparent areas. The result should have a clean alpha channel with no background remnants. Note: some white areas at image edges are a known API behavior and may appear." \
+  -F size="1024x1024" \
+  -F quality="high" \
+  -F n="1" \
+  -F output_format="b64_json")
+python3 -c "
+import base64, json, sys, os
+data = json.loads(sys.stdin.read())
+if 'error' in data:
+    print(json.dumps({'ok': False, 'error': data['error'].get('code','server'), 'detail': data['error'].get('message','')[:200]}))
     sys.exit(1)
-PY
+b64 = data['data'][0]['b64_json']
+outpath = os.environ['IMG_OUTPATH']
+with open(outpath, 'wb') as f:
+    f.write(base64.b64decode(b64))
+print(json.dumps({'ok': True, 'path': outpath}))
+" <<< "$RESP"
+EDITEOF
 ```
 Send the output via `send_media`. Handle errors using the same mapping as `/image`.
 
 ### ai "<prompt>"
 First send acknowledgment: "Editing your image..." and typing indicator.
 
-Then call OpenAI. IMPORTANT: Pass source path AND edit prompt via environment variables — NEVER interpolate user text into Python source:
+#### AI Edit Prompt Enhancement
+
+Before sending the edit prompt to the API, enhance it for better results. The same principles as image generation apply, but adapted for edits:
+
+**Structure:** Describe what to change, how to change it, and what to preserve.
+
+**Rules:**
+1. **Be explicit about preservation** — always mention what should NOT change.
+2. **Describe the desired result**, not just the action ("make the sky a vibrant sunset with orange and pink clouds" vs "change sky").
+3. **Mention blending** — edits should look natural, matching existing lighting and style.
+4. **Specify quality markers** — "seamless", "photorealistic", "matching the existing style".
+5. **Keep it focused** — one clear edit per prompt produces better results than multiple changes.
+
+**Enhancement examples:**
+
+| User says | Enhanced prompt |
+|-----------|---------------|
+| "remove the person" | "Remove the person from the scene completely. Fill the area with a natural continuation of the background, matching perspective, lighting, and texture seamlessly. Preserve all other elements exactly as they are." |
+| "make it sunset" | "Transform the sky into a warm golden sunset with orange and pink clouds. Adjust the lighting on all surfaces to match warm sunset illumination with long shadows. Preserve the composition and all foreground elements." |
+| "add sunglasses" | "Add stylish dark aviator sunglasses to the person's face, properly positioned on the nose bridge and ears. The sunglasses should have realistic reflections and shadows matching the existing lighting. Preserve all other facial features and the rest of the image." |
+| "make it winter" | "Transform the scene into winter: add a layer of fresh white snow on all horizontal surfaces, frost on windows and edges, visible breath if people are present, and an overcast winter sky. Adjust lighting to cool blue-white tones. Preserve the composition and structural elements." |
+| "fix the lighting" | "Improve the overall lighting to be well-balanced and natural. Reduce harsh shadows, brighten underexposed areas, and ensure even illumination across the scene while maintaining natural contrast. Preserve all content and composition." |
+| "make it look professional" | "Enhance this image to look professionally shot: improve color balance, add subtle vignetting, sharpen the subject, ensure proper white balance, and apply a clean, polished look. Preserve the original subject and composition." |
+
+#### input_fidelity Guidance
+
+For AI edits, consider image detail level:
+- Use `high` input_fidelity (default) for edits requiring precise detail (face edits, text, fine patterns)
+- Use `low` input_fidelity for broad edits (sky replacement, color grading, style changes) — faster and cheaper
+
+Then call OpenAI via curl. IMPORTANT: Pass source path AND enhanced edit prompt via environment variables:
 ```bash
-IMG_SOURCE='<SOURCE_IMAGE>' EDIT_PROMPT='<USER_EDIT_PROMPT>' python3 << 'PY'
-import base64, json, os, sys, uuid
-from openai import OpenAI
-
-client = OpenAI()
-source = os.environ["IMG_SOURCE"]
-edit_prompt = os.environ["EDIT_PROMPT"]
-
-try:
-    with open(source, "rb") as f:
-        response = client.images.edit(
-            model="gpt-image-1",
-            image=f,
-            prompt=edit_prompt,
-            size="1024x1024",
-            quality="high",
-            n=1
-        )
-    outdir = "/tmp/q-imagegen"
-    os.makedirs(outdir, exist_ok=True)
-    outpath = os.path.join(outdir, f"{uuid.uuid4().hex}.png")
-    with open(outpath, "wb") as f:
-        f.write(base64.b64decode(response.data[0].b64_json))
-    print(json.dumps({"ok": True, "path": outpath}))
-except Exception as e:
-    err = str(e)
-    if "content_policy" in err or "safety" in err.lower():
-        print(json.dumps({"ok": False, "error": "content_policy"}))
-    elif "401" in err:
-        print(json.dumps({"ok": False, "error": "auth"}))
-    else:
-        print(json.dumps({"ok": False, "error": "server", "detail": err[:200]}))
+mkdir -p /tmp/q-imagegen
+export IMG_SOURCE='<SOURCE_IMAGE>'
+export EDIT_PROMPT='<ENHANCED_EDIT_PROMPT>'
+export IMG_OUTPATH="/tmp/q-imagegen/$(uuidgen).png"
+bash << 'EDITEOF'
+set -euo pipefail
+OKEY=$(secret-tool lookup service openai)
+RESP=$(curl -sf https://api.openai.com/v1/images/edits \
+  -H "Authorization: Bearer $OKEY" \
+  -F model="gpt-image-1" \
+  -F "image=@$IMG_SOURCE" \
+  -F prompt="$EDIT_PROMPT" \
+  -F size="1024x1024" \
+  -F quality="high" \
+  -F n="1" \
+  -F output_format="b64_json")
+python3 -c "
+import base64, json, sys, os
+data = json.loads(sys.stdin.read())
+if 'error' in data:
+    print(json.dumps({'ok': False, 'error': data['error'].get('code','server'), 'detail': data['error'].get('message','')[:200]}))
     sys.exit(1)
-PY
+b64 = data['data'][0]['b64_json']
+outpath = os.environ['IMG_OUTPATH']
+with open(outpath, 'wb') as f:
+    f.write(base64.b64decode(b64))
+print(json.dumps({'ok': True, 'path': outpath}))
+" <<< "$RESP"
+EDITEOF
 ```
-Send the output via `send_media` with the edit prompt as caption. Handle errors using the same mapping as `/image`.
+Send the output via `send_media` with the original user edit request as caption. Handle errors using the same mapping as `/image`.
+
+## Multi-Step Edits
+
+When a user requests multiple edits (e.g., "resize to 800x600 and convert to webp"), execute them sequentially:
+1. Run the first operation, saving to a temp file
+2. Use that temp file as input for the next operation
+3. Send only the final result
+4. Clean up all intermediate files
 
 ## Error Handling
 
@@ -170,14 +224,22 @@ When user sends `/image-edit help`:
 *Image Editing*
 
 Send an image, then:
+
+*Free operations:*
 /image-edit resize 1200x630
 /image-edit compress 80
 /image-edit crop 16:9
 /image-edit convert webp
 /image-edit info
+
+*AI operations (~$0.04 each):*
 /image-edit remove-bg
 /image-edit ai "your edit instructions"
 
-_Resize, compress, crop, convert, info are free._
-_AI edits and remove-bg cost ~$0.04 each._
+Smart defaults — just say "resize" or "compress" without args and reasonable defaults are applied based on the image.
+
+AI edit prompts are automatically enhanced for better results. "remove the person" becomes a detailed instruction about seamless background fill.
+
+_Crop presets: square, portrait, landscape, story, banner_
+_Formats: png, jpg, webp, gif_
 ```
