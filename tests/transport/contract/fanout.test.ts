@@ -74,14 +74,17 @@ describe('FanoutDispatcher', () => {
     expect(ok).toHaveBeenCalledTimes(3);
   });
 
-  it('overflow on a subscriber queue increments metric and suspends after threshold', async () => {
-    const d = new FanoutDispatcher({ ...opts, perSubscriberCapacity: 1 });
+  it('overflow on a subscriber queue increments metric AND suspends after threshold', async () => {
+    const d = new FanoutDispatcher({ ...opts, perSubscriberCapacity: 1, overflowThreshold: 2 });
     const stuck = vi.fn(async () => { await new Promise(r => setTimeout(r, 100)); });
     d.subscribe('s', stuck);
-    d.enqueue(ev(1));
-    d.enqueue(ev(2));
-    d.enqueue(ev(3));
-    expect(d.metrics.subscriberOverflow.get('s') ?? 0).toBeGreaterThan(0);
+    d.enqueue(ev(1));   // accepted, drain starts, queue slot becomes free synchronously before await
+    d.enqueue(ev(2));   // accepted into the 1-cap queue while drain is busy
+    d.enqueue(ev(3));   // overflow #1
+    d.enqueue(ev(4));   // overflow #2 — crosses threshold
+    expect(d.metrics.subscriberOverflow.get('s') ?? 0).toBeGreaterThanOrEqual(2);
+    expect(d.isSuspended('s')).toBe(true);
+    expect(d.metrics.subscriberSuspensions.get('s')).toBe('overflow');
   });
 
   it('subscribe returns a Subscription whose dispose() removes the subscriber', async () => {
