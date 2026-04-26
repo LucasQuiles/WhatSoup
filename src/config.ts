@@ -37,6 +37,18 @@ function intEnv(key: string, fallback: number): number {
   return n;
 }
 
+function positiveIntValue(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function positiveIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw || raw.trim() === '') return fallback;
+  const trimmed = raw.trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) return fallback;
+  return parseInt(trimmed, 10);
+}
+
 // ---------------------------------------------------------------------------
 // INSTANCE_CONFIG — set by bootstrap/instance-loader for multi-instance mode
 // When absent, behavior is identical to before (backward compat for all tests).
@@ -255,8 +267,8 @@ export const config = {
   pineconeAllowedIndexes: (Array.isArray(instance?.pineconeAllowedIndexes) ? instance.pineconeAllowedIndexes : []) as string[],
 
   // Recency decay — Ebbinghaus-style exponential forgetting for memory search
-  recencyHalfLifeDays: (instance?.recencyHalfLifeDays as number | undefined) ?? intEnv('RECENCY_HALF_LIFE_DAYS', 14),
-  maxAgeDays: (instance?.maxAgeDays as number | undefined) ?? intEnv('MAX_AGE_DAYS', 90),
+  recencyHalfLifeDays: positiveIntValue(instance?.recencyHalfLifeDays, positiveIntEnv('RECENCY_HALF_LIFE_DAYS', 14)),
+  maxAgeDays: positiveIntValue(instance?.maxAgeDays, positiveIntEnv('MAX_AGE_DAYS', 90)),
 
   // Tool update verbosity: 'full' (default — all updates shown to user),
   // 'friendly' (all updates in plain language for non-technical users),

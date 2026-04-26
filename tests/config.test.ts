@@ -18,6 +18,8 @@ beforeEach(() => {
     VALIDATION_MODEL: process.env.VALIDATION_MODEL,
     FALLBACK_MODEL: process.env.FALLBACK_MODEL,
     PINECONE_INDEX: process.env.PINECONE_INDEX,
+    RECENCY_HALF_LIFE_DAYS: process.env.RECENCY_HALF_LIFE_DAYS,
+    MAX_AGE_DAYS: process.env.MAX_AGE_DAYS,
     LOG_LEVEL: process.env.LOG_LEVEL,
     WHATSOUP_CONFIG_DIR: process.env.WHATSOUP_CONFIG_DIR,
     WHATSOUP_DATA_DIR: process.env.WHATSOUP_DATA_DIR,
@@ -45,6 +47,8 @@ beforeEach(() => {
   delete process.env.VALIDATION_MODEL;
   delete process.env.FALLBACK_MODEL;
   delete process.env.PINECONE_INDEX;
+  delete process.env.RECENCY_HALF_LIFE_DAYS;
+  delete process.env.MAX_AGE_DAYS;
   delete process.env.LOG_LEVEL;
   delete process.env.WHATSOUP_GUI_PORT;
   // D-2: keep existing "apiTimeoutMs defaults to 30_000" tests deterministic
@@ -659,6 +663,42 @@ describe('config — apiTimeoutMs env-var override (P3.6 D-2)', () => {
     delete process.env.INSTANCE_CONFIG;
     const { config } = await import('../src/config.ts');
     expect(config.apiTimeoutMs).toBe(30_000);
+  });
+});
+
+describe('config — memory recency env-var overrides', () => {
+  it('defaults memory recency settings when env vars are unset', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.recencyHalfLifeDays).toBe(14);
+    expect(config.maxAgeDays).toBe(90);
+  });
+
+  it('accepts positive integer memory recency env vars', async () => {
+    process.env.RECENCY_HALF_LIFE_DAYS = '21';
+    process.env.MAX_AGE_DAYS = '180';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.recencyHalfLifeDays).toBe(21);
+    expect(config.maxAgeDays).toBe(180);
+  });
+
+  it('falls back for malformed or partial-numeric memory recency env vars', async () => {
+    process.env.RECENCY_HALF_LIFE_DAYS = '14abc';
+    process.env.MAX_AGE_DAYS = '1.5';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.recencyHalfLifeDays).toBe(14);
+    expect(config.maxAgeDays).toBe(90);
+  });
+
+  it('falls back for zero or negative memory recency env vars', async () => {
+    process.env.RECENCY_HALF_LIFE_DAYS = '0';
+    process.env.MAX_AGE_DAYS = '-30';
+    delete process.env.INSTANCE_CONFIG;
+    const { config } = await import('../src/config.ts');
+    expect(config.recencyHalfLifeDays).toBe(14);
+    expect(config.maxAgeDays).toBe(90);
   });
 });
 
