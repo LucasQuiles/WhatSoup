@@ -143,6 +143,40 @@ describe('PineconeMemory', () => {
       expect(results[2].id).toBe('rec-c');
     });
 
+    it('reorders search results by decayed score so older records sink below newer equally-similar records', async () => {
+      const mutableConfig = configModule.config as unknown as {
+        recencyHalfLifeDays: number;
+        maxAgeDays: number;
+      };
+      const previousHalfLife = mutableConfig.recencyHalfLifeDays;
+      const previousMaxAge = mutableConfig.maxAgeDays;
+      mutableConfig.recencyHalfLifeDays = 14;
+      mutableConfig.maxAgeDays = 90;
+
+      try {
+        const now = Date.now();
+        const fresh = makePineconeHit('fresh', 0.90, {
+          created_at: new Date(now).toISOString(),
+        });
+        const stale = makePineconeHit('stale', 0.90, {
+          created_at: new Date(now - 60 * 86_400_000).toISOString(),
+        });
+
+        // Mock returns stale first; search() should apply recency decay and reorder.
+        mockSearchRecords.mockResolvedValueOnce({
+          result: { hits: [stale, fresh] },
+        });
+
+        const out = await memory.search('test query', {}, 2);
+        expect(out.map((r) => r.id)).toEqual(['fresh', 'stale']);
+        // Stale should still be present (60 < maxAge=90), just reordered
+        expect(out.find((r) => r.id === 'stale')).toBeDefined();
+      } finally {
+        mutableConfig.recencyHalfLifeDays = previousHalfLife;
+        mutableConfig.maxAgeDays = previousMaxAge;
+      }
+    });
+
     it('returns empty array when hits is empty', async () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
       const results = await memory.search('nothing', {}, 5);
