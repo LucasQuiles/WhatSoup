@@ -125,19 +125,30 @@ export class InMemoryAdapter implements
   // ─── Test injection ────────────────────────────────────────────────────────
 
   injectInbound(event: InboundEvent): void {
+    const callAll = <T>(handlers: ReadonlySet<(e: T) => void>, payload: T): void => {
+      // Snapshot via [...handlers] to isolate mid-dispatch dispose (I2).
+      // Collect errors so siblings still receive the event, then surface failures.
+      const errors: unknown[] = [];
+      for (const h of [...handlers]) {
+        try { h(payload); } catch (err) { errors.push(err); }
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, 'One or more InMemoryAdapter listeners failed');
+      }
+    };
     switch (event.kind) {
       case 'message':
         this.knownConversations.add(event.data.conversation.id);
-        for (const h of this.listeners.message) h(event.data);
+        callAll(this.listeners.message, event.data);
         return;
-      case 'reaction': for (const h of this.listeners.reaction) h(event.data); return;
-      case 'edit': for (const h of this.listeners.edit) h(event.data); return;
-      case 'delete': for (const h of this.listeners.delete) h(event.data); return;
-      case 'presence': for (const h of this.listeners.presence) h(event.data); return;
-      case 'read': for (const h of this.listeners.read) h(event.data); return;
-      case 'group-update': for (const h of this.listeners['group-update']) h(event.data); return;
-      case 'button-press': for (const h of this.listeners['button-press']) h(event.data); return;
-      case 'outbound-status': for (const h of this.listeners['outbound-status']) h(event.data); return;
+      case 'reaction': callAll(this.listeners.reaction, event.data); return;
+      case 'edit': callAll(this.listeners.edit, event.data); return;
+      case 'delete': callAll(this.listeners.delete, event.data); return;
+      case 'presence': callAll(this.listeners.presence, event.data); return;
+      case 'read': callAll(this.listeners.read, event.data); return;
+      case 'group-update': callAll(this.listeners['group-update'], event.data); return;
+      case 'button-press': callAll(this.listeners['button-press'], event.data); return;
+      case 'outbound-status': callAll(this.listeners['outbound-status'], event.data); return;
     }
   }
 

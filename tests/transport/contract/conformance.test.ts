@@ -441,3 +441,49 @@ describe('Conformance — InMemoryAdapter cross-operation idempotency', () => {
     expect(mediaRefReplay).toEqual(mediaRef);
   });
 });
+
+describe('Conformance — InMemoryAdapter listener-Set isolation', () => {
+  const messageEvent = (channel: ReturnType<typeof makeChannelId>, id = 'm1') => ({
+    kind: 'message' as const,
+    data: {
+      ref: { channel, conversation: 'c', id },
+      conversation: { channel, id: 'c' },
+      sender: { channel, id: 's' },
+      fromMe: false,
+      text: id,
+      attachments: [],
+      timestamp: new Date(),
+      inboundEventKey: `wa:${id}`,
+      transportTimestamp: new Date(),
+      ingestSeq: 1,
+    },
+  });
+
+  it('I2 — handler that disposes a sibling before its turn does not skip that sibling', async () => {
+    const channel = makeChannelId('whatsapp', 'in-memory');
+    const a = new InMemoryAdapter(channel);
+    await a.connect();
+    const calls: string[] = [];
+    let subB!: { dispose(): void };
+    a.on('message', () => {
+      calls.push('A-disposes-B');
+      subB.dispose();
+    });
+    subB = a.on('message', () => { calls.push('B-still-fires'); });
+    a.on('message', () => { calls.push('C-still-fires'); });
+    a.injectInbound(messageEvent(channel));
+    expect(calls).toEqual(['A-disposes-B', 'B-still-fires', 'C-still-fires']);
+  });
+
+  it('I1 — throwing handler reports after sibling handlers still receive the event', async () => {
+    const channel = makeChannelId('whatsapp', 'in-memory');
+    const a = new InMemoryAdapter(channel);
+    await a.connect();
+    const calls: string[] = [];
+    a.on('message', () => { calls.push('A-throws'); throw new Error('boom'); });
+    a.on('message', () => { calls.push('B-still-fires'); });
+    a.on('message', () => { calls.push('C-still-fires'); });
+    expect(() => a.injectInbound(messageEvent(channel))).toThrow(AggregateError);
+    expect(calls).toEqual(['A-throws', 'B-still-fires', 'C-still-fires']);
+  });
+});
