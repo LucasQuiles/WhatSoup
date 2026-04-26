@@ -59,6 +59,17 @@ describe('TransportError subclasses', () => {
     expect(e.payload.hint).toBe('retry-after-ms=1500');
   });
 
+  it('RateLimitedError renders hint for retryAfterMs:0 (boundary)', () => {
+    const e = new RateLimitedError({
+      ...base,
+      scope: 'provider',
+      message: 'rate limited',
+      retryAfterMs: 0,
+    });
+    expect(e.payload.retryAfterMs).toBe(0);
+    expect(e.payload.hint).toBe('retry-after-ms=0');
+  });
+
   it('RateLimitedError leaves retryAfterMs undefined when input has none', () => {
     const e = new RateLimitedError({
       ...base,

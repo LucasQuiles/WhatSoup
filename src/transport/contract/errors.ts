@@ -88,7 +88,7 @@ export class RateLimitedError extends TransportError {
   constructor(input: RateLimitedInput) {
     super(input.message);
     this.payload = build(ErrorCode.RATE_LIMITED, true, input, {
-      hint: input.retryAfterMs ? `retry-after-ms=${input.retryAfterMs}` : input.hint,
+      hint: input.retryAfterMs !== undefined ? `retry-after-ms=${input.retryAfterMs}` : input.hint,
       retryAfterMs: input.retryAfterMs,
     });
   }
