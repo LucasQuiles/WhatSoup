@@ -3,6 +3,15 @@ import { config } from '../config.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
 import type { MemoryCluster, ConsolidationResult } from './types.ts';
 
+/**
+ * Dormant memory-consolidation infrastructure.
+ *
+ * As of 2026-04-25 this module is exercised by tests only; no production
+ * scheduler calls `clusterMemories` or `consolidateCluster` yet. Keep the
+ * implementation staged here until the memory scheduler workstream wires
+ * bounded cluster selection, validated LLM output, and provider deadlines.
+ */
+
 const log = createChildLogger('consolidation');
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories from an AI agent's episodic history, identify which patterns represent durable knowledge worth keeping long-term.
