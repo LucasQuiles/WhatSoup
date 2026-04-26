@@ -119,28 +119,23 @@ export class FanoutDispatcher {
         timer = setTimeout(() => resolve('timeout'), this.opts.subscriberTimeoutMs);
       });
 
-      try {
-        const result = await Promise.race([
-          (async () => sub.handler(event))().then(() => 'ok' as const).catch((e: unknown) => ({ err: e })),
-          timeoutPromise,
-        ]);
-        if (timer !== undefined) clearTimeout(timer);
+      const result = await Promise.race([
+        (async () => sub.handler(event))().then(() => 'ok' as const).catch((e: unknown) => ({ err: e })),
+        timeoutPromise,
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
 
-        if (result === 'timeout') {
-          sub.consecutiveTimeouts += 1;
-          this.bumpFailure(sub.id);
-          if (sub.consecutiveTimeouts >= this.opts.consecutiveTimeoutThreshold) {
-            this.suspend(sub, 'timeout');
-          }
-        } else if (typeof result === 'object' && 'err' in result) {
-          this.bumpFailure(sub.id);
-          sub.consecutiveTimeouts = 0;
-        } else {
-          sub.consecutiveTimeouts = 0;
-        }
-      } catch (e) {
-        if (timer !== undefined) clearTimeout(timer);
+      if (result === 'timeout') {
+        sub.consecutiveTimeouts += 1;
         this.bumpFailure(sub.id);
+        if (sub.consecutiveTimeouts >= this.opts.consecutiveTimeoutThreshold) {
+          this.suspend(sub, 'timeout');
+        }
+      } else if (typeof result === 'object' && 'err' in result) {
+        this.bumpFailure(sub.id);
+        sub.consecutiveTimeouts = 0;
+      } else {
+        sub.consecutiveTimeouts = 0;
       }
     }
   }
