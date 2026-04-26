@@ -22,6 +22,7 @@ import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
 import type { ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
+import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -33,6 +34,24 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
     return false;
   }
   return true;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function deepMergeRecords(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const current = result[key];
+    result[key] = isPlainRecord(current) && isPlainRecord(value)
+      ? deepMergeRecords(current, value)
+      : value;
+  }
+  return result;
 }
 
 export interface OpsDeps {
@@ -295,14 +314,9 @@ export async function handleConfigUpdate(
     return;
   }
 
-  // Deep merge for known nested objects so partial patches don't destroy siblings
-  const DEEP_MERGE_KEYS = ['agentOptions', 'models'];
-  const merged = { ...existing, ...patch };
-  for (const key of DEEP_MERGE_KEYS) {
-    if (existing[key] && patch[key] && typeof existing[key] === 'object' && typeof patch[key] === 'object') {
-      merged[key] = { ...(existing[key] as Record<string, unknown>), ...(patch[key] as Record<string, unknown>) };
-    }
-  }
+  // Deep merge nested config so partial memory.pinecone patches do not destroy
+  // sibling namespaces, BYOK key-env settings, or project guards.
+  const merged = deepMergeRecords(existing, patch);
 
   // Validate cwd path traversal (same guard as handleCreateLine)
   if (merged.agentOptions && typeof (merged.agentOptions as Record<string, unknown>).cwd === 'string') {
@@ -405,7 +419,8 @@ export async function handleConfigUpdate(
 
   // Atomic write: write to .tmp then rename
   // Strip settingsJson from persisted config (it lives in .claude/settings.json, not config.json)
-  const { settingsJson: _stripped, ...mergedClean } = merged;
+  const { settingsJson: _stripped, ...mergedCleanRaw } = merged;
+  const mergedClean = migrateLegacyMemoryConfig(mergedCleanRaw, { removeLegacy: true }).config;
   const tmpPath = instance.configPath + '.tmp';
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(mergedClean, null, 2) + '\n', 'utf-8');
@@ -663,7 +678,7 @@ export async function handleCreateLine(
   }
 
   // --- Build config — start with validated required fields, then merge optional fields ---
-  const config: Record<string, unknown> = {
+  let config: Record<string, unknown> = {
     name,
     type,
     adminPhones,
@@ -679,11 +694,15 @@ export async function handleCreateLine(
   const PASSTHROUGH_FIELDS = [
     'description', 'systemPrompt', 'maxTokens', 'tokenBudget', 'rateLimitPerHour',
     'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
-    'pineconeAllowedIndexes', 'agentOptions', 'toolUpdateMode', 'controlPeers',
+    'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
+    'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
+    'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
+    'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',
   ];
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
   }
+  config = migrateLegacyMemoryConfig(config, { removeLegacy: true }).config;
 
   // --- Create directories ---
   const createdExtras: string[] = [];

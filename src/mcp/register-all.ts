@@ -29,6 +29,10 @@ import { registerSchedulingTools } from './tools/scheduling.ts';
 
 const log = createChildLogger('register-all');
 
+export interface RegisterAllToolsOptions {
+  enableKnowledgeSearch?: boolean;
+}
+
 /**
  * Register all 18 tool modules onto the given registry.
  *
@@ -41,6 +45,7 @@ export function registerAllTools(
   registry: ToolRegistry,
   connection: ConnectionManager,
   db: Database,
+  options: RegisterAllToolsOptions = {},
 ): void {
   const getSock = () => connection.getSocket() as ExtendedBaileysSocket | null;
   const register = (tool: ToolDeclaration) => {
@@ -77,8 +82,14 @@ export function registerAllTools(
   try { registerPresenceTools(getSock, connection.presenceCache, register); } catch (err) { log.error({ err }, 'registerPresenceTools failed'); }
 
   // Knowledge search — only when instance config specifies allowed indexes
-  const allowedIndexes: string[] = Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
-  if (allowedIndexes.length > 0) {
+  const memoryPinecone = (config as {
+    memory?: { pinecone?: { allowedIndexes?: string[]; knowledgeSearch?: { enabled?: boolean } } };
+  }).memory?.pinecone;
+  const allowedIndexes: string[] = Array.isArray(memoryPinecone?.allowedIndexes)
+    ? memoryPinecone.allowedIndexes
+    : Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
+  const knowledgeEnabled = memoryPinecone?.knowledgeSearch?.enabled !== false;
+  if (allowedIndexes.length > 0 && knowledgeEnabled && options.enableKnowledgeSearch !== false) {
     try { registerKnowledgeTools(allowedIndexes, register); } catch (err) { log.error({ err }, 'registerKnowledgeTools failed'); }
   }
 

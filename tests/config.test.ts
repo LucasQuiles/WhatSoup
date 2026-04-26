@@ -18,6 +18,9 @@ beforeEach(() => {
     VALIDATION_MODEL: process.env.VALIDATION_MODEL,
     FALLBACK_MODEL: process.env.FALLBACK_MODEL,
     PINECONE_INDEX: process.env.PINECONE_INDEX,
+    PINECONE_PROJECT_ID: process.env.PINECONE_PROJECT_ID,
+    PINECONE_EXPECTED_HOST_SUFFIX: process.env.PINECONE_EXPECTED_HOST_SUFFIX,
+    MW_MIND_EMBED_URL: process.env.MW_MIND_EMBED_URL,
     RECENCY_HALF_LIFE_DAYS: process.env.RECENCY_HALF_LIFE_DAYS,
     MAX_AGE_DAYS: process.env.MAX_AGE_DAYS,
     LOG_LEVEL: process.env.LOG_LEVEL,
@@ -47,6 +50,9 @@ beforeEach(() => {
   delete process.env.VALIDATION_MODEL;
   delete process.env.FALLBACK_MODEL;
   delete process.env.PINECONE_INDEX;
+  delete process.env.PINECONE_PROJECT_ID;
+  delete process.env.PINECONE_EXPECTED_HOST_SUFFIX;
+  delete process.env.MW_MIND_EMBED_URL;
   delete process.env.RECENCY_HALF_LIFE_DAYS;
   delete process.env.MAX_AGE_DAYS;
   delete process.env.LOG_LEVEL;
@@ -70,11 +76,11 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 1: No INSTANCE_CONFIG — hardcoded defaults (backward compat)
+// Test 1: No INSTANCE_CONFIG — built-in defaults (backward compat)
 // ---------------------------------------------------------------------------
 
 describe('config — no INSTANCE_CONFIG (backward compat)', () => {
-  it('uses hardcoded defaults when INSTANCE_CONFIG is not set', async () => {
+  it('uses built-in defaults when INSTANCE_CONFIG is not set', async () => {
     delete process.env.INSTANCE_CONFIG;
     const { config } = await import('../src/config.ts');
 
@@ -93,6 +99,10 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.guiPort).toBe(9099);
     expect(config.tokenBudget).toBe(100_000);
     expect(config.pineconeIndex).toBe('whatsapp-bot');
+    expect(config.memory.pinecone.apiKeyEnv).toBe('PINECONE_API_KEY');
+    expect(config.memory.pinecone.index).toBe('whatsapp-bot');
+    expect(config.memory.pinecone.namespaces.facts).toBe('whatsapp-facts');
+    expect(config.memory.pinecone.knowledgeProfiles['mw-mind'].namespaces).toContain('whatsapp-summaries');
     expect(config.logLevel).toBe('info');
   });
 
@@ -613,7 +623,7 @@ describe('config — gui fields', () => {
 // ---------------------------------------------------------------------------
 // Test 9: P3.6 D-2 — WHATSOUP_API_TIMEOUT_MS env var override
 // ---------------------------------------------------------------------------
-// Before D-2, config.apiTimeoutMs was hardcoded 30_000 and operators
+// Before D-2, config.apiTimeoutMs was fixed at 30_000 and operators
 // following the runbook's "raise apiTimeoutMs" recovery step needed a code
 // edit to tune it. These tests lock the env-var fallback contract so the
 // runbook recommendation becomes operator-actionable.
@@ -651,7 +661,7 @@ describe('config — apiTimeoutMs env-var override (P3.6 D-2)', () => {
 
   it('falls back to 30000 for "0" (non-positive → invalid)', async () => {
     // Zero timeouts would mean "never wait" in Node's HTTP layer — safer to
-    // coerce to the hardcoded default than to accept the nonsense.
+    // coerce to the built-in default than to accept the nonsense.
     process.env.WHATSOUP_API_TIMEOUT_MS = '0';
     delete process.env.INSTANCE_CONFIG;
     const { config } = await import('../src/config.ts');
@@ -663,6 +673,105 @@ describe('config — apiTimeoutMs env-var override (P3.6 D-2)', () => {
     delete process.env.INSTANCE_CONFIG;
     const { config } = await import('../src/config.ts');
     expect(config.apiTimeoutMs).toBe(30_000);
+  });
+});
+
+describe('config — BYOK memory block', () => {
+  it('uses canonical memory.pinecone values before legacy aliases', async () => {
+    const instanceConfig = {
+      name: 'byok-bot',
+      type: 'chat',
+      systemPrompt: 'BYOK bot.',
+      adminPhones: ['15550000001'],
+      accessMode: 'allowlist',
+      pineconeIndex: 'legacy-index',
+      memory: {
+        conversation: { recent: 12, extended: 24, extendedWithinMs: 90_000 },
+        retention: { days: 14 },
+        enrichment: { intervalMs: 5_000, batchSize: 9, minConfidence: 0.6, dedupThreshold: 0.8, maxRetries: 7 },
+        pinecone: {
+          apiKeyEnv: 'PINECONE_TEAM_KEY',
+          projectId: 'nf9hzvy',
+          expectedHostSuffix: '-nf9hzvy.svc.aped-4627-b74a.pinecone.io',
+          index: 'mw-mind',
+          namespaces: {
+            facts: 'team-facts',
+            chunks: 'team-chunks',
+            summaries: 'team-summaries',
+          },
+          allowedIndexes: ['mw-mind'],
+          knowledgeSearch: { enabled: true, allowGlobalAgentSessions: true },
+        },
+      },
+      paths: {
+        configRoot: path.join(tmpDir, 'inst-config'),
+        dataRoot: path.join(tmpDir, 'inst-data'),
+        stateRoot: path.join(tmpDir, 'inst-state'),
+        authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+        dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+        logDir: path.join(tmpDir, 'inst-data', 'logs'),
+        lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+        mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+      },
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.pineconeIndex).toBe('mw-mind');
+    expect(config.memory.pinecone.apiKeyEnv).toBe('PINECONE_TEAM_KEY');
+    expect(config.memory.pinecone.projectId).toBe('nf9hzvy');
+    expect(config.memory.pinecone.expectedHostSuffix).toBe('-nf9hzvy.svc.aped-4627-b74a.pinecone.io');
+    expect(config.memory.pinecone.namespaces.facts).toBe('team-facts');
+    expect(config.memory.pinecone.namespaces.chunks).toBe('team-chunks');
+    expect(config.memory.pinecone.namespaces.summaries).toBe('team-summaries');
+    expect(config.pineconeAllowedIndexes).toEqual(['mw-mind']);
+    expect(config.memory.pinecone.knowledgeSearch.allowGlobalAgentSessions).toBe(true);
+    expect(config.conversationWindow).toBe(12);
+    expect(config.conversationWindowExtended).toBe(24);
+    expect(config.windowExtensionThresholdMs).toBe(90_000);
+    expect(config.retentionDays).toBe(14);
+    expect(config.enrichmentMaxRetries).toBe(7);
+  });
+
+  it('projects legacy flat fields into the canonical memory block at runtime', async () => {
+    const instanceConfig = {
+      name: 'legacy-bot',
+      type: 'chat',
+      systemPrompt: 'Legacy bot.',
+      adminPhones: ['15550000001'],
+      accessMode: 'allowlist',
+      pineconeApiKeyEnv: 'PINECONE_LEGACY_KEY',
+      pineconeProjectId: 'o6fsxb8',
+      pineconeIndex: 'legacy-memory',
+      pineconeAllowedIndexes: ['legacy-memory'],
+      pineconeFactsNamespace: 'legacy-facts',
+      pineconeSummariesNamespace: 'legacy-summaries',
+      conversationWindow: 33,
+      enrichmentBatchSize: 44,
+      paths: {
+        configRoot: path.join(tmpDir, 'inst-config'),
+        dataRoot: path.join(tmpDir, 'inst-data'),
+        stateRoot: path.join(tmpDir, 'inst-state'),
+        authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+        dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+        logDir: path.join(tmpDir, 'inst-data', 'logs'),
+        lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+        mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+      },
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.pinecone.apiKeyEnv).toBe('PINECONE_LEGACY_KEY');
+    expect(config.memory.pinecone.projectId).toBe('o6fsxb8');
+    expect(config.memory.pinecone.index).toBe('legacy-memory');
+    expect(config.memory.pinecone.allowedIndexes).toEqual(['legacy-memory']);
+    expect(config.memory.pinecone.namespaces.facts).toBe('legacy-facts');
+    expect(config.memory.pinecone.namespaces.summaries).toBe('legacy-summaries');
+    expect(config.conversationWindow).toBe(33);
+    expect(config.enrichmentBatchSize).toBe(44);
   });
 });
 

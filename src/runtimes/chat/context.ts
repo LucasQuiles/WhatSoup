@@ -63,7 +63,7 @@ export async function loadContext(
     // namespace fan-out. knowledge.ts consumes the same router for the
     // standalone mw-mind profile where namespace ordering actually changes
     // the fan-out.
-    const routed = routeQuery(messageText);
+    const routed = routeQuery(messageText, { namespaces: config.memory.pinecone.namespaces });
     const results = await pinecone.searchEntities(messageText);
     const topScores = results.slice(0, 3).map((r) => r.score);
     log.info(

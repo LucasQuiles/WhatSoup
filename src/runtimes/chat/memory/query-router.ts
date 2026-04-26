@@ -15,6 +15,17 @@ export interface RoutedQuery {
   namespaces: string[]; // ordered: first-tier first, fallbacks after
 }
 
+export interface MemoryRouteNamespaces {
+  facts?: string;
+  chunks?: string;
+  summaries?: string;
+}
+
+export interface RouteQueryOptions {
+  namespaces?: MemoryRouteNamespaces;
+  override?: string[];
+}
+
 /** Phrases that indicate an identity / preference / standing-fact question. */
 const FACTS_TRIGGERS: readonly string[] = [
   'who is',
@@ -41,9 +52,11 @@ const HYBRID_TRIGGERS: readonly string[] = [
   'talked about',
 ];
 
-const FACTS_NS = 'whatsapp-facts';
-const CHUNKS_NS = 'whatsapp-chunks';
-const SUMMARIES_NS = 'whatsapp-summaries';
+const DEFAULT_ROUTE_NAMESPACES = {
+  facts: 'whatsapp-facts',
+  chunks: 'whatsapp-chunks',
+  summaries: 'whatsapp-summaries',
+};
 
 /**
  * Return true if any trigger phrase appears in `lower` (already lowercased).
@@ -62,7 +75,7 @@ function anyMatch(lower: string, triggers: readonly string[]): boolean {
  * reported as 'hybrid' to reflect that the router deferred to the caller.
  *
  * Policy (see plan §Retrieval Policy):
- *   identity/preference/standing fact  ->  whatsapp-facts, then summaries, chunks
+ *   identity/preference/standing fact  ->  configured facts, then summaries, chunks
  *   thread catch-up / quote / what did I say  ->  summaries, chunks, then facts
  *   mixed / ambiguous  ->  summaries, then facts and chunks
  *
@@ -72,10 +85,17 @@ function anyMatch(lower: string, triggers: readonly string[]): boolean {
  * raw wins over facts because "what did I say" is more specific than a
  * standing-fact phrase that happens to appear in the same sentence.
  */
-export function routeQuery(query: string, override?: string[]): RoutedQuery {
+export function routeQuery(query: string, options?: RouteQueryOptions | string[]): RoutedQuery {
+  const override = Array.isArray(options) ? options : options?.override;
   if (override && override.length > 0) {
     return { intent: 'hybrid', namespaces: [...override] };
   }
+  const configured = Array.isArray(options) ? undefined : options?.namespaces;
+  const namespaces = {
+    facts: configured?.facts || DEFAULT_ROUTE_NAMESPACES.facts,
+    chunks: configured?.chunks || DEFAULT_ROUTE_NAMESPACES.chunks,
+    summaries: configured?.summaries || DEFAULT_ROUTE_NAMESPACES.summaries,
+  };
 
   const lower = query.toLowerCase();
 
@@ -86,27 +106,27 @@ export function routeQuery(query: string, override?: string[]): RoutedQuery {
   if (hitHybrid) {
     return {
       intent: 'hybrid',
-      namespaces: [SUMMARIES_NS, FACTS_NS, CHUNKS_NS],
+      namespaces: [namespaces.summaries, namespaces.facts, namespaces.chunks],
     };
   }
 
   if (hitRaw) {
     return {
       intent: 'raw',
-      namespaces: [SUMMARIES_NS, CHUNKS_NS, FACTS_NS],
+      namespaces: [namespaces.summaries, namespaces.chunks, namespaces.facts],
     };
   }
 
   if (hitFacts) {
     return {
       intent: 'facts',
-      namespaces: [FACTS_NS, SUMMARIES_NS, CHUNKS_NS],
+      namespaces: [namespaces.facts, namespaces.summaries, namespaces.chunks],
     };
   }
 
   // Unknown / generic: safest fan-out is hybrid.
   return {
     intent: 'hybrid',
-    namespaces: [SUMMARIES_NS, FACTS_NS, CHUNKS_NS],
+    namespaces: [namespaces.summaries, namespaces.facts, namespaces.chunks],
   };
 }

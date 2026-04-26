@@ -883,7 +883,12 @@ export class AgentRuntime implements Runtime {
   }
 
   private registerAllTools(): void {
-    registerAllTools(this.registry, this.messenger as ConnectionManager, this.db);
+    const allowGlobalKnowledgeSearch = (config as {
+      memory?: { pinecone?: { knowledgeSearch?: { allowGlobalAgentSessions?: boolean } } };
+    }).memory?.pinecone?.knowledgeSearch?.allowGlobalAgentSessions === true;
+    registerAllTools(this.registry, this.messenger as ConnectionManager, this.db, {
+      enableKnowledgeSearch: this.sandboxPerChat || allowGlobalKnowledgeSearch,
+    });
   }
 
   /** Create and configure an OutboundQueue with shared settings (durability, toolUpdateMode). */

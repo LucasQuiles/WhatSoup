@@ -14,6 +14,7 @@
     "auth": "node --experimental-strip-types src/transport/auth.ts",
     "auth:instance": "node --experimental-strip-types src/bootstrap-auth.ts",
     "backfill-enrichment": "node --experimental-strip-types scripts/backfill-enrichment.ts",
+    "migrate-memory-config": "node --experimental-strip-types scripts/migrate-memory-config.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",
     "pretest": "npm run strip-types-compat",
     "typecheck": "tsc --noEmit",

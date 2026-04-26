@@ -5,7 +5,7 @@
  * is_from_me = 0`, runs them through the same extract/validate/enqueue
  * pipeline the real-time EnrichmentPoller uses, and writes validated facts
  * into `fact_export_queue`. The downstream mw-mind bridge drains the queue
- * and upserts into the MWLab `whatsapp-facts` namespace.
+ * and upserts into the configured facts namespace.
  *
  * Constraints:
  *   - Does NOT widen the `is_from_me = 0` filter; skips messages where

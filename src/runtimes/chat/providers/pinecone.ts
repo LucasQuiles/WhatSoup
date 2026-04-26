@@ -58,7 +58,13 @@ function isBreakerOpen(operation: string): boolean {
   return getBreaker(operation).isOpen();
 }
 
-export type PineconeReadinessState = 'disabled' | 'auth_failed' | 'index_missing' | 'network_error' | 'ready';
+export type PineconeReadinessState =
+  | 'disabled'
+  | 'auth_failed'
+  | 'index_missing'
+  | 'project_mismatch'
+  | 'network_error'
+  | 'ready';
 
 function classifyReadinessError(err: unknown): Extract<PineconeReadinessState, 'auth_failed' | 'network_error'> {
   const status = typeof err === 'object' && err !== null && 'status' in err
@@ -91,7 +97,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
     return { state: 'disabled', index: targetIndex };
   }
 
-  const apiKey = process.env.PINECONE_API_KEY?.trim();
+  const apiKey = process.env[configuredPineconeApiKeyEnv()]?.trim();
   if (!apiKey) {
     return { state: 'disabled', index: targetIndex };
   }
@@ -99,11 +105,15 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
   try {
     const client = new Pinecone({ apiKey });
     const result = await client.listIndexes();
-    const indexes = Array.isArray((result as { indexes?: Array<{ name?: string }> }).indexes)
-      ? (result as { indexes: Array<{ name?: string }> }).indexes
+    const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)
+      ? (result as { indexes: Array<{ name?: string; host?: string }> }).indexes
       : [];
+    const found = indexes.find((index) => index.name === targetIndex);
 
-    if (indexes.some((index) => index.name === targetIndex)) {
+    if (found) {
+      if (!matchesProjectGuard(found.host, configuredPineconeProjectGuard())) {
+        return { state: 'project_mismatch', index: targetIndex };
+      }
       return { state: 'ready', index: targetIndex };
     }
 
@@ -113,6 +123,46 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
     logger.warn({ err, indexName: targetIndex, state }, 'pinecone readiness check failed');
     return { state, index: targetIndex };
   }
+}
+
+function configuredPineconeApiKeyEnv(): string {
+  const memory = (config as { memory?: { pinecone?: { apiKeyEnv?: string } } }).memory;
+  const apiKeyEnv = memory?.pinecone?.apiKeyEnv;
+  return typeof apiKeyEnv === 'string' && apiKeyEnv.trim() !== '' ? apiKeyEnv : 'PINECONE_API_KEY';
+}
+
+function configuredPineconeProjectGuard(): { projectId?: string; expectedHostSuffix?: string } {
+  const memory = (config as { memory?: { pinecone?: { projectId?: string; expectedHostSuffix?: string } } }).memory;
+  return {
+    projectId: memory?.pinecone?.projectId,
+    expectedHostSuffix: memory?.pinecone?.expectedHostSuffix,
+  };
+}
+
+function matchesProjectGuard(
+  host: string | undefined,
+  guard: { projectId?: string; expectedHostSuffix?: string },
+): boolean {
+  if (!guard.projectId && !guard.expectedHostSuffix) return true;
+  if (!host) return false;
+  if (guard.expectedHostSuffix && !host.endsWith(guard.expectedHostSuffix)) return false;
+  if (guard.projectId && !host.includes(`-${guard.projectId}.`)) return false;
+  return true;
+}
+
+async function configuredProjectGuardError(client: Pinecone, targetIndex: string): Promise<string | null> {
+  const guard = configuredPineconeProjectGuard();
+  if (!guard.projectId && !guard.expectedHostSuffix) return null;
+  const result = await client.listIndexes();
+  const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)
+    ? (result as { indexes: Array<{ name?: string; host?: string }> }).indexes
+    : [];
+  const found = indexes.find((index) => index.name === targetIndex);
+  if (!found) return `Pinecone index "${targetIndex}" is missing for the configured key`;
+  if (!matchesProjectGuard(found.host, guard)) {
+    return `Pinecone index "${targetIndex}" is not in the configured project`;
+  }
+  return null;
 }
 
 export interface MemoryRecord {
@@ -280,10 +330,16 @@ export function applyDecay(
 export class PineconeMemory {
   private client: Pinecone;
   private index: ReturnType<InstanceType<typeof Pinecone>['index']>;
+  private projectGuardCheck: Promise<string | null> | null = null;
 
   constructor() {
-    this.client = new Pinecone({ apiKey: process.env.PINECONE_API_KEY ?? '' });
+    this.client = new Pinecone({ apiKey: process.env[configuredPineconeApiKeyEnv()] ?? '' });
     this.index = this.client.index(config.pineconeIndex);
+  }
+
+  private async getProjectGuardError(): Promise<string | null> {
+    this.projectGuardCheck ??= configuredProjectGuardError(this.client, config.pineconeIndex);
+    return this.projectGuardCheck;
   }
 
   async search(
@@ -293,6 +349,11 @@ export class PineconeMemory {
   ): Promise<SearchResult[]> {
     if (isBreakerOpen('search')) {
       logger.warn('pinecone search circuit breaker open — skipping');
+      return [];
+    }
+    const projectGuardError = await this.getProjectGuardError();
+    if (projectGuardError) {
+      logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping search');
       return [];
     }
 
@@ -366,6 +427,11 @@ export class PineconeMemory {
   async searchEntities(query: string): Promise<EntitySearchResult[]> {
     if (isBreakerOpen('searchEntities')) {
       logger.warn('pinecone searchEntities circuit breaker open — skipping');
+      return [];
+    }
+    const projectGuardError = await this.getProjectGuardError();
+    if (projectGuardError) {
+      logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping entity search');
       return [];
     }
 
@@ -470,6 +536,11 @@ export class PineconeMemory {
     if (isBreakerOpen('upsert')) {
       logger.warn('pinecone upsert circuit breaker open — skipping');
       throw new AppError('Pinecone circuit breaker open', 'PINECONE_UNAVAILABLE');
+    }
+    const projectGuardError = await this.getProjectGuardError();
+    if (projectGuardError) {
+      logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping upsert');
+      throw new AppError(projectGuardError, 'PINECONE_UNAVAILABLE');
     }
 
     const pineconeRecords = records.map(toPineconeRecord);

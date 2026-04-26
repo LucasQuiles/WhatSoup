@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { createChildLogger } from '../../../logger.ts';
+import { config } from '../../../config.ts';
 import type { Database } from '../../../core/database.ts';
 import type { ValidatedFact } from './validator.ts';
 
@@ -162,7 +163,7 @@ export function enqueueFacts(
         fact.factId,
         fact.chatJid,
         fact.senderJid,
-        fact.namespace ?? 'whatsapp-facts',
+        fact.namespace ?? config.memory.pinecone.namespaces.facts,
         JSON.stringify(payload),
       );
       if (Number(result.changes) > 0) {

@@ -58,7 +58,7 @@ that export secrets from `~/.config/mwlab-secrets.keychain-db`:
 
 Per-instance configs live in `~/.config/whatsoup/instances/<name>/`.
 
-- `config.json` — instance schema (type, accessMode, healthPort, agentOptions, `enabled?: boolean`).
+- `config.json` — instance schema (type, accessMode, healthPort, agentOptions, `memory`, `enabled?: boolean`).
 - `tokens.env` — per-instance health token, read by the fleet.
 - `auth/` — Baileys session credentials.
 - `stdout.log`, `stderr.log` — captured launchd output.
@@ -66,6 +66,45 @@ Per-instance configs live in `~/.config/whatsoup/instances/<name>/`.
 Instances with `enabled: false` are skipped by fleet discovery (no health
 polling, no proxy routing) but keep their config on disk. Use this to
 take an instance out of rotation without deleting it.
+
+### BYOK memory config migration
+
+Memory/search settings are canonical under `memory` in `config.json`.
+Legacy fields such as `pineconeIndex` and `pineconeAllowedIndexes` are
+still read at runtime, but new writes should use `memory.pinecone`.
+
+Safe migration procedure:
+
+```bash
+cd ~/LAB/WhatSoup
+npm run migrate-memory-config -- --instance mw-bot
+npm run migrate-memory-config -- --instance mw-bot --write
+```
+
+The first command is a dry-run. The second rewrites only
+`~/.config/whatsoup/instances/mw-bot/config.json` and creates a
+`config.json.bak-*` backup. It does not touch:
+
+- `~/.config/whatsoup/instances/mw-bot/auth/`
+- `~/.config/whatsoup/instances/mw-bot/tokens.env`
+- `~/.local/share/whatsoup/instances/mw-bot/bot.db`
+- `~/.config/mwlab-secrets.keychain-db`
+
+So the migration should not trigger WhatsApp QR re-auth or provider
+credential rotation.
+
+For mwlab, keep `memory.pinecone.apiKeyEnv` as `PINECONE_API_KEY`
+unless the launchd wrapper is also updated to export a different BYOK env
+var. Set `memory.pinecone.projectId` to `nf9hzvy` and
+`memory.pinecone.expectedHostSuffix` to
+`-nf9hzvy.svc.aped-4627-b74a.pinecone.io` so same-name indexes in other
+projects fail closed with `project_mismatch`.
+
+Reference docs:
+
+- `docs/configuration.md`
+- `docs/explainers/byok-memory-config-migration.md`
+- `docs/releases/2026-04-26-byok-memory-config-migration.md`
 
 ## Canonical data paths
 

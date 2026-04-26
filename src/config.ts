@@ -2,14 +2,83 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { normalizePhoneE164 } from './lib/phone.ts';
+import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 
 const APP_NAME = 'whatsoup';
 
 // Name of the Pinecone index used for the memory/chat search mode.
 // This is an index name (data), not a project reference.
 export const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
+export const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
+export const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
+export const DEFAULT_MW_MIND_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
 export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
+export type PineconeSearchMode = 'memory' | 'entity';
+export type KnowledgeSearchMode = 'entity' | 'text' | 'vector';
+
+export interface PineconeNamespaceConfig {
+  facts: string;
+  chunks: string;
+  summaries: string;
+  legacy: string;
+  contacts: string;
+  localDocs: string;
+  oneDrive: string;
+  [key: string]: string;
+}
+
+export interface KnowledgeProfileConfig {
+  namespace: string;
+  namespaces: string[];
+  searchMode: KnowledgeSearchMode;
+  rerank: boolean;
+  rerankModel: string;
+  topK: number;
+  rerankTopN: number;
+  description: string;
+  embedUrl?: string;
+}
+
+export interface MemoryConfig {
+  conversation: {
+    recent: number;
+    extended: number;
+    extendedWithinMs: number;
+  };
+  retention: {
+    days: number;
+  };
+  enrichment: {
+    intervalMs: number;
+    batchSize: number;
+    minConfidence: number;
+    dedupThreshold: number;
+    maxRetries: number;
+  };
+  pinecone: {
+    apiKeyEnv: string;
+    projectId?: string;
+    expectedHostSuffix?: string;
+    index: string;
+    namespaces: PineconeNamespaceConfig;
+    contextTopK: number;
+    senderTopK: number;
+    selfFactTopK: number;
+    searchMode: PineconeSearchMode;
+    rerank: boolean;
+    rerankModel: string;
+    topK: number;
+    rerankTopN: number;
+    allowedIndexes: string[];
+    embedUrl: string;
+    knowledgeSearch: {
+      enabled: boolean;
+      allowGlobalAgentSessions: boolean;
+    };
+    knowledgeProfiles: Record<string, KnowledgeProfileConfig>;
+  };
+}
 
 export interface ToolThreshold {
   expectedMs: number;
@@ -47,6 +116,42 @@ function positiveIntEnv(key: string, fallback: number): number {
   const trimmed = raw.trim();
   if (!/^[1-9]\d*$/.test(trimmed)) return fallback;
   return parseInt(trimmed, 10);
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringProp(source: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = source?.[key];
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+function numberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
+  const value = source?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function booleanProp(source: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
+  const value = source?.[key];
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function stringArrayProp(source: Record<string, unknown> | undefined, key: string): string[] {
+  const value = source?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : [];
+}
+
+function pineconeSearchMode(value: unknown, fallback: PineconeSearchMode): PineconeSearchMode {
+  return value === 'memory' || value === 'entity' ? value : fallback;
+}
+
+function knowledgeSearchMode(value: unknown, fallback: KnowledgeSearchMode): KnowledgeSearchMode {
+  return value === 'entity' || value === 'text' || value === 'vector' ? value : fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +260,7 @@ mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
 mkdirSync(join(mediaDir, '..', 'cache'), { recursive: true, mode: 0o700 });
 
 // ---------------------------------------------------------------------------
-// Model defaults — priority: instance.models > env vars > hardcoded defaults
+// Model defaults — priority: instance.models > env vars > built-in defaults
 // ---------------------------------------------------------------------------
 const instanceModels: Record<string, string> = instance?.models ?? {};
 
@@ -216,6 +321,169 @@ const resolvedRateLimitWindowMs: number = (() => {
   return DEFAULT_RATE_WINDOW_MS;
 })();
 
+const DEFAULT_PINECONE_NAMESPACES: PineconeNamespaceConfig = {
+  facts: 'whatsapp-facts',
+  chunks: 'whatsapp-chunks',
+  summaries: 'whatsapp-summaries',
+  legacy: 'whatsapp',
+  contacts: 'whatsapp-contacts',
+  localDocs: 'local-docs',
+  oneDrive: 'onedrive',
+};
+
+function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
+  const namespaces: PineconeNamespaceConfig = { ...DEFAULT_PINECONE_NAMESPACES };
+  for (const [key, value] of Object.entries(source ?? {})) {
+    if (typeof value === 'string' && value.trim() !== '') {
+      namespaces[key] = value;
+    }
+  }
+  return namespaces;
+}
+
+function defaultKnowledgeProfiles(namespaces: PineconeNamespaceConfig): Record<string, KnowledgeProfileConfig> {
+  return {
+    'oneplatform-search': {
+      namespace: '__default__',
+      namespaces: [],
+      searchMode: 'entity',
+      rerank: true,
+      rerankModel: DEFAULT_PINECONE_RERANK_MODEL,
+      topK: 20,
+      rerankTopN: 6,
+      description: 'BES business data — accounts, contacts, buildings, work orders, invoices',
+    },
+    'oneplatform-entities': {
+      namespace: '',
+      namespaces: ['accounts', 'contacts', 'buildings', 'people', 'externals'],
+      searchMode: 'entity',
+      rerank: true,
+      rerankModel: DEFAULT_PINECONE_RERANK_MODEL,
+      topK: 20,
+      rerankTopN: 6,
+      description: 'Structured entities — accounts, contacts, buildings, people, external system records',
+    },
+    'mw-mind': {
+      namespace: '',
+      namespaces: [
+        namespaces.localDocs,
+        namespaces.oneDrive,
+        namespaces.legacy,
+        namespaces.contacts,
+        namespaces.facts,
+        namespaces.chunks,
+        namespaces.summaries,
+      ],
+      searchMode: 'vector',
+      rerank: false,
+      rerankModel: '',
+      topK: 20,
+      rerankTopN: 6,
+      embedUrl: DEFAULT_MW_MIND_EMBED_URL,
+      description:
+        "Standalone memory index with local docs, OneDrive files, WhatsApp messages, facts, summaries, chunks, and contacts.",
+    },
+  };
+}
+
+function mergeKnowledgeProfile(
+  base: KnowledgeProfileConfig,
+  override: Record<string, unknown> | undefined,
+): KnowledgeProfileConfig {
+  if (!override) return base;
+  return {
+    namespace: stringProp(override, 'namespace') ?? base.namespace,
+    namespaces: stringArrayProp(override, 'namespaces').length > 0
+      ? stringArrayProp(override, 'namespaces')
+      : base.namespaces,
+    searchMode: knowledgeSearchMode(override.searchMode, base.searchMode),
+    rerank: booleanProp(override, 'rerank', base.rerank),
+    rerankModel: stringProp(override, 'rerankModel') ?? base.rerankModel,
+    topK: numberProp(override, 'topK', base.topK),
+    rerankTopN: numberProp(override, 'rerankTopN', base.rerankTopN),
+    description: stringProp(override, 'description') ?? base.description,
+    embedUrl: stringProp(override, 'embedUrl') ?? base.embedUrl,
+  };
+}
+
+function mergeKnowledgeProfiles(
+  namespaces: PineconeNamespaceConfig,
+  source: Record<string, unknown> | undefined,
+): Record<string, KnowledgeProfileConfig> {
+  const profiles = defaultKnowledgeProfiles(namespaces);
+  for (const [indexName, value] of Object.entries(source ?? {})) {
+    const override = record(value);
+    if (!override) continue;
+    const base = profiles[indexName] ?? {
+      namespace: '',
+      namespaces: [],
+      searchMode: 'entity' as KnowledgeSearchMode,
+      rerank: false,
+      rerankModel: DEFAULT_PINECONE_RERANK_MODEL,
+      topK: 20,
+      rerankTopN: 6,
+      description: indexName,
+    };
+    profiles[indexName] = mergeKnowledgeProfile(base, override);
+  }
+  return profiles;
+}
+
+export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
+  const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
+  const memoryRoot = record(migrated.memory);
+  const conversation = record(memoryRoot?.conversation);
+  const retention = record(memoryRoot?.retention);
+  const enrichment = record(memoryRoot?.enrichment);
+  const pinecone = record(memoryRoot?.pinecone);
+  const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
+  const namespaces = resolvePineconeNamespaces(record(pinecone?.namespaces));
+  const defaultMode: PineconeSearchMode = index === DEFAULT_PINECONE_INDEX ? 'memory' : 'entity';
+  const knowledgeSearch = record(pinecone?.knowledgeSearch);
+
+  return {
+    conversation: {
+      recent: numberProp(conversation, 'recent', 50),
+      extended: numberProp(conversation, 'extended', 100),
+      extendedWithinMs: numberProp(conversation, 'extendedWithinMs', 10 * 60 * 1000),
+    },
+    retention: {
+      days: numberProp(retention, 'days', 30),
+    },
+    enrichment: {
+      intervalMs: numberProp(enrichment, 'intervalMs', 60 * 1000),
+      batchSize: numberProp(enrichment, 'batchSize', 200),
+      minConfidence: numberProp(enrichment, 'minConfidence', 0.7),
+      dedupThreshold: numberProp(enrichment, 'dedupThreshold', 0.95),
+      maxRetries: numberProp(enrichment, 'maxRetries', 3),
+    },
+    pinecone: {
+      apiKeyEnv: stringProp(pinecone, 'apiKeyEnv') ?? DEFAULT_PINECONE_API_KEY_ENV,
+      projectId: stringProp(pinecone, 'projectId') ?? process.env.PINECONE_PROJECT_ID,
+      expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
+      index,
+      namespaces,
+      contextTopK: numberProp(pinecone, 'contextTopK', 10),
+      senderTopK: numberProp(pinecone, 'senderTopK', 5),
+      selfFactTopK: numberProp(pinecone, 'selfFactTopK', 5),
+      searchMode: pineconeSearchMode(pinecone?.searchMode, defaultMode),
+      rerank: booleanProp(pinecone, 'rerank', false),
+      rerankModel: stringProp(pinecone, 'rerankModel') ?? DEFAULT_PINECONE_RERANK_MODEL,
+      topK: numberProp(pinecone, 'topK', 20),
+      rerankTopN: numberProp(pinecone, 'rerankTopN', 6),
+      allowedIndexes: stringArrayProp(pinecone, 'allowedIndexes'),
+      embedUrl: stringProp(pinecone, 'embedUrl') ?? process.env.MW_MIND_EMBED_URL ?? DEFAULT_MW_MIND_EMBED_URL,
+      knowledgeSearch: {
+        enabled: booleanProp(knowledgeSearch, 'enabled', true),
+        allowGlobalAgentSessions: booleanProp(knowledgeSearch, 'allowGlobalAgentSessions', false),
+      },
+      knowledgeProfiles: mergeKnowledgeProfiles(namespaces, record(pinecone?.knowledgeProfiles)),
+    },
+  };
+}
+
+const resolvedMemory = resolveMemoryConfig(instance);
+
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
@@ -240,9 +508,10 @@ export const config = {
 
   // Conversation
   maxTokens: (instance?.maxTokens as number | undefined) ?? intEnv('MAX_TOKENS', 750),
-  conversationWindow: 50,
-  conversationWindowExtended: 100,
-  windowExtensionThresholdMs: 10 * 60 * 1000, // 10 minutes
+  memory: resolvedMemory,
+  conversationWindow: resolvedMemory.conversation.recent,
+  conversationWindowExtended: resolvedMemory.conversation.extended,
+  windowExtensionThresholdMs: resolvedMemory.conversation.extendedWithinMs,
 
   // Rate limiting
   rateLimitPerHour: (instance?.rateLimitPerHour as number | undefined) ?? intEnv('RATE_LIMIT_PER_HOUR', 45),
@@ -250,21 +519,21 @@ export const config = {
   rateLimitNoticeWindowMs: (instance?.rateLimitNoticeWindowMs as number | undefined) ?? DEFAULT_RATE_WINDOW_MS, // dedup window for rate-limit notices
 
   // Enrichment
-  enrichmentIntervalMs: 60 * 1000, // 1 minute
-  enrichmentBatchSize: 200,
-  enrichmentMinConfidence: 0.7,
-  enrichmentDedupThreshold: 0.95,
+  enrichmentIntervalMs: resolvedMemory.enrichment.intervalMs,
+  enrichmentBatchSize: resolvedMemory.enrichment.batchSize,
+  enrichmentMinConfidence: resolvedMemory.enrichment.minConfidence,
+  enrichmentDedupThreshold: resolvedMemory.enrichment.dedupThreshold,
 
   // Pinecone
-  pineconeIndex: (instance?.pineconeIndex as string | undefined) ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX,
-  pineconeContextTopK: 10,
-  pineconeSenderTopK: 5,
-  pineconeSelfFactTopK: 5,
-  pineconeSearchMode: (instance?.pineconeSearchMode ?? ((instance?.pineconeIndex ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX) === DEFAULT_PINECONE_INDEX ? 'memory' : 'entity')) as 'memory' | 'entity',
-  pineconeRerank: (instance?.pineconeRerank as boolean | undefined) ?? false,
-  pineconeTopK: (instance?.pineconeTopK as number | undefined) ?? 20,
-  pineconeRerankTopN: (instance?.pineconeRerankTopN as number | undefined) ?? 6,
-  pineconeAllowedIndexes: (Array.isArray(instance?.pineconeAllowedIndexes) ? instance.pineconeAllowedIndexes : []) as string[],
+  pineconeIndex: resolvedMemory.pinecone.index,
+  pineconeContextTopK: resolvedMemory.pinecone.contextTopK,
+  pineconeSenderTopK: resolvedMemory.pinecone.senderTopK,
+  pineconeSelfFactTopK: resolvedMemory.pinecone.selfFactTopK,
+  pineconeSearchMode: resolvedMemory.pinecone.searchMode,
+  pineconeRerank: resolvedMemory.pinecone.rerank,
+  pineconeTopK: resolvedMemory.pinecone.topK,
+  pineconeRerankTopN: resolvedMemory.pinecone.rerankTopN,
+  pineconeAllowedIndexes: resolvedMemory.pinecone.allowedIndexes,
 
   // Recency decay — Ebbinghaus-style exponential forgetting for memory search
   recencyHalfLifeDays: positiveIntValue(instance?.recencyHalfLifeDays, positiveIntEnv('RECENCY_HALF_LIFE_DAYS', 14)),
@@ -335,10 +604,10 @@ export const config = {
   tokenBudget: (instance?.tokenBudget as number | undefined) ?? 100_000,
 
   // Retention
-  retentionDays: 30,
+  retentionDays: resolvedMemory.retention.days,
 
   // Enrichment retry
-  enrichmentMaxRetries: 3,
+  enrichmentMaxRetries: resolvedMemory.enrichment.maxRetries,
 
   // Logging
   logLevel: (process.env.LOG_LEVEL ?? 'info') as string,

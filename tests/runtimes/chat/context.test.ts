@@ -3,7 +3,19 @@ import { loadContext } from '../../../src/runtimes/chat/context.ts';
 import type { SearchResult, MemoryRecord, EntitySearchResult } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
 vi.mock('../../../src/config.ts', () => ({
-  config: { pineconeSearchMode: 'memory', botName: 'Loops' },
+  config: {
+    pineconeSearchMode: 'memory',
+    botName: 'Loops',
+    memory: {
+      pinecone: {
+        namespaces: {
+          facts: 'whatsapp-facts',
+          chunks: 'whatsapp-chunks',
+          summaries: 'whatsapp-summaries',
+        },
+      },
+    },
+  },
 }));
 vi.mock('../../../src/logger.ts', () => ({
   createChildLogger: () => ({
