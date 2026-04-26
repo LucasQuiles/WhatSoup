@@ -13,6 +13,11 @@ vi.mock('../../../../src/config.ts', () => ({
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,
     enrichmentDedupThreshold: 0.95,
+    memory: {
+      pinecone: {
+        apiKeyEnv: 'PINECONE_API_KEY',
+      },
+    },
   },
 }));
 
@@ -32,12 +37,16 @@ vi.mock('../../../../src/logger.ts', () => ({
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';
+import * as configModule from '../../../../src/config.ts';
 import { getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 
 describe('getPineconeReadiness', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.PINECONE_API_KEY;
+    vi.mocked(Pinecone).mockReset();
+    delete (configModule.config as any).memory.pinecone.projectId;
+    delete (configModule.config as any).memory.pinecone.expectedHostSuffix;
   });
 
   it('returns disabled when no api key is configured', async () => {
@@ -64,6 +73,22 @@ describe('getPineconeReadiness', () => {
 
     await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
       state: 'ready',
+      index: 'mw-mind',
+    });
+  });
+
+  it('returns project_mismatch when the configured project guard does not match the index host', async () => {
+    process.env.PINECONE_API_KEY = 'pcsk-test';
+    vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
+      this.listIndexes = mockListIndexes;
+    } as unknown as () => Pinecone);
+    (configModule.config as any).memory.pinecone.projectId = 'nf9hzvy';
+    mockListIndexes.mockResolvedValueOnce({
+      indexes: [{ name: 'mw-mind', host: 'mw-mind-o6fsxb8.svc.aped-4627-b74a.pinecone.io' }],
+    });
+
+    await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
+      state: 'project_mismatch',
       index: 'mw-mind',
     });
   });

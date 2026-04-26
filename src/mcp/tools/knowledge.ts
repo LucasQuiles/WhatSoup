@@ -7,72 +7,11 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
+import { config } from '../../config.ts';
+import type { KnowledgeProfileConfig } from '../../config.ts';
 import type { ToolDeclaration } from '../types.ts';
 
 const log = createChildLogger('knowledge-tools');
-
-/** Index profiles: how to search each known index. */
-const INDEX_PROFILES: Record<string, {
-  /** Default namespace. Empty string = default namespace. */
-  namespace: string;
-  /** Named namespaces to fan-out search across (empty = use namespace field only). */
-  namespaces: string[];
-  searchMode: 'entity' | 'text' | 'vector';
-  rerank: boolean;
-  rerankModel: string;
-  topK: number;
-  rerankTopN: number;
-  description: string;
-}> = {
-  'oneplatform-search': {
-    namespace: '__default__',
-    namespaces: [],
-    searchMode: 'entity',
-    rerank: true,
-    rerankModel: 'pinecone-rerank-v0',
-    topK: 20,
-    rerankTopN: 6,
-    description: 'BES business data — accounts, contacts, buildings, work orders, invoices',
-  },
-  'oneplatform-entities': {
-    namespace: '',
-    namespaces: ['accounts', 'contacts', 'buildings', 'people', 'externals'],
-    searchMode: 'entity',
-    rerank: true,
-    rerankModel: 'pinecone-rerank-v0',
-    topK: 20,
-    rerankTopN: 6,
-    description: 'Structured entities — accounts, contacts, buildings, people, external system records',
-  },
-  'mw-mind': {
-    namespace: '',
-    // Phase 3: fan-out includes the three new WhatsApp namespaces
-    // (whatsapp-facts, whatsapp-chunks, whatsapp-summaries). The historical
-    // `whatsapp` namespace remains read-only source material. WhatsApp queries
-    // fan out in intent-ordered fashion via query-router.ts.
-    namespaces: [
-      'local-docs',
-      'onedrive',
-      'whatsapp',
-      'whatsapp-contacts',
-      'whatsapp-facts',
-      'whatsapp-chunks',
-      'whatsapp-summaries',
-    ],
-    searchMode: 'vector',
-    rerank: false,
-    rerankModel: '',
-    topK: 20,
-    rerankTopN: 6,
-    description:
-      "Michael's memory — local docs, OneDrive files, WhatsApp messages (facts, chunks, summaries), and WhatsApp contacts. " +
-      "Standalone index; queries embed client-side via the local mw-mind-embed service. " +
-      "WhatsApp queries route by intent: facts-first, raw-first, or hybrid.",
-  },
-};
-
-/** Local embed service (mw-mind) — emits multilingual-e5-large vectors. */
-const MW_MIND_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
 /** Max chars per result text to keep tool output within token budget. */
 const MAX_TEXT_PER_RESULT = 600;
@@ -86,6 +25,98 @@ interface ParsedHit {
   text: string;
   entityType: string;
   fields: Record<string, unknown>;
+}
+
+function pineconeMemoryConfig(): {
+  apiKeyEnv: string;
+  projectId?: string;
+  expectedHostSuffix?: string;
+  namespaces?: { facts?: string; chunks?: string; summaries?: string; [key: string]: string | undefined };
+  knowledgeProfiles: Record<string, KnowledgeProfileConfig>;
+} {
+  const pinecone = (config as {
+    memory?: {
+      pinecone?: {
+        apiKeyEnv?: string;
+        projectId?: string;
+        expectedHostSuffix?: string;
+        namespaces?: { facts?: string; chunks?: string; summaries?: string; [key: string]: string | undefined };
+        knowledgeProfiles?: Record<string, KnowledgeProfileConfig>;
+      };
+    };
+  }).memory?.pinecone;
+  return {
+    apiKeyEnv: pinecone?.apiKeyEnv || 'PINECONE_API_KEY',
+    projectId: pinecone?.projectId,
+    expectedHostSuffix: pinecone?.expectedHostSuffix,
+    namespaces: pinecone?.namespaces,
+    knowledgeProfiles: pinecone?.knowledgeProfiles ?? {},
+  };
+}
+
+function namespaceAllowlist(profile: KnowledgeProfileConfig): Set<string> {
+  return new Set(
+    [profile.namespace, ...profile.namespaces]
+      .filter((namespace): namespace is string => typeof namespace === 'string'),
+  );
+}
+
+function resolveNamespacesToSearch(
+  indexName: string,
+  query: string,
+  profile: KnowledgeProfileConfig,
+  nsOverride: string | undefined,
+  namespaces: ReturnType<typeof pineconeMemoryConfig>['namespaces'],
+): { namespacesToSearch: string[]; queryIntent?: string; error?: string } {
+  const allowed = namespaceAllowlist(profile);
+  if (nsOverride) {
+    if (allowed.size > 0 && !allowed.has(nsOverride)) {
+      return { namespacesToSearch: [], error: `Namespace "${nsOverride}" is not allowed for index "${indexName}".` };
+    }
+    return { namespacesToSearch: [nsOverride] };
+  }
+
+  if (indexName === 'mw-mind') {
+    const routed = routeQuery(query, { namespaces });
+    const routedSet = new Set(routed.namespaces);
+    const others = profile.namespaces.filter((ns) => !routedSet.has(ns));
+    return { namespacesToSearch: [...routed.namespaces, ...others], queryIntent: routed.intent };
+  }
+
+  if (profile.namespaces.length > 0) {
+    return { namespacesToSearch: profile.namespaces };
+  }
+
+  return { namespacesToSearch: [profile.namespace] };
+}
+
+function matchesProjectGuard(
+  host: string | undefined,
+  guard: { projectId?: string; expectedHostSuffix?: string },
+): boolean {
+  if (!guard.projectId && !guard.expectedHostSuffix) return true;
+  if (!host) return false;
+  if (guard.expectedHostSuffix && !host.endsWith(guard.expectedHostSuffix)) return false;
+  if (guard.projectId && !host.includes(`-${guard.projectId}.`)) return false;
+  return true;
+}
+
+async function validatePineconeProject(
+  pc: Pinecone,
+  indexName: string,
+  guard: { projectId?: string; expectedHostSuffix?: string },
+): Promise<string | null> {
+  if (!guard.projectId && !guard.expectedHostSuffix) return null;
+  const result = await pc.listIndexes();
+  const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)
+    ? (result as { indexes: Array<{ name?: string; host?: string }> }).indexes
+    : [];
+  const found = indexes.find((index) => index.name === indexName);
+  if (!found) return `Index "${indexName}" was not found for the configured Pinecone key.`;
+  if (!matchesProjectGuard(found.host, guard)) {
+    return `Index "${indexName}" is in the wrong Pinecone project for this instance.`;
+  }
+  return null;
 }
 
 function parseHits(
@@ -150,9 +181,10 @@ export function registerKnowledgeTools(
 ): void {
   if (allowedIndexes.length === 0) return;
 
-  const apiKey = process.env.PINECONE_API_KEY ?? '';
+  const memoryConfig = pineconeMemoryConfig();
+  const apiKey = process.env[memoryConfig.apiKeyEnv] ?? '';
   if (!apiKey) {
-    log.warn('PINECONE_API_KEY not set — knowledge tools will not be registered');
+    log.warn({ apiKeyEnv: memoryConfig.apiKeyEnv }, 'Pinecone API key env var not set — knowledge tools will not be registered');
     return;
   }
 
@@ -166,8 +198,8 @@ export function registerKnowledgeTools(
 
   // Validate and filter to known indexes
   const validIndexes = allowedIndexes.filter((name) => {
-    if (INDEX_PROFILES[name]) return true;
-    log.warn({ index: name }, 'Unknown index in pineconeAllowedIndexes — skipping');
+    if (memoryConfig.knowledgeProfiles[name]) return true;
+    log.warn({ index: name }, 'Unknown index in memory.pinecone.allowedIndexes — skipping');
     return false;
   });
 
@@ -175,7 +207,7 @@ export function registerKnowledgeTools(
 
   // Build enum description
   const indexDescriptions = validIndexes
-    .map((name) => `"${name}": ${INDEX_PROFILES[name].description}`)
+    .map((name) => `"${name}": ${memoryConfig.knowledgeProfiles[name]!.description}`)
     .join('; ');
 
   const KnowledgeSearchSchema = z.object({
@@ -203,44 +235,50 @@ export function registerKnowledgeTools(
       }
 
       const { index: indexName, query, top_k, namespace: nsOverride } = parsed.data;
-      const profile = INDEX_PROFILES[indexName];
+      const profile = memoryConfig.knowledgeProfiles[indexName]!;
       const startMs = Date.now();
 
       // Determine which namespaces to search.
       //
       // For the standalone mw-mind index, WhatsApp queries route by intent:
-      //   - facts-first: whatsapp-facts, then whatsapp-summaries, whatsapp-chunks
-      //   - raw-first:   whatsapp-summaries, whatsapp-chunks, then whatsapp-facts
-      //   - hybrid:      whatsapp-summaries, whatsapp-facts, whatsapp-chunks
-      // Other scopes (local-docs, onedrive, whatsapp, whatsapp-contacts) are
+      //   - facts-first: configured facts, then summaries, chunks
+      //   - raw-first:   configured summaries, chunks, then facts
+      //   - hybrid:      configured summaries, facts, chunks
+      // Other configured profile namespaces are
       // appended after the routed WhatsApp order so they still participate in
       // the fan-out. An explicit `namespace` argument overrides routing.
-      let namespacesToSearch: string[];
-      let queryIntent: string | undefined;
-      if (nsOverride) {
-        namespacesToSearch = [nsOverride];
-      } else if (indexName === 'mw-mind') {
-        const routed = routeQuery(query);
-        queryIntent = routed.intent;
-        const routedSet = new Set(routed.namespaces);
-        const others = profile.namespaces.filter((ns) => !routedSet.has(ns));
-        namespacesToSearch = [...routed.namespaces, ...others];
-      } else if (profile.namespaces.length > 0) {
-        namespacesToSearch = profile.namespaces;
-      } else {
-        namespacesToSearch = [profile.namespace];
+      const routed = resolveNamespacesToSearch(
+        indexName,
+        query,
+        profile,
+        nsOverride,
+        memoryConfig.namespaces,
+      );
+      if (routed.error) {
+        return { error: routed.error };
       }
+      const namespacesToSearch = routed.namespacesToSearch;
+      const queryIntent = routed.queryIntent;
 
       try {
+        const projectError = await validatePineconeProject(pc, indexName, {
+          projectId: memoryConfig.projectId,
+          expectedHostSuffix: memoryConfig.expectedHostSuffix,
+        });
+        if (projectError) return { error: projectError };
+
         const index = pc.index(indexName);
         let hits: ParsedHit[] = [];
 
         if (profile.searchMode === 'vector') {
           // Standalone index: embed the query client-side and call index.query.
-          // mw-mind uses multilingual-e5-large (1024-dim) served at MW_MIND_EMBED_URL.
           let vec: number[];
           try {
-            const embedResp = await fetch(MW_MIND_EMBED_URL, {
+            const embedUrl = profile.embedUrl ?? memoryConfig.knowledgeProfiles[indexName]?.embedUrl;
+            if (!embedUrl) {
+              return { error: `Vector index "${indexName}" is missing memory.pinecone.knowledgeProfiles.${indexName}.embedUrl.` };
+            }
+            const embedResp = await fetch(embedUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ texts: [query], input_type: 'query' }),

@@ -308,6 +308,54 @@ describe('handleConfigUpdate PATCH validation', () => {
     expect(JSON.parse(res._body).model).toBe('claude-opus-4-9000');
   });
 
+  it('deep-merges memory patches and persists canonical memory config', async () => {
+    const configPath = writeConfig({
+      memory: {
+        pinecone: {
+          apiKeyEnv: 'PINECONE_TEAM_KEY',
+          index: 'mw-mind',
+          namespaces: {
+            facts: 'team-facts',
+            chunks: 'team-chunks',
+            summaries: 'team-summaries',
+          },
+        },
+      },
+    });
+    const inst = fakeInstance(configPath);
+    const deps = makeDeps(inst);
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        pineconeAllowedIndexes: ['mw-mind'],
+        memory: {
+          pinecone: {
+            projectId: 'nf9hzvy',
+            namespaces: { facts: 'mw-facts' },
+          },
+        },
+      })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body.memory.pinecone).toMatchObject({
+      apiKeyEnv: 'PINECONE_TEAM_KEY',
+      projectId: 'nf9hzvy',
+      index: 'mw-mind',
+      allowedIndexes: ['mw-mind'],
+    });
+    expect(body.memory.pinecone.namespaces).toEqual({
+      facts: 'mw-facts',
+      chunks: 'team-chunks',
+      summaries: 'team-summaries',
+    });
+    expect(body).not.toHaveProperty('pineconeAllowedIndexes');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(body);
+  });
+
   // -- combined patch --
 
   it('accepts a combined patch with accessMode + adminPhones + model', async () => {

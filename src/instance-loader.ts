@@ -51,7 +51,9 @@ interface InstanceConfig {
   // Optional fields
   model?: string;
   models?: Record<string, string>;
+  memory?: Record<string, unknown>;
   pineconeIndex?: string;
+  pineconeAllowedIndexes?: string[];
   maxTokens?: number;
   tokenBudget?: number;
   rateLimitPerHour?: number;

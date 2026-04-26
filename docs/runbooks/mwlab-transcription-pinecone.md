@@ -34,13 +34,40 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.mw-bot.plis
 
 ## Instance config
 
-`~/.config/whatsoup/instances/mw-bot/config.json` should keep:
+`~/.config/whatsoup/instances/mw-bot/config.json` should use the canonical BYOK memory block:
 
 ```json
-"pineconeIndex": "mw-mind"
+"memory": {
+  "pinecone": {
+    "apiKeyEnv": "PINECONE_API_KEY",
+    "projectId": "nf9hzvy",
+    "expectedHostSuffix": "-nf9hzvy.svc.aped-4627-b74a.pinecone.io",
+    "index": "mw-mind",
+    "namespaces": {
+      "facts": "whatsapp-facts",
+      "chunks": "whatsapp-chunks",
+      "summaries": "whatsapp-summaries",
+      "legacy": "whatsapp",
+      "contacts": "whatsapp-contacts",
+      "localDocs": "local-docs",
+      "oneDrive": "onedrive"
+    },
+    "allowedIndexes": []
+  }
+}
 ```
 
-Leave `pineconeAllowedIndexes` absent until `mw-mind` has a defined schema and should be exposed through `knowledge_search`.
+Keep `memory.pinecone.allowedIndexes` empty until `mw-mind` should be exposed through `knowledge_search`. If `mw-mind` is added later, the agent still needs either `agentOptions.sandboxPerChat: true` or `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true`; the default is fail-closed for non-sandboxed global sessions.
+
+Legacy fields such as `pineconeIndex` and `pineconeAllowedIndexes` are still read at runtime, but new writes should be canonical. Migrate without touching auth:
+
+```bash
+cd ~/LAB/WhatSoup
+npm run migrate-memory-config -- --instance mw-bot
+npm run migrate-memory-config -- --instance mw-bot --write
+```
+
+The migration helper rewrites only `config.json` and creates `config.json.bak-*` by default. It does not touch `auth/`, `tokens.env`, `bot.db`, or the mwlab keychain, so a successful config migration should not require a WhatsApp QR re-auth.
 
 ## Local transcription bootstrap
 
@@ -176,7 +203,7 @@ WHATSOUP_API_TIMEOUT_MS=60000 \
   npx tsx scripts/backfill-enrichment.ts --strict --provider openai --instance mw-bot
 ```
 
-Only `gemma3:27b` has been proven viable in the default 30s `apiTimeoutMs`. `qwen2.5:72b` and `qwen3:32b-tuned` have both timed out at cold-load — set `WHATSOUP_API_TIMEOUT_MS=60000` (or higher; value is in ms) before invoking the script if using them. The env var overrides the hardcoded `config.apiTimeoutMs` default without a code edit.
+Only `gemma3:27b` has been proven viable in the default 30s `apiTimeoutMs`. `qwen2.5:72b` and `qwen3:32b-tuned` have both timed out at cold-load — set `WHATSOUP_API_TIMEOUT_MS=60000` (or higher; value is in ms) before invoking the script if using them. The env var overrides the built-in `config.apiTimeoutMs` default without a code edit.
 
 ## Open item
 

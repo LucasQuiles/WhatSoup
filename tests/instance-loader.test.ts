@@ -143,7 +143,14 @@ describe('loadInstance — optional fields preserved', () => {
         validation: 'claude-haiku-4-5',
         fallback: 'gpt-4',
       },
+      memory: {
+        pinecone: {
+          apiKeyEnv: 'PINECONE_TEST_KEY',
+          index: 'mw-mind',
+        },
+      },
       pineconeIndex: 'whatsapp-bot',
+      pineconeAllowedIndexes: ['mw-mind'],
       maxTokens: 750,
       tokenBudget: 100000,
       rateLimitPerHour: 45,
@@ -154,7 +161,9 @@ describe('loadInstance — optional fields preserved', () => {
 
     const config = JSON.parse(process.env.INSTANCE_CONFIG!);
     expect(config.models).toEqual(richChat.models);
+    expect(config.memory).toEqual(richChat.memory);
     expect(config.pineconeIndex).toBe('whatsapp-bot');
+    expect(config.pineconeAllowedIndexes).toEqual(['mw-mind']);
     expect(config.maxTokens).toBe(750);
     expect(config.tokenBudget).toBe(100000);
     expect(config.rateLimitPerHour).toBe(45);

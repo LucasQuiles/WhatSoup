@@ -123,6 +123,27 @@ describe('routeQuery — explicit override wins', () => {
   });
 });
 
+describe('routeQuery — configurable namespaces', () => {
+  it('uses caller-provided namespace names for intent routing', () => {
+    const namespaces = {
+      facts: 'tenant-facts',
+      chunks: 'tenant-chunks',
+      summaries: 'tenant-summaries',
+    };
+
+    expect(routeQuery('who is Ari', { namespaces }).namespaces).toEqual([
+      'tenant-facts',
+      'tenant-summaries',
+      'tenant-chunks',
+    ]);
+    expect(routeQuery('what did I say to Ari', { namespaces }).namespaces).toEqual([
+      'tenant-summaries',
+      'tenant-chunks',
+      'tenant-facts',
+    ]);
+  });
+});
+
 describe('routeQuery — unknown / generic queries default to hybrid', () => {
   const genericPhrases = [
     'hello there',

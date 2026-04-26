@@ -3,9 +3,9 @@
 WhatSoup is configured through two complementary mechanisms: environment variables for
 infrastructure-level settings, and per-instance `instance.json` files for runtime behavior.
 In multi-instance mode, `instance.json` values take precedence over environment variables.
-Both take precedence over hardcoded defaults.
+Both take precedence over built-in defaults.
 
-**Resolution order:** `instance.json` > environment variable > hardcoded default
+**Resolution order:** canonical `memory.*` in `instance.json` > legacy flat aliases in `instance.json` > environment variable > built-in default
 
 ---
 
@@ -17,7 +17,7 @@ Both take precedence over hardcoded defaults.
 |----------|------|-------------|
 | `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances. **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so Claude Code uses Max/Pro subscription billing instead. |
 | `OPENAI_API_KEY` | string | OpenAI API key. Preferred for cloud audio transcription and used for LLM fallback in `chat` instances. Local transcription fallbacks can run without it when installed. |
-| `PINECONE_API_KEY` | string | Pinecone API key. Required for `chat` instances that use the memory/entity search pipeline. |
+| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. Required only when the instance uses Pinecone-backed memory/search. |
 
 These three keys are loaded from GNOME Keyring by the `whatsoup` wrapper script and exported
 before the process starts. They are never written to disk.
@@ -64,6 +64,9 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `PINECONE_INDEX` | string | `whatsapp-bot` | Pinecone index name for the memory pipeline. When this equals `whatsapp-bot` (the default), `pineconeSearchMode` defaults to `memory`; any other index defaults to `entity`. |
+| `PINECONE_PROJECT_ID` | string | unset | Optional project guard. When set, readiness and knowledge search verify that the resolved index host belongs to this project ID. |
+| `PINECONE_EXPECTED_HOST_SUFFIX` | string | unset | Optional stricter project guard, for example `-nf9hzvy.svc.aped-4627-b74a.pinecone.io`. |
+| `MW_MIND_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Default local embed endpoint for vector knowledge profiles that do not override `embedUrl`. |
 | `RECENCY_HALF_LIFE_DAYS` | integer | `14` | Positive day-count half-life for memory-search recency decay. Smaller values forget faster; zero/negative/malformed values fall back to `14`. |
 | `MAX_AGE_DAYS` | integer | `90` | Positive day-count cutoff for memory search; records older than this are filtered out. Zero/negative/malformed values fall back to `90`. |
 
@@ -134,11 +137,13 @@ into place during deployment.
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
 | `models` | object | no | env/default | Model overrides. Keys: `conversation`, `extraction`, `validation`, `fallback`. Each takes a model ID string. |
-| `pineconeIndex` | string | no | `whatsapp-bot` | Pinecone index name. Overrides `PINECONE_INDEX`. |
-| `pineconeSearchMode` | string | no | auto | `memory` or `entity`. Auto-detected from index name if omitted: `whatsapp-bot` → `memory`, anything else → `entity`. |
-| `pineconeRerank` | boolean | no | `false` | Enable client-side reranking via `pinecone-rerank-v0` for entity search. |
-| `pineconeTopK` | integer | no | `20` | Number of candidates to fetch before reranking (entity search). |
-| `pineconeRerankTopN` | integer | no | `6` | Number of results to keep after reranking. |
+| `memory` | object | no | defaults | Canonical BYOK memory/search config. Use this for all new configs. See [`memory`](#memory). |
+| `pineconeIndex` | string | no | `whatsapp-bot` | Legacy alias for `memory.pinecone.index`. Runtime still reads it; fleet writes and the migrator convert it to `memory.*`. |
+| `pineconeSearchMode` | string | no | auto | Legacy alias for `memory.pinecone.searchMode`. |
+| `pineconeRerank` | boolean | no | `false` | Legacy alias for `memory.pinecone.rerank`. |
+| `pineconeTopK` | integer | no | `20` | Legacy alias for `memory.pinecone.topK`. |
+| `pineconeRerankTopN` | integer | no | `6` | Legacy alias for `memory.pinecone.rerankTopN`. |
+| `pineconeAllowedIndexes` | string[] | no | `[]` | Legacy alias for `memory.pinecone.allowedIndexes`. |
 | `maxTokens` | integer | no | `750` | Max LLM response tokens. Overrides `MAX_TOKENS`. |
 | `tokenBudget` | integer | no | `100000` | Total token budget (used by agent runtime). |
 | `rateLimitPerHour` | integer | no | `45` | Per-user rate limit. Overrides `RATE_LIMIT_PER_HOUR`. |
@@ -168,7 +173,87 @@ into place during deployment.
 }
 ```
 
-Omit any key to inherit the env var or hardcoded default for that slot.
+Omit any key to inherit the env var or built-in default for that slot.
+
+### `memory`
+
+`memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.
+
+Use `memory` for new installs and migrations. The runtime still accepts the old flat fields for compatibility, but the fleet API and `npm run migrate-memory-config` write the canonical shape.
+
+```json
+"memory": {
+  "conversation": {
+    "recent": 50,
+    "extended": 100,
+    "extendedWithinMs": 600000
+  },
+  "retention": {
+    "days": 30
+  },
+  "enrichment": {
+    "intervalMs": 60000,
+    "batchSize": 200,
+    "minConfidence": 0.7,
+    "dedupThreshold": 0.95,
+    "maxRetries": 3
+  },
+  "pinecone": {
+    "apiKeyEnv": "PINECONE_API_KEY",
+    "projectId": "nf9hzvy",
+    "expectedHostSuffix": "-nf9hzvy.svc.aped-4627-b74a.pinecone.io",
+    "index": "mw-mind",
+    "namespaces": {
+      "facts": "whatsapp-facts",
+      "chunks": "whatsapp-chunks",
+      "summaries": "whatsapp-summaries",
+      "legacy": "whatsapp",
+      "contacts": "whatsapp-contacts",
+      "localDocs": "local-docs",
+      "oneDrive": "onedrive"
+    },
+    "searchMode": "entity",
+    "allowedIndexes": [],
+    "knowledgeSearch": {
+      "enabled": true,
+      "allowGlobalAgentSessions": false
+    }
+  }
+}
+```
+
+#### Pinecone BYOK Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `memory.pinecone.apiKeyEnv` | string | `PINECONE_API_KEY` | Name of the environment variable that holds this instance's Pinecone key. This is the BYOK boundary: the key is still injected by wrappers/keychains, but the instance decides which env var to read. |
+| `memory.pinecone.projectId` | string | env/unset | Optional project ID guard. If the listed index host does not include this project ID, readiness returns `project_mismatch` and `knowledge_search` refuses to query. |
+| `memory.pinecone.expectedHostSuffix` | string | env/unset | Optional exact host suffix guard. Use this when two projects have the same index name and you need fail-closed routing. |
+| `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
+| `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
+| `memory.pinecone.searchMode` | string | auto | `memory` for chat/sender/self-fact filters, `entity` for entity index search. Defaults from the index name. |
+| `memory.pinecone.allowedIndexes` | string[] | `[]` | Indexes exposed through the agent `knowledge_search` MCP tool. Empty disables that tool. |
+| `memory.pinecone.knowledgeSearch.enabled` | boolean | `true` | Global on/off switch for knowledge tool registration. Still requires `allowedIndexes`. |
+| `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions` | boolean | `false` | Allows `knowledge_search` in non-`sandboxPerChat` agent sessions. Default is fail-closed because global sessions can span callers. |
+| `memory.pinecone.knowledgeProfiles` | object | built-in profiles | Per-index retrieval profile overrides. Configure namespace allowlists, rerank settings, vector/text/entity mode, and `embedUrl`. |
+
+#### Legacy Migration
+
+Dry-run all local instance configs:
+
+```bash
+npm run migrate-memory-config
+```
+
+Migrate one instance with a backup:
+
+```bash
+npm run migrate-memory-config -- --instance mw-bot --write
+```
+
+The migrator only reads and writes `config.json`. It does not touch `tokens.env`, `auth/`, `bot.db`, provider keychains, or WhatsApp session credentials, so a successful config migration does not require a QR re-auth.
+
+Field aliases migrated into `memory.*` include `pineconeIndex`, `pineconeAllowedIndexes`, `pineconeSearchMode`, `pineconeRerank`, `pineconeTopK`, `pineconeRerankTopN`, `pineconeNamespaces`, `pineconeFactsNamespace`, `pineconeChunksNamespace`, `pineconeSummariesNamespace`, `pineconeApiKeyEnv`, `pineconeProjectId`, `pineconeExpectedHostSuffix`, `conversationWindow`, `conversationWindowExtended`, `windowExtensionThresholdMs`, `retentionDays`, and enrichment tuning fields.
 
 ### `operationTracker`
 
@@ -393,11 +478,18 @@ required.
     "extraction": "claude-haiku-4-5-20251001",
     "validation": "claude-haiku-4-5-20251001"
   },
-  "pineconeIndex": "team-search",
-  "pineconeSearchMode": "entity",
-  "pineconeRerank": true,
-  "pineconeTopK": 20,
-  "pineconeRerankTopN": 6,
+  "memory": {
+    "pinecone": {
+      "apiKeyEnv": "PINECONE_TEAM_KEY",
+      "projectId": "team-project-id",
+      "expectedHostSuffix": "-team-project-id.svc.aped-4627-b74a.pinecone.io",
+      "index": "team-search",
+      "searchMode": "entity",
+      "rerank": true,
+      "topK": 20,
+      "rerankTopN": 6
+    }
+  },
   "maxTokens": 500,
   "tokenBudget": 50000,
   "rateLimitPerHour": 60,

@@ -19,6 +19,18 @@ vi.mock('../../../../src/logger.ts', () => ({
   }),
 }));
 
+vi.mock('../../../../src/config.ts', () => ({
+  config: {
+    memory: {
+      pinecone: {
+        namespaces: {
+          facts: 'whatsapp-facts',
+        },
+      },
+    },
+  },
+}));
+
 import { Database } from '../../../../src/core/database.ts';
 import {
   enqueueFacts,
@@ -654,4 +666,3 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     }
   });
 });
-

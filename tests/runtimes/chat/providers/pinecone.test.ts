@@ -23,6 +23,11 @@ vi.mock('../../../../src/config.ts', () => ({
     enrichmentDedupThreshold: 0.95,
     recencyHalfLifeDays: 36500,   // ~100 years — effectively disable decay in existing tests
     maxAgeDays: 36500,
+    memory: {
+      pinecone: {
+        apiKeyEnv: 'PINECONE_API_KEY',
+      },
+    },
   },
 }));
 
