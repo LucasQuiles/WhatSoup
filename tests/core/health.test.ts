@@ -339,6 +339,186 @@ describe('POST /send — Authorization header check', () => {
   });
 });
 
+describe('POST /agent/compact', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+  });
+
+  afterEach(async () => {
+    db.close();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('requires the health bearer token', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        handleAgentCommand: vi.fn(),
+      } as any,
+    })));
+
+    const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{}');
+
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+  });
+
+  it('routes compact directly to the agent runtime and defaults to silent mode', async () => {
+    const handleAgentCommand = vi.fn().mockResolvedValue({
+      ok: true,
+      command: 'compact',
+      chatJid: '120363410094619161@g.us',
+      silent: true,
+    });
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        handleAgentCommand,
+      } as any,
+    })));
+
+    const { status, body } = await httpReq(
+      port,
+      '/agent/compact',
+      'POST',
+      JSON.stringify({ chatJid: '120363410094619161@g.us' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toEqual({
+      ok: true,
+      command: 'compact',
+      chatJid: '120363410094619161@g.us',
+      silent: true,
+    });
+    expect(handleAgentCommand).toHaveBeenCalledWith({
+      command: 'compact',
+      chatJid: '120363410094619161@g.us',
+      silent: true,
+    });
+  });
+
+  it('allows explicit non-silent compact for operator-triggered diagnostics', async () => {
+    const handleAgentCommand = vi.fn().mockResolvedValue({
+      ok: true,
+      command: 'compact',
+      chatJid: '120363410094619161@g.us',
+      silent: false,
+    });
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        handleAgentCommand,
+      } as any,
+    })));
+
+    const { status } = await httpReq(
+      port,
+      '/agent/compact',
+      'POST',
+      JSON.stringify({ chatJid: '120363410094619161@g.us', silent: false }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(200);
+    expect(handleAgentCommand).toHaveBeenCalledWith({
+      command: 'compact',
+      chatJid: '120363410094619161@g.us',
+      silent: false,
+    });
+  });
+
+  it('rejects non-agent instances', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{}', {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(409);
+    expect(JSON.parse(body)).toMatchObject({
+      ok: false,
+      error: 'agent commands are only available on agent instances',
+    });
+  });
+
+  it('maps runtime command errors to HTTP status and code', async () => {
+    const err = Object.assign(new Error('agent session is not active'), {
+      code: 'session_inactive',
+      statusCode: 409,
+    });
+    const handleAgentCommand = vi.fn().mockRejectedValue(err);
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        handleAgentCommand,
+      } as any,
+    })));
+
+    const { status, body } = await httpReq(port, '/agent/compact', 'POST', '{}', {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(409);
+    expect(JSON.parse(body)).toMatchObject({
+      ok: false,
+      error: 'agent session is not active',
+      code: 'session_inactive',
+    });
+  });
+
+  it('validates request body types before dispatching to the runtime', async () => {
+    const handleAgentCommand = vi.fn();
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        handleAgentCommand,
+      } as any,
+    })));
+
+    const { status, body } = await httpReq(
+      port,
+      '/agent/compact',
+      'POST',
+      JSON.stringify({ chatJid: 123 }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(400);
+    expect(JSON.parse(body)).toMatchObject({ ok: false, error: 'chatJid must be a string when provided' });
+    expect(handleAgentCommand).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-object JSON bodies before dispatching to the runtime', async () => {
+    const handleAgentCommand = vi.fn();
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        handleAgentCommand,
+      } as any,
+    })));
+
+    const { status, body } = await httpReq(
+      port,
+      '/agent/compact',
+      'POST',
+      'null',
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(400);
+    expect(JSON.parse(body)).toMatchObject({ ok: false, error: 'request body must be a JSON object' });
+    expect(handleAgentCommand).not.toHaveBeenCalled();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // HEALTH_BIND_ADDRESS env var
 // ---------------------------------------------------------------------------

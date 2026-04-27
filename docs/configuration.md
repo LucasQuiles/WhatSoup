@@ -74,9 +74,22 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`). |
+| `HEALTH_PORT` | integer | `9090` | Port for the HTTP health server (`GET /health`, `POST /send`, `POST /agent/compact`). |
 | `HEALTH_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the health server. Set to `0.0.0.0` in Docker to allow host-exposed health checks. |
-| `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for `POST /send`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, `POST /send` always returns `401`. |
+| `WHATSOUP_HEALTH_TOKEN` | string | (empty) | Bearer token for health-server mutation endpoints such as `POST /send`, `POST /access`, `POST /mark-read`, `POST /heal`, and `POST /agent/compact`. Requests without a matching `Authorization: Bearer <token>` header receive `401`. If unset, mutation endpoints fail closed with `401`. |
+
+#### Agent compact endpoint
+
+Agent instances expose `POST /agent/compact` for control-plane compaction that does not pass through WhatsApp ingest. This avoids the group-chat failure mode where bare `/compact` is ignored because the bot was not mentioned, while tagged `/compact` reaches the agent as ordinary text.
+
+```bash
+curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
+  -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"chatJid":"120363410094619161@g.us"}'
+```
+
+`chatJid` is required for `agentOptions.sessionScope: "per_chat"` and shared-session agents so the runtime compacts the intended session and routes the completion event correctly. Single-session agents can omit it only when an active chat is already known. `silent` defaults to `true`, suppressing the normal user-facing compact notice and any command output. Set `"silent": false` only for operator diagnostics.
 
 ### Logging
 

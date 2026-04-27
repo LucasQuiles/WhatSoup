@@ -250,7 +250,7 @@ curl http://127.0.0.1:9093/health
 
 Returns connection status, uptime, message counts, enrichment state, durability stats, and model configuration. The health port is configurable per instance.
 
-The health server also exposes operational endpoints: `/send` (send messages), `/access` (allow/block contacts), `/mark-read` (mark chats as read), `/heal` (inject repair reports), and `/typing` (composing indicators).
+The health server also exposes operational endpoints: `/send` (send messages), `/access` (allow/block contacts), `/mark-read` (mark chats as read), `/heal` (inject repair reports), `/agent/compact` (agent-only silent context compaction), and `/typing` (composing indicators).
 
 The fleet server's health poller probes each instance every 5 seconds and tracks consecutive failures to determine status: `online` → `degraded` (1-2 failures) → `unreachable` (3+). The console displays this as a color-coded heartbeat strip.
 

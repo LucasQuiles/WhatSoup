@@ -1155,6 +1155,141 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
   });
 
+  it('per_chat handleAgentCommand silently sends /compact to the target session', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const groupJid = '120363410094619161@g.us';
+
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
+    mockSession.sendTurn.mockClear();
+    mockQueue.indicateTyping.mockClear();
+    mockQueue.enqueueText.mockClear();
+    mockQueue.enqueueResultText.mockClear();
+    mockQueue.flush.mockResolvedValue(undefined);
+
+    const result = await runtime.handleAgentCommand({
+      command: 'compact',
+      chatJid: groupJid,
+      silent: true,
+    });
+
+    expect(result).toEqual({ ok: true, command: 'compact', chatJid: groupJid, silent: true });
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+    expect(mockQueue.indicateTyping).not.toHaveBeenCalled();
+
+    capturedOnEventRef.current!({ type: 'compact_boundary' });
+    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+
+    capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+
+    capturedOnEventRef.current!({ type: 'compact_boundary' });
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('ompact'));
+  });
+
+  it('per_chat handleAgentCommand rejects compact while the target chat has a turn in progress', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const groupJid = '120363410094619161@g.us';
+
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
+    mockSession.sendTurn.mockClear();
+    (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set(groupJid, [42]);
+
+    await expect(runtime.handleAgentCommand({
+      command: 'compact',
+      chatJid: groupJid,
+      silent: true,
+    })).rejects.toMatchObject({ code: 'turn_in_progress', statusCode: 409 });
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it('single handleAgentCommand silently sends /compact without compact output or fallback', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
+
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
+    capturedOnEventRef.current!({ type: 'result', text: 'ready' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    mockSession.sendTurn.mockClear();
+    mockQueue.enqueueText.mockClear();
+    mockQueue.enqueueResultText.mockClear();
+    mockQueue.flush.mockClear();
+    mockQueue.flush.mockResolvedValue(undefined);
+
+    const result = await runtime.handleAgentCommand({
+      command: 'compact',
+      silent: true,
+    });
+
+    expect(result).toEqual({ ok: true, command: 'compact', chatJid: '15550100001@s.whatsapp.net', silent: true });
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    capturedOnEventRef.current!({ type: 'compact_boundary' });
+    capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
+    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+    expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
+  it('shared handleAgentCommand requires chatJid and silently routes compact completion', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const chatJid = '15550100002@s.whatsapp.net';
+
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    await runtime.start();
+    await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'hello' }));
+    capturedOnEventRef.current!({ type: 'result', text: 'ready' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    mockSession.sendTurn.mockClear();
+    mockQueue.enqueueText.mockClear();
+    mockQueue.enqueueResultText.mockClear();
+    mockQueue.flush.mockClear();
+    mockQueue.flush.mockResolvedValue(undefined);
+
+    await expect(runtime.handleAgentCommand({
+      command: 'compact',
+      silent: true,
+    })).rejects.toMatchObject({ code: 'chat_jid_required', statusCode: 400 });
+
+    const result = await runtime.handleAgentCommand({
+      command: 'compact',
+      chatJid,
+      silent: true,
+    });
+
+    expect(result).toEqual({ ok: true, command: 'compact', chatJid, silent: true });
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    capturedOnEventRef.current!({ type: 'compact_boundary' });
+    capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
+    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+    expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
 
   // ─── B02: STDIN_WRITE_TIMEOUT handling ────────────────────────────────────
 
