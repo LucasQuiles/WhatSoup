@@ -174,19 +174,56 @@ export function registerMessagingTools(
 
   registry.register({
     name: 'react_message',
-    description: 'React to a message with an emoji. Pass empty string to remove reaction.',
+    description: 'React to a message with an emoji. Pass empty string to remove reaction. When messageId is omitted, reacts to the most recent inbound message in the chat.',
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
     schema: z.object({
       chatJid: z.string(),
-      messageId: z.string(),
+      messageId: z.string().optional().describe('Message ID to react to. Omit to react to the most recent inbound message in the chat.'),
       emoji: z.string(),
     }),
     handler: async (params, session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
-      const messageId = params['messageId'] as string;
+      let messageId = params['messageId'] as string | undefined;
       const emoji = params['emoji'] as string;
+
+      // When messageId is omitted, resolve to most recent inbound message in the chat.
+      // Uses chat_jid (raw JID) for lookup — works for both global sessions
+      // (where conversationKey is undefined) and chat-scoped sessions.
+      // conversation_key uses normalized form (e.g. "123_at_g.us") which won't
+      // match the raw chatJid ("123@g.us") in global sessions.
+      if (!messageId) {
+        const recent = db
+          .prepare(
+            `SELECT message_id, is_from_me, chat_jid, sender_jid, content, conversation_key
+             FROM messages
+             WHERE chat_jid = ? AND is_from_me = 0
+             ORDER BY timestamp DESC
+             LIMIT 1`,
+          )
+          .get(chatJid) as OwnershipRow | undefined;
+        if (!recent) {
+          return { error: 'No recent inbound message found in this chat to react to' };
+        }
+        messageId = recent.message_id;
+        // Skip ownership validation — we just queried it directly
+        try {
+          await connection.sendRaw(chatJid, {
+            react: {
+              text: emoji,
+              key: {
+                remoteJid: chatJid,
+                id: recent.message_id,
+                fromMe: Boolean(recent.is_from_me),
+              },
+            },
+          });
+        } catch (err) {
+          return { error: sanitizeError(err) };
+        }
+        return { sent: true, emoji, messageId, resolved: 'last_inbound' };
+      }
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
       if (error) return { error };
