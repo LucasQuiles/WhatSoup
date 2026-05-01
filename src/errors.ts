@@ -8,6 +8,7 @@ export type ErrorCode =
   | 'LLM_UNAVAILABLE'
   | 'LLM_AUTH_ERROR'
   | 'LLM_RATE_LIMITED'
+  | 'LLM_BAD_REQUEST'
   | 'LLM_TIMEOUT'
   | 'PINECONE_UNAVAILABLE'
   | 'SEND_FAILED'

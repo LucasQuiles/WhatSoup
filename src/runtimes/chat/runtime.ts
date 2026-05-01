@@ -299,7 +299,9 @@ export class ChatRuntime implements Runtime {
     } catch (primaryErr) {
       log.warn({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
 
-      // Auth and rate-limit errors won't be fixed by retrying — fast-fail
+      // Auth and rate-limit errors won't be fixed by retrying any provider — fast-fail.
+      // 400 (bad_request) skips the same-provider retry but still attempts fallback
+      // below, since a different provider's parser may accept the same payload.
       if (primaryErr instanceof WhatSoupError && (primaryErr.code === 'LLM_AUTH_ERROR' || primaryErr.code === 'LLM_RATE_LIMITED')) {
         log.error({ traceId, err: primaryErr, code: primaryErr.code }, 'non-retryable LLM error — skipping retry and fallback');
         llmDurationMs = Date.now() - llmStart;
@@ -310,6 +312,32 @@ export class ChatRuntime implements Runtime {
           `LLM ${primaryErr.code} for ${this.botName} (${this.primaryProvider.name})`,
           `model=${config.models.conversation} traceId=${traceId} error=${primaryErr.message}`,
         );
+      } else if (primaryErr instanceof WhatSoupError && primaryErr.code === 'LLM_BAD_REQUEST') {
+        // 400 (bad_request): skip same-provider retry (same payload = same error) but
+        // attempt fallback provider — a different provider's parser may accept the payload.
+        log.warn({ traceId, err: primaryErr, code: primaryErr.code }, 'bad request — skipping retry, trying fallback');
+
+        const fallbackRequest: GenerateRequest = { ...request, model: config.models.fallback };
+        try {
+          log.info({ step: 'fallback_on_400', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 2, elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt');
+          const result = await this.fallbackProvider.generate(fallbackRequest);
+          responseText = result.content;
+          modelUsed = config.models.fallback;
+          inputTokens = result.inputTokens;
+          outputTokens = result.outputTokens;
+          llmDurationMs = Date.now() - llmStart;
+          clearAlertSource(this.botName, 'llm_total_failure');
+        } catch (fallbackErr) {
+          log.error({ traceId, err: fallbackErr }, 'fallback also failed after primary 400');
+          llmDurationMs = Date.now() - llmStart;
+          responseText = null;
+          emitAlert(
+            this.botName,
+            'llm_total_failure',
+            `LLM bad request + fallback failed for ${this.botName}`,
+            `model=${config.models.conversation} traceId=${traceId} error=${primaryErr.message}`,
+          );
+        }
       } else {
       log.error({ traceId, err: primaryErr }, 'primary provider failed — retrying after delay');
 

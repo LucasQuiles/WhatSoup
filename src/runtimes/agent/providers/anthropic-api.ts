@@ -16,6 +16,10 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { convertMcpToolsToAnthropic } from './mcp-bridge.ts';
+import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
+import { createChildLogger } from '../../../logger.ts';
+
+const log = createChildLogger('anthropic-api-provider');
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -124,7 +128,7 @@ export class AnthropicApiProvider implements ProviderSession {
     const textParts = request.parts
       .filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text')
       .map(p => p.text);
-    const text = textParts.join('\n');
+    const text = stripLoneSurrogates(textParts.join('\n'));
 
     this.messages.push({ role: 'user', content: text });
 
@@ -169,7 +173,7 @@ export class AnthropicApiProvider implements ProviderSession {
         toolResultBlocks.push({
           type: 'tool_result',
           tool_use_id: tu.id,
-          content: toolResult.content,
+          content: stripLoneSurrogates(toolResult.content),
           ...(toolResult.isError ? { is_error: true } : {}),
         });
 
@@ -232,11 +236,17 @@ export class AnthropicApiProvider implements ProviderSession {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private async callApi(model: string): Promise<CallApiResult> {
+  private async callApi(model: string, selfHealAttempt = false): Promise<CallApiResult> {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
     const mcpTools = this.opts.mcpBridge?.listTools() ?? [];
+
+    // Defense layer: sanitize the system prompt and message history before
+    // serialization to prevent lone surrogates from producing invalid JSON.
+    // This is a hot path — stripLoneSurrogates fast-paths strings with no surrogates.
+    const sanitizedSystem = stripLoneSurrogates(this.systemPrompt);
+    sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
 
     let response: Response;
     try {
@@ -250,7 +260,7 @@ export class AnthropicApiProvider implements ProviderSession {
         body: JSON.stringify({
           model,
           max_tokens: (this.config?.maxTokens as number | undefined) ?? 16384,
-          system: this.systemPrompt,
+          system: sanitizedSystem,
           messages: this.messages,
           ...(mcpTools.length > 0
             ? { tools: convertMcpToolsToAnthropic(mcpTools) }
@@ -261,16 +271,50 @@ export class AnthropicApiProvider implements ProviderSession {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.opts.onEvent({ type: 'result', text: `Fetch error: ${msg}` });
+      this.opts.onEvent({ type: 'result', text: `_Connection error — please try again._` });
+      log.error({ err: msg, model }, 'fetch error in callApi');
       return { text: '' };
     }
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '(unreadable)');
-      this.opts.onEvent({
-        type: 'result',
-        text: `API error ${response.status}: ${errText}`,
-      });
+
+      // ── Self-heal: surrogate corruption in message history ──────────────
+      // If the API rejects the payload due to lone surrogates and we haven't
+      // tried recovery yet, sanitize the entire history and retry once.
+      if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
+        log.warn(
+          { model, errPreview: errText.slice(0, 200), messageCount: this.messages.length },
+          'surrogate corruption detected — self-healing conversation history',
+        );
+        // Deep-sanitize the stored messages (mutates in place for future turns too)
+        const repaired = sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
+        log.info({ repairedFields: repaired }, 'self-heal complete — retrying API call');
+        // Retry once with the sanitized history (typing indicator is already active)
+        return this.callApi(model, true);
+      }
+
+      // ── User-friendly error messages ───────────────────────────────────
+      // Never expose raw API error JSON to the user.
+      let friendlyMsg: string;
+      if (response.status === 400) {
+        friendlyMsg = '⚠️ _There was an issue with my conversation data. Please try again or send /new to start fresh._';
+        log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error (post self-heal)');
+      } else if (response.status === 429) {
+        friendlyMsg = '_Rate limited — please wait a moment and try again._';
+        log.warn({ status: 429, model }, 'API rate limited');
+      } else if (response.status === 401) {
+        friendlyMsg = '_Authentication error — please contact the administrator._';
+        log.error({ status: 401, model }, 'API auth error');
+      } else if (response.status >= 500) {
+        friendlyMsg = '_Service temporarily unavailable — please try again in a moment._';
+        log.error({ status: response.status, model }, 'API server error');
+      } else {
+        friendlyMsg = `_Service error (${response.status}) — please try again._`;
+        log.error({ status: response.status, errPreview: errText.slice(0, 300), model }, 'API error');
+      }
+
+      this.opts.onEvent({ type: 'result', text: friendlyMsg });
       return { text: '' };
     }
 

@@ -17,6 +17,10 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
+import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
+import { createChildLogger } from '../../../logger.ts';
+
+const log = createChildLogger('openai-api-provider');
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -122,7 +126,7 @@ export class OpenAIApiProvider implements ProviderSession {
     const textParts = request.parts
       .filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text')
       .map(p => p.text);
-    const text = textParts.join('\n');
+    const text = stripLoneSurrogates(textParts.join('\n'));
 
     this.messages.push({ role: 'user', content: text });
 
@@ -229,11 +233,14 @@ export class OpenAIApiProvider implements ProviderSession {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private async callApi(model: string): Promise<CallApiResult> {
+  private async callApi(model: string, selfHealAttempt = false): Promise<CallApiResult> {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
     const mcpTools = this.opts.mcpBridge?.listTools() ?? [];
+
+    // Defense layer: sanitize message history before serialization
+    sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
 
     let response: Response;
     try {
@@ -256,16 +263,35 @@ export class OpenAIApiProvider implements ProviderSession {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.opts.onEvent({ type: 'result', text: `Fetch error: ${msg}` });
+      this.opts.onEvent({ type: 'result', text: '_Connection error — please try again._' });
+      log.error({ err: msg, model }, 'fetch error in callApi');
       return { text: '' };
     }
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '(unreadable)');
-      this.opts.onEvent({
-        type: 'result',
-        text: `API error ${response.status}: ${errText}`,
-      });
+
+      // Self-heal: surrogate corruption
+      if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
+        log.warn({ model, errPreview: errText.slice(0, 200) }, 'surrogate corruption detected — sanitizing and retrying');
+        sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
+        return this.callApi(model, true);
+      }
+
+      // User-friendly error — never show raw JSON error bodies
+      let friendlyMsg: string;
+      if (response.status === 400) {
+        friendlyMsg = '⚠️ _There was an issue with my conversation data. Please try again or send /new to start fresh._';
+        log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error');
+      } else if (response.status === 429) {
+        friendlyMsg = '_Rate limited — please wait a moment and try again._';
+      } else if (response.status >= 500) {
+        friendlyMsg = '_Service temporarily unavailable — please try again in a moment._';
+      } else {
+        friendlyMsg = `_Service error (${response.status}) — please try again._`;
+      }
+
+      this.opts.onEvent({ type: 'result', text: friendlyMsg });
       return { text: '' };
     }
 

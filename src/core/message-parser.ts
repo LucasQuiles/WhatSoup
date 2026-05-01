@@ -12,6 +12,7 @@ import { type WAMessage, isJidGroup, jidNormalizedUser } from '@whiskeysockets/b
 import type { IncomingMessage } from './types.ts';
 import { bareNumber, isLidJid } from './jid-constants.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
+import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 
 /**
  * Unwrap Baileys container types to reach the real message payload.
@@ -242,13 +243,18 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
 
   const isResponseWorthy = !isStatusBroadcast && !isReaction && !isPollVote && !isProtocol && !hasNoContent;
 
+  // Sanitize content at ingestion — WhatsApp messages can contain lone surrogates
+  // that produce invalid JSON when serialized for LLM API calls.
+  const safeContent = content !== null ? stripLoneSurrogates(content) : null;
+  const safeContentText = contentText !== null ? stripLoneSurrogates(contentText) : null;
+
   return {
     messageId: msg.key.id!,
     chatJid: msg.key.remoteJid!,
     senderJid,
     senderName,
-    content,
-    contentText,
+    content: safeContent,
+    contentText: safeContentText,
     contentType,
     isFromMe: msg.key.fromMe ?? false,
     isGroup: isJidGroup(msg.key.remoteJid!) ?? false,

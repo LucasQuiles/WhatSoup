@@ -4,7 +4,7 @@
  */
 import type { Logger } from 'pino';
 import { WhatSoupError as AppError } from '../../../errors.ts';
-export type ApiErrorType = 'auth' | 'rate_limit' | 'timeout' | 'server' | 'network' | 'unknown';
+export type ApiErrorType = 'auth' | 'rate_limit' | 'bad_request' | 'timeout' | 'server' | 'network' | 'unknown';
 
 /**
  * Extract HTTP status code from an API SDK error, if present.
@@ -31,6 +31,7 @@ export function extractStatusCode(error: unknown): number | undefined {
 export function classifyApiError(error: unknown): ApiErrorType {
   const statusCode = extractStatusCode(error);
 
+  if (statusCode === 400) return 'bad_request';
   if (statusCode === 401) return 'auth';
   if (statusCode === 429) return 'rate_limit';
   if (statusCode === 408) return 'timeout';
@@ -70,6 +71,9 @@ export function handleApiError(
     { errorType, statusCode, provider: providerName, model, elapsed_ms, err },
     'llm_api_error',
   );
+  if (errorType === 'bad_request') {
+    throw new AppError(`${providerName} bad request (malformed payload)`, 'LLM_BAD_REQUEST', err);
+  }
   if (errorType === 'timeout') {
     throw new AppError(`${providerName} request timed out`, 'LLM_TIMEOUT', err);
   }

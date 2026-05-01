@@ -4,6 +4,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import type { LLMProvider, GenerateRequest, GenerateResponse, ChatMessage } from './types.ts';
 import { handleApiError } from './api-error-classifier.ts';
+import { stripLoneSurrogates } from '../../../core/sanitize-surrogates.ts';
 
 const logger = createChildLogger('anthropic-provider');
 
@@ -41,6 +42,14 @@ export function createAnthropicProvider(): LLMProvider {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), config.apiTimeoutMs);
 
+      // Defense layer: sanitize all message content to strip lone surrogates
+      // that would produce invalid JSON and trigger "no low surrogate" API errors.
+      const sanitizedMessages = messages.map(m => ({
+        ...m,
+        content: stripLoneSurrogates(m.content),
+      }));
+      const sanitizedSystemPrompt = stripLoneSurrogates(systemPrompt);
+
       const startMs = Date.now();
       let response: Anthropic.Message;
       try {
@@ -48,8 +57,8 @@ export function createAnthropicProvider(): LLMProvider {
           {
             model,
             max_tokens: maxTokens,
-            system: systemPrompt,
-            messages: messages.map(toAnthropicMessage),
+            system: sanitizedSystemPrompt,
+            messages: sanitizedMessages.map(toAnthropicMessage),
           },
           { signal: controller.signal },
         );

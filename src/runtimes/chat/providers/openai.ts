@@ -4,6 +4,7 @@ import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import type { LLMProvider, GenerateRequest, GenerateResponse, ChatMessage } from './types.ts';
 import { handleApiError } from './api-error-classifier.ts';
+import { stripLoneSurrogates } from '../../../core/sanitize-surrogates.ts';
 
 const logger = createChildLogger('openai-provider');
 
@@ -38,9 +39,14 @@ export function createOpenAIProvider(): LLMProvider {
     async generate(request: GenerateRequest): Promise<GenerateResponse> {
       const { model, maxTokens, systemPrompt, messages } = request;
 
+      // Sanitize message content to strip lone surrogates before SDK serialization
+      const sanitizedMessages = messages.map(m => ({
+        ...m,
+        content: stripLoneSurrogates(m.content),
+      }));
       const chatMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: 'system', content: systemPrompt },
-        ...messages.map(toOpenAIMessage),
+        { role: 'system', content: stripLoneSurrogates(systemPrompt) },
+        ...sanitizedMessages.map(toOpenAIMessage),
       ];
 
       const controller = new AbortController();
