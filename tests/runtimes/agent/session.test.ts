@@ -1514,7 +1514,7 @@ describe('recoverStalledOperation', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends Ctrl+C to provider stdin', async () => {
+  it('does not write to provider stdin (NDJSON-safe no-op)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -1524,7 +1524,7 @@ describe('recoverStalledOperation', () => {
     (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
     sm.recoverStalledOperation('tool_123', 'Bash');
 
-    expect(mockChild.stdin.write).toHaveBeenCalledWith('\x03');
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
   });
 
   it('is a no-op when session is not active', async () => {
