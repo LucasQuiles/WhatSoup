@@ -915,19 +915,31 @@ export class SessionManager {
   }
 
   /**
-   * Attempt to recover a stalled tool operation by interrupting the provider.
-   * Called by the operation tracker when an individual tool exceeds its stall threshold.
-   * This is a softer intervention than the hard watchdog — it tries stdin interrupt
-   * first and lets the provider handle the tool abort gracefully.
+   * Soft notification that an individual tool has exceeded its stall threshold.
+   * Called by the operation tracker.
+   *
+   * Historical note: this used to write `\x03` (Ctrl-C / ETX) to the child's stdin
+   * as a "soft interrupt." That approach is fundamentally incompatible with every
+   * provider currently shipped — claude-cli, codex-cli, gemini-cli, and opencode-cli
+   * all consume stdin as NDJSON (one JSON message per line) and are not run as TTYs.
+   * `\x03` is not a valid JSON token and is not interpreted as SIGINT outside a TTY,
+   * so the byte simply prepended onto the next user message line, which crashed the
+   * provider with `SyntaxError: Unrecognized token '\u0003'` and exit code 1.
+   *
+   * The OperationTracker already emits an `operation_stalled` progress event to the
+   * outbound queue (user-facing notification), and the hard watchdog backstop
+   * (`WATCHDOG_HARD_MS`, 30 min) still SIGKILLs genuinely hung sessions. So this
+   * method is now a structured no-op that records the stall for telemetry without
+   * touching stdin. If a future TTY-based provider lands, gate any interrupt write
+   * on a `provider.acceptsTtyInterrupts` capability rather than reintroducing an
+   * unconditional stdin byte.
    */
   recoverStalledOperation(toolId: string, toolName: string): void {
     if (!this.active || this.child === null) return;
-    log.warn({ toolId, toolName, pid: this.child.pid, sessionId: this.sessionId }, 'recovering stalled operation — sending interrupt');
-    try {
-      this.child.stdin?.write('\x03');
-    } catch (err) {
-      log.error({ err, toolId, toolName }, 'failed to send interrupt for stalled operation');
-    }
+    log.warn(
+      { toolId, toolName, pid: this.child.pid, sessionId: this.sessionId, action: 'noop' },
+      'operation stalled — soft recovery is a no-op for stream-json providers; relying on hard watchdog backstop',
+    );
   }
 
   /**
