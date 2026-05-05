@@ -597,6 +597,13 @@ export const config = {
     groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? 60_000,
   },
 
+  // Paused chats — messages are stored but never dispatched to runtime.
+  // Toggle groups on/off without losing messages. Add JIDs like "120363406944965248@g.us".
+  pausedChats: new Set<string>(
+    (Array.isArray(instance?.pausedChats) ? instance.pausedChats : [])
+      .filter((j: unknown) => typeof j === 'string' && (j as string).trim() !== ''),
+  ),
+
   // Media
   mediaDir,
 
