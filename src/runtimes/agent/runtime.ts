@@ -852,6 +852,10 @@ export class AgentRuntime implements Runtime {
    * Buffer an image turn. If more images arrive within IMAGE_COALESCE_MS,
    * they're appended. When the timer fires (or a non-image message arrives),
    * all buffered images are sent as a single combined turn.
+   *
+   * Seq/state setup is deferred to flush time — only the representative
+   * turn gets a seq entry, preventing desync with the shift-one-per-turn
+   * logic in handleEventPerChat.
    */
   private coalesceImageTurn(mapKey: string, chatJid: string, text: string, msg: IncomingMessage): void {
     const existing = this.imageCoalesceBuffers.get(mapKey);
@@ -860,11 +864,11 @@ export class AgentRuntime implements Runtime {
       existing.texts.push(text);
       if (msg.inboundSeq !== undefined) existing.inboundSeqs.push(msg.inboundSeq);
       clearTimeout(existing.timer);
-      existing.timer = setTimeout(() => this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      existing.timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
       log.info({ mapKey, bufferedCount: existing.texts.length }, 'image coalesced into batch');
     } else {
       // First image — start the coalesce window
-      const timer = setTimeout(() => this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      const timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
       this.imageCoalesceBuffers.set(mapKey, {
         texts: [text],
         timer,
@@ -877,18 +881,42 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Flush the image coalesce buffer for a chat — send all buffered images
-   * as a single combined turn.
+   * as a single combined turn. Returns a Promise so callers can await it
+   * to prevent concurrent turn injection.
+   *
+   * Durability: only the LAST inboundSeq is pushed onto perChatInboundSeqQueue
+   * (the representative seq for this combined turn). Earlier seqs are marked
+   * skipped with reason 'coalesced_image' via durability engine.
    */
-  private flushImageCoalesce(mapKey: string): void {
+  private async flushImageCoalesce(mapKey: string): Promise<void> {
     const entry = this.imageCoalesceBuffers.get(mapKey);
     if (!entry) return;
 
     clearTimeout(entry.timer);
     this.imageCoalesceBuffers.delete(mapKey);
 
-    const { texts, msg } = entry;
+    const { texts, msg, inboundSeqs } = entry;
     const chatJid = msg.chatJid;
     const count = texts.length;
+
+    // Mark all-but-last inbound seqs as coalesced (they won't get their own turn)
+    if (inboundSeqs.length > 1 && this.durability) {
+      for (let i = 0; i < inboundSeqs.length - 1; i++) {
+        this.durability.markInboundSkipped(inboundSeqs[i], 'coalesced_image');
+      }
+    }
+
+    // Push only the representative (last) seq onto the per-chat queue
+    const representativeSeq = inboundSeqs.length > 0 ? inboundSeqs[inboundSeqs.length - 1] : undefined;
+    const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+    if (representativeSeq !== undefined) seqQueue.push(representativeSeq);
+    this.perChatInboundSeqQueue.set(mapKey, seqQueue);
+    this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(representativeSeq);
+
+    // Set state for this turn
+    this.perChatTurnContentType.set(mapKey, 'image');
+    this.perChatTurnText.set(mapKey, '');
+    this.perChatAssistantItemText.delete(mapKey);
 
     // Combine all image references into one turn
     let combinedText: string;
@@ -896,14 +924,14 @@ export class AgentRuntime implements Runtime {
       combinedText = texts[0];
     } else {
       combinedText = `[${count} images received]\n${texts.join('\n')}`;
-      log.info({ mapKey, imageCount: count }, 'flushing coalesced image batch as single turn');
+      log.info({ mapKey, imageCount: count, coalescedSeqs: inboundSeqs.length - 1 }, 'flushing coalesced image batch as single turn');
     }
 
-    // Fire-and-forget — sendTurnPerChat is async but we don't need to await here
-    // since this is called from a timer callback
-    void this.sendTurnPerChat(chatJid, combinedText, mapKey).catch((err) => {
+    try {
+      await this.sendTurnPerChat(chatJid, combinedText, mapKey);
+    } catch (err) {
       log.error({ err, mapKey, imageCount: count }, 'failed to send coalesced image turn');
-    });
+    }
   }
 
   private normalizeAssistantTextForDelivery(
@@ -1862,23 +1890,27 @@ export class AgentRuntime implements Runtime {
         inboundSeq: msg.inboundSeq,
       });
     } else if (this.sessionScope === 'per_chat') {
-      // per_chat: enqueue inbound seq keyed by chat before sending turn
       const mapKey = perChatMapKey!;
-      const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
-      if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
-      this.perChatInboundSeqQueue.set(mapKey, seqQueue);
-      this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(msg.inboundSeq);
-      // Track inbound contentType for voice reply (SP4)
-      this.perChatTurnContentType.set(mapKey, msg.contentType);
-      this.perChatTurnText.set(mapKey, '');
-      this.perChatAssistantItemText.delete(mapKey);
 
-      // Image coalescing: batch rapid image sends into a single turn
-      if (msg.contentType === 'image' || msg.contentType === 'sticker') {
+      // Image coalescing: batch rapid image sends into a single turn.
+      // For coalesced images, defer seq/state setup until flush time — only
+      // the representative turn gets a seq entry, preventing desync.
+      if (msg.contentType === 'image') {
         this.coalesceImageTurn(mapKey, chatJid, text, msg);
       } else {
-        // Flush any pending image buffer first (text message after images = done uploading)
-        this.flushImageCoalesce(mapKey);
+        // Flush any pending image buffer first (text message after images = done uploading).
+        // Await to prevent concurrent turn injection with the text turn below.
+        await this.flushImageCoalesce(mapKey);
+
+        // per_chat: enqueue inbound seq keyed by chat before sending turn
+        const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+        if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
+        this.perChatInboundSeqQueue.set(mapKey, seqQueue);
+        this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(msg.inboundSeq);
+        // Track inbound contentType for voice reply (SP4)
+        this.perChatTurnContentType.set(mapKey, msg.contentType);
+        this.perChatTurnText.set(mapKey, '');
+        this.perChatAssistantItemText.delete(mapKey);
         await this.sendTurnPerChat(chatJid, text, mapKey);
       }
     } else {

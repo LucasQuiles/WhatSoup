@@ -47,17 +47,20 @@ export async function resizeImageIfNeeded(
     return { buffer, mimeType, resized: false };
   }
 
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   try {
     const result = await Promise.race([
       _doResize(buffer, mimeType),
-      new Promise<ResizeResult>((_, reject) =>
-        setTimeout(() => reject(new Error('resize timeout')), RESIZE_TIMEOUT_MS),
-      ),
+      new Promise<ResizeResult>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('resize timeout')), RESIZE_TIMEOUT_MS);
+      }),
     ]);
     return result;
   } catch (err) {
     log.warn({ err, mimeType, sizeBytes: buffer.length }, 'image resize failed — using original');
     return { buffer, mimeType, resized: false };
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
@@ -82,14 +85,22 @@ async function _doResize(buffer: Buffer, mimeType: string): Promise<ResizeResult
     };
   }
 
-  // Resize: fit within MAX_DIMENSION × MAX_DIMENSION, preserving aspect ratio
-  const resized = await image
-    .resize(MAX_DIMENSION, MAX_DIMENSION, {
-      fit: 'inside',
-      withoutEnlargement: true,
-    })
-    .jpeg({ quality: 85, mozjpeg: true })
-    .toBuffer({ resolveWithObject: true });
+  // Resize: fit within MAX_DIMENSION × MAX_DIMENSION, preserving aspect ratio.
+  // Preserve WebP format for stickers/webp inputs (animated stickers lose frames
+  // if converted to JPEG). All other formats output as JPEG for size efficiency.
+  let pipeline = image.resize(MAX_DIMENSION, MAX_DIMENSION, {
+    fit: 'inside',
+    withoutEnlargement: true,
+  });
+  let outputMime: string;
+  if (mimeType === 'image/webp') {
+    pipeline = pipeline.webp({ quality: 85 });
+    outputMime = 'image/webp';
+  } else {
+    pipeline = pipeline.jpeg({ quality: 85, mozjpeg: true });
+    outputMime = 'image/jpeg';
+  }
+  const resized = await pipeline.toBuffer({ resolveWithObject: true });
 
   log.info(
     {
@@ -106,7 +117,7 @@ async function _doResize(buffer: Buffer, mimeType: string): Promise<ResizeResult
 
   return {
     buffer: resized.data,
-    mimeType: 'image/jpeg',
+    mimeType: outputMime,
     resized: true,
     originalWidth: width,
     originalHeight: height,
