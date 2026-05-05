@@ -31,9 +31,24 @@ vi.mock('node:fs', () => ({
   unlinkSync: vi.fn(),
 }));
 
+const mockResizeImageIfNeeded = vi.fn();
+vi.mock('../../src/core/image-resize.ts', () => ({
+  resizeImageIfNeeded: (...args: any[]) => mockResizeImageIfNeeded(...args),
+}));
+
 import { downloadMedia } from '../../src/core/media-download.ts';
 
 const MB = 1024 * 1024;
+
+// Default: resize mock passes through the buffer unchanged
+beforeEach(() => {
+  mockResizeImageIfNeeded.mockReset();
+  mockResizeImageIfNeeded.mockImplementation(async (buf: Buffer, mime: string) => ({
+    buffer: buf,
+    mimeType: mime,
+    resized: false,
+  }));
+});
 
 describe('downloadMedia — positive', () => {
   it('returns buffer and mimeType on success', async () => {
@@ -85,5 +100,63 @@ describe('downloadMedia — negative', () => {
 
     expect(result).not.toBeNull();
     expect(result!.buffer.length).toBe(25 * MB);
+  });
+});
+
+describe('downloadMedia — image resize integration', () => {
+  it('calls resizeImageIfNeeded with correct args for image downloads', async () => {
+    const fakeBuffer = Buffer.alloc(1024, 0x42);
+    const resizedBuffer = Buffer.from('resized');
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+    mockResizeImageIfNeeded.mockResolvedValue({
+      buffer: resizedBuffer,
+      mimeType: 'image/jpeg',
+      resized: true,
+    });
+
+    await downloadMedia(downloadFn, 'image/jpeg');
+
+    expect(mockResizeImageIfNeeded).toHaveBeenCalledOnce();
+    expect(mockResizeImageIfNeeded).toHaveBeenCalledWith(fakeBuffer, 'image/jpeg');
+  });
+
+  it('does NOT call resizeImageIfNeeded for non-image MIME types', async () => {
+    const fakeBuffer = Buffer.alloc(512, 0x00);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+
+    await downloadMedia(downloadFn, 'audio/ogg');
+
+    expect(mockResizeImageIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('returns the MIME type from resize output', async () => {
+    const fakeBuffer = Buffer.alloc(1024, 0x42);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+    mockResizeImageIfNeeded.mockResolvedValue({
+      buffer: Buffer.from('converted'),
+      mimeType: 'image/jpeg',
+      resized: true,
+    });
+
+    const result = await downloadMedia(downloadFn, 'image/png');
+
+    expect(result).not.toBeNull();
+    expect(result!.mimeType).toBe('image/jpeg');
+  });
+
+  it('returns original buffer when resize reports {resized: false}', async () => {
+    const fakeBuffer = Buffer.alloc(1024, 0x42);
+    const downloadFn = vi.fn().mockResolvedValue(fakeBuffer);
+    mockResizeImageIfNeeded.mockResolvedValue({
+      buffer: fakeBuffer,
+      mimeType: 'image/jpeg',
+      resized: false,
+    });
+
+    const result = await downloadMedia(downloadFn, 'image/jpeg');
+
+    expect(result).not.toBeNull();
+    expect(result!.buffer).toBe(fakeBuffer);
+    expect(result!.mimeType).toBe('image/jpeg');
   });
 });
