@@ -786,6 +786,20 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
 
+  // ---------------------------------------------------------------------------
+  // Image coalescing — batch rapid image sends into a single turn
+  // ---------------------------------------------------------------------------
+  // When multiple images arrive for the same chat within IMAGE_COALESCE_MS,
+  // they're collected and sent as one combined turn to avoid hitting Claude's
+  // per-image dimension limits in multi-image sessions.
+  private static readonly IMAGE_COALESCE_MS = 3_000;
+  private imageCoalesceBuffers: Map<string, {
+    texts: string[];
+    timer: ReturnType<typeof setTimeout>;
+    msg: IncomingMessage;
+    inboundSeqs: number[];
+  }> = new Map();
+
   // Set of mapKeys for which handleResumeFailed is currently managing context
   // injection + pending-turn replay. Used to suppress context injection in any
   // concurrent sendTurnToSession call for the same chat, preventing double injection.
@@ -816,12 +830,80 @@ export class AgentRuntime implements Runtime {
     this.perChatAssistantItemText.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
+    // Cancel any pending image coalesce buffer
+    const imgBuf = this.imageCoalesceBuffers.get(mapKey);
+    if (imgBuf) {
+      clearTimeout(imgBuf.timer);
+      this.imageCoalesceBuffers.delete(mapKey);
+    }
     // Clean up operation tracker for this chat
     const tracker = this.operationTrackers.get(mapKey);
     if (tracker) {
       tracker.shutdown();
       this.operationTrackers.delete(mapKey);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Image coalescing methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Buffer an image turn. If more images arrive within IMAGE_COALESCE_MS,
+   * they're appended. When the timer fires (or a non-image message arrives),
+   * all buffered images are sent as a single combined turn.
+   */
+  private coalesceImageTurn(mapKey: string, chatJid: string, text: string, msg: IncomingMessage): void {
+    const existing = this.imageCoalesceBuffers.get(mapKey);
+    if (existing) {
+      // More images arriving — append and reset timer
+      existing.texts.push(text);
+      if (msg.inboundSeq !== undefined) existing.inboundSeqs.push(msg.inboundSeq);
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      log.info({ mapKey, bufferedCount: existing.texts.length }, 'image coalesced into batch');
+    } else {
+      // First image — start the coalesce window
+      const timer = setTimeout(() => this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      this.imageCoalesceBuffers.set(mapKey, {
+        texts: [text],
+        timer,
+        msg,
+        inboundSeqs: msg.inboundSeq !== undefined ? [msg.inboundSeq] : [],
+      });
+      log.info({ mapKey }, 'image coalesce window opened');
+    }
+  }
+
+  /**
+   * Flush the image coalesce buffer for a chat — send all buffered images
+   * as a single combined turn.
+   */
+  private flushImageCoalesce(mapKey: string): void {
+    const entry = this.imageCoalesceBuffers.get(mapKey);
+    if (!entry) return;
+
+    clearTimeout(entry.timer);
+    this.imageCoalesceBuffers.delete(mapKey);
+
+    const { texts, msg } = entry;
+    const chatJid = msg.chatJid;
+    const count = texts.length;
+
+    // Combine all image references into one turn
+    let combinedText: string;
+    if (count === 1) {
+      combinedText = texts[0];
+    } else {
+      combinedText = `[${count} images received]\n${texts.join('\n')}`;
+      log.info({ mapKey, imageCount: count }, 'flushing coalesced image batch as single turn');
+    }
+
+    // Fire-and-forget — sendTurnPerChat is async but we don't need to await here
+    // since this is called from a timer callback
+    void this.sendTurnPerChat(chatJid, combinedText, mapKey).catch((err) => {
+      log.error({ err, mapKey, imageCount: count }, 'failed to send coalesced image turn');
+    });
   }
 
   private normalizeAssistantTextForDelivery(
@@ -1790,7 +1872,15 @@ export class AgentRuntime implements Runtime {
       this.perChatTurnContentType.set(mapKey, msg.contentType);
       this.perChatTurnText.set(mapKey, '');
       this.perChatAssistantItemText.delete(mapKey);
-      await this.sendTurnPerChat(chatJid, text, mapKey);
+
+      // Image coalescing: batch rapid image sends into a single turn
+      if (msg.contentType === 'image' || msg.contentType === 'sticker') {
+        this.coalesceImageTurn(mapKey, chatJid, text, msg);
+      } else {
+        // Flush any pending image buffer first (text message after images = done uploading)
+        this.flushImageCoalesce(mapKey);
+        await this.sendTurnPerChat(chatJid, text, mapKey);
+      }
     } else {
       // single mode: store inbound seq on runtime + queue
       this.currentInboundSeq = msg.inboundSeq;
@@ -1873,6 +1963,12 @@ export class AgentRuntime implements Runtime {
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
+      // Flush any buffered output from the dying session before shutting down.
+      // Without this, text in the 2-second stream debounce buffer is lost when
+      // the child process is killed, because the stream parser stops emitting events.
+      const queue = this.getQueueForChat(chatJid, mapKey);
+      if (queue) await queue.flush();
+
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.

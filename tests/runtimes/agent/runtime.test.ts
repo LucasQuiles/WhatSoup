@@ -1504,6 +1504,7 @@ describe('AgentRuntime', () => {
       'this.pendingTurnText.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
       'this.operationTrackers.delete(mapKey);',
+      'this.imageCoalesceBuffers.delete(mapKey);',
     ];
 
     for (const expectedDelete of expectedDeletes) {

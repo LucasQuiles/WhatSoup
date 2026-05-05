@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
+import { resizeImageIfNeeded } from './image-resize.ts';
 
 const log = createChildLogger('media:download');
 
@@ -68,6 +69,13 @@ export async function downloadMedia(
     }
 
     log.info({ mimeType, sizeBytes: buffer.length, durationMs }, 'Media downloaded');
+
+    // Resize images that exceed Claude's 2000px multi-image limit
+    if (mimeType.startsWith('image/')) {
+      const resized = await resizeImageIfNeeded(buffer, mimeType);
+      return { buffer: resized.buffer, mimeType: resized.mimeType };
+    }
+
     return { buffer, mimeType };
   } catch (err) {
     log.error({ err, mimeType, durationMs: Date.now() - startMs }, 'Media download failed');
