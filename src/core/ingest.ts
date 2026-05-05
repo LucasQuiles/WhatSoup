@@ -247,9 +247,10 @@ export function createIngestHandler(
           }
           return parsedAdminCommand;
         };
+        const pausedChats = config.pausedChats ?? new Set<string>();
 
         // 1b++. Paused chat short-circuit — message stored above, skip dispatch entirely.
-        if ((config.pausedChats.has(conversationKey) || config.pausedChats.has(msg.chatJid)) && !getAdminCommand()) {
+        if ((pausedChats.has(conversationKey) || pausedChats.has(msg.chatJid)) && !getAdminCommand()) {
           log.info({ chatJid: msg.chatJid, messageId: msg.messageId }, 'chat paused — skipping dispatch');
           if (durability) {
             const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
