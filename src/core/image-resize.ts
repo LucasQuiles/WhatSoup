@@ -4,7 +4,6 @@
 // We resize to MAX_DIMENSION (1920px — safe margin below 2000) on the longest edge,
 // preserving aspect ratio. JPEG output for smaller file sizes.
 
-import sharp from 'sharp';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('image-resize');
@@ -65,6 +64,7 @@ export async function resizeImageIfNeeded(
 }
 
 async function _doResize(buffer: Buffer, mimeType: string): Promise<ResizeResult> {
+  const { default: sharp } = await import('sharp');
   const image = sharp(buffer);
   const metadata = await image.metadata();
 

@@ -369,6 +369,12 @@ type PerChatCleanupRuntimeState = {
   perChatAssistantItemText: Map<string, Map<string, string>>;
   pendingTurnText: Map<string, string>;
   resumeFailedHandling: Set<string>;
+  imageCoalesceBuffers: Map<string, {
+    texts: string[];
+    timer: ReturnType<typeof setTimeout>;
+    msg: IncomingMessage;
+    inboundSeqs: number[];
+  }>;
 };
 
 function getPerChatCleanupState(runtime: AgentRuntime): PerChatCleanupRuntimeState {
@@ -887,54 +893,73 @@ describe('AgentRuntime', () => {
   });
 
   it('handleJidAliasChanged cleans the old key after migrating per-chat state', () => {
-    const canonicalJid = '15550004444@s.whatsapp.net';
-    const db = makeDb();
-    (db.raw.prepare as ReturnType<typeof vi.fn>).mockReturnValue({
-      run: vi.fn(),
-      get: vi.fn(() => ({ phone_jid: canonicalJid })),
-    });
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const state = runtime as unknown as PerChatCleanupRuntimeState & {
-      chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
-      chatQueues: Map<string, IOutboundQueue>;
-    };
-    const lidKey = '15550004444@lid';
-    const sessionRef = { getStatus: () => mockSession.getStatus() };
-    const queueRef = makeQueueMock(lidKey);
+    vi.useFakeTimers();
+    try {
+      const canonicalJid = '15550004444@s.whatsapp.net';
+      const db = makeDb();
+      (db.raw.prepare as ReturnType<typeof vi.fn>).mockReturnValue({
+        run: vi.fn(),
+        get: vi.fn(() => ({ phone_jid: canonicalJid })),
+      });
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PerChatCleanupRuntimeState & {
+        chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
+        chatQueues: Map<string, IOutboundQueue>;
+      };
+      const lidKey = '15550004444@lid';
+      const sessionRef = { getStatus: () => mockSession.getStatus() };
+      const queueRef = makeQueueMock(lidKey);
+      const imageTimer = setTimeout(() => undefined, 60_000);
 
-    state.chatSessions.set(lidKey, sessionRef);
-    state.chatQueues.set(lidKey, queueRef);
-    state.perChatInboundSeqQueue.set(lidKey, [4, 5]);
-    state.perChatTurnContentType.set(lidKey, 'text');
-    state.perChatTurnText.set(lidKey, 'reply');
-    state.perChatAssistantItemText.set(lidKey, new Map([['item-1', 'chunk']]));
-    state.pendingTurnText.set(lidKey, 'pending');
-    state.perChatCrashCount.set(lidKey, 2);
-    state.resumeFailedHandling.add(lidKey);
+      state.chatSessions.set(lidKey, sessionRef);
+      state.chatQueues.set(lidKey, queueRef);
+      state.perChatInboundSeqQueue.set(lidKey, [4, 5]);
+      state.perChatTurnContentType.set(lidKey, 'text');
+      state.perChatTurnText.set(lidKey, 'reply');
+      state.perChatAssistantItemText.set(lidKey, new Map([['item-1', 'chunk']]));
+      state.pendingTurnText.set(lidKey, 'pending');
+      state.perChatCrashCount.set(lidKey, 2);
+      state.resumeFailedHandling.add(lidKey);
+      state.imageCoalesceBuffers.set(lidKey, {
+        texts: ['image-a', 'image-b'],
+        timer: imageTimer,
+        msg: makeMsg({ chatJid: lidKey, contentType: 'image', inboundSeq: 6 }),
+        inboundSeqs: [6, 7],
+      });
 
-    expect(() => runtime.handleJidAliasChanged('15550004444', canonicalJid)).not.toThrow();
+      expect(() => runtime.handleJidAliasChanged('15550004444', canonicalJid)).not.toThrow();
 
-    expect(state.chatSessions.get(canonicalJid)).toBe(sessionRef);
-    expect(state.chatQueues.get(canonicalJid)).toBe(queueRef);
-    expect(queueRef.updateDeliveryJid).toHaveBeenCalledWith(canonicalJid);
-    expect(state.perChatInboundSeqQueue.get(canonicalJid)).toEqual([4, 5]);
-    expect(state.perChatTurnContentType.get(canonicalJid)).toBe('text');
-    expect(state.perChatTurnText.get(canonicalJid)).toBe('reply');
-    expect(state.perChatAssistantItemText.get(canonicalJid)?.get('item-1')).toBe('chunk');
-    expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
-    expect(state.perChatCrashCount.get(canonicalJid)).toBe(2);
-    expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
+      expect(state.chatSessions.get(canonicalJid)).toBe(sessionRef);
+      expect(state.chatQueues.get(canonicalJid)).toBe(queueRef);
+      expect(queueRef.updateDeliveryJid).toHaveBeenCalledWith(canonicalJid);
+      expect(state.perChatInboundSeqQueue.get(canonicalJid)).toEqual([4, 5]);
+      expect(state.perChatTurnContentType.get(canonicalJid)).toBe('text');
+      expect(state.perChatTurnText.get(canonicalJid)).toBe('reply');
+      expect(state.perChatAssistantItemText.get(canonicalJid)?.get('item-1')).toBe('chunk');
+      expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
+      expect(state.perChatCrashCount.get(canonicalJid)).toBe(2);
+      expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
+      expect(state.imageCoalesceBuffers.get(canonicalJid)).toMatchObject({
+        texts: ['image-a', 'image-b'],
+        inboundSeqs: [6, 7],
+      });
+      expect(state.imageCoalesceBuffers.get(canonicalJid)?.msg.chatJid).toBe(canonicalJid);
+      expect(state.imageCoalesceBuffers.get(canonicalJid)?.timer).not.toBe(imageTimer);
 
-    expect(state.chatSessions.has(lidKey)).toBe(false);
-    expect(state.chatQueues.has(lidKey)).toBe(false);
-    expect(state.perChatCrashCount.has(lidKey)).toBe(false);
-    expect(state.perChatInboundSeqQueue.has(lidKey)).toBe(false);
-    expect(state.perChatTurnContentType.has(lidKey)).toBe(false);
-    expect(state.perChatTurnText.has(lidKey)).toBe(false);
-    expect(state.perChatAssistantItemText.has(lidKey)).toBe(false);
-    expect(state.pendingTurnText.has(lidKey)).toBe(false);
-    expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
+      expect(state.chatSessions.has(lidKey)).toBe(false);
+      expect(state.chatQueues.has(lidKey)).toBe(false);
+      expect(state.perChatCrashCount.has(lidKey)).toBe(false);
+      expect(state.perChatInboundSeqQueue.has(lidKey)).toBe(false);
+      expect(state.perChatTurnContentType.has(lidKey)).toBe(false);
+      expect(state.perChatTurnText.has(lidKey)).toBe(false);
+      expect(state.perChatAssistantItemText.has(lidKey)).toBe(false);
+      expect(state.pendingTurnText.has(lidKey)).toBe(false);
+      expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
+      expect(state.imageCoalesceBuffers.has(lidKey)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('per_chat active-session events keep delivering results after LID remap', async () => {
@@ -1008,6 +1033,160 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueStreamingText.mock.calls.map(([text]) => text)).toEqual(['Hello ', 'world']);
     expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('!');
     expect(state.perChatTurnText.has(canonicalJid)).toBe(false);
+  });
+
+  it('image coalescing flushes a batch when the timer fires', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const durability = {
+        markInboundSkipped: vi.fn(),
+        markInboundFailed: vi.fn(),
+      };
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
+
+      await runtime.start();
+      (runtime as unknown as { durability: typeof durability }).durability = durability;
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-1', content: 'image one', contentType: 'image', inboundSeq: 1 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-2', content: 'image two', contentType: 'image', inboundSeq: 2 }));
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('[2 images received]\nimage one\nimage two');
+      expect(durability.markInboundSkipped).toHaveBeenCalledWith(1, 'coalesced_image');
+      expect(mockQueue.setInboundSeq).toHaveBeenCalledWith(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('image coalescing flushes buffered images before a following text turn', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-1', content: 'image one', contentType: 'image', inboundSeq: 10 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'txt-1', content: 'after image', contentType: 'text', inboundSeq: 11 }));
+
+      const sentTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).map(([text]) => text);
+      expect(sentTurns).toEqual(['image one', 'after image']);
+      expect(mockQueue.setInboundSeq.mock.calls.map(([seq]) => seq)).toEqual([10, 11]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('image coalescing queues only the representative seq and consumes it on result', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PerChatCleanupRuntimeState;
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-1', content: 'image one', contentType: 'image', inboundSeq: 21 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-2', content: 'image two', contentType: 'image', inboundSeq: 22 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-3', content: 'image three', contentType: 'image', inboundSeq: 23 }));
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(state.perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([23]);
+      capturedOnEventRef.current!({ type: 'result', text: null });
+      expect(state.perChatInboundSeqQueue.get('test@s.whatsapp.net')).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('image coalescing sends one turn for multiple images in a timer batch', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-1', content: 'image one', contentType: 'image', inboundSeq: 31 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-2', content: 'image two', contentType: 'image', inboundSeq: 32 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-3', content: 'image three', contentType: 'image', inboundSeq: 33 }));
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      const firstTurn = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)[0][0];
+      expect(firstTurn).toContain('[3 images received]');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('image coalescing flushes immediately at the max batch size', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
+
+      await runtime.start();
+      for (let i = 1; i <= 20; i += 1) {
+        await sendAndDrain(runtime, makeMsg({
+          messageId: `img-${i}`,
+          content: `image ${i}`,
+          contentType: 'image',
+          inboundSeq: 100 + i,
+        }));
+      }
+
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      const firstTurn = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>)[0][0];
+      expect(firstTurn).toContain('[20 images received]');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('image coalescing aborts instead of sending while resume-failed recovery owns the chat', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PerChatCleanupRuntimeState & {
+        flushImageCoalesce: (mapKey: string) => Promise<void>;
+        durability: { markInboundSkipped: ReturnType<typeof vi.fn> } | null;
+      };
+      const timer = setTimeout(() => undefined, 60_000);
+      const markInboundSkipped = vi.fn();
+      state.durability = { markInboundSkipped };
+      state.resumeFailedHandling.add('test@s.whatsapp.net');
+      state.imageCoalesceBuffers.set('test@s.whatsapp.net', {
+        texts: ['image one'],
+        timer,
+        msg: makeMsg({ content: 'image one', contentType: 'image', inboundSeq: 141 }),
+        inboundSeqs: [141],
+      });
+
+      await state.flushImageCoalesce('test@s.whatsapp.net');
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      expect(state.imageCoalesceBuffers.has('test@s.whatsapp.net')).toBe(false);
+      expect(markInboundSkipped).toHaveBeenCalledWith(141, 'resume_failed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('handleMessage /status sends status when inactive', async () => {
@@ -1488,6 +1667,47 @@ describe('AgentRuntime', () => {
     expect(state.resumeFailedHandling.has(survivorKey)).toBe(true);
   });
 
+  it('cleanupPerChatState marks buffered image seqs skipped before deleting the buffer', () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test');
+      const state = getPerChatCleanupState(runtime) as PerChatCleanupRuntimeState & {
+        durability: { markInboundSkipped: ReturnType<typeof vi.fn> } | null;
+      };
+      const targetKey = 'target@s.whatsapp.net';
+      const otherKey = 'other@s.whatsapp.net';
+      const targetTimer = setTimeout(() => undefined, 60_000);
+      const otherTimer = setTimeout(() => undefined, 60_000);
+      const markInboundSkipped = vi.fn();
+      state.durability = { markInboundSkipped };
+
+      state.imageCoalesceBuffers.set(targetKey, {
+        texts: ['img-a', 'img-b'],
+        timer: targetTimer,
+        msg: makeMsg({ chatJid: targetKey, contentType: 'image' }),
+        inboundSeqs: [11, 12],
+      });
+      state.imageCoalesceBuffers.set(otherKey, {
+        texts: ['other-img'],
+        timer: otherTimer,
+        msg: makeMsg({ chatJid: otherKey, contentType: 'image' }),
+        inboundSeqs: [21],
+      });
+
+      state.cleanupPerChatState(targetKey);
+
+      expect(state.imageCoalesceBuffers.has(targetKey)).toBe(false);
+      expect(state.imageCoalesceBuffers.has(otherKey)).toBe(true);
+      expect(markInboundSkipped).toHaveBeenCalledWith(11, 'cleanup_aborted');
+      expect(markInboundSkipped).toHaveBeenCalledWith(12, 'cleanup_aborted');
+      expect(markInboundSkipped).not.toHaveBeenCalledWith(21, 'cleanup_aborted');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cleanupPerChatState structurally covers all eight auxiliary per-chat maps', async () => {
     const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
     const match = source.match(/private cleanupPerChatState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
@@ -1504,7 +1724,6 @@ describe('AgentRuntime', () => {
       'this.pendingTurnText.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
       'this.operationTrackers.delete(mapKey);',
-      'this.imageCoalesceBuffers.delete(mapKey);',
     ];
 
     for (const expectedDelete of expectedDeletes) {
@@ -1512,6 +1731,7 @@ describe('AgentRuntime', () => {
     }
 
     expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length);
+    expect(methodBody).toContain("this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');");
   });
 
   it('per_chat shutdown calls cleanupPerChatState for each chat key and clears auxiliary maps', async () => {
@@ -1629,6 +1849,8 @@ describe('AgentRuntime', () => {
       const workspaceMediaStopB = vi.fn();
       const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
       const timeout = setTimeout(() => undefined, 60_000);
+      const imageTimer = setTimeout(() => undefined, 60_000);
+      const markInboundSkipped = vi.fn();
 
       const runtimeState = runtime as unknown as {
         session: { shutdown: () => Promise<void> } | null;
@@ -1649,6 +1871,13 @@ describe('AgentRuntime', () => {
         perChatAssistantItemText: Map<string, Map<string, string>>;
         pendingTurnText: Map<string, string>;
         resumeFailedHandling: Set<string>;
+        imageCoalesceBuffers: Map<string, {
+          texts: string[];
+          timer: ReturnType<typeof setTimeout>;
+          msg: IncomingMessage;
+          inboundSeqs: number[];
+        }>;
+        durability: { markInboundSkipped: ReturnType<typeof vi.fn> } | null;
       };
 
       runtimeState.session = { shutdown: sessionShutdown };
@@ -1671,6 +1900,7 @@ describe('AgentRuntime', () => {
         }],
       ]);
       runtimeState.controlSessionTimeout = timeout;
+      runtimeState.durability = { markInboundSkipped };
       runtimeState.activeToolNames.set('scope', new Map([['tool-1', 'Read']]));
       runtimeState.perChatInboundSeqQueue.set('chat-a', [1]);
       runtimeState.perChatTurnContentType.set('chat-a', 'text');
@@ -1678,6 +1908,12 @@ describe('AgentRuntime', () => {
       runtimeState.perChatAssistantItemText.set('chat-a', new Map([['item-1', 'chunk']]));
       runtimeState.pendingTurnText.set('chat-a', 'hello');
       runtimeState.resumeFailedHandling.add('chat-a');
+      runtimeState.imageCoalesceBuffers.set('chat-a', {
+        texts: ['image-a'],
+        timer: imageTimer,
+        msg: makeMsg({ chatJid: 'chat-a@s.whatsapp.net', contentType: 'image' }),
+        inboundSeqs: [31],
+      });
 
       await expect(runtime.shutdown()).resolves.toBeUndefined();
 
@@ -1701,6 +1937,8 @@ describe('AgentRuntime', () => {
       expect(runtimeState.perChatAssistantItemText.size).toBe(0);
       expect(runtimeState.pendingTurnText.size).toBe(0);
       expect(runtimeState.resumeFailedHandling.size).toBe(0);
+      expect(runtimeState.imageCoalesceBuffers.size).toBe(0);
+      expect(markInboundSkipped).toHaveBeenCalledWith(31, 'cleanup_aborted');
     } finally {
       vi.useRealTimers();
     }

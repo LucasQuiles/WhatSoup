@@ -52,6 +52,12 @@ vi.mock('../../src/core/access-list.ts', () => ({
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler } from '../../src/core/ingest.ts';
 import { config } from '../../src/config.ts';
+import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
+import { handleAdminCommand } from '../../src/core/admin.ts';
+
+const mockIsAdminMessage = vi.mocked(isAdminMessage);
+const mockParseAdminCommand = vi.mocked(parseAdminCommand);
+const mockHandleAdminCommand = vi.mocked(handleAdminCommand);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -121,6 +127,9 @@ let savedPausedChats: Set<string>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockIsAdminMessage.mockReturnValue(false);
+  mockParseAdminCommand.mockReturnValue(null);
+  mockHandleAdminCommand.mockResolvedValue(undefined);
   savedPausedChats = config.pausedChats;
 });
 
@@ -218,6 +227,51 @@ describe('pausedChats — ingest short-circuit', () => {
     );
     expect(markInboundSkipped).toHaveBeenCalledOnce();
     expect(markInboundSkipped).toHaveBeenCalledWith(42, 'chat_paused');
+  });
+
+  it('handles admin commands from paused chats instead of dropping them', async () => {
+    const groupJid = '120363406689931730@g.us';
+    setPausedChats([groupJid]);
+    mockIsAdminMessage.mockReturnValue(true);
+    mockParseAdminCommand.mockReturnValue({ action: 'block', subjectType: 'phone', subjectId: '15559876543' });
+
+    const journalInbound = vi.fn().mockReturnValue(43);
+    const markInboundSkipped = vi.fn();
+    const durability = {
+      journalInbound,
+      markInboundSkipped,
+      matchEcho: vi.fn(),
+    };
+
+    const { handler, runtime, messenger, db } = makeIngest({ durability });
+    const msg = makeMsg({
+      chatJid: groupJid,
+      senderJid: '15184194479@s.whatsapp.net',
+      content: 'block 15559876543',
+      isGroup: true,
+    });
+
+    await runIngest(handler, msg);
+
+    expect(runtime.handleMessage).not.toHaveBeenCalled();
+    expect(mockHandleAdminCommand).toHaveBeenCalledWith(
+      db,
+      messenger,
+      'block',
+      'phone',
+      '15559876543',
+      groupJid,
+      expect.any(Function),
+      durability,
+    );
+    expect(journalInbound).toHaveBeenCalledWith(
+      msg.messageId,
+      '120363406689931730_at_g.us',
+      groupJid,
+      'admin',
+    );
+    expect(markInboundSkipped).toHaveBeenCalledWith(43, 'admin_command');
+    expect(markInboundSkipped).not.toHaveBeenCalledWith(expect.any(Number), 'chat_paused');
   });
 
   // -------------------------------------------------------------------------
