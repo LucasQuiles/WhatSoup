@@ -1189,6 +1189,46 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('image coalescing marks representative failed and clears turn state when send fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PerChatCleanupRuntimeState & {
+        durability: {
+          markInboundSkipped: ReturnType<typeof vi.fn>;
+          markInboundFailed: ReturnType<typeof vi.fn>;
+        } | null;
+      };
+      const durability = {
+        markInboundSkipped: vi.fn(),
+        markInboundFailed: vi.fn(),
+      };
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 1, sessionId: 'sess', startedAt: null, messageCount: 0, lastMessageAt: null });
+      mockSession.sendTurn.mockRejectedValueOnce(new Error('send failed'));
+
+      await runtime.start();
+      state.durability = durability;
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-fail-1', content: 'image one', contentType: 'image', inboundSeq: 151 }));
+      await sendAndDrain(runtime, makeMsg({ messageId: 'img-fail-2', content: 'image two', contentType: 'image', inboundSeq: 152 }));
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(durability.markInboundSkipped).toHaveBeenCalledWith(151, 'coalesced_image');
+      expect(durability.markInboundFailed).toHaveBeenCalledWith(152);
+      expect(state.imageCoalesceBuffers.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.pendingTurnText.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.perChatTurnContentType.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.perChatTurnText.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.perChatAssistantItemText.has('test@s.whatsapp.net')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('handleMessage /status sends status when inactive', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

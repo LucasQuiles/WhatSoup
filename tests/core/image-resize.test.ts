@@ -209,6 +209,31 @@ describe('resizeImageIfNeeded', () => {
     });
   });
 
+  describe('sharp load failure', () => {
+    it('returns the original image when sharp cannot be imported', async () => {
+      vi.resetModules();
+      vi.doMock('sharp', () => {
+        throw new Error('sharp native module unavailable');
+      });
+
+      try {
+        const { resizeImageIfNeeded: resizeWithBrokenSharp } = await import('../../src/core/image-resize.ts');
+        const buf = Buffer.alloc(20_000, 0xaa);
+
+        const result = await resizeWithBrokenSharp(buf, 'image/png');
+
+        expect(result).toEqual({
+          buffer: buf,
+          mimeType: 'image/png',
+          resized: false,
+        });
+      } finally {
+        vi.doUnmock('sharp');
+        vi.resetModules();
+      }
+    });
+  });
+
   // ── 10. Result metadata populated correctly ──
   describe('metadata population', () => {
     it('populates all metadata fields on resize', async () => {

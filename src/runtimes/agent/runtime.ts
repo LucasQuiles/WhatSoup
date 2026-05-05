@@ -985,6 +985,9 @@ export class AgentRuntime implements Runtime {
         this.markImageCoalesceSeqFailed(mapKey, representativeSeq);
       }
       this.pendingTurnText.delete(mapKey);
+      this.perChatTurnContentType.delete(mapKey);
+      this.perChatTurnText.delete(mapKey);
+      this.perChatAssistantItemText.delete(mapKey);
       log.error({ err, mapKey, imageCount: count }, 'failed to send coalesced image turn');
     }
   }
