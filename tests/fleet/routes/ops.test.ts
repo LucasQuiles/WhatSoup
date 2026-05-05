@@ -12,6 +12,7 @@ import {
   handleAccessUpdate,
   handleRestart,
   handleConfigUpdate,
+  handleCreateLine,
 } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
@@ -71,6 +72,16 @@ function mockRes(): ServerResponse & { _status: number; _headers: Record<string,
     },
   };
   return res as any;
+}
+
+function fileMode(filePath: string): number {
+  return fs.statSync(filePath).mode & 0o777;
+}
+
+function writePermissiveFile(filePath: string, contents: string): void {
+  fs.writeFileSync(filePath, contents);
+  fs.chmodSync(filePath, 0o644);
+  expect(fileMode(filePath)).toBe(0o644);
 }
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
@@ -273,18 +284,131 @@ describe('handleRestart', () => {
 });
 
 // ---------------------------------------------------------------------------
+// handleCreateLine
+// ---------------------------------------------------------------------------
+
+describe('handleCreateLine', () => {
+  let tmpDir: string;
+  let agentCwd: string;
+  let originalConfigHome: string | undefined;
+  let originalDataHome: string | undefined;
+  let originalStateHome: string | undefined;
+  let originalUmask: number;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-create-mode-test-'));
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-create-mode-'));
+
+    originalConfigHome = process.env.XDG_CONFIG_HOME;
+    originalDataHome = process.env.XDG_DATA_HOME;
+    originalStateHome = process.env.XDG_STATE_HOME;
+    originalUmask = process.umask(0o022);
+
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'config');
+    process.env.XDG_DATA_HOME = path.join(tmpDir, 'data');
+    process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
+  });
+
+  afterEach(() => {
+    process.umask(originalUmask);
+    if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalDataHome;
+    if (originalStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = originalStateHome;
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(agentCwd, { recursive: true, force: true });
+  });
+
+  it('creates config.json and CLAUDE.md with private file modes', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'mode-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+        claudeMd: 'Local operating instructions for this instance.\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'mode-agent', 'config.json');
+    const claudeMdPath = path.join(agentCwd, '.claude', 'CLAUDE.md');
+    const modes = {
+      configJson: fileMode(configPath),
+      claudeMd: fileMode(claudeMdPath),
+    };
+    expect(modes).toEqual({ configJson: 0o600, claudeMd: 0o600 });
+  });
+
+  it('tightens pre-existing CLAUDE.md and settings.json modes during create', async () => {
+    const claudeDir = path.join(agentCwd, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+    const settingsPath = path.join(claudeDir, 'settings.json');
+    writePermissiveFile(claudeMdPath, 'old instructions\n');
+    writePermissiveFile(settingsPath, JSON.stringify({ hooks: { PreToolUse: [] } }));
+
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'mode-agent-existing',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+        claudeMd: 'Updated local operating instructions.\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    expect(fileMode(claudeMdPath)).toBe(0o600);
+    expect(fileMode(settingsPath)).toBe(0o600);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // handleConfigUpdate
 // ---------------------------------------------------------------------------
 
 describe('handleConfigUpdate', () => {
   let tmpDir: string;
+  let agentCwd: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-config-test-'));
+    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
+    fs.mkdirSync(homeTmp, { recursive: true });
+    agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-config-mode-'));
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(agentCwd, { recursive: true, force: true });
   });
 
   it('returns 404 for unknown instance', async () => {
@@ -345,6 +469,67 @@ describe('handleConfigUpdate', () => {
 
     // Verify no .tmp file left behind
     expect(fs.existsSync(configPath + '.tmp')).toBe(false);
+  });
+
+  it('replaces a stale permissive config tmp with a private config file', async () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ type: 'chat', healthPort: 3010, accessMode: 'self_only' }));
+    const tmpPath = configPath + '.tmp';
+    writePermissiveFile(tmpPath, JSON.stringify({ stale: true }));
+
+    const inst = fakeInstance({ configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(fs.existsSync(tmpPath)).toBe(false);
+    expect(fileMode(configPath)).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).accessMode).toBe('allowlist');
+  });
+
+  it('tightens pre-existing CLAUDE.md and settings.json modes during config update', async () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+    }));
+    const claudeDir = path.join(agentCwd, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+    const settingsPath = path.join(claudeDir, 'settings.json');
+    writePermissiveFile(claudeMdPath, 'old instructions\n');
+    writePermissiveFile(settingsPath, JSON.stringify({ hooks: { PreToolUse: [] } }));
+
+    const inst = fakeInstance({ type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        claudeMd: 'Updated local operating instructions.\n',
+        settingsJson: {
+          permissions: {
+            allow: ['Bash'],
+            deny: [],
+            defaultMode: 'bypassPermissions',
+          },
+        },
+      })),
+      res,
+      deps,
+      { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(fileMode(claudeMdPath)).toBe(0o600);
+    expect(fileMode(settingsPath)).toBe(0o600);
   });
 
   it('returns 500 when config file cannot be read', async () => {

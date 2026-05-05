@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { writePermissionsSettings } from '../../src/core/workspace.ts';
 
@@ -65,6 +65,27 @@ describe('writePermissionsSettings', () => {
     // Both hooks and permissions should be present
     expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('/path/to/hook.sh');
     expect(written.permissions.allow).toEqual(['Bash']);
+  });
+
+  it('tightens an existing settings.json file to private mode', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    const settingsPath = join(claudeDir, 'settings.json');
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [] } }));
+    chmodSync(settingsPath, 0o644);
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o644);
+
+    const settings = {
+      permissions: {
+        allow: ['Bash'],
+        deny: [],
+        defaultMode: 'bypassPermissions' as const,
+      },
+    };
+    writePermissionsSettings(claudeDir, settings);
+
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
   });
 
   it('creates .claude/ directory if it does not exist', () => {

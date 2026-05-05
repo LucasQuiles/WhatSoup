@@ -1,7 +1,7 @@
 // src/core/workspace.ts
 // Pure functions for mapping chat JIDs to workspace paths.
 
-import { mkdirSync, writeFileSync, symlinkSync, unlinkSync, readFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync, symlinkSync, unlinkSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { defaultSettingsJson, type PermissionsSettings } from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -9,6 +9,16 @@ import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('workspace');
+
+function writePrivateFileSync(filePath: string, data: string): void {
+  try {
+    chmodSync(filePath, 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  writeFileSync(filePath, data, { mode: 0o600 });
+  chmodSync(filePath, 0o600);
+}
 
 export interface WorkspaceInfo {
   kind: 'dm' | 'group';
@@ -132,7 +142,7 @@ export function writePermissionsSettings(
       // null or {} = reset to global inheritance; non-empty object = override
       merged.enabledPlugins = settings.enabledPlugins ?? {};
     }
-    writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
   } catch (err) {
     log.error({ err, claudeDir }, 'failed to write permissions settings');
     throw err;
