@@ -91,6 +91,73 @@ describe('migrate-memory-config CLI helpers', () => {
     }
   });
 
+  it('write mode preserves flat recency settings while migrating supported Pinecone fields', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-test-'));
+    try {
+      const configPath = makeInstance(tmp, 'mw-bot', {
+        name: 'mw-bot',
+        pineconeIndex: 'mw-mind',
+        recencyHalfLifeDays: 21,
+        maxAgeDays: 180,
+      });
+
+      const result = migrateMemoryConfigFile(configPath, { write: true, backup: false });
+      const next = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      expect(result.wrote).toBe(true);
+      expect(result.backupPath).toBeNull();
+      expect(next.memory.pinecone.index).toBe('mw-mind');
+      expect(next).not.toHaveProperty('pineconeIndex');
+      expect(next.recencyHalfLifeDays).toBe(21);
+      expect(next.maxAgeDays).toBe(180);
+      expect(next.memory.pinecone).not.toHaveProperty('recencyHalfLifeDays');
+      expect(next.memory.pinecone).not.toHaveProperty('maxAgeDays');
+      expect(result.moved).toContainEqual({ from: 'pineconeIndex', to: 'memory.pinecone.index' });
+      expect(result.removed).toContain('pineconeIndex');
+      expect(result.moved.map((move) => move.from)).not.toContain('recencyHalfLifeDays');
+      expect(result.moved.map((move) => move.from)).not.toContain('maxAgeDays');
+      expect(result.removed).not.toContain('recencyHalfLifeDays');
+      expect(result.removed).not.toContain('maxAgeDays');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('dry-run preserves flat recency settings while reporting supported Pinecone moves', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-test-'));
+    try {
+      const configPath = makeInstance(tmp, 'mw-bot', {
+        name: 'mw-bot',
+        pineconeIndex: 'mw-mind',
+        recencyHalfLifeDays: 21,
+        maxAgeDays: 180,
+      });
+      const beforeConfig = fs.readFileSync(configPath, 'utf-8');
+
+      const result = migrateMemoryConfigFile(configPath, { write: false });
+      const next = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      expect(result.changed).toBe(true);
+      expect(result.wrote).toBe(false);
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(beforeConfig);
+      expect(next.pineconeIndex).toBe('mw-mind');
+      expect(next.recencyHalfLifeDays).toBe(21);
+      expect(next.maxAgeDays).toBe(180);
+      expect(next).not.toHaveProperty('memory.pinecone.index');
+      expect(next).not.toHaveProperty('memory.pinecone.recencyHalfLifeDays');
+      expect(next).not.toHaveProperty('memory.pinecone.maxAgeDays');
+      expect(result.moved).toContainEqual({ from: 'pineconeIndex', to: 'memory.pinecone.index' });
+      expect(result.removed).toContain('pineconeIndex');
+      expect(result.moved.map((move) => move.from)).not.toContain('recencyHalfLifeDays');
+      expect(result.moved.map((move) => move.from)).not.toContain('maxAgeDays');
+      expect(result.removed).not.toContain('recencyHalfLifeDays');
+      expect(result.removed).not.toContain('maxAgeDays');
+      expect(result).not.toHaveProperty('config');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('runMigration can target a named instance', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-test-'));
     try {
