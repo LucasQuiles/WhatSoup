@@ -786,6 +786,21 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
 
+  // ---------------------------------------------------------------------------
+  // Image coalescing — batch rapid image sends into a single turn
+  // ---------------------------------------------------------------------------
+  // When multiple images arrive for the same chat within IMAGE_COALESCE_MS,
+  // they're collected and sent as one combined turn to avoid hitting Claude's
+  // per-image dimension limits in multi-image sessions.
+  private static readonly IMAGE_COALESCE_MS = 3_000;
+  private static readonly MAX_COALESCE_BATCH = 20;
+  private imageCoalesceBuffers: Map<string, {
+    texts: string[];
+    timer: ReturnType<typeof setTimeout>;
+    msg: IncomingMessage;
+    inboundSeqs: number[];
+  }> = new Map();
+
   // Set of mapKeys for which handleResumeFailed is currently managing context
   // injection + pending-turn replay. Used to suppress context injection in any
   // concurrent sendTurnToSession call for the same chat, preventing double injection.
@@ -804,6 +819,35 @@ export class AgentRuntime implements Runtime {
     return created;
   }
 
+  private markImageCoalesceSeqsSkipped(mapKey: string, inboundSeqs: number[], reason: string): void {
+    if (!this.durability) return;
+    for (const seq of inboundSeqs) {
+      try {
+        this.durability.markInboundSkipped(seq, reason);
+      } catch (err) {
+        log.warn({ err, mapKey, seq, reason }, 'failed to mark image coalesce seq skipped');
+      }
+    }
+  }
+
+  private markImageCoalesceSeqFailed(mapKey: string, seq: number): void {
+    if (!this.durability) return;
+    try {
+      this.durability.markInboundFailed(seq);
+    } catch (err) {
+      log.warn({ err, mapKey, seq }, 'failed to mark image coalesce representative seq failed');
+    }
+  }
+
+  private abortImageCoalesceBuffer(mapKey: string, reason: string): boolean {
+    const imgBuf = this.imageCoalesceBuffers.get(mapKey);
+    if (!imgBuf) return false;
+    clearTimeout(imgBuf.timer);
+    this.imageCoalesceBuffers.delete(mapKey);
+    this.markImageCoalesceSeqsSkipped(mapKey, imgBuf.inboundSeqs, reason);
+    return true;
+  }
+
   /**
    * Remove all per-chat auxiliary state for a given map key.
    * Call this whenever a session is removed from chatSessions.
@@ -816,11 +860,135 @@ export class AgentRuntime implements Runtime {
     this.perChatAssistantItemText.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
+    // Cancel any pending image coalesce buffer
+    this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
     // Clean up operation tracker for this chat
     const tracker = this.operationTrackers.get(mapKey);
     if (tracker) {
       tracker.shutdown();
       this.operationTrackers.delete(mapKey);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Image coalescing methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Buffer an image turn. If more images arrive within IMAGE_COALESCE_MS,
+   * they're appended. When the timer fires (or a non-image message arrives),
+   * all buffered images are sent as a single combined turn.
+   *
+   * Seq/state setup is deferred to flush time — only the representative
+   * turn gets a seq entry, preventing desync with the shift-one-per-turn
+   * logic in handleEventPerChat.
+   */
+  private async coalesceImageTurn(mapKey: string, chatJid: string, text: string, msg: IncomingMessage): Promise<void> {
+    const existing = this.imageCoalesceBuffers.get(mapKey);
+    if (existing) {
+      // More images arriving — append and reset timer
+      existing.texts.push(text);
+      if (msg.inboundSeq !== undefined) existing.inboundSeqs.push(msg.inboundSeq);
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      if (existing.texts.length >= AgentRuntime.MAX_COALESCE_BATCH) {
+        log.warn({
+          mapKey,
+          bufferedCount: existing.texts.length,
+          maxBatch: AgentRuntime.MAX_COALESCE_BATCH,
+        }, 'image coalesce batch limit reached — flushing immediately');
+        await this.flushImageCoalesce(mapKey);
+        return;
+      }
+      log.info({ mapKey, bufferedCount: existing.texts.length }, 'image coalesced into batch');
+    } else {
+      // First image — start the coalesce window
+      const timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
+      this.imageCoalesceBuffers.set(mapKey, {
+        texts: [text],
+        timer,
+        msg,
+        inboundSeqs: msg.inboundSeq !== undefined ? [msg.inboundSeq] : [],
+      });
+      log.info({ mapKey }, 'image coalesce window opened');
+    }
+  }
+
+  /**
+   * Flush the image coalesce buffer for a chat — send all buffered images
+   * as a single combined turn. Returns a Promise so callers can await it
+   * to prevent concurrent turn injection.
+   *
+   * Durability: only the LAST inboundSeq is pushed onto perChatInboundSeqQueue
+   * (the representative seq for this combined turn). Earlier seqs are marked
+   * skipped with reason 'coalesced_image' via durability engine.
+   */
+  private async flushImageCoalesce(mapKey: string): Promise<void> {
+    if (this.resumeFailedHandling.has(mapKey)) {
+      const aborted = this.abortImageCoalesceBuffer(mapKey, 'resume_failed');
+      if (aborted) {
+        log.warn({ mapKey }, 'image coalesce flush skipped during resume-failed recovery');
+      }
+      return;
+    }
+
+    const entry = this.imageCoalesceBuffers.get(mapKey);
+    if (!entry) return;
+
+    clearTimeout(entry.timer);
+    this.imageCoalesceBuffers.delete(mapKey);
+
+    const { texts, msg, inboundSeqs } = entry;
+    const chatJid = msg.chatJid;
+    const count = texts.length;
+    const representativeSeq = inboundSeqs.length > 0 ? inboundSeqs[inboundSeqs.length - 1] : undefined;
+    let queuedRepresentativeSeq = false;
+
+    try {
+      // Mark all-but-last inbound seqs as coalesced (they won't get their own turn)
+      if (inboundSeqs.length > 1) {
+        this.markImageCoalesceSeqsSkipped(mapKey, inboundSeqs.slice(0, -1), 'coalesced_image');
+      }
+
+      // Push only the representative (last) seq onto the per-chat queue
+      const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+      if (representativeSeq !== undefined) {
+        seqQueue.push(representativeSeq);
+        queuedRepresentativeSeq = true;
+      }
+      this.perChatInboundSeqQueue.set(mapKey, seqQueue);
+      this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(representativeSeq);
+
+      // Set state for this turn
+      this.perChatTurnContentType.set(mapKey, 'image');
+      this.perChatTurnText.set(mapKey, '');
+      this.perChatAssistantItemText.delete(mapKey);
+
+      // Combine all image references into one turn
+      let combinedText: string;
+      if (count === 1) {
+        combinedText = texts[0];
+      } else {
+        combinedText = `[${count} images received]\n${texts.join('\n')}`;
+        log.info({ mapKey, imageCount: count, coalescedSeqs: inboundSeqs.length - 1 }, 'flushing coalesced image batch as single turn');
+      }
+
+      await this.sendTurnPerChat(chatJid, combinedText, mapKey);
+    } catch (err) {
+      if (representativeSeq !== undefined) {
+        if (queuedRepresentativeSeq) {
+          const seqQueue = this.perChatInboundSeqQueue.get(mapKey);
+          const idx = seqQueue?.indexOf(representativeSeq) ?? -1;
+          if (seqQueue && idx >= 0) seqQueue.splice(idx, 1);
+          if (seqQueue?.length === 0) this.perChatInboundSeqQueue.delete(mapKey);
+        }
+        this.markImageCoalesceSeqFailed(mapKey, representativeSeq);
+      }
+      this.pendingTurnText.delete(mapKey);
+      this.perChatTurnContentType.delete(mapKey);
+      this.perChatTurnText.delete(mapKey);
+      this.perChatAssistantItemText.delete(mapKey);
+      log.error({ err, mapKey, imageCount: count }, 'failed to send coalesced image turn');
     }
   }
 
@@ -1014,6 +1182,17 @@ export class AgentRuntime implements Runtime {
           if (this.resumeFailedHandling.has(lidKey)) {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
+          }
+          const imageBuffer = this.imageCoalesceBuffers.get(lidKey);
+          if (imageBuffer) {
+            clearTimeout(imageBuffer.timer);
+            imageBuffer.timer = setTimeout(
+              () => void this.flushImageCoalesce(canonical),
+              AgentRuntime.IMAGE_COALESCE_MS,
+            );
+            imageBuffer.msg = { ...imageBuffer.msg, chatJid: newJid };
+            this.imageCoalesceBuffers.delete(lidKey);
+            this.imageCoalesceBuffers.set(canonical, imageBuffer);
           }
           this.cleanupPerChatState(lidKey);
           log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
@@ -1780,17 +1959,29 @@ export class AgentRuntime implements Runtime {
         inboundSeq: msg.inboundSeq,
       });
     } else if (this.sessionScope === 'per_chat') {
-      // per_chat: enqueue inbound seq keyed by chat before sending turn
       const mapKey = perChatMapKey!;
-      const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
-      if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
-      this.perChatInboundSeqQueue.set(mapKey, seqQueue);
-      this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(msg.inboundSeq);
-      // Track inbound contentType for voice reply (SP4)
-      this.perChatTurnContentType.set(mapKey, msg.contentType);
-      this.perChatTurnText.set(mapKey, '');
-      this.perChatAssistantItemText.delete(mapKey);
-      await this.sendTurnPerChat(chatJid, text, mapKey);
+
+      // Image coalescing: batch rapid image sends into a single turn.
+      // For coalesced images, defer seq/state setup until flush time — only
+      // the representative turn gets a seq entry, preventing desync.
+      if (msg.contentType === 'image') {
+        await this.coalesceImageTurn(mapKey, chatJid, text, msg);
+      } else {
+        // Flush any pending image buffer first (text message after images = done uploading).
+        // Await to prevent concurrent turn injection with the text turn below.
+        await this.flushImageCoalesce(mapKey);
+
+        // per_chat: enqueue inbound seq keyed by chat before sending turn
+        const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
+        if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
+        this.perChatInboundSeqQueue.set(mapKey, seqQueue);
+        this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(msg.inboundSeq);
+        // Track inbound contentType for voice reply (SP4)
+        this.perChatTurnContentType.set(mapKey, msg.contentType);
+        this.perChatTurnText.set(mapKey, '');
+        this.perChatAssistantItemText.delete(mapKey);
+        await this.sendTurnPerChat(chatJid, text, mapKey);
+      }
     } else {
       // single mode: store inbound seq on runtime + queue
       this.currentInboundSeq = msg.inboundSeq;
@@ -1873,6 +2064,12 @@ export class AgentRuntime implements Runtime {
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
+      // Flush any buffered output from the dying session before shutting down.
+      // Without this, text in the 2-second stream debounce buffer is lost when
+      // the child process is killed, because the stream parser stops emitting events.
+      const queue = this.getQueueForChat(chatJid, mapKey);
+      if (queue) await queue.flush();
+
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
@@ -2437,6 +2634,7 @@ export class AgentRuntime implements Runtime {
       const perChatKeys = new Set<string>([
         ...this.chatSessions.keys(),
         ...this.chatQueues.keys(),
+        ...this.imageCoalesceBuffers.keys(),
       ]);
       for (const [chatJid, session] of this.chatSessions) {
         try { await session.shutdown(); } catch (err) { log.warn({ err, chatJid }, 'per_chat session shutdown failed'); }
@@ -2530,6 +2728,11 @@ export class AgentRuntime implements Runtime {
       workspaceMediaBridgesStopped,
     }, 'workspace resources stopped in shutdown');
     this.workspaceResources.clear();
+
+    for (const mapKey of [...this.imageCoalesceBuffers.keys()]) {
+      this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
+    }
+
     this.outboundQueues.clear();
     this.chatSessions.clear();
     this.chatQueues.clear();
@@ -2544,6 +2747,7 @@ export class AgentRuntime implements Runtime {
     this.perChatAssistantItemText.clear();
     this.pendingTurnText.clear();
     this.resumeFailedHandling.clear();
+    this.imageCoalesceBuffers.clear();
 
     log.info({
       instanceName: this.instanceName,
@@ -3159,6 +3363,7 @@ export class AgentRuntime implements Runtime {
     } else {
       session = this.session ?? undefined;
     }
+    if (mapKey) this.abortImageCoalesceBuffer(mapKey, 'resume_failed');
     if (!session) {
       log.warn({ chatJid }, 'handleResumeFailed: no session — skipping');
       return;

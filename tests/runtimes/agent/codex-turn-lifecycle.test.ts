@@ -362,6 +362,7 @@ describe('Codex turn lifecycle — runtime level', () => {
       lastMessageAt: new Date().toISOString(),
     });
 
+    vi.clearAllMocks();
     return onEvent;
   }
 

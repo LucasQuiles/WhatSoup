@@ -31,6 +31,11 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
     testTimeout: 10_000,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'json', 'json-summary'],
+      reportsDirectory: 'coverage',
+    },
     env: {
       INSTANCE_CONFIG: '',
     },

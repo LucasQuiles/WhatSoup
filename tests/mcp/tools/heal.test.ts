@@ -509,13 +509,9 @@ describe('emit_heal_result MCP tool', () => {
     }, { tier: 'global' });
 
     expect(mockDequeueNextReport).toHaveBeenCalledOnce();
-    // handleControlTurn was called again (void — no await needed for assertion)
-    // The control turn text includes the report_id
-    // We verify it attempted to send another turn to the control session
-    // (mockSession.sendTurn will be called by handleControlTurn for r-NEXT)
-    await vi.runAllTimersAsync().catch(() => {});
-    // The void dispatch is fire-and-forget; we just verify dequeue was called
-    // and no error was thrown
+    expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('[REPAIR REQUEST — report_id: r-NEXT]'));
+    expect(sendTurnSpy).toHaveBeenCalledWith(expect.stringContaining('"errorClass":"crash__next"'));
+    expect(runtime.currentControlReportId).toBe('r-NEXT');
   });
 
   it('does NOT dequeue when no reports are queued', async () => {

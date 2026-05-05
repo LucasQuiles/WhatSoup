@@ -239,6 +239,26 @@ export function createIngestHandler(
           'inbound message received',
         );
 
+        let parsedAdminCommand: ReturnType<typeof parseAdminCommand> | null | undefined;
+        const getAdminCommand = (): ReturnType<typeof parseAdminCommand> | null => {
+          if (!msg.content || !isAdminMessage(msg, db)) return null;
+          if (parsedAdminCommand === undefined) {
+            parsedAdminCommand = parseAdminCommand(msg.content);
+          }
+          return parsedAdminCommand;
+        };
+        const pausedChats = config.pausedChats ?? new Set<string>();
+
+        // 1b++. Paused chat short-circuit — message stored above, skip dispatch entirely.
+        if ((pausedChats.has(conversationKey) || pausedChats.has(msg.chatJid)) && !getAdminCommand()) {
+          log.info({ chatJid: msg.chatJid, messageId: msg.messageId }, 'chat paused — skipping dispatch');
+          if (durability) {
+            const seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'none');
+            durability.markInboundSkipped(seq, 'chat_paused');
+          }
+          return;
+        }
+
         // 1c. Passive short-circuit — store message, journal as complete, no dispatch
         if (instanceType === 'passive') {
           if (durability) {
@@ -249,32 +269,30 @@ export function createIngestHandler(
         }
 
         // 2. Check admin commands FIRST (before trigger check)
-        if (isAdminMessage(msg, db) && msg.content) {
-          const cmd = parseAdminCommand(msg.content);
-          if (cmd) {
-            let seq: number | undefined;
-            if (durability) {
-              seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'admin');
-            }
-            try {
-              await handleAdminCommand(
-                db,
-                messenger,
-                cmd.action,
-                cmd.subjectType,
-                cmd.subjectId,
-                msg.chatJid,
-                (m) => runtime.handleMessage(m),
-                durability,
-              );
-            } catch (err) {
-              log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
-            }
-            if (durability && seq !== undefined) {
-              durability.markInboundSkipped(seq, 'admin_command');
-            }
-            return;
+        const cmd = getAdminCommand();
+        if (cmd) {
+          let seq: number | undefined;
+          if (durability) {
+            seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'admin');
           }
+          try {
+            await handleAdminCommand(
+              db,
+              messenger,
+              cmd.action,
+              cmd.subjectType,
+              cmd.subjectId,
+              msg.chatJid,
+              (m) => runtime.handleMessage(m),
+              durability,
+            );
+          } catch (err) {
+            log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
+          }
+          if (durability && seq !== undefined) {
+            durability.markInboundSkipped(seq, 'admin_command');
+          }
+          return;
         }
 
         // 3. Access policy / trigger check

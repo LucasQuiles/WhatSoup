@@ -776,7 +776,7 @@ describe('transcribe_audio', () => {
     );
 
     const body = JSON.parse(result.content[0].text);
-    expect(body.error).toBeTruthy();
+    expect(body.error).toBe('no_audio_data');
   });
 });
 
@@ -848,7 +848,7 @@ describe('download_media — path confinement', () => {
     expect(body.cached).not.toBe(true);
     expect(body.file_path).not.toBe('/etc/passwd');
     // Without raw_message it falls through to a no_raw_message error — not a file path leak.
-    expect(body.error).toBeTruthy();
+    expect(body.error).toBe('no_raw_message');
   });
 
   it('does not return a cached path that escapes mediaDir via path traversal', async () => {
@@ -864,7 +864,7 @@ describe('download_media — path confinement', () => {
     const body = JSON.parse(result.content[0].text);
     expect(body.cached).not.toBe(true);
     expect(body.file_path).toBeUndefined();
-    expect(body.error).toBeTruthy();
+    expect(body.error).toBe('no_raw_message');
   });
 });
 

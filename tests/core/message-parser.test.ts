@@ -552,7 +552,7 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     innerMsg.emoji = innerMsg.associatedEmoji;
     const result = parseIncomingMessage(msg)!;
     const parsed = JSON.parse(result.content!);
-    expect(parsed.emoji).toBeTruthy();
+    expect(parsed.emoji).toBe('\u{1F602}');
   });
 
   it('liveLocation: content is text with lat/lng/accuracy, contentType is live_location', () => {
