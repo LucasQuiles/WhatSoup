@@ -135,6 +135,11 @@ export async function handleSend(
       return;
     }
 
+    if (parsed.profile !== undefined && (typeof parsed.profile !== 'string' || parsed.profile.trim().length === 0)) {
+      jsonResponse(res, 400, { error: 'profile must be a non-empty string' });
+      return;
+    }
+
     if (hasChatJid && !parsed.chatJid.includes('@')) {
       parsed.chatJid = isGroupConversationKey(parsed.chatJid)
         ? conversationKeyToJid(parsed.chatJid)

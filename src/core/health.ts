@@ -8,6 +8,19 @@ import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
+import {
+  AliasNotFoundError,
+  MissingTargetError,
+  MutuallyExclusiveError,
+  createChatResolver,
+} from './chats-resolver.ts';
+import {
+  InvalidSendRequestError,
+  MissingTextError,
+  prepareTextSend,
+  type PreparedTextSend,
+} from './send-pipeline.ts';
+import { UnknownProfileError, type ProfileRegistry } from './profiles.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
@@ -30,6 +43,7 @@ export interface HealthDeps {
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
   runtime?: Runtime;
+  profiles?: ProfileRegistry;
   // Phase 1: instance identity for control-plane fleet discovery
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
@@ -92,7 +106,22 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function sendRequestErrorMessage(err: unknown): string {
+  if (
+    err instanceof AliasNotFoundError ||
+    err instanceof MissingTargetError ||
+    err instanceof MutuallyExclusiveError ||
+    err instanceof InvalidSendRequestError ||
+    err instanceof MissingTextError ||
+    err instanceof UnknownProfileError
+  ) {
+    return err.message;
+  }
+  return 'invalid send request';
+}
+
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
+  const chatResolver = createChatResolver({ db: deps.db.raw });
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
@@ -116,27 +145,34 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       });
       req.on('end', () => {
         if (destroyed) return;
+        let parsed: unknown;
         try {
-          const { chatJid, text } = JSON.parse(body) as { chatJid?: string; text?: string };
-          if (!chatJid || !text) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, error: 'chatJid and text are required' }));
-            return;
-          }
-          sendTracked(deps.connectionManager, chatJid, text, deps.durability, { replayPolicy: 'unsafe' })
-            .then(() => {
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: true }));
-            })
-            .catch((err) => {
-              log.error({ err, chatJid }, 'POST /send failed');
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
-            });
+          parsed = JSON.parse(body);
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          return;
         }
+
+        let prepared: PreparedTextSend;
+        try {
+          prepared = prepareTextSend(parsed, { chatResolver, profiles: deps.profiles });
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: sendRequestErrorMessage(err) }));
+          return;
+        }
+
+        sendTracked(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, { replayPolicy: 'unsafe' })
+          .then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          })
+          .catch((err) => {
+            log.error({ err, chatJid: prepared.chatJid }, 'POST /send failed');
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+          });
       });
       return;
     }

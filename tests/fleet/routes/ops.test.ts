@@ -249,6 +249,47 @@ describe('handleSend', () => {
     expect(res._status).toBe(200);
   });
 
+  it('returns 400 when profile is not a string', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ to: 'kio', text: 'hi', profile: 123 })),
+      res,
+      deps,
+      { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/profile/);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
+  });
+
+  it('forwards string profile through mcpCall without resolving at fleet edge', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ to: 'kio', text: 'hi', profile: 'satellite' })),
+      res,
+      deps,
+      { name: 'test-line' },
+    );
+
+    expect(mcpCall).toHaveBeenCalledWith(
+      '/state/test-line/whatsoup.sock',
+      'send_message',
+      { to: 'kio', text: 'hi', profile: 'satellite' },
+    );
+    expect(res._status).toBe(200);
+  });
+
   it('returns 400 when body has both chatJid and to (mutual exclusion)', async () => {
     const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });

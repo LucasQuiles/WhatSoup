@@ -26,6 +26,7 @@ import { registerVoiceTools } from './tools/voice.ts';
 import { registerRetentionTools } from './tools/retention.ts';
 import { registerStatusTools } from './tools/status.ts';
 import { registerSchedulingTools } from './tools/scheduling.ts';
+import { createProfileRegistry } from '../core/profiles.ts';
 
 const log = createChildLogger('register-all');
 
@@ -48,6 +49,7 @@ export function registerAllTools(
   options: RegisterAllToolsOptions = {},
 ): void {
   const getSock = () => connection.getSocket() as ExtendedBaileysSocket | null;
+  const profileRegistry = createProfileRegistry(config.profiles ?? {});
   const register = (tool: ToolDeclaration) => {
     try {
       registry.register(tool);
@@ -57,7 +59,7 @@ export function registerAllTools(
   };
 
   // Pattern 1 — options-object: take ToolRegistry + deps directly
-  try { registerMessagingTools(registry, { connection, db: db.raw }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
+  try { registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
   try { registerMediaTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
   try { registerVoiceTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerVoiceTools failed'); }
   try { registerRetentionTools(registry, { db }); } catch (err) { log.error({ err }, 'registerRetentionTools failed'); }
