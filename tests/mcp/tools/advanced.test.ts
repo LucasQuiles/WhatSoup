@@ -690,7 +690,7 @@ describe('advanced tools', () => {
     it('accepts @g.us JID format', async () => {
       const result = await registry.call(
         'relay_message',
-        { jid: '120363406689931730@g.us', proto },
+        { jid: '111111100000000001@g.us', proto },
         globalSession(),
       );
       expect(result.isError).toBeUndefined();

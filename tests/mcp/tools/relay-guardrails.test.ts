@@ -338,13 +338,13 @@ describe('SP5-03: success path — enabled and within payload limit', () => {
     try {
       const result = await registry.call(
         'relay_message',
-        { jid: '120363406689931730@g.us', proto: { msg: 'group relay' } },
+        { jid: '111111100000000001@g.us', proto: { msg: 'group relay' } },
         globalSession(),
       );
 
       expect(result.isError).toBeUndefined();
       expect(vi.mocked(sock.relayMessage)).toHaveBeenCalledWith(
-        '120363406689931730@g.us',
+        '111111100000000001@g.us',
         { msg: 'group relay' },
         {},
       );

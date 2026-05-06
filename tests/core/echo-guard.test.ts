@@ -14,18 +14,18 @@ describe('echo-guard', () => {
   });
 
   it('allows first send to a group', () => {
-    expect(canSendToGroup('120363406689931730@g.us', DEFAULT_CFG)).toBe(true);
+    expect(canSendToGroup('111111100000000001@g.us', DEFAULT_CFG)).toBe(true);
   });
 
   it('blocks second send within cooldown window', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '111111100000000001@g.us';
     recordGroupOutbound(jid);
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
   });
 
   it('allows send after cooldown expires', async () => {
     vi.useFakeTimers();
-    const jid = '120363406689931730@g.us';
+    const jid = '111111100000000001@g.us';
     const cfg: EchoGuardConfig = { enabled: true, groupCooldownMs: 10 };
     recordGroupOutbound(jid);
     await vi.advanceTimersByTimeAsync(15);
@@ -45,7 +45,7 @@ describe('echo-guard', () => {
   });
 
   it('allows all sends when disabled', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '111111100000000001@g.us';
     const cfg: EchoGuardConfig = { enabled: false, groupCooldownMs: 60_000 };
     recordGroupOutbound(jid);
     expect(canSendToGroup(jid, cfg)).toBe(true);
@@ -60,7 +60,7 @@ describe('echo-guard', () => {
   });
 
   it('__resetForTests clears all cooldown state', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '111111100000000001@g.us';
     recordGroupOutbound(jid);
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
     __resetForTests();
