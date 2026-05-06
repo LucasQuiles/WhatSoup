@@ -122,7 +122,7 @@ describe('profile tools', () => {
         globalSession(),
       );
       const data = JSON.parse(result.content[0].text) as { url: null };
-      expect(data.url).toBeNull();
+      expect(data.url).toStrictEqual(null);
     });
 
     it('errors when sock is null', async () => {
@@ -154,7 +154,7 @@ describe('profile tools', () => {
         globalSession(),
       );
       const data = JSON.parse(result.content[0].text) as { status: null };
-      expect(data.status).toBeNull();
+      expect(data.status).toStrictEqual(null);
     });
   });
 
@@ -398,7 +398,7 @@ describe('profile tools', () => {
       sock.fetchPrivacySettings.mockResolvedValue(undefined);
       const result = await registry.call('get_privacy_settings', {}, globalSession());
       const data = JSON.parse(result.content[0].text) as { settings: null };
-      expect(data.settings).toBeNull();
+      expect(data.settings).toStrictEqual(null);
     });
 
     it('errors when sock is null', async () => {
@@ -566,7 +566,7 @@ describe('profile tools', () => {
         globalSession(),
       );
       const data = JSON.parse(result.content[0].text) as { result: null };
-      expect(data.result).toBeNull();
+      expect(data.result).toStrictEqual(null);
     });
 
     it('errors when sock is null', async () => {
