@@ -273,13 +273,13 @@ describe('parseIncomingMessage — negative cases', () => {
   it('null message → returns null', () => {
     const msg = { key: { id: 'null-001', remoteJid: '15551234567@s.whatsapp.net' }, message: null };
     const result = parseIncomingMessage(msg as any);
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('missing remoteJid → returns null', () => {
     const msg = { key: { id: 'nojid-001', remoteJid: null }, message: { conversation: 'hello' } };
     const result = parseIncomingMessage(msg as any);
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 });
 
@@ -460,7 +460,7 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     expect(parsed.duration).toBe(15);
     expect(parsed.ptt).toBe(true);
     expect(parsed.transcription).toBeNull();
-    expect(result.contentText).toBeNull();
+    expect(result.contentText).toStrictEqual(null);
   });
 
   it('video with caption: content preserves caption, contentText is caption', () => {
@@ -589,7 +589,7 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     const result = parseIncomingMessage(msg)!;
     expect(result.contentType).toBe('image');
     expect(result.content).toBeNull();
-    expect(result.contentText).toBeNull();
+    expect(result.contentText).toStrictEqual(null);
   });
 
   it('plain text: contentText is null (content IS the readable text)', () => {
@@ -597,6 +597,6 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     const result = parseIncomingMessage(msg)!;
     expect(result.contentType).toBe('text');
     expect(result.content).toBe('Hello world');
-    expect(result.contentText).toBeNull();
+    expect(result.contentText).toStrictEqual(null);
   });
 });
