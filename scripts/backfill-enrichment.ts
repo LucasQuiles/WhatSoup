@@ -4,7 +4,7 @@
  * Reads messages from bot.db where `enrichment_processed_at IS NULL AND
  * is_from_me = 0`, runs them through the same extract/validate/enqueue
  * pipeline the real-time EnrichmentPoller uses, and writes validated facts
- * into `fact_export_queue`. The downstream mw-mind bridge drains the queue
+ * into `fact_export_queue`. The configured memory bridge drains the queue
  * and upserts into the configured facts namespace.
  *
  * Constraints:
@@ -20,7 +20,7 @@
  *     `backfill_fail:<run_id>` so operators can distinguish backfill runs
  *     from real-time runs without a schema change.
  *
- * Run this with `com.whatsoup.mw-bot` STOPPED. See Phase 3.5 plan.
+ * Run this with the target WhatSoup instance stopped.
  */
 
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -65,9 +65,6 @@ export type StrictStage =
   | 'schema-shape'
   | 'schema-items-all-dropped';
 
-// P3.6-H2: pino-child logger used only on strict-mode fail-closed paths so
-// operators see the batch-level failure even when the summary is silenced
-// by telemetry-off runs. Non-strict paths keep their console.* logging.
 const log = createChildLogger('backfill-enrichment');
 
 export function groupByChatJid(messages: StoredMessage[]): Map<string, StoredMessage[]> {
@@ -97,30 +94,48 @@ export interface BackfillArgs {
   provider: ProviderKind;
   telemetryPath?: string;
   /**
-   * P3.6-H2. When true, pass `{ strict: true }` through to extractFacts /
-   * validateFacts and fail-closed on ExtractionError / ValidationError:
-   * the batch is NOT marked processed, the failure is recorded in
-   * `runBackfill.summary.failedBatches`, and the run exit code is non-zero
-   * so orchestrators detect the incident. Dry-run keeps the exit code at 0.
-   * Default false to preserve pre-H2 behavior for existing callers.
+   * When true, pass `{ strict: true }` through to extractFacts / validateFacts
+   * and fail closed on ExtractionError / ValidationError.
    */
   strict: boolean;
 }
 
 export function parseArgs(argv: readonly string[]): BackfillArgs {
+  const hasRunIdArg = argv.includes('--run-id');
+  const hasTelemetryArg = argv.includes('--telemetry');
+  const runIdFromCanonical = process.env.WHATSOUP_BACKFILL_RUN_ID;
+  const runIdFromAlias = process.env.MW_MIND_RUN_ID;
+  const telemetryDirFromCanonical = process.env.WHATSOUP_BACKFILL_TELEMETRY_DIR;
+  const telemetryDirFromAlias = process.env.MW_MIND_CLOSEOUT_DIR;
+  const telemetryDir = telemetryDirFromCanonical ?? telemetryDirFromAlias;
+
   const args: BackfillArgs = {
-    instance: 'mw-bot',
+    instance: process.env.WHATSOUP_BACKFILL_INSTANCE ?? 'mw-bot',
     limit: 500,
     dryRun: false,
     provider: 'anthropic',
     strict: false,
-    runId:
-      process.env.MW_MIND_RUN_ID ||
-      `backfill-${new Date().toISOString().replace(/[:.]/g, '-')}`,
-    telemetryPath: process.env.MW_MIND_CLOSEOUT_DIR
-      ? `${process.env.MW_MIND_CLOSEOUT_DIR}/task-5-backfill-telemetry.jsonl`
+    runId: runIdFromCanonical ?? runIdFromAlias ?? `backfill-${new Date().toISOString().replace(/[:.]/g, '-')}`,
+    telemetryPath: telemetryDir
+      ? `${telemetryDir}/task-5-backfill-telemetry.jsonl`
       : undefined,
   };
+  if (runIdFromAlias && !runIdFromCanonical && !hasRunIdArg) {
+    console.warn(
+      { alias: 'MW_MIND_RUN_ID', canonical: 'WHATSOUP_BACKFILL_RUN_ID', expires: '2026-10-26' },
+      'backfill run id is using a deprecated environment alias',
+    );
+  }
+  if (telemetryDirFromAlias && !telemetryDirFromCanonical && !hasTelemetryArg) {
+    console.warn(
+      {
+        alias: 'MW_MIND_CLOSEOUT_DIR',
+        canonical: 'WHATSOUP_BACKFILL_TELEMETRY_DIR',
+        expires: '2026-10-26',
+      },
+      'backfill telemetry directory is using a deprecated environment alias',
+    );
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--instance') args.instance = argv[++i] ?? args.instance;
@@ -149,14 +164,14 @@ function printUsage(): void {
   const text = [
     'Usage: backfill-enrichment [options]',
     '',
-    '  --instance <name>      Instance to backfill (default: mw-bot)',
+    '  --instance <name>      Instance to backfill (default: $WHATSOUP_BACKFILL_INSTANCE or mw-bot)',
     '  --limit <N>            Max messages to process (default: 500)',
     '  --dry-run              Classify but do not enqueue',
     '  --strict               Fail-closed on ExtractionError / ValidationError',
-    '                         (P3.6-H2: skip markProcessed + propagate non-zero exit)',
+    '                         (skip markProcessed + propagate non-zero exit)',
     '  --provider <name>      LLM provider: anthropic | openai (default: anthropic)',
-    '  --run-id <id>          Run identifier (default: $MW_MIND_RUN_ID or backfill-<ts>)',
-    '  --telemetry <path>     JSONL output path (default: $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl)',
+    '  --run-id <id>          Run identifier (default: $WHATSOUP_BACKFILL_RUN_ID, deprecated $MW_MIND_RUN_ID, or backfill-<ts>)',
+    '  --telemetry <path>     JSONL output path (default: $WHATSOUP_BACKFILL_TELEMETRY_DIR/task-5-backfill-telemetry.jsonl; deprecated alias $MW_MIND_CLOSEOUT_DIR)',
     '',
     'Provider config:',
     '  anthropic  → reads ANTHROPIC_API_KEY; default models claude-sonnet-4-6 / claude-haiku-4-5',
@@ -597,15 +612,9 @@ export async function runBackfill(
 
   summary.elapsedMs = Date.now() - start;
 
-  // P3.6 review D-1: emit a final run_complete telemetry record so the
-  // runbook-documented jq command
-  //   jq '.failedBatches' $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl
-  // returns the structured failure list instead of `null` on every line.
-  // Before this, failedBatches lived only on the BackfillSummary returned
-  // from runBackfill and was printed via console.log in main(); operators
-  // following the runbook would read the JSONL and find no failedBatches
-  // key anywhere. The record is written after the loop so batchesOk /
-  // batchesFailed reflect the final totals.
+  // Emit a final run_complete telemetry record so operators reading the JSONL
+  // can see the structured failure list. Written after the loop so batchesOk
+  // and batchesFailed reflect the final totals.
   emitTelemetry(args.telemetryPath, {
     timestamp_utc: new Date().toISOString(),
     run_id: args.runId,

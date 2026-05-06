@@ -12,7 +12,8 @@ const APP_NAME = 'whatsoup';
 export const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
 export const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
 export const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
-export const DEFAULT_MW_MIND_EMBED_URL = 'http://127.0.0.1:8799/embed';
+export const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
+export const DEFAULT_MW_MIND_EMBED_URL = DEFAULT_KNOWLEDGE_EMBED_URL;
 
 export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 export type PineconeSearchMode = 'memory' | 'entity';
@@ -407,6 +408,17 @@ const DEFAULT_PINECONE_NAMESPACES: PineconeNamespaceConfig = {
   oneDrive: 'onedrive',
 };
 
+const BUILTIN_KNOWLEDGE_PROFILE_NAMES = new Set([
+  'mw-mind',
+  'oneplatform-search',
+  'oneplatform-entities',
+]);
+
+function warnConfigDeprecation(payload: Record<string, unknown>, message: string): void {
+  // eslint-disable-next-line no-console -- startup deprecation warning before logger is available; expires 2026-10-26
+  console.warn(payload, message);
+}
+
 function resolvePineconeNamespaces(source: Record<string, unknown> | undefined): PineconeNamespaceConfig {
   const namespaces: PineconeNamespaceConfig = { ...DEFAULT_PINECONE_NAMESPACES };
   for (const [key, value] of Object.entries(source ?? {})) {
@@ -417,7 +429,10 @@ function resolvePineconeNamespaces(source: Record<string, unknown> | undefined):
   return namespaces;
 }
 
-function defaultKnowledgeProfiles(namespaces: PineconeNamespaceConfig): Record<string, KnowledgeProfileConfig> {
+function defaultKnowledgeProfiles(
+  namespaces: PineconeNamespaceConfig,
+  defaultEmbedUrl: string,
+): Record<string, KnowledgeProfileConfig> {
   return {
     'oneplatform-search': {
       namespace: '__default__',
@@ -455,7 +470,7 @@ function defaultKnowledgeProfiles(namespaces: PineconeNamespaceConfig): Record<s
       rerankModel: '',
       topK: 20,
       rerankTopN: 6,
-      embedUrl: DEFAULT_MW_MIND_EMBED_URL,
+      embedUrl: defaultEmbedUrl,
       description:
         "Standalone memory index with local docs, OneDrive files, WhatsApp messages, facts, summaries, chunks, and contacts.",
     },
@@ -484,9 +499,10 @@ function mergeKnowledgeProfile(
 
 function mergeKnowledgeProfiles(
   namespaces: PineconeNamespaceConfig,
+  defaultEmbedUrl: string,
   source: Record<string, unknown> | undefined,
 ): Record<string, KnowledgeProfileConfig> {
-  const profiles = defaultKnowledgeProfiles(namespaces);
+  const profiles = defaultKnowledgeProfiles(namespaces, defaultEmbedUrl);
   for (const [indexName, value] of Object.entries(source ?? {})) {
     const override = record(value);
     if (!override) continue;
@@ -514,8 +530,40 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   const pinecone = record(memoryRoot?.pinecone);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
   const namespaces = resolvePineconeNamespaces(record(pinecone?.namespaces));
+  const pineconeEmbedUrl = stringProp(pinecone, 'embedUrl');
+  const embedUrl =
+    pineconeEmbedUrl ??
+    process.env.KNOWLEDGE_EMBED_URL ??
+    process.env.MW_MIND_EMBED_URL ??
+    DEFAULT_KNOWLEDGE_EMBED_URL;
+  if (process.env.MW_MIND_EMBED_URL && !pineconeEmbedUrl && !process.env.KNOWLEDGE_EMBED_URL) {
+    warnConfigDeprecation(
+      {
+        alias: 'MW_MIND_EMBED_URL',
+        canonical: 'memory.pinecone.embedUrl or KNOWLEDGE_EMBED_URL',
+        expires: '2026-10-26',
+      },
+      'memory.pinecone.embedUrl is using a deprecated environment alias',
+    );
+  }
   const defaultMode: PineconeSearchMode = index === DEFAULT_PINECONE_INDEX ? 'memory' : 'entity';
   const knowledgeSearch = record(pinecone?.knowledgeSearch);
+  const allowedIndexes = stringArrayProp(pinecone, 'allowedIndexes');
+  const rawKnowledgeProfiles = record(pinecone?.knowledgeProfiles);
+  const declaredProfiles = new Set(Object.keys(rawKnowledgeProfiles ?? {}));
+  for (const profileName of allowedIndexes) {
+    if (BUILTIN_KNOWLEDGE_PROFILE_NAMES.has(profileName) && !declaredProfiles.has(profileName)) {
+      warnConfigDeprecation(
+        {
+          profile: profileName,
+          allowedIndexes,
+          declaredProfiles: [...declaredProfiles],
+          expires: '2026-10-26',
+        },
+        'memory.pinecone.allowedIndexes references a built-in profile that is not declared in knowledgeProfiles',
+      );
+    }
+  }
 
   return {
     conversation: {
@@ -547,13 +595,13 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       rerankModel: stringProp(pinecone, 'rerankModel') ?? DEFAULT_PINECONE_RERANK_MODEL,
       topK: numberProp(pinecone, 'topK', 20),
       rerankTopN: numberProp(pinecone, 'rerankTopN', 6),
-      allowedIndexes: stringArrayProp(pinecone, 'allowedIndexes'),
-      embedUrl: stringProp(pinecone, 'embedUrl') ?? process.env.MW_MIND_EMBED_URL ?? DEFAULT_MW_MIND_EMBED_URL,
+      allowedIndexes,
+      embedUrl,
       knowledgeSearch: {
         enabled: booleanProp(knowledgeSearch, 'enabled', true),
         allowGlobalAgentSessions: booleanProp(knowledgeSearch, 'allowGlobalAgentSessions', false),
       },
-      knowledgeProfiles: mergeKnowledgeProfiles(namespaces, record(pinecone?.knowledgeProfiles)),
+      knowledgeProfiles: mergeKnowledgeProfiles(namespaces, embedUrl, rawKnowledgeProfiles),
     },
   };
 }
