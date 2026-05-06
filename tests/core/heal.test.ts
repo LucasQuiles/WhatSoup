@@ -284,7 +284,7 @@ describe('getActiveReportForClass', () => {
     const db = makeDb();
 
     const result = getActiveReportForClass(db, 'crash__nonexistent');
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('returns the active row when one exists', () => {
@@ -312,7 +312,7 @@ describe('getActiveReportForClass', () => {
     `).run(reportId);
 
     const result = getActiveReportForClass(db, 'crash__boom');
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 });
 
@@ -353,7 +353,7 @@ describe('dequeueNextReport', () => {
     const db = makeDb();
 
     const result = dequeueNextReport(db);
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 });
 
