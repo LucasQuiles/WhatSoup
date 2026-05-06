@@ -39,6 +39,20 @@ function makeMessenger(): { messenger: Messenger; calls: string[]; typingCalls: 
   return { messenger, calls, typingCalls };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('OutboundQueue', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -566,17 +580,23 @@ describe('OutboundQueue', () => {
   // ─── Serialization ─────────────────────────────────────────────────────────
 
   it('sends messages serially (only one in-flight at a time)', async () => {
-    const inFlight: number[] = [];
+    const started: string[] = [];
+    const finished: string[] = [];
+    const pending = new Map<string, ReturnType<typeof deferred<{ waMessageId: null }>>>();
     let concurrent = 0;
 
     const serialMessenger: Messenger = {
       sendMessage: vi.fn(async (_jid: string, text: string) => {
         concurrent += 1;
-        inFlight.push(concurrent);
-        // Simulate async delay
-        await new Promise<void>((resolve) => setTimeout(resolve, 100));
-        concurrent -= 1;
-        return { waMessageId: null };
+        started.push(text);
+        const send = deferred<{ waMessageId: null }>();
+        pending.set(text, send);
+        try {
+          return await send.promise;
+        } finally {
+          concurrent -= 1;
+          finished.push(text);
+        }
       }),
       sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
@@ -586,10 +606,35 @@ describe('OutboundQueue', () => {
     queue.enqueueText('B');
     queue.enqueueText('C');
 
-    await vi.runAllTimersAsync();
+    await vi.waitFor(() => {
+      expect(serialMessenger.sendMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(started).toEqual(['A']);
+    expect(concurrent).toBe(1);
 
-    // Max concurrent should never exceed 1
-    expect(Math.max(...inFlight)).toBe(1);
+    pending.get('A')!.resolve({ waMessageId: null });
+    await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+    await vi.waitFor(() => {
+      expect(serialMessenger.sendMessage).toHaveBeenCalledTimes(2);
+    });
+    expect(started).toEqual(['A', 'B']);
+    expect(finished).toEqual(['A']);
+    expect(concurrent).toBe(1);
+
+    pending.get('B')!.resolve({ waMessageId: null });
+    await vi.advanceTimersByTimeAsync(MIN_SEND_GAP_MS);
+    await vi.waitFor(() => {
+      expect(serialMessenger.sendMessage).toHaveBeenCalledTimes(3);
+    });
+    expect(started).toEqual(['A', 'B', 'C']);
+    expect(finished).toEqual(['A', 'B']);
+    expect(concurrent).toBe(1);
+
+    pending.get('C')!.resolve({ waMessageId: null });
+    await queue.flush();
+
+    expect(finished).toEqual(['A', 'B', 'C']);
+    expect(concurrent).toBe(0);
   });
 
   // ─── Retry tests ───────────────────────────────────────────────────────────
