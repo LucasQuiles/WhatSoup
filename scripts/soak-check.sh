@@ -59,7 +59,9 @@ run_soak01() {
     local port="${INSTANCES[$name]}"
     local url="http://localhost:${port}/health"
     local body
-    body=$(curl -sf --connect-timeout 3 "$url" 2>/dev/null || true)
+    if ! body=$(curl --silent --show-error --fail-with-body --connect-timeout 3 "$url" 2>/dev/null); then
+      body=""
+    fi
     if [[ "$body" == *'"connected":true'* ]]; then
       ok "SOAK-01  whatsoup@${name} (port ${port}): connected=true"
     else
