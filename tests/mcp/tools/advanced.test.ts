@@ -371,8 +371,16 @@ describe('advanced tools', () => {
     });
 
     it('works from chat-scoped session', async () => {
-      const result = await registry.call('send_button_reply', params, chatSession('group1@g.us'));
-      expect(result.isError).toBeUndefined();
+      const result = await registry.call(
+        'send_button_reply',
+        { displayText: 'Yes', id: 'btn_yes', type: 1 },
+        chatSession('group1'),
+      );
+      const data = JSON.parse(result.content[0].text) as { sent: boolean; chatJid: string; id: string };
+      expect(data).toEqual({ sent: true, chatJid: 'group1@s.whatsapp.net', id: 'btn_yes' });
+      expect((mockSock as any).sendMessage).toHaveBeenCalledWith('group1@s.whatsapp.net', {
+        buttonReply: { displayText: 'Yes', id: 'btn_yes', type: 1 },
+      });
     });
 
     it('errors when sock is null', async () => {
@@ -426,8 +434,20 @@ describe('advanced tools', () => {
     });
 
     it('works from chat-scoped session', async () => {
-      const result = await registry.call('send_list_reply', params, chatSession('group1@g.us'));
-      expect(result.isError).toBeUndefined();
+      const result = await registry.call(
+        'send_list_reply',
+        { title: 'Selected item', listType: 1, selectedRowId: 'row_001' },
+        chatSession('group1'),
+      );
+      const data = JSON.parse(result.content[0].text) as { sent: boolean; chatJid: string; selectedRowId: string };
+      expect(data).toEqual({ sent: true, chatJid: 'group1@s.whatsapp.net', selectedRowId: 'row_001' });
+      expect((mockSock as any).sendMessage).toHaveBeenCalledWith('group1@s.whatsapp.net', {
+        listReply: {
+          title: 'Selected item',
+          listType: 1,
+          singleSelectReply: { selectedRowId: 'row_001' },
+        },
+      });
     });
 
     it('errors when sock is null', async () => {
@@ -470,10 +490,14 @@ describe('advanced tools', () => {
     it('works from chat-scoped session', async () => {
       const result = await registry.call(
         'send_limit_sharing',
-        { chatJid: '111@s.whatsapp.net' },
+        {},
         chatSession('111'),
       );
-      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { sent: boolean; chatJid: string };
+      expect(data).toEqual({ sent: true, chatJid: '111@s.whatsapp.net' });
+      expect((mockSock as any).sendMessage).toHaveBeenCalledWith('111@s.whatsapp.net', {
+        limitSharing: true,
+      });
     });
 
     it('errors when sock is null', async () => {
@@ -693,7 +717,17 @@ describe('advanced tools', () => {
         { jid: '111111100000000001@g.us', proto },
         globalSession(),
       );
-      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { relayed: boolean; jid: string; result: { messageId: string } };
+      expect(data).toEqual({
+        relayed: true,
+        jid: '111111100000000001@g.us',
+        result: { messageId: 'msg123' },
+      });
+      expect((mockSock as any).relayMessage).toHaveBeenCalledWith(
+        '111111100000000001@g.us',
+        proto,
+        {},
+      );
     });
 
     it('accepts @lid JID format', async () => {
@@ -702,7 +736,13 @@ describe('advanced tools', () => {
         { jid: '12345@lid', proto },
         globalSession(),
       );
-      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { relayed: boolean; jid: string; result: { messageId: string } };
+      expect(data).toEqual({
+        relayed: true,
+        jid: '12345@lid',
+        result: { messageId: 'msg123' },
+      });
+      expect((mockSock as any).relayMessage).toHaveBeenCalledWith('12345@lid', proto, {});
     });
   });
 });
