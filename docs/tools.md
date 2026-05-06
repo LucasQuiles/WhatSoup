@@ -1,6 +1,6 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 139 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 140 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
 ## Scope and Replay Policy Glossary
 
@@ -41,7 +41,8 @@ Complete reference for all 139 MCP tools exposed by WhatSoup. Tools are grouped 
 | [retention.ts](#retentionts) | 1 |
 | [status.ts](#statusts) | 2 |
 | [scheduling.ts](#schedulingts) | 3 |
-| **Total** | **139** |
+| [audit.ts](#auditts) | 1 |
+| **Total** | **140** |
 
 ---
 
@@ -49,13 +50,13 @@ Complete reference for all 139 MCP tools exposed by WhatSoup. Tools are grouped 
 
 Chat-scoped messaging tools for sending, replying to, reacting to, editing, deleting, pinning, and decorating messages.
 
-> All tools in this module use `targetMode: injected`. In chat-scoped sessions target fields are auto-injected and must not be passed. In global sessions, tools require `chatJid` unless the tool documents an alias target such as `to`.
+> Tools in this module use `targetMode: injected`. In chat-scoped sessions the target chat is auto-injected and caller-supplied `chatJid`/`to` values are ignored. In global sessions `send_message` requires exactly one target: raw `chatJid` or alias `to`.
 
 ---
 
 ### send_message
 
-Send a text message to the current chat. Supports @name and @number mentions.
+Send a text message. In chat-scoped sessions the current chat is injected. In global sessions provide exactly one of `chatJid` or `to`. Supports @name and @number mentions.
 
 | | |
 |---|---|
@@ -66,10 +67,18 @@ Send a text message to the current chat. Supports @name and @number mentions.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| chatJid | string | global only, xor `to` | Raw WhatsApp chat JID. Auto-injected and hidden in chat-scoped sessions. |
-| to | string | global only, xor `chatJid` | Per-instance chat alias resolved from the line's `chat_aliases` table. Auto-stripped in chat-scoped sessions. |
+| chatJid | string | global only | Raw WhatsApp chat JID. Mutually exclusive with `to`. |
+| to | string | global only | Per-instance chat alias from `chatAliases` / `chat_aliases`. Mutually exclusive with `chatJid`. |
 | text | string | required | Message text (supports @name/@number mention syntax) |
 | viewOnce | boolean | optional | Send as a view-once message that disappears after viewing |
+| link_preview | `"auto"` or `"off"` | optional | Control link preview generation. Defaults to `auto`; `off` suppresses previews. |
+| profile | string | optional | Per-instance send profile from `profiles`. Profiles can prepend `prefix`, append `tag`, and provide a default `linkPreview`. |
+
+**Profile order:** target resolution happens first, then the profile decorates text, then the message is sent. If both `link_preview` and the selected profile's `linkPreview` are set, the request-level `link_preview` value wins.
+
+**Target/profile errors:** `chatJid` + `to` returns `chatJid and to are mutually exclusive; provide exactly one`; neither target returns `request body must contain chatJid (raw JID) or to (alias)`; an unknown alias returns `alias not found: <alias>`; an unknown profile returns `unknown profile: <profile>`. MCP returns these as tool error envelopes. The health `/send` route maps the same request errors to HTTP 400.
+
+**Outbound audit:** `send_message` creates one `outbound_sends` intent row after target/profile preparation and finalizes that row as `sent` or `failed` after transport returns. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows; message bodies are not stored or returned.
 
 ---
 
@@ -220,6 +229,54 @@ Pin or unpin a message in the current chat.
 | messageId | string | required | ID of the message to pin or unpin |
 | pin | boolean | required | `true` to pin, `false` to unpin |
 | duration | `"24h"` \| `"7d"` \| `"30d"` | optional | How long to pin for; defaults to `"7d"` |
+
+---
+
+## audit.ts
+
+Outbound send audit read tools. The audit log is per instance because each instance has its own SQLite database.
+
+---
+
+### read_outbound_sends
+
+Read recent outbound send audit rows without returning message text.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| limit | number | optional | Maximum rows to return. Defaults to `50`; values above `100` are clamped to `100`; values below `1` are rejected. |
+| chatJid | string | optional | Exact raw WhatsApp JID filter. Aliases are not resolved at read time. |
+
+**Return shape**
+
+```json
+{
+  "outbound_sends": [
+    {
+      "id": 1,
+      "chat_jid": "EXAMPLE_JID@s.whatsapp.net",
+      "text_hash": "SHA256_HEX",
+      "text_length": 12,
+      "status": "sent",
+      "profile": "notify",
+      "transport_id": "TRANSPORT_MESSAGE_ID",
+      "created_at": "2026-04-26 20:30:00",
+      "sent_at": "2026-04-26 20:30:01"
+    }
+  ]
+}
+```
+
+Rows include `id`, `chat_jid`, `text_hash`, `text_length`, `status`, `created_at`, and optional `profile`, `transport_id`, `error_text`, and `sent_at`. Optional fields are omitted when the underlying DB value is null.
+
+**No-text invariant:** the audit table stores and returns only `text_hash` (SHA-256 of the final send text) and `text_length`. Message bodies are never returned.
 
 ---
 

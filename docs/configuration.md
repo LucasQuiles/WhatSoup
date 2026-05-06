@@ -86,7 +86,7 @@ Agent instances expose `POST /agent/compact` for control-plane compaction that d
 curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
   -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"chatJid":"120363410094619161@g.us"}'
+  -d '{"chatJid":"GROUP_JID@g.us"}'
 ```
 
 `chatJid` is required for per-chat and shared session agents so the runtime compacts the intended session and routes the completion event correctly. Agents using one session can omit it only when an active chat is already known. `silent` defaults to `true`, suppressing the normal user-facing compact notice and any command output. Set `"silent": false` only for operator diagnostics.
@@ -162,6 +162,8 @@ into place during deployment.
 | `rateLimitPerHour` | integer | no | `45` | Per-user rate limit. Overrides `RATE_LIMIT_PER_HOUR`. |
 | `healthPort` | integer | no | `9090` | Health server port. Overrides `HEALTH_PORT`. |
 | `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |
+| `chatAliases` | object | no | `{}` | Per-instance alias map used by send surfaces. Keys are aliases such as `ops` or `support`; values are raw WhatsApp JIDs. Seeded into the instance's `chat_aliases` table at startup. |
+| `profiles` | object | no | `{}` | Per-instance send decoration policies. Keys are profile names; values can define `prefix`, `tag`, and `linkPreview`. Loaded from private instance config at startup. |
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only, brief text for warnings. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
@@ -187,6 +189,76 @@ into place during deployment.
 ```
 
 Omit any key to inherit the env var or built-in default for that slot.
+
+### `chatAliases`
+
+`chatAliases` is the per-instance alias seed for outbound sends. It lets fleet HTTP callers and global MCP `send_message` callers use a stable alias with `to` instead of embedding raw WhatsApp JIDs in scripts.
+
+```json
+"chatAliases": {
+  "ops": "GROUP_JID@g.us",
+  "support": "USER_JID@s.whatsapp.net"
+}
+```
+
+Each instance has its own SQLite database, so alias scope is the instance. The same alias name may intentionally point to different chats in different instance configs. On startup, WhatSoup upserts the configured aliases into the instance's `chat_aliases` table and only updates rows whose target JID changed.
+
+Validation rules:
+
+- `chatAliases` must be an object.
+- Alias keys are trimmed and must be non-empty.
+- Target values are trimmed and must be non-empty strings.
+- Duplicate aliases after trimming are rejected.
+
+These values often contain private phone or group JIDs. Keep instance `config.json` files private; repo-local `instances/*/config.json` is ignored by git.
+
+### `profiles`
+
+`profiles` is the per-instance send profile registry. Fleet HTTP callers and global MCP `send_message` callers can pass `profile` to apply a named text decoration policy at send time.
+
+```json
+"profiles": {
+  "notify": {},
+  "alert": {
+    "prefix": "[ALERT] "
+  },
+  "monitor": {
+    "tag": " #monitor"
+  },
+  "plain": {
+    "linkPreview": "off"
+  }
+}
+```
+
+Profiles are scoped to one instance config. The same profile name may intentionally behave differently on different lines. They are loaded into memory at startup; there is no profile table or runtime mutation API.
+
+Supported fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix` | string | Prepended exactly as configured before the request text. |
+| `tag` | string | Appended exactly as configured after the request text. |
+| `linkPreview` | `"auto"` or `"off"` | Default link-preview mode for requests using the profile. A request-level `link_preview` value overrides this. |
+
+Validation rules:
+
+- `profiles` must be an object of profile names to profile objects.
+- Profile names are trimmed and must be non-empty.
+- Each profile value must be an object.
+- Unknown profile fields are rejected.
+- `prefix` and `tag`, when present, must be strings.
+- `linkPreview`, when present, must be `"auto"` or `"off"`.
+
+Keep instance `config.json` files private. Profile names are safe to document, but profile text can contain operational labels or private routing conventions; repo-local `instances/*/config.json` is ignored by git.
+
+### Outbound Send Audit
+
+Outbound send auditing is automatic and has no `config.json` field. Migration 22 creates an `outbound_sends` table in each instance's SQLite database on startup.
+
+The table is per instance. It records outbound send intent and outcome for MCP `send_message` and health `/send`, including the resolved raw chat JID, whether the request used a raw `chatJid` or alias `to`, the selected `profile` when present, SHA-256 hash of the final message text, text length, status, transport message id when available, and error text for failed sends.
+
+Message bodies are not stored in `outbound_sends`. Retention is currently unbounded; prune manually after backup if local policy requires it.
 
 ### `memory`
 
@@ -400,6 +472,8 @@ The loader enforces these constraints before the process starts:
 - `agent` instances with `agentOptions` must have a valid `sessionScope` and non-empty `cwd`.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
 - `agent` with `sessionScope: single` must use `accessMode: self_only`.
+- `chatAliases`, when present, must be an object of non-empty alias to JID strings.
+- `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
 
 ---
 
@@ -413,7 +487,7 @@ $XDG_CONFIG_HOME/whatsoup/instances/<name>/   (default: ~/.config/...)
   auth/             — Baileys WhatsApp auth credentials
 
 $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
-  bot.db            — SQLite database (messages, contacts, access list, sessions)
+  bot.db            — SQLite database (messages, contacts, access list, sessions, outbound_sends audit)
   logs/             — Pino log files (daily rotation via pino-roll)
   media/tmp/        — Temporary media files for agent Read access
 
@@ -514,7 +588,7 @@ required.
 
 ### Passive — MCP-only
 
-A passive instance exposes all 117 MCP tools over Unix sockets but never sends automatic
+A passive instance exposes the global MCP tools over Unix sockets but never sends automatic
 replies. Used to give external agents read/write access to a WhatsApp account without any
 bot persona.
 
