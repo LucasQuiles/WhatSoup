@@ -225,8 +225,7 @@ describe('SessionManager', () => {
       mockChild._exitCb(1, null);
     }
 
-    // Flush microtasks so the messenger.send promise resolves
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
 
     expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
     expect(sentMessages).toHaveLength(1);
@@ -254,8 +253,7 @@ describe('SessionManager', () => {
     await sm.sendTurn('hello');
 
     mockChild._exitCb?.(1, null);
-    // notifyUser is called via setImmediate — flush both microtasks and macrotasks
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(notifyUser).toHaveBeenCalledTimes(1));
 
     expect(onCrash).toHaveBeenCalledWith({
       exitCode: 1,
@@ -500,21 +498,21 @@ describe('SessionManager', () => {
     // First crash
     await sm.spawnSession();
     mockChild._exitCb?.(1, null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
 
     // Second crash — spawn fresh child, crash immediately
     const mockChild2 = makeMockChild(22222);
     (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
     await sm.spawnSession();
     mockChild2._exitCb?.(1, null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
 
     // Third crash
     const mockChild3 = makeMockChild(33333);
     (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild3);
     await sm.spawnSession();
     mockChild3._exitCb?.(1, null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
 
     // Only the first crash should have sent a notification
     expect(sentMessages).toHaveLength(1);
@@ -806,8 +804,7 @@ describe('SessionManager', () => {
     // Trigger exit with code 1 (resume failure pattern)
     mockChild._exitCb?.(1, null);
 
-    // Flush microtasks
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(onResumeFailedCb).toHaveBeenCalledTimes(1));
 
     expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'resume_failed');
     expect(onResumeFailedCb).toHaveBeenCalledTimes(1);
@@ -1072,7 +1069,7 @@ describe('SessionManager', () => {
 
     await sm.spawnSession();
     mockChild._exitCb?.(1, null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
 
     expect(sentMessages).toHaveLength(1);
 
@@ -1083,7 +1080,7 @@ describe('SessionManager', () => {
     (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
     await sm.spawnSession();
     mockChild2._exitCb?.(1, null);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(sentMessages).toHaveLength(2));
 
     expect(sentMessages).toHaveLength(2);
     expect(sentMessages[1].text).toContain('session ended');
