@@ -1185,7 +1185,9 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueText).not.toHaveBeenCalled();
 
     capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(mockQueue.flush).toHaveBeenCalled();
+    });
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
 
     capturedOnEventRef.current!({ type: 'compact_boundary' });
@@ -1223,7 +1225,9 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello' }));
     capturedOnEventRef.current!({ type: 'result', text: 'ready' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(mockQueue.flush).toHaveBeenCalled();
+    });
     mockSession.sendTurn.mockClear();
     mockQueue.enqueueText.mockClear();
     mockQueue.enqueueResultText.mockClear();
@@ -1240,7 +1244,9 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'compact_boundary' });
     capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(mockQueue.flush).toHaveBeenCalled();
+    });
 
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
@@ -1259,7 +1265,9 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndDrainShared(runtime, makeMsg({ chatJid, content: 'hello' }));
     capturedOnEventRef.current!({ type: 'result', text: 'ready' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(mockQueue.flush).toHaveBeenCalled();
+    });
     mockSession.sendTurn.mockClear();
     mockQueue.enqueueText.mockClear();
     mockQueue.enqueueResultText.mockClear();
@@ -1282,7 +1290,9 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'compact_boundary' });
     capturedOnEventRef.current!({ type: 'result', text: 'compact complete' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      expect(mockQueue.flush).toHaveBeenCalled();
+    });
 
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
