@@ -7,8 +7,20 @@ import {
   applyProfile,
   type ProfileRegistry,
 } from './profiles.ts';
+import type {
+  OutboundSendCaller,
+  OutboundSendsWriter,
+} from './outbound-sends.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
+export type TextSendTransportResult = { transportId?: string | null } | void;
+export type TextSendTransport<T extends TextSendTransportResult = TextSendTransportResult> = (
+  prepared: PreparedTextSend,
+) => Promise<T>;
+
+export interface ExecuteSendOptions {
+  beforeAudit?: (prepared: PreparedTextSend) => void | Promise<void>;
+}
 
 export interface TextSendInput extends ChatTarget {
   text?: unknown;
@@ -23,6 +35,7 @@ export interface PreparedTextSend {
   audit: {
     targetKind: 'chatJid' | 'alias';
     alias?: string;
+    profile?: string;
     textLength: number;
   };
 }
@@ -48,18 +61,64 @@ export interface SendPipelineDeps {
 
 export interface SendPipeline {
   prepareSend(input: unknown): PreparedTextSend;
+  executeSend<T extends TextSendTransportResult>(
+    input: unknown,
+    transport: TextSendTransport<T>,
+    options?: ExecuteSendOptions,
+  ): Promise<T>;
 }
 
 export function createSendPipeline({
   resolver,
   profiles,
+  auditWriter,
+  caller,
 }: {
   resolver: ChatResolver;
   profiles?: ProfileRegistry;
+  auditWriter?: OutboundSendsWriter;
+  caller?: OutboundSendCaller;
 }): SendPipeline {
   return {
     prepareSend(input: unknown): PreparedTextSend {
       return prepareTextSend(input, { chatResolver: resolver, profiles });
+    },
+    async executeSend<T extends TextSendTransportResult>(
+      input: unknown,
+      transport: TextSendTransport<T>,
+      options: ExecuteSendOptions = {},
+    ): Promise<T> {
+      const prepared = prepareTextSend(input, { chatResolver: resolver, profiles });
+      await options.beforeAudit?.(prepared);
+
+      let auditId: number | undefined;
+      if (auditWriter) {
+        if (!caller) {
+          throw new InvalidSendRequestError('send audit caller is required');
+        }
+        auditId = auditWriter.writeIntent({
+          caller,
+          chatJid: prepared.chatJid,
+          targetKind: prepared.audit.targetKind,
+          alias: prepared.audit.alias,
+          profile: prepared.audit.profile,
+          text: prepared.text,
+          linkPreviewMode: prepared.linkPreviewMode,
+        });
+      }
+
+      try {
+        const result = await transport(prepared);
+        if (auditId !== undefined) {
+          auditWriter!.markSuccess(auditId, extractTransportId(result));
+        }
+        return result;
+      } catch (err) {
+        if (auditId !== undefined) {
+          auditWriter!.markFailure(auditId, err instanceof Error ? err.message : String(err));
+        }
+        throw err;
+      }
     },
   };
 }
@@ -113,7 +172,15 @@ export function prepareTextSend(
     audit: {
       targetKind: alias ? 'alias' : 'chatJid',
       ...(alias ? { alias } : {}),
+      ...(typeof profileName === 'string' ? { profile: profileName.trim() } : {}),
       textLength: text.length,
     },
   };
+}
+
+function extractTransportId(result: TextSendTransportResult): string | null {
+  if (result && typeof result.transportId === 'string' && result.transportId.length > 0) {
+    return result.transportId;
+  }
+  return null;
 }

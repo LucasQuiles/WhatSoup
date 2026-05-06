@@ -17,10 +17,10 @@ import {
 import {
   InvalidSendRequestError,
   MissingTextError,
-  prepareTextSend,
-  type PreparedTextSend,
+  createSendPipeline,
 } from './send-pipeline.ts';
 import { UnknownProfileError, type ProfileRegistry } from './profiles.ts';
+import type { OutboundSendsWriter } from './outbound-sends.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
@@ -44,6 +44,7 @@ export interface HealthDeps {
   durability?: DurabilityEngine;
   runtime?: Runtime;
   profiles?: ProfileRegistry;
+  auditWriter?: OutboundSendsWriter;
   // Phase 1: instance identity for control-plane fleet discovery
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
@@ -122,6 +123,12 @@ function sendRequestErrorMessage(err: unknown): string {
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   const chatResolver = createChatResolver({ db: deps.db.raw });
+  const sendPipeline = createSendPipeline({
+    resolver: chatResolver,
+    profiles: deps.profiles,
+    auditWriter: deps.auditWriter,
+    caller: 'health',
+  });
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /send — send a text message to any chat ──
     if (req.url === '/send' && req.method === 'POST') {
@@ -154,22 +161,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
 
-        let prepared: PreparedTextSend;
-        try {
-          prepared = prepareTextSend(parsed, { chatResolver, profiles: deps.profiles });
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: sendRequestErrorMessage(err) }));
-          return;
-        }
-
-        sendTracked(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, { replayPolicy: 'unsafe' })
+        sendPipeline.executeSend(parsed, async (prepared) => {
+          await sendTracked(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, { replayPolicy: 'unsafe' });
+          return {};
+        })
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
           })
           .catch((err) => {
-            log.error({ err, chatJid: prepared.chatJid }, 'POST /send failed');
+            const sendError = sendRequestErrorMessage(err);
+            if (sendError !== 'invalid send request') {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: sendError }));
+              return;
+            }
+            log.error({ err }, 'POST /send failed');
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
           });

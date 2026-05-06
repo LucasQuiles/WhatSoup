@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Database } from '../../src/core/database.ts';
 import {
   InvalidSendRequestError,
   MissingTextError,
@@ -31,6 +32,96 @@ const chatResolver: ChatResolver = {
     throw new MissingTargetError();
   },
 };
+
+describe('executeSend outbound audit lifecycle', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('records one sent audit row when transport succeeds', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({
+      resolver: chatResolver,
+      auditWriter: writer,
+      caller: 'mcp',
+    });
+
+    const result = await pipeline.executeSend(
+      { to: 'ops', text: 'hello audit' },
+      async () => ({ transportId: 'wamid.success' }),
+    );
+
+    expect(result).toEqual({ transportId: 'wamid.success' });
+    const rows = db.raw
+      .prepare('SELECT status, caller, chat_jid, target_kind, alias, transport_message_id, error FROM outbound_sends')
+      .all() as Array<Record<string, unknown>>;
+    expect(rows).toEqual([{
+      status: 'sent',
+      caller: 'mcp',
+      chat_jid: 'ops-chat@s.whatsapp.net',
+      target_kind: 'alias',
+      alias: 'ops',
+      transport_message_id: 'wamid.success',
+      error: null,
+    }]);
+  });
+
+  it('records one failed audit row and rethrows when transport throws', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({
+      resolver: chatResolver,
+      auditWriter: writer,
+      caller: 'health',
+    });
+
+    await expect(pipeline.executeSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'will fail' },
+      async () => {
+        throw new Error('socket closed');
+      },
+    )).rejects.toThrow('socket closed');
+
+    const rows = db.raw
+      .prepare('SELECT status, caller, chat_jid, target_kind, alias, transport_message_id, error FROM outbound_sends')
+      .all() as Array<Record<string, unknown>>;
+    expect(rows).toEqual([{
+      status: 'failed',
+      caller: 'health',
+      chat_jid: 'raw-chat@s.whatsapp.net',
+      target_kind: 'chatJid',
+      alias: null,
+      transport_message_id: null,
+      error: 'socket closed',
+    }]);
+  });
+
+  it('does not audit preparation failures because no send intent exists', async () => {
+    const { createOutboundSendsWriter } = await import('../../src/core/outbound-sends.ts');
+    const writer = createOutboundSendsWriter({ db: db.raw, line: 'personal' });
+    const pipeline = createSendPipeline({
+      resolver: chatResolver,
+      auditWriter: writer,
+      caller: 'mcp',
+    });
+    const transport = vi.fn(async () => ({ transportId: 'wamid.unused' }));
+
+    await expect(pipeline.executeSend({ text: 'missing target' }, transport))
+      .rejects.toThrow(MissingTargetError);
+
+    const row = db.raw.prepare('SELECT COUNT(*) AS count FROM outbound_sends').get() as { count: number };
+    expect(row.count).toBe(0);
+    expect(transport).not.toHaveBeenCalled();
+  });
+});
 
 describe('prepareTextSend', () => {
   it('prepares raw chat JID sends with default link preview behavior', () => {
@@ -131,6 +222,7 @@ describe('prepareTextSend', () => {
       audit: {
         targetKind: 'alias',
         alias: 'ops',
+        profile: 'satellite',
         textLength: 19,
       },
     });

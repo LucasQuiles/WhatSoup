@@ -26,7 +26,9 @@ import { registerVoiceTools } from './tools/voice.ts';
 import { registerRetentionTools } from './tools/retention.ts';
 import { registerStatusTools } from './tools/status.ts';
 import { registerSchedulingTools } from './tools/scheduling.ts';
+import { registerOutboundAuditTools } from './tools/audit.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
+import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
 
 const log = createChildLogger('register-all');
 
@@ -50,6 +52,7 @@ export function registerAllTools(
 ): void {
   const getSock = () => connection.getSocket() as ExtendedBaileysSocket | null;
   const profileRegistry = createProfileRegistry(config.profiles ?? {});
+  const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
   const register = (tool: ToolDeclaration) => {
     try {
       registry.register(tool);
@@ -59,12 +62,13 @@ export function registerAllTools(
   };
 
   // Pattern 1 — options-object: take ToolRegistry + deps directly
-  try { registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
+  try { registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
   try { registerMediaTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
   try { registerVoiceTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerVoiceTools failed'); }
   try { registerRetentionTools(registry, { db }); } catch (err) { log.error({ err }, 'registerRetentionTools failed'); }
   try { registerStatusTools(registry, { db, getSock }); } catch (err) { log.error({ err }, 'registerStatusTools failed'); }
   try { registerSchedulingTools(registry, { db }); } catch (err) { log.error({ err }, 'registerSchedulingTools failed'); }
+  try { registerOutboundAuditTools(registry, { writer: outboundSendsWriter }); } catch (err) { log.error({ err }, 'registerOutboundAuditTools failed'); }
 
   // Pattern 2 — DB-dependent
   try { registerChatManagementTools(db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }

@@ -40,6 +40,7 @@ describe('registerAllTools', () => {
     expect(tools.some((tool) => tool.name === 'schedule_message')).toBe(true);
     expect(tools.some((tool) => tool.name === 'list_scheduled')).toBe(true);
     expect(tools.some((tool) => tool.name === 'cancel_scheduled')).toBe(true);
+    expect(tools.some((tool) => tool.name === 'read_outbound_sends')).toBe(true);
 
     db.raw.close();
   });

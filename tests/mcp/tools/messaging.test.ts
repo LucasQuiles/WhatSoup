@@ -2,9 +2,11 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
+import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerMessagingTools, type MessagingDeps } from '../../../src/mcp/tools/messaging.ts';
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
+import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -345,6 +347,81 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.content.text).toBe('[SAT] https://example.com #satellite');
       expect(call.content).not.toHaveProperty('linkPreview');
+    });
+
+    it('audits a successful send_message exactly once when configured', async () => {
+      const auditDb = new Database(':memory:');
+      auditDb.open();
+      try {
+        const auditRegistry = new ToolRegistry();
+        const auditCalls = makeCalls();
+        const auditConnection = makeConnection(auditCalls);
+        registerMessagingTools(auditRegistry, {
+          connection: auditConnection,
+          db: auditDb.raw,
+          auditWriter: createOutboundSendsWriter({ db: auditDb.raw, line: 'test-line' }),
+        });
+
+        const result = await auditRegistry.call(
+          'send_message',
+          { chatJid: '15555550101@s.whatsapp.net', text: 'Hello audit' },
+          { tier: 'global' },
+        );
+
+        expect(result.isError).toBeUndefined();
+        const rows = auditDb.raw
+          .prepare('SELECT line, caller, chat_jid, target_kind, status, text_length FROM outbound_sends')
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toEqual([{
+          line: 'test-line',
+          caller: 'mcp',
+          chat_jid: '15555550101@s.whatsapp.net',
+          target_kind: 'chatJid',
+          status: 'sent',
+          text_length: 'Hello audit'.length,
+        }]);
+      } finally {
+        auditDb.close();
+      }
+    });
+
+    it('audits a failed send_message exactly once when transport throws', async () => {
+      const auditDb = new Database(':memory:');
+      auditDb.open();
+      try {
+        const auditRegistry = new ToolRegistry();
+        registerMessagingTools(auditRegistry, {
+          connection: {
+            ...makeConnection(makeCalls()),
+            sendRaw: async () => {
+              throw new Error('socket closed');
+            },
+          } as never,
+          db: auditDb.raw,
+          auditWriter: createOutboundSendsWriter({ db: auditDb.raw, line: 'test-line' }),
+        });
+
+        const result = await auditRegistry.call(
+          'send_message',
+          { chatJid: '15555550101@s.whatsapp.net', text: 'will fail' },
+          { tier: 'global' },
+        );
+
+        const body = JSON.parse(result.content[0].text);
+        expect(body.error).toMatch(/temporarily disconnected/);
+        const rows = auditDb.raw
+          .prepare('SELECT caller, chat_jid, target_kind, status, error FROM outbound_sends')
+          .all() as Array<Record<string, unknown>>;
+        expect(rows).toEqual([{
+          caller: 'mcp',
+          chat_jid: '15555550101@s.whatsapp.net',
+          target_kind: 'chatJid',
+          status: 'failed',
+          error: 'socket closed',
+        }]);
+      } finally {
+        auditDb.close();
+      }
     });
   });
 
