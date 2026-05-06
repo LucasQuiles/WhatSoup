@@ -166,9 +166,11 @@ describe('handleSend', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
     const res = mockRes();
-    await handleSend(mockReq('{"text":"hello"}'), res, deps, { name: 'test-line' });
+    // Body must include chatJid or to (post-P1-D xor validation).
+    const body = JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hello' });
+    await handleSend(mockReq(body), res, deps, { name: 'test-line' });
     expect(mcpCall).not.toHaveBeenCalled();
-    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', '{"text":"hello"}', 'tok123');
+    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
   });
 
@@ -180,7 +182,9 @@ describe('handleSend', () => {
     vi.mocked(mcpCall).mockResolvedValue({ success: false, error: 'timeout' });
 
     const res = mockRes();
-    await handleSend(mockReq('{"text":"hi"}'), res, deps, { name: 'test-line' });
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+      res, deps, { name: 'test-line' });
     expect(res._status).toBe(502);
   });
 
@@ -203,8 +207,10 @@ describe('handleSend', () => {
     vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
 
     const res = mockRes();
-    await handleSend(mockReq('{"text":"hi"}'), res, deps, { name: 'test-line' });
-    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', '{"text":"hi"}', 'tok123');
+    // Body must include chatJid or to (post-P1-D xor validation).
+    const body = JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' });
+    await handleSend(mockReq(body), res, deps, { name: 'test-line' });
+    expect(proxyToInstance).toHaveBeenCalledWith(3010, '/send', 'POST', body, 'tok123');
     expect(res._status).toBe(200);
   });
 
@@ -214,9 +220,144 @@ describe('handleSend', () => {
     const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
     const res = mockRes();
-    await handleSend(mockReq('{}'), res, deps, { name: 'test-line' });
+    // Body must include chatJid (post-P1-D xor validation) so we reach the
+    // route-availability check rather than failing at body validation.
+    await handleSend(mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net' })), res, deps, { name: 'test-line' });
     expect(res._status).toBe(422);
     expect(JSON.parse(res._body).error).toMatch(/no send route/);
+  });
+
+  // ── P1-D resolver-integration cases ───────────────────────────────────────
+
+  it('forwards body with to (alias) through mcpCall', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ to: 'kio', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+
+    // Fleet forwards `to` verbatim; the per-instance MCP layer (P1-E) does the
+    // actual alias resolution.
+    expect(mcpCall).toHaveBeenCalledWith(
+      '/state/test-line/whatsoup.sock', 'send_message',
+      { to: 'kio', text: 'hi' });
+    expect(res._status).toBe(200);
+  });
+
+  it('returns 400 when body has both chatJid and to (mutual exclusion)', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', to: 'kio', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(400);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(JSON.parse(res._body).error).toMatch(/mutually exclusive/);
+  });
+
+  it('returns 400 when body has neither chatJid nor to', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ text: 'hi' })),
+      res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(400);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(JSON.parse(res._body).error).toMatch(/chatJid.*to|to.*chatJid/);
+  });
+
+  it('propagates 502 when instance reports unknown alias not found', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    // Simulate the per-instance MCP returning an alias-not-found error.
+    vi.mocked(mcpCall).mockResolvedValue({
+      success: false, error: 'alias not found: unknown',
+    });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ to: 'unknown', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(502);
+    expect(JSON.parse(res._body).error).toMatch(/alias not found/);
+  });
+
+  // ── P1-D code-review I-1 / I-2 regression guards ──────────────────────────
+
+  it('returns 400 when JSON body parses to null (closes I-1 bypass)', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    // Without the I-1 guard, `JSON.parse('null')` returns null, `parsed.chatJid`
+    // throws TypeError, the catch swallows it, and the request falls through
+    // to mcpCall with a null payload — bypassing xor entirely.
+    await handleSend(mockReq('null'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(400);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(JSON.parse(res._body).error).toMatch(/JSON object/);
+  });
+
+  it('returns 400 when JSON body parses to an array', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleSend(mockReq('[]'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(400);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(JSON.parse(res._body).error).toMatch(/JSON object/);
+  });
+
+  it('returns 400 when chatJid is whitespace-only (closes I-2 trim gap)', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ chatJid: '   ', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+
+    // Whitespace-only count as not-provided after trim; with no `to` present,
+    // this is the "neither" branch -> 400.
+    expect(res._status).toBe(400);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
+    expect(JSON.parse(res._body).error).toMatch(/chatJid|to/);
+  });
+
+  it('returns 400 when to is whitespace-only', async () => {
+    const inst = fakeInstance({ type: 'passive', socketPath: '/tmp/sock' });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleSend(
+      mockReq(JSON.stringify({ to: '   ', text: 'hi' })),
+      res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(400);
+    expect(mcpCall).not.toHaveBeenCalled();
+    expect(proxyToInstance).not.toHaveBeenCalled();
   });
 });
 

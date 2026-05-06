@@ -412,7 +412,7 @@ describe('fleet integration -- send routing', () => {
     const { status } = await fetchJson(`/api/lines/${INST_A}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jid: '5551234@s.whatsapp.net', text: 'Hello' }),
+      body: JSON.stringify({ chatJid: '5551234@s.whatsapp.net', text: 'Hello' }),
     });
     expect(status).toBe(200);
     expect(proxyToInstance).toHaveBeenCalled();
@@ -429,7 +429,7 @@ describe('fleet integration -- send routing', () => {
     const { status } = await fetchJson(`/api/lines/${INST_B}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jid: '5551234@s.whatsapp.net', text: 'Hello' }),
+      body: JSON.stringify({ chatJid: '5551234@s.whatsapp.net', text: 'Hello' }),
     });
     expect(status).toBe(200);
     expect(proxyToInstance).toHaveBeenCalled();
@@ -439,7 +439,7 @@ describe('fleet integration -- send routing', () => {
     const { status } = await fetchJson('/api/lines/nonexistent/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jid: 'x', text: 'y' }),
+      body: JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'y' }),
     });
     expect(status).toBe(404);
   });
