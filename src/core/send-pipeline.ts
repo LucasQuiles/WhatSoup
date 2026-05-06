@@ -2,12 +2,18 @@ import {
   type ChatResolver,
   type ChatTarget,
 } from './chats-resolver.ts';
+import {
+  UnknownProfileError,
+  applyProfile,
+  type ProfileRegistry,
+} from './profiles.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
 
 export interface TextSendInput extends ChatTarget {
   text?: unknown;
   link_preview?: unknown;
+  profile?: unknown;
 }
 
 export interface PreparedTextSend {
@@ -37,6 +43,7 @@ export class MissingTextError extends Error {
 
 export interface SendPipelineDeps {
   chatResolver: ChatResolver;
+  profiles?: ProfileRegistry;
 }
 
 export interface SendPipeline {
@@ -45,12 +52,14 @@ export interface SendPipeline {
 
 export function createSendPipeline({
   resolver,
+  profiles,
 }: {
   resolver: ChatResolver;
+  profiles?: ProfileRegistry;
 }): SendPipeline {
   return {
     prepareSend(input: unknown): PreparedTextSend {
-      return prepareTextSend(input, { chatResolver: resolver });
+      return prepareTextSend(input, { chatResolver: resolver, profiles });
     },
   };
 }
@@ -61,7 +70,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 export function prepareTextSend(
   input: unknown,
-  { chatResolver }: SendPipelineDeps,
+  { chatResolver, profiles }: SendPipelineDeps,
 ): PreparedTextSend {
   if (!isPlainRecord(input)) {
     throw new InvalidSendRequestError('request body must be a JSON object');
@@ -76,6 +85,17 @@ export function prepareTextSend(
     throw new InvalidSendRequestError('link_preview must be "auto" or "off"');
   }
 
+  const profileName = input['profile'];
+  if (profileName !== undefined && (typeof profileName !== 'string' || profileName.trim().length === 0)) {
+    throw new InvalidSendRequestError('profile must be a non-empty string');
+  }
+  const profile = typeof profileName === 'string'
+    ? profiles?.get(profileName.trim())
+    : undefined;
+  if (typeof profileName === 'string' && profile === undefined) {
+    throw new UnknownProfileError(profileName.trim());
+  }
+
   const target: ChatTarget = {};
   if (typeof input['chatJid'] === 'string') target.chatJid = input['chatJid'];
   if (typeof input['to'] === 'string') target.to = input['to'];
@@ -84,12 +104,12 @@ export function prepareTextSend(
   const alias = typeof input['to'] === 'string' && input['to'].trim().length > 0
     ? input['to']
     : undefined;
-  const text = input['text'];
+  const text = profile ? applyProfile(input['text'], profile) : input['text'];
 
   return {
     chatJid,
     text,
-    linkPreviewMode: linkPreview ?? 'auto',
+    linkPreviewMode: linkPreview ?? profile?.linkPreview ?? 'auto',
     audit: {
       targetKind: alias ? 'alias' : 'chatJid',
       ...(alias ? { alias } : {}),

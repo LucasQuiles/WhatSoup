@@ -10,6 +10,7 @@ import {
   MutuallyExclusiveError,
   type ChatResolver,
 } from '../../src/core/chats-resolver.ts';
+import { createProfileRegistry, UnknownProfileError } from '../../src/core/profiles.ts';
 
 const chatResolver: ChatResolver = {
   resolve(target): string {
@@ -86,6 +87,70 @@ describe('prepareTextSend', () => {
     expect(pipeline.prepareSend({ to: 'ops', text: 'hi' })).toMatchObject({
       chatJid: 'ops-chat@s.whatsapp.net',
       text: 'hi',
+      linkPreviewMode: 'auto',
+    });
+  });
+
+  it('rejects unknown profiles before preparing a send', () => {
+    expect(() => prepareTextSend(
+      { chatJid: 'raw-chat@s.whatsapp.net', text: 'hi', profile: 'missing' },
+      { chatResolver, profiles: createProfileRegistry({}) },
+    )).toThrow(UnknownProfileError);
+  });
+
+  it('preserves current send preparation when no profile is requested', () => {
+    const prepared = prepareTextSend(
+      { to: 'ops', text: 'hi' },
+      { chatResolver, profiles: createProfileRegistry({ satellite: { prefix: '[SAT] ' } }) },
+    );
+
+    expect(prepared).toEqual({
+      chatJid: 'ops-chat@s.whatsapp.net',
+      text: 'hi',
+      linkPreviewMode: 'auto',
+      audit: {
+        targetKind: 'alias',
+        alias: 'ops',
+        textLength: 2,
+      },
+    });
+  });
+
+  it('creates a reusable pipeline with resolver and profile registry bound once', () => {
+    const pipeline = createSendPipeline({
+      resolver: chatResolver,
+      profiles: createProfileRegistry({
+        satellite: { prefix: '[SAT] ', tag: ' #satellite', linkPreview: 'off' },
+      }),
+    });
+
+    expect(pipeline.prepareSend({ to: 'ops', text: 'hi', profile: 'satellite' })).toEqual({
+      chatJid: 'ops-chat@s.whatsapp.net',
+      text: '[SAT] hi #satellite',
+      linkPreviewMode: 'off',
+      audit: {
+        targetKind: 'alias',
+        alias: 'ops',
+        textLength: 19,
+      },
+    });
+  });
+
+  it('lets request link_preview override profile linkPreview', () => {
+    const pipeline = createSendPipeline({
+      resolver: chatResolver,
+      profiles: createProfileRegistry({
+        satellite: { prefix: '[SAT] ', linkPreview: 'off' },
+      }),
+    });
+
+    expect(pipeline.prepareSend({
+      to: 'ops',
+      text: 'https://example.com',
+      profile: 'satellite',
+      link_preview: 'auto',
+    })).toMatchObject({
+      text: '[SAT] https://example.com',
       linkPreviewMode: 'auto',
     });
   });
