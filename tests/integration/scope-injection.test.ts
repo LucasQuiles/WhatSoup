@@ -3,7 +3,7 @@
  *
  * Tests the complete scope-enforcement matrix:
  *   A. Chat-scoped session — injected tools (auto-injection, schema stripping, override prevention)
- *   B. Global session — injected tools (schema enrichment, chatJid required, chatJid accepted)
+ *   B. Global session — injected tools (schema enrichment, chatJid or alias target accepted)
  *   C. Global-only tools — hidden from and rejected by chat-scoped sessions
  *   D. Cross-conversation guard — injected chatJid always uses session.deliveryJid
  *   E. The 4 recently-changed tools (clear_chat, delete_chat, delete_message_for_me,
@@ -268,7 +268,7 @@ describe('B. global session — injected tools', () => {
       expect(names).toContain(tool.name);
     });
 
-    it(`${tool.name}: inputSchema INCLUDES chatJid as required for global session`, () => {
+    it(`${tool.name}: inputSchema advertises global-session target fields`, () => {
       const tools = registry.listTools(session);
       const entry = tools.find((t) => t.name === tool.name);
       expect(entry).toBeDefined();
@@ -276,9 +276,14 @@ describe('B. global session — injected tools', () => {
       const props = schema.properties as Record<string, unknown> | undefined;
       expect(props).toBeDefined();
       expect(props).toHaveProperty('chatJid');
+      const supportsAliasTarget = Object.prototype.hasOwnProperty.call(props!, 'to');
       const required = schema.required as string[] | undefined;
       expect(required).toBeDefined();
-      expect(required).toContain('chatJid');
+      if (supportsAliasTarget) {
+        expect(required).not.toContain('chatJid');
+      } else {
+        expect(required).toContain('chatJid');
+      }
     });
 
     it(`${tool.name}: returns error when called without chatJid in global session`, async () => {
@@ -665,7 +670,7 @@ describe('F. schema advertised vs underlying schema integrity', () => {
     }
   });
 
-  it('injected tools always have chatJid as required in global session schema — full sweep', () => {
+  it('injected tools advertise global session target requirements — full sweep', () => {
     const globalTools = registry.listTools(globalSession());
     const injectedToolNames = INJECTED_TOOLS.map((t) => t.name);
 
@@ -683,15 +688,23 @@ describe('F. schema advertised vs underlying schema integrity', () => {
         `${tool.name}: chatJid must appear in global session schema`,
       ).toContain('chatJid');
 
+      const supportsAliasTarget = Object.prototype.hasOwnProperty.call(props!, 'to');
       const required = schema.required as string[] | undefined;
       expect(
         required,
         `${tool.name}: required array must be defined in global session schema`,
       ).toBeDefined();
-      expect(
-        required,
-        `${tool.name}: chatJid must be required in global session schema`,
-      ).toContain('chatJid');
+      if (supportsAliasTarget) {
+        expect(
+          required,
+          `${tool.name}: alias-target tools must not require chatJid because to is an alternative target`,
+        ).not.toContain('chatJid');
+      } else {
+        expect(
+          required,
+          `${tool.name}: chatJid must be required in global session schema`,
+        ).toContain('chatJid');
+      }
     }
   });
 });

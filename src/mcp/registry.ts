@@ -77,6 +77,16 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
   return {};
 }
 
+function schemaHasProperty(tool: ToolDeclaration, propertyName: string): boolean {
+  const schema = zodToJsonSchema(tool.schema);
+  const properties = schema.properties as Record<string, JsonSchema> | undefined;
+  return properties !== undefined && Object.prototype.hasOwnProperty.call(properties, propertyName);
+}
+
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 /**
  * Build a JSON Schema for tools/list output.
  *
@@ -102,14 +112,28 @@ function buildListSchema(
   const props: Record<string, JsonSchema> =
     { ...((base.properties as Record<string, JsonSchema>) ?? {}) };
   const existingRequired: string[] = (base.required as string[]) ?? [];
+  const supportsAliasTarget = Object.prototype.hasOwnProperty.call(props, 'to');
 
   if (session.tier === 'chat-scoped') {
-    // Strip chatJid — it is auto-filled from session.deliveryJid at call time.
+    // Strip caller targets — chatJid is auto-filled from session.deliveryJid
+    // at call time, and alias targets must not retarget a chat-scoped session.
     delete props['chatJid'];
+    if (supportsAliasTarget) delete props['to'];
     return {
       ...base,
       properties: props,
-      required: existingRequired.filter((k) => k !== 'chatJid'),
+      required: existingRequired.filter((k) => k !== 'chatJid' && k !== 'to'),
+    };
+  }
+
+  if (supportsAliasTarget) {
+    return {
+      ...base,
+      properties: {
+        chatJid: { type: 'string' },
+        ...props,
+      },
+      required: existingRequired.filter((k) => k !== 'chatJid' && k !== 'to'),
     };
   }
 
@@ -220,6 +244,8 @@ export class ToolRegistry {
     let effectiveParams = { ...params };
 
     if (tool.targetMode === 'injected') {
+      const supportsAliasTarget = schemaHasProperty(tool, 'to');
+
       if (session.tier === 'chat-scoped') {
         // Auto-fill deliveryJid from session; chatJid should not come from caller
         if (!session.deliveryJid) {
@@ -230,19 +256,29 @@ export class ToolRegistry {
         }
         // Remove any caller-supplied chatJid to prevent override
         delete effectiveParams['chatJid'];
+        if (supportsAliasTarget) delete effectiveParams['to'];
         effectiveParams['chatJid'] = session.deliveryJid;
       } else {
-        // Global session: caller must supply chatJid
+        // Global session: caller must supply chatJid, or an alias target for
+        // tools that explicitly support `to`.
         const callerJid = effectiveParams['chatJid'];
-        if (!callerJid || typeof callerJid !== 'string') {
+        const hasCallerJid = hasNonEmptyString(callerJid);
+        const hasAliasTarget = supportsAliasTarget && hasNonEmptyString(effectiveParams['to']);
+        if (!hasCallerJid && !hasAliasTarget) {
           return {
-            content: [{ type: 'text', text: `Tool "${name}" requires chatJid parameter in a global session` }],
+            content: [{
+              type: 'text',
+              text: supportsAliasTarget
+                ? `Tool "${name}" requires chatJid or to parameter in a global session`
+                : `Tool "${name}" requires chatJid parameter in a global session`,
+            }],
             isError: true,
           };
         }
 
         // Cross-conversation guard: only enforced when session has a bound conversationKey
-        if (session.conversationKey) {
+        // Alias targets are resolved inside the tool handler, then checked there.
+        if (session.conversationKey && hasCallerJid && !hasAliasTarget) {
           let resolved: string;
           try {
             resolved = toConversationKey(callerJid);

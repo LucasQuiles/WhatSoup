@@ -30,6 +30,14 @@ function makeDb(): DatabaseSync {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+  db.exec(`
+    CREATE TABLE chat_aliases (
+      alias TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
   return db;
 }
 
@@ -57,6 +65,13 @@ function seedMessage(
     1_700_000_000,
   );
   return messageId;
+}
+
+function seedAlias(db: DatabaseSync, alias: string, chatJid: string): void {
+  db.prepare(`
+    INSERT INTO chat_aliases (alias, chat_jid)
+    VALUES (?, ?)
+  `).run(alias, chatJid);
 }
 
 function makeCalls(): string[] {
@@ -116,6 +131,86 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.jid).toBe('1234567890@s.whatsapp.net');
       expect(call.content.text).toBe('Hello world');
+    });
+
+    it('resolves to alias in a global session and sends to the aliased JID', async () => {
+      seedAlias(db, 'ops', '19876543210@s.whatsapp.net');
+
+      const result = await registry.call(
+        'send_message',
+        { to: 'ops', text: 'Alias hello' },
+        { tier: 'global' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      const call = JSON.parse(calls[0]);
+      expect(call.jid).toBe('19876543210@s.whatsapp.net');
+      expect(call.content.text).toBe('Alias hello');
+    });
+
+    it('returns an alias error and does not send when to is unknown', async () => {
+      const result = await registry.call(
+        'send_message',
+        { to: 'missing', text: 'Alias hello' },
+        { tier: 'global' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(0);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('alias not found: missing');
+    });
+
+    it('returns a target error and does not send when chatJid and to are both provided', async () => {
+      seedAlias(db, 'ops', '19876543210@s.whatsapp.net');
+
+      const result = await registry.call(
+        'send_message',
+        {
+          chatJid: '1234567890@s.whatsapp.net',
+          to: 'ops',
+          text: 'Alias hello',
+        },
+        { tier: 'global' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(0);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('chatJid and to are mutually exclusive; provide exactly one');
+    });
+
+    it('rejects alias resolution that crosses a bound global conversation', async () => {
+      seedAlias(db, 'bob', '19995551234@s.whatsapp.net');
+
+      const result = await registry.call(
+        'send_message',
+        { to: 'bob', text: 'wrong chat' },
+        { tier: 'global', conversationKey: '1234567890' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(0);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toMatch(/does not match session conversation/);
+    });
+
+    it('ignores caller-supplied to in a chat-scoped session and sends to deliveryJid', async () => {
+      seedAlias(db, 'bob', '19995551234@s.whatsapp.net');
+
+      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const result = await registry.call(
+        'send_message',
+        { to: 'bob', text: 'Current chat only' },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      const call = JSON.parse(calls[0]);
+      expect(call.jid).toBe('1234567890@s.whatsapp.net');
+      expect(call.jid).not.toBe('19995551234@s.whatsapp.net');
     });
 
     it('applies mention formatting for @name patterns', async () => {
