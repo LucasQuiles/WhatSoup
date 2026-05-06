@@ -24,6 +24,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { waitForHistorySyncThenRecover } from '../../src/core/post-connect-recovery.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -487,17 +488,8 @@ describe('Crash Recovery — Scenario 6: maybe_sent reconciliation with wa_messa
 
 describe('Crash Recovery — Scenario 7: historySyncComplete race (fake timers)', () => {
   /**
-   * These tests replicate the Promise.race pattern from main.ts startup:
-   *
-   *   await Promise.race([
-   *     new Promise<void>((resolve) => connectionManager.once('historySyncComplete', resolve)),
-   *     new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
-   *   ]);
-   *   await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
-   *   durability.postConnectRecovery();
-   *
-   * They do NOT import main.ts; they inline the same logic to keep the test
-   * self-contained and avoid side effects from real I/O initialization.
+   * These tests cover the startup wait/recovery helper used by main.ts without
+   * importing main.ts, which would start real I/O initialization.
    */
 
   let db: Database;
@@ -517,16 +509,13 @@ describe('Crash Recovery — Scenario 7: historySyncComplete race (fake timers)'
     const connectionManager = new EventEmitter();
     let postConnectCalled = false;
 
-    // Mirror the startup sequence from main.ts (lines 272-277)
-    const startupSequence = (async () => {
-      await Promise.race([
-        new Promise<void>((resolve) => connectionManager.once('historySyncComplete', resolve)),
-        new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
-      ]);
-      await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
-      engine.postConnectRecovery();
-      postConnectCalled = true;
-    })();
+    const startupSequence = waitForHistorySyncThenRecover({
+      connectionManager,
+      recover: () => {
+        engine.postConnectRecovery();
+        postConnectCalled = true;
+      },
+    });
 
     // Neither historySyncComplete nor the timeout have fired yet
     expect(postConnectCalled).toBe(false);
@@ -549,15 +538,13 @@ describe('Crash Recovery — Scenario 7: historySyncComplete race (fake timers)'
     const connectionManager = new EventEmitter();
     let postConnectCalled = false;
 
-    const startupSequence = (async () => {
-      await Promise.race([
-        new Promise<void>((resolve) => connectionManager.once('historySyncComplete', resolve)),
-        new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
-      ]);
-      await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
-      engine.postConnectRecovery();
-      postConnectCalled = true;
-    })();
+    const startupSequence = waitForHistorySyncThenRecover({
+      connectionManager,
+      recover: () => {
+        engine.postConnectRecovery();
+        postConnectCalled = true;
+      },
+    });
 
     // Emit historySyncComplete early (e.g. at 3s into startup)
     await vi.advanceTimersByTimeAsync(3_000);
@@ -577,22 +564,19 @@ describe('Crash Recovery — Scenario 7: historySyncComplete race (fake timers)'
     expect(postConnectCalled).toBe(true);
   });
 
-  it('event path: 15s timer is cancelled implicitly — total elapsed well under 25s', async () => {
+  it('event path: postConnect runs without waiting for the 15s timeout', async () => {
     // Verify that firing historySyncComplete at t=1s means postConnect runs at ~11s
     // (1s race wait + 10s echo grace), not at 15s+10s=25s.
     const connectionManager = new EventEmitter();
     const elapsed: number[] = [];
 
-    const startupSequence = (async () => {
-      await Promise.race([
-        new Promise<void>((resolve) => connectionManager.once('historySyncComplete', resolve)),
-        new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
-      ]);
-      elapsed.push(Date.now()); // checkpoint A: race resolved
-      await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
-      elapsed.push(Date.now()); // checkpoint B: postConnect called
-      engine.postConnectRecovery();
-    })();
+    const startupSequence = waitForHistorySyncThenRecover({
+      connectionManager,
+      recover: () => {
+        elapsed.push(Date.now());
+        engine.postConnectRecovery();
+      },
+    });
 
     const t0 = Date.now();
 
@@ -605,9 +589,9 @@ describe('Crash Recovery — Scenario 7: historySyncComplete race (fake timers)'
     await vi.advanceTimersByTimeAsync(10_000);
     await startupSequence;
 
-    // Race resolved at ~1s, postConnect at ~11s — both well under 25s
+    // postConnect runs at ~11s, well under 25s.
+    expect(elapsed).toHaveLength(1);
     expect(elapsed[0]! - t0).toBeLessThan(15_000);
-    expect(elapsed[1]! - t0).toBeLessThan(15_000);
   });
 });
 
