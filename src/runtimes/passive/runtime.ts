@@ -39,7 +39,9 @@ export class PassiveRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
-    registerAllTools(this.registry, this.connection, this.db);
+    registerAllTools(this.registry, this.connection, this.db, {
+      enableKnowledgeSearch: false,
+    });
     if (this.durability) this.registry.setDurability(this.durability);
 
     const socketPath = this.config.socketPath
