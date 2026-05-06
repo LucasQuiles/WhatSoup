@@ -7,7 +7,10 @@ CONTEXT=$(journalctl --user -u "whatsoup@${INSTANCE}" -n 20 --no-pager -o cat 2>
 ERROR_LINE=$(echo "$CONTEXT" | grep -oP '"msg":"[^"]*"' | tail -1 || echo "unknown error")
 
 # Try the internal heal path first
-TOKEN=$(secret-tool lookup service whatsoup_health 2>/dev/null || echo "")
+TOKEN=$(secret-tool lookup service whatsoup-health-token user "$INSTANCE" 2>/dev/null || echo "")
+if [ -z "$TOKEN" ]; then
+    TOKEN=$(secret-tool lookup service whatsoup_health 2>/dev/null || echo "")
+fi
 if [ -n "$TOKEN" ]; then
     HEAL_URL="http://127.0.0.1:9092/heal"
     PAYLOAD=$(jq -n --arg inst "$INSTANCE" --arg ctx "$CONTEXT" --arg err "$ERROR_LINE" \

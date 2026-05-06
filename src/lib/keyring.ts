@@ -17,8 +17,19 @@ const SERVICE_ENV_MAP: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
   pinecone: 'PINECONE_API_KEY',
   elevenlabs: 'ELEVENLABS_API_KEY',
+  'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
   whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
 };
+
+const SERVICE_MIGRATION_FALLBACKS: Record<string, string[]> = {
+  'whatsoup-health-token': ['whatsoup_health'],
+};
+
+export interface CredentialLookupOptions {
+  user?: string;
+  skipEnv?: boolean;
+  skipMigrationFallbacks?: boolean;
+}
 
 let _cachedBackend: KeyringBackend | undefined;
 
@@ -50,46 +61,86 @@ export function detectKeyringBackend(): KeyringBackend {
  *  1. Environment variable (if mapped)
  *  2. Platform keyring (secret-tool or macOS Keychain)
  *
+ * User-scoped lookups invert that order so a shared process env var cannot
+ * shadow an instance-specific keyring entry.
+ *
  * Returns the trimmed value, or null if unavailable.
  */
-export function lookupCredential(service: string): string | null {
-  // 1. Check environment variable first
-  const envKey = SERVICE_ENV_MAP[service];
-  if (envKey) {
+export function lookupCredential(service: string, options: CredentialLookupOptions = {}): string | null {
+  const lookupEnv = (): string | null => {
+    const envKey = SERVICE_ENV_MAP[service];
+    if (!envKey) return null;
     const envVal = process.env[envKey];
     if (envVal) return envVal.trim();
+    return null;
+  };
+
+  // 1. Check environment variable first for normal service-wide lookups.
+  const envFirst = options.user === undefined && options.skipEnv !== true;
+  if (envFirst) {
+    const envVal = lookupEnv();
+    if (envVal) return envVal;
   }
+  const lookupEnvAfterKeyringMiss = (): string | null => {
+    if (envFirst || options.skipEnv === true) return null;
+    return lookupEnv();
+  };
 
   // 2. Try platform keyring
   const backend = detectKeyringBackend();
 
+  const services = [
+    service,
+    ...(options.skipMigrationFallbacks === true ? [] : (SERVICE_MIGRATION_FALLBACKS[service] ?? [])),
+  ];
+  const secretToolArgs = (candidate: string, includeOptions: boolean): string[] => {
+    const args = ['lookup', 'service', candidate];
+    if (includeOptions && options.user) args.push('user', options.user);
+    return args;
+  };
+
   if (backend === 'secret-tool') {
     try {
-      const raw = execFileSync('secret-tool', ['lookup', 'service', service], { timeout: 5_000 });
-      const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
-      return val || null;
+      for (const [index, candidate] of services.entries()) {
+        try {
+          const raw = execFileSync('secret-tool', secretToolArgs(candidate, index === 0), { timeout: 5_000 });
+          const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
+          if (val) return val;
+        } catch {
+          // Try migration fallback candidates before giving up.
+        }
+      }
+      return lookupEnvAfterKeyringMiss();
     } catch {
-      return null;
+      return lookupEnvAfterKeyringMiss();
     }
   }
 
   if (backend === 'macos-keychain') {
     try {
       const username = os.userInfo().username;
-      const raw = execFileSync(
-        'security',
-        ['find-generic-password', '-s', service, '-a', username, '-w'],
-        { timeout: 5_000 },
-      );
-      const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
-      return val || null;
+      for (const [index, candidate] of services.entries()) {
+        try {
+          const account = index === 0 && options.user ? options.user : username;
+          const raw = execFileSync(
+            'security',
+            ['find-generic-password', '-s', candidate, '-a', account, '-w'],
+            { timeout: 5_000 },
+          );
+          const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
+          if (val) return val;
+        } catch {
+          // Try migration fallback candidates before giving up.
+        }
+      }
+      return lookupEnvAfterKeyringMiss();
     } catch {
-      return null;
+      return lookupEnvAfterKeyringMiss();
     }
   }
 
-  // env-only — already checked above
-  return null;
+  // env-only or scoped keyring miss.
+  return lookupEnvAfterKeyringMiss();
 }
 
 /** Reset cached backend detection (for testing). */
