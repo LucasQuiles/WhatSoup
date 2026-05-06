@@ -94,4 +94,13 @@ describe('health token shell wrappers', () => {
     expect(canonical).toBeLessThan(legacy);
     expect(source).not.toContain('echo "$TOKEN"');
   });
+
+  it('heal-notify uses portable grep and configurable alert binary', () => {
+    const source = fs.readFileSync('deploy/scripts/heal-notify.sh', 'utf8');
+
+    expect(source).toContain('grep -oE');
+    expect(source).not.toContain('grep -oP');
+    expect(source).toContain('WHATSOUP_ALERT_BIN');
+    expect(source).toContain('exec "$ALERT_BIN"');
+  });
 });

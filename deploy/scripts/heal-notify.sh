@@ -4,7 +4,7 @@ INSTANCE="${1:?Usage: heal-notify.sh <instance-name>}"
 
 # Gather evidence
 CONTEXT=$(journalctl --user -u "whatsoup@${INSTANCE}" -n 20 --no-pager -o cat 2>/dev/null || echo "no logs available")
-ERROR_LINE=$(echo "$CONTEXT" | grep -oP '"msg":"[^"]*"' | tail -1 || echo "unknown error")
+ERROR_LINE=$(echo "$CONTEXT" | grep -oE '"msg":"[^"]*"' | tail -1 || echo "unknown error")
 
 # Try the internal heal path first
 TOKEN=$(secret-tool lookup service whatsoup-health-token user "$INSTANCE" 2>/dev/null || echo "")
@@ -28,7 +28,8 @@ fi
 
 # Heal path failed or unavailable — fall back to WhatsApp alert lane
 EVIDENCE=$(echo "$CONTEXT" | tail -3)
-exec /home/q/.local/bin/whatsapp-alert \
+ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
+exec "$ALERT_BIN" \
     --instance "$INSTANCE" --source service_crash \
     --summary "whatsoup@${INSTANCE} service failed (systemd OnFailure)" \
     --evidence "$EVIDENCE"
