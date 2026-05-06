@@ -70,7 +70,7 @@ describe('downloadMedia — negative', () => {
 
     const result = await downloadMedia(downloadFn, 'image/jpeg');
 
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('returns null when the buffer exceeds 25MB', async () => {
@@ -80,7 +80,7 @@ describe('downloadMedia — negative', () => {
 
     const result = await downloadMedia(downloadFn, 'video/mp4');
 
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('returns null on unexpected error in download function', async () => {
@@ -88,7 +88,7 @@ describe('downloadMedia — negative', () => {
 
     const result = await downloadMedia(downloadFn, 'audio/ogg');
 
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('accepts buffers exactly at the 25MB boundary', async () => {
