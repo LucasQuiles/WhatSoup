@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { canSendToGroup, recordGroupOutbound, __resetForTests } from '../../src/core/echo-guard.ts';
 import type { EchoGuardConfig } from '../../src/core/echo-guard.ts';
 
@@ -7,6 +7,10 @@ const DEFAULT_CFG: EchoGuardConfig = { enabled: true, groupCooldownMs: 60_000 };
 describe('echo-guard', () => {
   beforeEach(() => {
     __resetForTests();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('allows first send to a group', () => {
@@ -20,10 +24,11 @@ describe('echo-guard', () => {
   });
 
   it('allows send after cooldown expires', async () => {
+    vi.useFakeTimers();
     const jid = '120363406689931730@g.us';
     const cfg: EchoGuardConfig = { enabled: true, groupCooldownMs: 10 };
     recordGroupOutbound(jid);
-    await new Promise(r => setTimeout(r, 15));
+    await vi.advanceTimersByTimeAsync(15);
     expect(canSendToGroup(jid, cfg)).toBe(true);
   });
 

@@ -172,10 +172,9 @@ describe('emitHealReport', () => {
       stderr: 'Killed',
     });
 
-    // Give the fire-and-forget promise a tick to settle
-    await new Promise(resolve => setTimeout(resolve, 0));
-
-    expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
+    });
     const [, targetJid, message] = vi.mocked(sendTracked).mock.calls[0]!;
     expect(targetJid).toBe('15559998888@s.whatsapp.net');
     expect(message).toMatch(/^\[LOOPS_HEAL\]/);
