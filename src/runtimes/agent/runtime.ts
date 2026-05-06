@@ -1,7 +1,7 @@
 // src/runtimes/agent/runtime.ts
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
-import type { Runtime } from '../types.ts';
+import type { AgentCommandRequest, AgentCommandResult, Runtime } from '../types.ts';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
@@ -109,6 +109,19 @@ const SHARED_QUEUE_IDLE_MS = 60 * 60 * 1000;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
+const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+
+class AgentCommandRuntimeError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+
+  constructor(code: string, message: string, statusCode: number) {
+    super(message);
+    this.name = 'AgentCommandRuntimeError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
 
 /**
  * Prepare a plain-text content string for the agent runtime from any message type.
@@ -581,6 +594,7 @@ export class AgentRuntime implements Runtime {
   private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
+  private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
 
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
@@ -645,6 +659,47 @@ export class AgentRuntime implements Runtime {
 
   private clearToolNames(toolScopeKey: string): void {
     this.activeToolNames.delete(toolScopeKey);
+  }
+
+  private beginSilentCompact(scopeKey: string): void {
+    this.clearSilentCompact(scopeKey);
+    const timer = setTimeout(() => {
+      this.silentCompactScopes.delete(scopeKey);
+    }, SILENT_COMPACT_TTL_MS);
+    timer.unref?.();
+    this.silentCompactScopes.set(scopeKey, timer);
+  }
+
+  private isSilentCompact(scopeKey?: string): boolean {
+    return scopeKey !== undefined && this.silentCompactScopes.has(scopeKey);
+  }
+
+  private clearSilentCompact(scopeKey?: string): void {
+    if (scopeKey === undefined) return;
+    const timer = this.silentCompactScopes.get(scopeKey);
+    if (timer) clearTimeout(timer);
+    this.silentCompactScopes.delete(scopeKey);
+  }
+
+  private assertNoActiveUserTurn(scopeKey: string): void {
+    if (this.sessionScope === 'per_chat') {
+      if ((this.perChatInboundSeqQueue.get(scopeKey)?.length ?? 0) > 0) {
+        throw new AgentCommandRuntimeError(
+          'turn_in_progress',
+          'agent command rejected because the target chat already has a turn in progress',
+          409,
+        );
+      }
+      return;
+    }
+
+    if (this.currentInboundSeq !== undefined || this.currentTurnChatJid !== null) {
+      throw new AgentCommandRuntimeError(
+        'turn_in_progress',
+        'agent command rejected because the agent already has a turn in progress',
+        409,
+      );
+    }
   }
 
   private getOpenFileDescriptorCount(): number | null {
@@ -2131,6 +2186,8 @@ export class AgentRuntime implements Runtime {
    * Send a turn in non-shared (legacy) mode.
    */
   private async sendTurnNonShared(chatJid: string, text: string): Promise<void> {
+    this.currentTurnChatJid = chatJid;
+    this.turnHadVisibleOutput = false;
     await this.sendTurnToSession(this.session!, chatJid, text);
   }
 
@@ -2209,6 +2266,7 @@ export class AgentRuntime implements Runtime {
       case 'assistant_text':
         session?.tickWatchdog();
         tracker?.onAnyActivity();
+        if (this.isSilentCompact(mapKey)) break;
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
@@ -2228,6 +2286,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
+        if (this.isSilentCompact(mapKey)) break;
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
@@ -2239,6 +2298,10 @@ export class AgentRuntime implements Runtime {
       case 'compact_boundary':
         session?.tickWatchdog();
         tracker?.onAnyActivity();
+        if (this.isSilentCompact(mapKey)) {
+          log.info({ chatJid: queue.targetChatJid }, 'silent agent compact boundary observed');
+          break;
+        }
         queue.indicateTyping();
         queue.enqueueText(
           'Context compacted — older details summarized. Restate any important context I should carry forward.',
@@ -2249,6 +2312,7 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+        if (this.isSilentCompact(mapKey)) break;
         const toolNames = this.activeToolNames.get(toolScopeKey);
         if (event.isError) {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
@@ -2262,7 +2326,8 @@ export class AgentRuntime implements Runtime {
         }
         break;
 
-      case 'result':
+      case 'result': {
+        const wasSilentCompact = this.isSilentCompact(mapKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(toolScopeKey);
@@ -2278,10 +2343,12 @@ export class AgentRuntime implements Runtime {
             session?.shutdown();
             break;
           }
-          queue.enqueueResultText(event.text);
-          // Accumulate result text for voice reply (SP4)
-          if (mapKey !== undefined) {
-            this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+          if (!wasSilentCompact) {
+            queue.enqueueResultText(event.text);
+            // Accumulate result text for voice reply (SP4)
+            if (mapKey !== undefined) {
+              this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+            }
           }
         }
         if (mapKey !== undefined) {
@@ -2338,7 +2405,7 @@ export class AgentRuntime implements Runtime {
           // Capture voice reply context before flush (SP4)
           const chatJidForVoice = queue.targetChatJid;
           const inboundContentType = mapKey !== undefined ? (this.perChatTurnContentType.get(mapKey) ?? null) : null;
-          const responseText = mapKey !== undefined ? (this.perChatTurnText.get(mapKey) ?? '') : '';
+          const responseText = !wasSilentCompact && mapKey !== undefined ? (this.perChatTurnText.get(mapKey) ?? '') : '';
           // Clean up per-chat voice state
           if (mapKey !== undefined) {
             this.perChatTurnContentType.delete(mapKey);
@@ -2358,7 +2425,9 @@ export class AgentRuntime implements Runtime {
             })
             .catch((err) => log.error({ err }, 'flush or voice reply failed'));
         }
+        if (wasSilentCompact) this.clearSilentCompact(mapKey);
         break;
+      }
 
       case 'token_usage':
         // Record token usage without triggering turn completion.
@@ -2583,6 +2652,91 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  async handleAgentCommand(request: AgentCommandRequest): Promise<AgentCommandResult> {
+    if (request.command !== 'compact') {
+      throw new AgentCommandRuntimeError(
+        'unsupported_command',
+        `unsupported agent command: ${String(request.command)}`,
+        400,
+      );
+    }
+
+    const silent = request.silent === true;
+
+    if (this.sessionScope === 'per_chat') {
+      if (!request.chatJid) {
+        throw new AgentCommandRuntimeError(
+          'chat_jid_required',
+          'chatJid is required for per_chat agent commands',
+          400,
+        );
+      }
+
+      const mapKey = this.resolvePerChatMapKey(request.chatJid);
+      this.assertNoActiveUserTurn(mapKey);
+      const session = this.chatSessions.get(mapKey);
+      if (!session) {
+        throw new AgentCommandRuntimeError(
+          'session_not_found',
+          `no agent session exists for ${request.chatJid}`,
+          404,
+        );
+      }
+      if (!session.getStatus().active) {
+        throw new AgentCommandRuntimeError(
+          'session_inactive',
+          `agent session for ${request.chatJid} is not active`,
+          409,
+        );
+      }
+
+      if (silent) this.beginSilentCompact(mapKey);
+      try {
+        await session.sendTurn('/compact');
+      } catch (err) {
+        if (silent) this.clearSilentCompact(mapKey);
+        throw err;
+      }
+
+      return { ok: true, command: 'compact', chatJid: request.chatJid, silent };
+    }
+
+    const session = this.session;
+    if (!session) {
+      throw new AgentCommandRuntimeError('session_not_found', 'no agent session exists', 404);
+    }
+    if (!session.getStatus().active) {
+      throw new AgentCommandRuntimeError('session_inactive', 'agent session is not active', 409);
+    }
+
+    this.assertNoActiveUserTurn(GLOBAL_TOOL_SCOPE_KEY);
+    const targetChatJid = request.chatJid ?? this.activeChatJid;
+    if (!targetChatJid || (this.shared && !request.chatJid)) {
+      throw new AgentCommandRuntimeError(
+        'chat_jid_required',
+        'chatJid is required for shared agent commands and for single agent commands without an active chat',
+        400,
+      );
+    }
+    if (this.shared) {
+      this.ensureOutboundQueue(targetChatJid);
+    } else if (!this.queue) {
+      throw new AgentCommandRuntimeError('session_queue_not_found', 'agent session has no active outbound queue', 409);
+    }
+
+    if (silent) this.beginSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
+    this.currentTurnChatJid = targetChatJid;
+    try {
+      await session.sendTurn('/compact');
+    } catch (err) {
+      if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
+      this.currentTurnChatJid = null;
+      throw err;
+    }
+
+    return { ok: true, command: 'compact', chatJid: targetChatJid, silent };
+  }
+
   /** Return the ControlQueue for the control session, or null if none exists. */
   getControlQueue(): ControlQueue | null {
     return (this.chatQueues.get('control@heal.internal') as unknown as ControlQueue) ?? null;
@@ -2628,6 +2782,10 @@ export class AgentRuntime implements Runtime {
       clearTimeout(timer);
     }
     this.pendingRespawnTimers.clear();
+    for (const timer of this.silentCompactScopes.values()) {
+      clearTimeout(timer);
+    }
+    this.silentCompactScopes.clear();
 
     // Shutdown per_chat sessions
     if (this.sessionScope === 'per_chat') {
@@ -3503,6 +3661,7 @@ export class AgentRuntime implements Runtime {
       case 'assistant_text':
         this.session?.tickWatchdog();
         tracker?.onAnyActivity();
+        if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
           if (!normalizedText) break;
@@ -3521,6 +3680,7 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
+        if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
@@ -3534,6 +3694,10 @@ export class AgentRuntime implements Runtime {
       case 'compact_boundary':
         this.session?.tickWatchdog();
         tracker?.onAnyActivity();
+        if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) {
+          log.info({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'silent agent compact boundary observed');
+          break;
+        }
         // Start the composing indicator so the user sees activity during compaction,
         // then send the notification. The indicator stays alive via the heartbeat
         // until the turn's result event fires flush().
@@ -3548,6 +3712,7 @@ export class AgentRuntime implements Runtime {
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+        if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
         if (event.isError) {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
@@ -3566,7 +3731,8 @@ export class AgentRuntime implements Runtime {
         }
         break;
 
-      case 'result':
+      case 'result': {
+        const wasSilentCompact = this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
@@ -3583,16 +3749,18 @@ export class AgentRuntime implements Runtime {
             this.session?.shutdown();
             break;
           }
-          queue.enqueueResultText(event.text);
-          this.turnHadVisibleOutput = true;
-          // Accumulate result text for voice reply (SP4)
-          this.currentTurnAssistantText += event.text;
+          if (!wasSilentCompact) {
+            queue.enqueueResultText(event.text);
+            this.turnHadVisibleOutput = true;
+            // Accumulate result text for voice reply (SP4)
+            this.currentTurnAssistantText += event.text;
+          }
         }
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
         // If nothing visible was emitted this turn, send an explicit fallback
-        if (!this.turnHadVisibleOutput) {
+        if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');
         }
         this.turnHadVisibleOutput = false;
@@ -3648,7 +3816,7 @@ export class AgentRuntime implements Runtime {
           // Capture voice reply context before flush (SP4)
           const chatJidForVoice = this.shared ? this.currentTurnChatJid : this.activeChatJid;
           const inboundContentType = this.currentTurnInboundContentType;
-          const responseText = this.currentTurnAssistantText;
+          const responseText = wasSilentCompact ? '' : this.currentTurnAssistantText;
           // Reset per-turn voice state
           this.currentTurnInboundContentType = null;
           this.currentTurnAssistantText = '';
@@ -3666,7 +3834,9 @@ export class AgentRuntime implements Runtime {
             })
             .catch((err) => log.error({ err }, 'flush or voice reply failed'));
         }
+        if (wasSilentCompact) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
         break;
+      }
 
       case 'token_usage':
         // Record token usage without triggering turn completion (non-per-chat path).

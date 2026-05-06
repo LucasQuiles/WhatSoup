@@ -2,6 +2,21 @@
 import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 
+export interface AgentCommandRequest {
+  command: 'compact';
+  /** Required for per-chat agent runtimes so control-plane calls target one session. */
+  chatJid?: string;
+  /** Suppress user-facing compact notifications and any command output when true. */
+  silent?: boolean;
+}
+
+export interface AgentCommandResult {
+  ok: true;
+  command: 'compact';
+  chatJid: string | null;
+  silent: boolean;
+}
+
 export interface Runtime {
   start(): Promise<void>;
   handleMessage(msg: IncomingMessage): Promise<void>;
@@ -12,4 +27,6 @@ export interface Runtime {
   handleJidAliasChanged?(conversationKey: string, newJid: string): void;
   /** Inject a repair turn into the control session for self-healing. */
   handleControlTurn?(reportId: string, payload: string): Promise<void>;
+  /** Execute an internal agent command without routing through WhatsApp ingest. */
+  handleAgentCommand?(request: AgentCommandRequest): Promise<AgentCommandResult>;
 }

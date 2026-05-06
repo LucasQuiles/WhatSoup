@@ -82,6 +82,15 @@ function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
+function agentCommandStatus(err: unknown): number {
+  const status = (err as { statusCode?: unknown })?.statusCode;
+  return typeof status === 'number' && status >= 400 && status < 600 ? status : 500;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // ── POST /send — send a text message to any chat ──
@@ -127,6 +136,95 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
         }
+      });
+      return;
+    }
+
+    // ── POST /agent/compact — run runtime compaction without WhatsApp ingest ──
+    if (req.url === '/agent/compact' && req.method === 'POST') {
+      (async () => {
+        const jsonHeaders = { 'Content-Type': 'application/json' };
+
+        if (!requireAuth(req, res)) return;
+
+        if (deps.instanceType !== 'agent' || !deps.runtime?.handleAgentCommand) {
+          res.writeHead(409, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'agent commands are only available on agent instances' }));
+          return;
+        }
+
+        const MAX_BODY_BYTES = 64 * 1024;
+        let rawBody = '';
+        let byteCount = 0;
+        let destroyed = false;
+        await new Promise<void>((resolve) => {
+          req.on('data', (chunk: Buffer) => {
+            if (destroyed) return;
+            byteCount += chunk.byteLength;
+            if (byteCount > MAX_BODY_BYTES) {
+              destroyed = true;
+              res.writeHead(413, jsonHeaders);
+              res.end(JSON.stringify({ ok: false, error: 'request body too large' }));
+              req.destroy();
+              resolve();
+              return;
+            }
+            rawBody += chunk;
+          });
+          req.once('end', resolve);
+        });
+        if (destroyed) return;
+
+        let data: unknown;
+        try {
+          data = rawBody.trim() === '' ? {} : JSON.parse(rawBody);
+        } catch {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          return;
+        }
+        if (!isJsonObject(data)) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'request body must be a JSON object' }));
+          return;
+        }
+
+        const chatJid = data['chatJid'];
+        const silent = data['silent'];
+        if (chatJid !== undefined && typeof chatJid !== 'string') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'chatJid must be a string when provided' }));
+          return;
+        }
+        if (silent !== undefined && typeof silent !== 'boolean') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ ok: false, error: 'silent must be a boolean when provided' }));
+          return;
+        }
+
+        try {
+          const result = await deps.runtime.handleAgentCommand({
+            command: 'compact',
+            ...(chatJid !== undefined ? { chatJid } : {}),
+            silent: silent !== false,
+          });
+          res.writeHead(200, jsonHeaders);
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const code = (err as { code?: unknown })?.code;
+          res.writeHead(agentCommandStatus(err), jsonHeaders);
+          res.end(JSON.stringify({
+            ok: false,
+            error: (err as Error).message,
+            ...(typeof code === 'string' ? { code } : {}),
+          }));
+        }
+      })().catch((err) => {
+        log.error({ err }, 'POST /agent/compact: unhandled error');
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+        } catch { /* response already started */ }
       });
       return;
     }
