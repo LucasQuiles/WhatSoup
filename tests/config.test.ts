@@ -75,6 +75,27 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+function makeInstanceConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    name: 'profile-test',
+    type: 'chat',
+    systemPrompt: 'Profile test.',
+    adminPhones: ['15550000001'],
+    accessMode: 'allowlist',
+    paths: {
+      configRoot: path.join(tmpDir, 'inst-config'),
+      dataRoot: path.join(tmpDir, 'inst-data'),
+      stateRoot: path.join(tmpDir, 'inst-state'),
+      authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'inst-data', 'logs'),
+      lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+    },
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: No INSTANCE_CONFIG — built-in defaults (backward compat)
 // ---------------------------------------------------------------------------
@@ -238,6 +259,55 @@ describe('config — chatAliases validation', () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
 
     await expect(import('../src/config.ts')).rejects.toThrow(/duplicate alias/i);
+  });
+});
+
+describe('config — transport profiles', () => {
+  it('preserves valid top-level profiles from INSTANCE_CONFIG', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        satellite: {
+          prefix: '[SAT] ',
+          tag: ' #satellite',
+          linkPreview: 'off',
+        },
+      },
+    }));
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.profiles).toEqual({
+      satellite: {
+        prefix: '[SAT] ',
+        tag: ' #satellite',
+        linkPreview: 'off',
+      },
+    });
+  });
+
+  it('rejects unknown profile fields in INSTANCE_CONFIG', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        satellite: {
+          prefix: '[SAT] ',
+          chunkSize: 1200,
+        },
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(/profiles.*chunkSize|chunkSize.*profiles|unknown.*profile/i);
+  });
+
+  it('rejects invalid linkPreview profile policy values in INSTANCE_CONFIG', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      profiles: {
+        satellite: {
+          linkPreview: 'always',
+        },
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(/linkPreview.*auto.*off/);
   });
 });
 

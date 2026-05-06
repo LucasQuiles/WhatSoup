@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { normalizePhoneE164 } from './lib/phone.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
+import type { Profile } from './core/profiles.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -164,6 +165,59 @@ function stringRecordProp(source: Record<string, unknown> | null | undefined, ke
       throw new Error(`${key} contains duplicate alias after trimming: ${alias}`);
     }
     result[alias] = rawValue.trim();
+  }
+  return result;
+}
+
+function profileRecordProp(source: Record<string, unknown> | null | undefined, key: string): Record<string, Profile> {
+  const value = source?.[key];
+  if (value === undefined) return {};
+  const obj = record(value);
+  if (!obj) {
+    throw new Error(`${key} must be an object of profile names to profile objects`);
+  }
+
+  const allowedFields = new Set(['prefix', 'tag', 'linkPreview']);
+  const result: Record<string, Profile> = {};
+  for (const [rawName, rawProfile] of Object.entries(obj)) {
+    const profileName = rawName.trim();
+    if (profileName === '') {
+      throw new Error(`${key} must not contain empty profile names`);
+    }
+    if (result[profileName] !== undefined) {
+      throw new Error(`${key} contains duplicate profile after trimming: ${profileName}`);
+    }
+
+    const profileObj = record(rawProfile);
+    if (!profileObj) {
+      throw new Error(`${key}.${profileName} must be an object`);
+    }
+    for (const field of Object.keys(profileObj)) {
+      if (!allowedFields.has(field)) {
+        throw new Error(`${key}.${profileName} contains unknown field: ${field}`);
+      }
+    }
+
+    const profile: Profile = {};
+    if (profileObj.prefix !== undefined) {
+      if (typeof profileObj.prefix !== 'string') {
+        throw new Error(`${key}.${profileName}.prefix must be a string`);
+      }
+      profile.prefix = profileObj.prefix;
+    }
+    if (profileObj.tag !== undefined) {
+      if (typeof profileObj.tag !== 'string') {
+        throw new Error(`${key}.${profileName}.tag must be a string`);
+      }
+      profile.tag = profileObj.tag;
+    }
+    if (profileObj.linkPreview !== undefined) {
+      if (profileObj.linkPreview !== 'auto' && profileObj.linkPreview !== 'off') {
+        throw new Error(`${key}.${profileName}.linkPreview must be "auto" or "off"`);
+      }
+      profile.linkPreview = profileObj.linkPreview;
+    }
+    result[profileName] = profile;
   }
   return result;
 }
@@ -631,6 +685,9 @@ export const config = {
 
   // Per-instance seed data for chat_aliases.
   chatAliases: stringRecordProp(instance, 'chatAliases'),
+
+  // Per-instance send decoration policies.
+  profiles: profileRecordProp(instance, 'profiles'),
 
   // Token budget
   tokenBudget: (instance?.tokenBudget as number | undefined) ?? 100_000,
