@@ -188,22 +188,33 @@ describe('turnPartsToOpenAIContent', () => {
 describe('generateMcpConfigFile', () => {
   it('claude-cli → returns object with mcpServers.whatsoup', () => {
     const result = generateMcpConfigFile('claude-cli', '/tmp/whatsoup.sock', '/tmp/proxy.ts');
-    expect(result).not.toBeNull();
-    expect((result as Record<string, unknown>).mcpServers).toBeDefined();
-    const servers = (result as { mcpServers: Record<string, unknown> }).mcpServers;
-    expect(servers.whatsoup).toBeDefined();
+    expect(result).toEqual({
+      mcpServers: {
+        whatsoup: {
+          command: 'node',
+          args: ['--experimental-strip-types', '/tmp/proxy.ts'],
+          env: { WHATSOUP_SOCKET: '/tmp/whatsoup.sock' },
+        },
+      },
+    });
   });
 
   it('codex-cli → returns same format with mcpServers.whatsoup', () => {
     const result = generateMcpConfigFile('codex-cli', '/tmp/whatsoup.sock', '/tmp/proxy.ts');
-    expect(result).not.toBeNull();
-    const servers = (result as { mcpServers: Record<string, unknown> }).mcpServers;
-    expect(servers.whatsoup).toBeDefined();
+    expect(result).toEqual({
+      mcpServers: {
+        whatsoup: {
+          command: 'node',
+          args: ['--experimental-strip-types', '/tmp/proxy.ts'],
+          env: { WHATSOUP_SOCKET: '/tmp/whatsoup.sock' },
+        },
+      },
+    });
   });
 
   it('openai-api → returns null', () => {
     const result = generateMcpConfigFile('openai-api', '/tmp/whatsoup.sock', '/tmp/proxy.ts');
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 });
 
@@ -322,17 +333,17 @@ describe('buildEnv (via ClaudeProvider.buildEnv)', () => {
 
   it('PINECONE_API_KEY is excluded', () => {
     const env = provider.buildEnv();
-    expect(env.PINECONE_API_KEY).toBeUndefined();
+    expect(Object.keys(env)).not.toContain('PINECONE_API_KEY');
   });
 
   it('WHATSOUP_HEALTH_TOKEN is excluded', () => {
     const env = provider.buildEnv();
-    expect(env.WHATSOUP_HEALTH_TOKEN).toBeUndefined();
+    expect(Object.keys(env)).not.toContain('WHATSOUP_HEALTH_TOKEN');
   });
 
   it('ANTHROPIC_API_KEY is excluded', () => {
     const env = provider.buildEnv();
-    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY');
   });
 
   it('undefined values are stripped from the result', () => {
