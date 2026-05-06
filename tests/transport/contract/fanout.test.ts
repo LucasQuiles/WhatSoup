@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { FanoutDispatcher, type FanoutOptions } from '../../../src/transport/contract/fanout.ts';
 import type { InboundEvent } from '../../../src/transport/contract/events.ts';
@@ -27,6 +27,10 @@ const opts: FanoutOptions = {
 };
 
 describe('FanoutDispatcher', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('delivers events to all subscribers', async () => {
     const d = new FanoutDispatcher(opts);
     const a = vi.fn(); const b = vi.fn();
@@ -40,12 +44,15 @@ describe('FanoutDispatcher', () => {
   it('a slow subscriber does NOT delay another', async () => {
     const d = new FanoutDispatcher(opts);
     const fast = vi.fn();
-    const slow = vi.fn(async () => { await new Promise(r => setTimeout(r, 30)); });
+    let releaseSlow: (() => void) | undefined;
+    const slow = vi.fn(async () => {
+      await new Promise<void>(resolve => { releaseSlow = resolve; });
+    });
     d.subscribe('fast', fast); d.subscribe('slow', slow);
     d.enqueue(ev(1));
-    // Wait for fast to complete; slow may still be running.
-    await new Promise(r => setTimeout(r, 5));
-    // Drain explicitly so the test is deterministic.
+    expect(fast).toHaveBeenCalledOnce();
+    expect(slow).toHaveBeenCalledOnce();
+    releaseSlow?.();
     await d.flush();
     expect(fast).toHaveBeenCalledOnce();
     expect(slow).toHaveBeenCalledOnce();
@@ -64,19 +71,23 @@ describe('FanoutDispatcher', () => {
   });
 
   it('repeated subscriber timeouts cause suspension; sibling subscribers continue', async () => {
+    vi.useFakeTimers();
     const d = new FanoutDispatcher({ ...opts, subscriberTimeoutMs: 5 });
     const ok = vi.fn();
-    const slow = vi.fn(async () => { await new Promise(r => setTimeout(r, 30)); });
+    const slow = vi.fn(async () => { await new Promise<void>(() => {}); });
     d.subscribe('ok', ok); d.subscribe('slow', slow);
     d.enqueue(ev(1)); d.enqueue(ev(2)); d.enqueue(ev(3));
-    await d.flush();
+    const flushed = d.flush();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushed;
     expect(d.isSuspended('slow')).toBe(true);
     expect(ok).toHaveBeenCalledTimes(3);
+    expect(slow).toHaveBeenCalledTimes(2);
   });
 
   it('overflow on a subscriber queue increments metric AND suspends after threshold', async () => {
     const d = new FanoutDispatcher({ ...opts, perSubscriberCapacity: 1, overflowThreshold: 2 });
-    const stuck = vi.fn(async () => { await new Promise(r => setTimeout(r, 100)); });
+    const stuck = vi.fn(async () => { await new Promise<void>(() => {}); });
     d.subscribe('s', stuck);
     d.enqueue(ev(1));   // accepted, drain starts, queue slot becomes free synchronously before await
     d.enqueue(ev(2));   // accepted into the 1-cap queue while drain is busy
@@ -112,10 +123,11 @@ describe('FanoutDispatcher', () => {
     const d = new FanoutDispatcher({ ...opts, subscriberTimeoutMs: 1000 });
     let inflight = 0;
     let started = 0;
+    let releaseInflight: (() => void) | undefined;
     const handler = vi.fn(async () => {
       started += 1;
       inflight += 1;
-      await new Promise(r => setTimeout(r, 20));
+      await new Promise<void>(resolve => { releaseInflight = resolve; });
       inflight -= 1;
     });
     const sub = d.subscribe('s', handler);
@@ -123,11 +135,10 @@ describe('FanoutDispatcher', () => {
     d.enqueue(ev(2));
     d.enqueue(ev(3));
     d.enqueue(ev(4));
-    // Let the drainLoop start processing the first event.
-    await new Promise(r => setTimeout(r, 5));
     expect(started).toBe(1);
     expect(inflight).toBe(1);
     sub.dispose();
+    releaseInflight?.();
     await d.flush();
     // After dispose, no further handler invocations.
     expect(handler).toHaveBeenCalledTimes(1);
