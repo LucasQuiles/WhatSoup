@@ -54,6 +54,20 @@ function deepMergeRecords(
   return result;
 }
 
+/**
+ * Writes via chmod/write/chmod and follows symlinks. Parent confinement and
+ * symlink/O_NOFOLLOW hardening are tracked separately.
+ */
+function writePrivateFileSync(filePath: string, data: string): void {
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  fs.writeFileSync(filePath, data, { encoding: 'utf-8', mode: 0o600 });
+  fs.chmodSync(filePath, 0o600);
+}
+
 export interface OpsDeps {
   discovery: FleetDiscovery;
   realtime: FleetRealtimePublisher;
@@ -366,7 +380,7 @@ export async function handleConfigUpdate(
       try {
         const claudeDir = path.join(ao.cwd, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
-        fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string, 'utf-8');
+        writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
       } catch (err) {
         jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
         return;
@@ -423,7 +437,7 @@ export async function handleConfigUpdate(
   const mergedClean = migrateLegacyMemoryConfig(mergedCleanRaw, { removeLegacy: true }).config;
   const tmpPath = instance.configPath + '.tmp';
   try {
-    fs.writeFileSync(tmpPath, JSON.stringify(mergedClean, null, 2) + '\n', 'utf-8');
+    writePrivateFileSync(tmpPath, JSON.stringify(mergedClean, null, 2) + '\n');
     fs.renameSync(tmpPath, instance.configPath);
   } catch (err) {
     // Clean up tmp on failure
@@ -713,7 +727,9 @@ export async function handleCreateLine(
     fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
 
     // --- Write config.json ---
-    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    // Safe inline here: configDir is freshly created after the name uniqueness guard;
+    // existing-file writes route through writePrivateFileSync.
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
 
     // Decision: instance creation ignores any per-instance provider key material for now.
     // The deploy wrapper still reads a shared provider key from the keyring, and we will only
@@ -734,7 +750,7 @@ export async function handleCreateLine(
       const claudeDir = path.join(cwd, '.claude');
       fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-      fs.writeFileSync(claudeMdPath, body.claudeMd as string, 'utf-8');
+      writePrivateFileSync(claudeMdPath, body.claudeMd as string);
       createdExtras.push(claudeMdPath);
     }
 
@@ -859,7 +875,7 @@ export async function handleAuth(
             const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
             raw.introSent = false;
             const tmpPath = cfgPath + '.tmp';
-            fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+            writePrivateFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n');
             fs.renameSync(tmpPath, cfgPath);
           } catch { /* config write failed — intro won't re-fire but not critical */ }
           deps.serviceManager.startFire(params.name, (err: Error | null) => {
