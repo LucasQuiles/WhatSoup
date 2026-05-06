@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { WebSocket } from 'ws';
 import { FleetWebSocketServer } from '../../src/fleet/websocket-server.ts';
@@ -44,6 +44,20 @@ function waitForMessage(ws: WebSocket): Promise<WsEvent> {
       catch (err) { reject(err); }
     });
     setTimeout(() => reject(new Error('message timeout')), 3000);
+  });
+}
+
+function closeAndWait(ws: WebSocket): Promise<void> {
+  if (ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve) => {
+    ws.once('close', () => resolve());
+    ws.close();
+  });
+}
+
+async function expectClientCount(count: number): Promise<void> {
+  await vi.waitFor(() => {
+    expect(wsServer.clientCount).toBe(count);
   });
 }
 
@@ -116,12 +130,10 @@ describe('FleetWebSocketServer', () => {
     await hello2;
     expect(wsServer.clientCount).toBe(2);
 
-    ws1.close();
-    await new Promise(r => setTimeout(r, 100));
-    expect(wsServer.clientCount).toBe(1);
+    await closeAndWait(ws1);
+    await expectClientCount(1);
 
-    ws2.close();
-    await new Promise(r => setTimeout(r, 100));
-    expect(wsServer.clientCount).toBe(0);
+    await closeAndWait(ws2);
+    await expectClientCount(0);
   });
 });
