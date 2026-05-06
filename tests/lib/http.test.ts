@@ -194,7 +194,6 @@ describe('asyncHandler', () => {
     const req = mockRequest();
     const res = mockResponse();
     handler(req as any, res as any);
-    await new Promise((r) => setTimeout(r, 10));
     expect(fn).toHaveBeenCalledWith(req, res);
     // No error response written
     expect(res._status).toBe(0);
@@ -206,7 +205,9 @@ describe('asyncHandler', () => {
     const req = mockRequest();
     const res = mockResponse();
     handler(req as any, res as any);
-    await new Promise((r) => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(res._status).toBe(500);
+    });
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body)).toEqual({ error: 'boom' });
   });
@@ -218,7 +219,9 @@ describe('asyncHandler', () => {
     const req = mockRequest();
     const res = mockResponse();
     handler(req as any, res as any);
-    await new Promise((r) => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(res._status).toBe(404);
+    });
     expect(res._status).toBe(404);
     expect(JSON.parse(res._body)).toEqual({ error: 'not found' });
   });
