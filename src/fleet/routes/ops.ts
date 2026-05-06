@@ -735,9 +735,9 @@ export async function handleCreateLine(
     // The deploy wrapper still reads a shared provider key from the keyring, and we will only
     // persist instance-scoped keys after a dedicated secret-storage model is designed end-to-end.
 
-    // --- Copy shared health token ---
+    // --- Copy health token (per-instance canonical service only) ---
     try {
-      const token = lookupCredential('whatsoup_health');
+      const token = lookupCredential('whatsoup-health-token', { user: name, skipEnv: true, skipMigrationFallbacks: true });
       if (token) {
         fs.writeFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { mode: 0o600 });
       }
