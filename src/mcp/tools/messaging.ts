@@ -14,6 +14,12 @@ import {
   MutuallyExclusiveError,
   createChatResolver,
 } from '../../core/chats-resolver.ts';
+import {
+  InvalidSendRequestError,
+  MissingTextError,
+  createSendPipeline,
+  type PreparedTextSend,
+} from '../../core/send-pipeline.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 
@@ -59,69 +65,17 @@ interface OwnershipResult {
   error?: string;
 }
 
-interface SendTargetResult {
-  chatJid?: string;
-  error?: string;
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-function chatTargetErrorMessage(err: unknown): string {
+function sendPreparationErrorMessage(err: unknown): string {
   if (
     err instanceof AliasNotFoundError ||
     err instanceof MissingTargetError ||
-    err instanceof MutuallyExclusiveError
+    err instanceof MutuallyExclusiveError ||
+    err instanceof InvalidSendRequestError ||
+    err instanceof MissingTextError
   ) {
     return err.message;
   }
   return sanitizeError(err);
-}
-
-function resolveSendTarget(
-  db: DatabaseSync,
-  params: Record<string, unknown>,
-  session: SessionContext,
-): SendTargetResult {
-  const chatJid = params['chatJid'];
-  const alias = params['to'];
-  const hasChatJid = isNonEmptyString(chatJid);
-  const hasAlias = isNonEmptyString(alias);
-
-  if (hasChatJid && hasAlias) {
-    return { error: new MutuallyExclusiveError().message };
-  }
-  if (!hasChatJid && !hasAlias) {
-    return { error: new MissingTargetError().message };
-  }
-
-  let resolvedChatJid: string;
-  if (hasChatJid) {
-    resolvedChatJid = chatJid;
-  } else {
-    try {
-      resolvedChatJid = createChatResolver({ db }).resolve({ to: alias as string });
-    } catch (err) {
-      return { error: chatTargetErrorMessage(err) };
-    }
-  }
-
-  if (session.tier === 'global' && session.conversationKey) {
-    let resolvedConversationKey: string;
-    try {
-      resolvedConversationKey = toConversationKey(resolvedChatJid);
-    } catch {
-      return { error: `Invalid chatJid "${resolvedChatJid}": must be a valid JID` };
-    }
-    if (resolvedConversationKey !== session.conversationKey) {
-      return {
-        error: `chatJid "${resolvedChatJid}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
-      };
-    }
-  }
-
-  return { chatJid: resolvedChatJid };
 }
 
 function validateMessageOwnership(
@@ -158,6 +112,7 @@ export function registerMessagingTools(
   deps: MessagingDeps,
 ): void {
   const { connection, db } = deps;
+  const sendPipeline = createSendPipeline({ resolver: createChatResolver({ db }) });
 
   // ── send_message ──────────────────────────────────────────────────────────
 
@@ -175,17 +130,31 @@ export function registerMessagingTools(
       link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
     }),
     handler: async (params, session: SessionContext) => {
-      const target = resolveSendTarget(db, params, session);
-      if (target.error) {
-        return { error: target.error };
+      let prepared: PreparedTextSend;
+      try {
+        prepared = sendPipeline.prepareSend(params);
+      } catch (err) {
+        return { error: sendPreparationErrorMessage(err) };
       }
-      const chatJid = target.chatJid!;
-      const text = params['text'] as string;
+
+      if (session.tier === 'global' && session.conversationKey) {
+        let resolvedConversationKey: string;
+        try {
+          resolvedConversationKey = toConversationKey(prepared.chatJid);
+        } catch {
+          return { error: `Invalid chatJid "${prepared.chatJid}": must be a valid JID` };
+        }
+        if (resolvedConversationKey !== session.conversationKey) {
+          return {
+            error: `chatJid "${prepared.chatJid}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
+          };
+        }
+      }
+
       const viewOnce = params['viewOnce'] as boolean | undefined;
-      const linkPreviewMode = (params['link_preview'] as string | undefined) ?? 'auto';
 
       const { text: formatted, jids: mentions, hasMentions } = formatMentions(
-        text,
+        prepared.text,
         connection.contactsDir.contacts,
         connection.contactsDir.getLidMappings(),
       );
@@ -194,9 +163,9 @@ export function registerMessagingTools(
         const content: Record<string, unknown> = hasMentions
           ? { text: formatted, mentions }
           : { text: formatted };
-        if (linkPreviewMode === 'off') content['linkPreview'] = null;
+        if (prepared.linkPreviewMode === 'off') content['linkPreview'] = null;
         if (viewOnce) content['viewOnce'] = true;
-        await connection.sendRaw(chatJid, content);
+        await connection.sendRaw(prepared.chatJid, content);
       } catch (err) {
         return { error: sanitizeError(err) };
       }
