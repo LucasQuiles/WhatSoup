@@ -21,6 +21,7 @@ import {
   type PreparedTextSend,
 } from '../../core/send-pipeline.ts';
 import { UnknownProfileError, type ProfileRegistry } from '../../core/profiles.ts';
+import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 
@@ -58,6 +59,7 @@ export interface MessagingDeps {
   connection: ConnectionManager;
   db: DatabaseSync;
   profiles?: ProfileRegistry;
+  auditWriter?: OutboundSendsWriter;
 }
 
 type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
@@ -65,20 +67,6 @@ type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_j
 interface OwnershipResult {
   row?: OwnershipRow;
   error?: string;
-}
-
-function sendPreparationErrorMessage(err: unknown): string {
-  if (
-    err instanceof AliasNotFoundError ||
-    err instanceof MissingTargetError ||
-    err instanceof MutuallyExclusiveError ||
-    err instanceof InvalidSendRequestError ||
-    err instanceof MissingTextError ||
-    err instanceof UnknownProfileError
-  ) {
-    return err.message;
-  }
-  return sanitizeError(err);
 }
 
 function validateMessageOwnership(
@@ -115,7 +103,12 @@ export function registerMessagingTools(
   deps: MessagingDeps,
 ): void {
   const { connection, db } = deps;
-  const sendPipeline = createSendPipeline({ resolver: createChatResolver({ db }), profiles: deps.profiles });
+  const sendPipeline = createSendPipeline({
+    resolver: createChatResolver({ db }),
+    profiles: deps.profiles,
+    auditWriter: deps.auditWriter,
+    caller: 'mcp',
+  });
 
   // ── send_message ──────────────────────────────────────────────────────────
 
@@ -134,47 +127,59 @@ export function registerMessagingTools(
       link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
     }),
     handler: async (params, session: SessionContext) => {
-      let prepared: PreparedTextSend;
+      let formattedText = '';
       try {
-        prepared = sendPipeline.prepareSend(params);
+        await sendPipeline.executeSend(params, async (prepared) => {
+          const viewOnce = params['viewOnce'] as boolean | undefined;
+          const { text: formatted, jids: mentions, hasMentions } = formatMentions(
+            prepared.text,
+            connection.contactsDir.contacts,
+            connection.contactsDir.getLidMappings(),
+          );
+          formattedText = formatted;
+
+          const content: Record<string, unknown> = hasMentions
+            ? { text: formatted, mentions }
+            : { text: formatted };
+          if (prepared.linkPreviewMode === 'off') content['linkPreview'] = null;
+          if (viewOnce) content['viewOnce'] = true;
+          const receipt = await connection.sendRaw(prepared.chatJid, content);
+          return { transportId: receipt.waMessageId };
+        }, {
+          beforeAudit(prepared: PreparedTextSend): void {
+            if (session.tier !== 'global' || !session.conversationKey) return;
+
+            let resolvedConversationKey: string;
+            try {
+              resolvedConversationKey = toConversationKey(prepared.chatJid);
+            } catch {
+              throw new Error(`Invalid chatJid "${prepared.chatJid}": must be a valid JID`);
+            }
+            if (resolvedConversationKey !== session.conversationKey) {
+              throw new Error(
+                `chatJid "${prepared.chatJid}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
+              );
+            }
+          },
+        });
       } catch (err) {
-        return { error: sendPreparationErrorMessage(err) };
-      }
-
-      if (session.tier === 'global' && session.conversationKey) {
-        let resolvedConversationKey: string;
-        try {
-          resolvedConversationKey = toConversationKey(prepared.chatJid);
-        } catch {
-          return { error: `Invalid chatJid "${prepared.chatJid}": must be a valid JID` };
+        if (
+          err instanceof AliasNotFoundError ||
+          err instanceof MissingTargetError ||
+          err instanceof MutuallyExclusiveError ||
+          err instanceof InvalidSendRequestError ||
+          err instanceof MissingTextError ||
+          err instanceof UnknownProfileError
+        ) {
+          return { error: err.message };
         }
-        if (resolvedConversationKey !== session.conversationKey) {
-          return {
-            error: `chatJid "${prepared.chatJid}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
-          };
+        if (err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))) {
+          return { error: err.message };
         }
-      }
-
-      const viewOnce = params['viewOnce'] as boolean | undefined;
-
-      const { text: formatted, jids: mentions, hasMentions } = formatMentions(
-        prepared.text,
-        connection.contactsDir.contacts,
-        connection.contactsDir.getLidMappings(),
-      );
-
-      try {
-        const content: Record<string, unknown> = hasMentions
-          ? { text: formatted, mentions }
-          : { text: formatted };
-        if (prepared.linkPreviewMode === 'off') content['linkPreview'] = null;
-        if (viewOnce) content['viewOnce'] = true;
-        await connection.sendRaw(prepared.chatJid, content);
-      } catch (err) {
         return { error: sanitizeError(err) };
       }
 
-      return { sent: true, text: formatted };
+      return { sent: true, text: formattedText };
     },
   });
 

@@ -400,6 +400,39 @@ CREATE TABLE IF NOT EXISTS chat_aliases (
 );
 `;
 
+const MIGRATION_22 = `
+CREATE TABLE IF NOT EXISTS outbound_sends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  line TEXT NOT NULL,
+  caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health')),
+  chat_jid TEXT NOT NULL,
+  target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias')),
+  alias TEXT,
+  profile TEXT,
+  text_hash TEXT NOT NULL,
+  text_length INTEGER NOT NULL,
+  link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL),
+  status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed')),
+  error TEXT,
+  transport_message_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_created_at
+  ON outbound_sends(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_status_created
+  ON outbound_sends(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_chat_created
+  ON outbound_sends(chat_jid, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_alias_created
+  ON outbound_sends(alias, created_at)
+  WHERE alias IS NOT NULL;
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -566,6 +599,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   }],
   [20, runMigration20],
   [21, (db: DatabaseSync) => { db.exec(MIGRATION_21); }],
+  [22, (db: DatabaseSync) => { db.exec(MIGRATION_22); }],
 ]);
 
 function runMigration20(db: DatabaseSync): void {

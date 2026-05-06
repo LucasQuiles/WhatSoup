@@ -45,6 +45,7 @@ vi.mock('../../src/logger.ts', () => ({
 import { Database } from '../../src/core/database.ts';
 import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
+import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 
@@ -283,6 +284,7 @@ describe('POST /send — Authorization header check', () => {
       profiles: createProfileRegistry({
         satellite: { prefix: '[SAT] ', tag: ' #satellite' },
       }),
+      auditWriter: createOutboundSendsWriter({ db: db.raw, line: 'test-line' }),
     });
     ({ server, port } = await buildTestServer(deps));
   });
@@ -318,6 +320,52 @@ describe('POST /send — Authorization header check', () => {
     });
     expect(status).toBe(200);
     expect(JSON.parse(body).ok).toBe(true);
+  });
+
+  it('audits a successful health send exactly once', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello audit' });
+
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body).ok).toBe(true);
+    const rows = db.raw
+      .prepare('SELECT line, caller, chat_jid, target_kind, status, text_length FROM outbound_sends')
+      .all() as Array<Record<string, unknown>>;
+    expect(rows).toEqual([{
+      line: 'test-line',
+      caller: 'health',
+      chat_jid: '15550100001@s.whatsapp.net',
+      target_kind: 'chatJid',
+      status: 'sent',
+      text_length: 'hello audit'.length,
+    }]);
+  });
+
+  it('audits a failed health send exactly once', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    vi.mocked(deps.connectionManager.sendMessage).mockRejectedValueOnce(new Error('transport unavailable'));
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'will fail' });
+
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(500);
+    expect(JSON.parse(body).error).toBe('transport unavailable');
+    const rows = db.raw
+      .prepare('SELECT caller, chat_jid, target_kind, status, error FROM outbound_sends')
+      .all() as Array<Record<string, unknown>>;
+    expect(rows).toEqual([{
+      caller: 'health',
+      chat_jid: '15550100001@s.whatsapp.net',
+      target_kind: 'chatJid',
+      status: 'failed',
+      error: 'transport unavailable',
+    }]);
   });
 
   it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set (fail-closed)', async () => {

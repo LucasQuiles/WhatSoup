@@ -396,7 +396,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
 
     db2.close();
   });
@@ -499,7 +499,7 @@ describe('Test 5 — schema_migrations version tracking', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
 
     db.close();
   });
@@ -699,7 +699,7 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
 
     const tables = (
       db.raw
@@ -780,7 +780,7 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
 
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
 
     // raw_message column from migration 5
     const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
@@ -810,6 +810,80 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
       raw.exec('ALTER TABLE messages ADD COLUMN raw_message TEXT');
     }).toThrow(); // "no such table: messages"
     raw.close();
+  });
+});
+
+describe('outbound_sends migration contract', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('records migration version 22 and creates outbound_sends', () => {
+    const version = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 22')
+      .get() as { version: number } | undefined;
+    expect(version?.version).toBe(22);
+
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('outbound_sends');
+  });
+
+  it('creates required columns without storing raw message text', () => {
+    const table = db.raw
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
+      .get() as { sql: string } | undefined;
+    expect(table).toBeDefined();
+    expect(table!.sql).toContain("caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health'))");
+    expect(table!.sql).toContain("target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias'))");
+    expect(table!.sql).toContain("link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL)");
+    expect(table!.sql).toContain("status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed'))");
+
+    const cols = db.raw
+      .prepare('PRAGMA table_info(outbound_sends)')
+      .all() as Array<{ name: string; type: string; notnull: number; dflt_value: string | null }>;
+    const colMap = new Map(cols.map((col) => [col.name, col]));
+
+    expect(colMap.get('id')).toMatchObject({ type: 'INTEGER' });
+    expect(colMap.get('line')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('caller')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('chat_jid')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('target_kind')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('alias')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('profile')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('text_hash')).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(colMap.get('text_length')).toMatchObject({ type: 'INTEGER', notnull: 1 });
+    expect(colMap.get('link_preview_mode')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('status')).toMatchObject({ type: 'TEXT', notnull: 1, dflt_value: "'intent'" });
+    expect(colMap.get('error')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('transport_message_id')).toMatchObject({ type: 'TEXT' });
+    expect(colMap.get('created_at')).toMatchObject({ type: 'TEXT', notnull: 1, dflt_value: "datetime('now')" });
+    expect(colMap.get('completed_at')).toMatchObject({ type: 'TEXT' });
+
+    expect(cols.map((col) => col.name)).not.toContain('text');
+    expect(cols.map((col) => col.name)).not.toContain('message_text');
+    expect(cols.map((col) => col.name)).not.toContain('payload');
+  });
+
+  it('creates bounded-read indexes for outbound_sends', () => {
+    const indexes = db.raw
+      .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'outbound_sends'")
+      .all() as Array<{ name: string; sql: string | null }>;
+    const indexMap = new Map(indexes.map((index) => [index.name, index.sql ?? '']));
+
+    expect(indexMap.get('idx_outbound_sends_created_at')).toContain('created_at');
+    expect(indexMap.get('idx_outbound_sends_status_created')).toContain('status, created_at');
+    expect(indexMap.get('idx_outbound_sends_chat_created')).toContain('chat_jid, created_at');
+    expect(indexMap.get('idx_outbound_sends_alias_created')).toContain('alias, created_at');
+    expect(indexMap.get('idx_outbound_sends_alias_created')).toContain('WHERE alias IS NOT NULL');
   });
 });
 

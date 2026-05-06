@@ -24,6 +24,7 @@ import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
+import { createOutboundSendsWriter } from './core/outbound-sends.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
   handleReaction,
@@ -149,6 +150,7 @@ if (seededChatAliases > 0) {
   log.info({ count: seededChatAliases }, 'seeded chat aliases');
 }
 const profileRegistry = createProfileRegistry(config.profiles ?? {});
+const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
@@ -534,6 +536,7 @@ const healthServer = startHealthServer({
   durability,
   runtime,
   profiles: profileRegistry,
+  auditWriter: outboundSendsWriter,
   instanceName: config.botName,
   instanceType: instanceType,
   accessMode: config.accessMode,
