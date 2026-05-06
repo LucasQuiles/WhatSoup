@@ -4007,11 +4007,11 @@ describe('AgentRuntime', () => {
 
       const mockDurability = {
         getResumableCheckpoints: vi.fn(() => [
-          { conversation_key: '120363406689931730_at_g.us' },
+          { conversation_key: '111111100000000001_at_g.us' },
           { conversation_key: '18459780919' },
         ]),
         getSessionCheckpoint: vi.fn((key: string) => {
-          if (key === '120363406689931730_at_g.us') return { session_id: 'group-sess-1' };
+          if (key === '111111100000000001_at_g.us') return { session_id: 'group-sess-1' };
           if (key === '18459780919') return { session_id: 'dm-sess-1' };
           return null;
         }),
@@ -4023,7 +4023,7 @@ describe('AgentRuntime', () => {
 
       // Group checkpoint must be tombstoned as 'ended'
       expect(mockDurability.upsertSessionCheckpoint).toHaveBeenCalledWith(
-        '120363406689931730_at_g.us',
+        '111111100000000001_at_g.us',
         { sessionStatus: 'ended' },
       );
 
@@ -4131,7 +4131,7 @@ describe('AgentRuntime', () => {
       mockGetActiveSession.mockReturnValue({
         id: 2,
         session_id: 'sess-shared-group',
-        chat_jid: '120363406689931730@g.us',
+        chat_jid: '111111100000000001@g.us',
         claude_pid: 0,
         status: 'active',
         started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
@@ -4144,7 +4144,7 @@ describe('AgentRuntime', () => {
       const mockDurability = {
         getSessionCheckpoint: vi.fn(() => ({
           id: 2,
-          conversation_key: '120363406689931730_at_g.us',
+          conversation_key: '111111100000000001_at_g.us',
           session_id: 'sess-shared-group',
           transcript_path: null,
           active_turn_id: null,
@@ -4178,7 +4178,7 @@ describe('AgentRuntime', () => {
       mockGetActiveSession.mockReturnValue({
         id: 3,
         session_id: 'sess-single-group',
-        chat_jid: '120363406689931730@g.us',
+        chat_jid: '111111100000000001@g.us',
         claude_pid: 0,
         status: 'active',
         started_at: new Date(Date.now() - 5 * 60_000).toISOString(),
@@ -4191,7 +4191,7 @@ describe('AgentRuntime', () => {
       const mockDurability = {
         getSessionCheckpoint: vi.fn(() => ({
           id: 3,
-          conversation_key: '120363406689931730_at_g.us',
+          conversation_key: '111111100000000001_at_g.us',
           session_id: 'sess-single-group',
           transcript_path: null,
           active_turn_id: null,

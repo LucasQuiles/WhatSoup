@@ -64,7 +64,7 @@ describe('heal protocol contracts', () => {
       attempt: 1,
       maxAttempts: 2,
       timestamp: '2026-03-31T19:17:46Z',
-      chatJid: '120363427199347057@g.us',
+      chatJid: '111111100000000003@g.us',
       exitCode: 1,
       signal: null,
       stderr: 'TypeError: boom',

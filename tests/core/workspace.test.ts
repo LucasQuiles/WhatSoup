@@ -31,10 +31,10 @@ describe('chatJidToWorkspace', () => {
   });
 
   it('Group @g.us: kind=group, key=sanitized JID, path ends with groups/<sanitized>', () => {
-    const result = chatJidToWorkspace(CWD, '120363423809065844@g.us');
+    const result = chatJidToWorkspace(CWD, '111111100000000002@g.us');
     expect(result.kind).toBe('group');
-    expect(result.workspaceKey).toBe('120363423809065844_at_g.us');
-    expect(result.workspacePath.endsWith('groups/120363423809065844_at_g.us')).toBe(true);
+    expect(result.workspaceKey).toBe('111111100000000002_at_g.us');
+    expect(result.workspacePath.endsWith('groups/111111100000000002_at_g.us')).toBe(true);
   });
 
   it('uses path.join to produce absolute paths from instanceCwd', () => {
