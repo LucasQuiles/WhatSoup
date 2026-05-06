@@ -1,1 +1,5 @@
-cd console && npx lint-staged
+#!/usr/bin/env sh
+set -e
+
+npm run guard:repo:staged
+(cd console && npx lint-staged)
