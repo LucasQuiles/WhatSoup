@@ -23,6 +23,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import {
   createChatResolver,
+  seedChatAliases,
   type ChatResolver,
   AliasNotFoundError,
   MutuallyExclusiveError,
@@ -260,5 +261,32 @@ describe('ChatResolver contract -- error type discrimination', () => {
     }
     expect(caughtMissing).toBeInstanceOf(Error);
     expect(caughtMissing).toBeInstanceOf(MissingTargetError);
+  });
+});
+
+describe('seedChatAliases', () => {
+  it('inserts alias seeds and resolves them', () => {
+    const db = makeDb();
+
+    expect(seedChatAliases(db, {
+      ops: '15555550100@s.whatsapp.net',
+      support: '120363001@g.us',
+    })).toBe(2);
+
+    const resolver = createChatResolver({ db });
+    expect(resolver.resolve({ to: 'ops' })).toBe('15555550100@s.whatsapp.net');
+    expect(resolver.resolve({ to: 'support' })).toBe('120363001@g.us');
+    db.close();
+  });
+
+  it('is idempotent for unchanged aliases and updates changed targets', () => {
+    const db = makeDb();
+
+    expect(seedChatAliases(db, { ops: '15555550100@s.whatsapp.net' })).toBe(1);
+    expect(seedChatAliases(db, { ops: '15555550100@s.whatsapp.net' })).toBe(0);
+    expect(seedChatAliases(db, { ops: '15555550101@s.whatsapp.net' })).toBe(1);
+
+    expect(createChatResolver({ db }).resolve({ to: 'ops' })).toBe('15555550101@s.whatsapp.net');
+    db.close();
   });
 });

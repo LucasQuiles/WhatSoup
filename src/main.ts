@@ -22,6 +22,7 @@ import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
+import { seedChatAliases } from './core/chats-resolver.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
   handleReaction,
@@ -141,6 +142,11 @@ process.on('exit', () => releaseLock());
 // (Phase 3 gate G1).
 const db = new Database(config.dbPath);
 db.open();
+
+const seededChatAliases = seedChatAliases(db.raw, config.chatAliases);
+if (seededChatAliases > 0) {
+  log.info({ count: seededChatAliases }, 'seeded chat aliases');
+}
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.

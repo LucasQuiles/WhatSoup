@@ -177,6 +177,10 @@ describe('config — full INSTANCE_CONFIG override', () => {
       healthPort: 9999,
       tokenBudget: 200_000,
       pineconeIndex: 'custom-index',
+      chatAliases: {
+        ops: '15555550100@s.whatsapp.net',
+        support: '120363001@g.us',
+      },
     };
     process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
 
@@ -197,9 +201,43 @@ describe('config — full INSTANCE_CONFIG override', () => {
     expect(config.healthPort).toBe(9999);
     expect(config.tokenBudget).toBe(200_000);
     expect(config.pineconeIndex).toBe('custom-index');
+    expect(config.chatAliases).toEqual({
+      ops: '15555550100@s.whatsapp.net',
+      support: '120363001@g.us',
+    });
     expect(config.configRoot).toBe(instancePaths.configRoot);
     expect(config.dataRoot).toBe(instancePaths.dataRoot);
     expect(config.stateRoot).toBe(instancePaths.stateRoot);
+  });
+});
+
+describe('config — chatAliases validation', () => {
+  it('trims aliases and rejects duplicate aliases after trimming', async () => {
+    const instancePaths = {
+      configRoot: path.join(tmpDir, 'inst-config'),
+      dataRoot: path.join(tmpDir, 'inst-data'),
+      stateRoot: path.join(tmpDir, 'inst-state'),
+      authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'inst-data', 'logs'),
+      lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+    };
+    const instanceConfig = {
+      name: 'my-bot',
+      type: 'chat',
+      systemPrompt: 'You are my custom bot.',
+      adminPhones: ['15550000001'],
+      accessMode: 'allowlist',
+      paths: instancePaths,
+      chatAliases: {
+        ops: '15555550100@s.whatsapp.net',
+        ' ops ': '15555550101@s.whatsapp.net',
+      },
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+
+    await expect(import('../src/config.ts')).rejects.toThrow(/duplicate alias/i);
   });
 });
 
