@@ -30,7 +30,6 @@ describe('runCommand', () => {
     )).rejects.toThrow(/timed out/i);
 
     const pid = Number((await readFile(pidPath, 'utf8')).trim());
-    await new Promise((resolve) => setTimeout(resolve, 2_200));
     expect(isAlive(pid)).toBe(false);
 
     await rm(dir, { recursive: true, force: true });
@@ -56,7 +55,6 @@ describe('runCommand', () => {
     expect(elapsed).toBeGreaterThanOrEqual(2_000);
 
     const pid = Number((await readFile(pidPath, 'utf8')).trim());
-    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(isAlive(pid)).toBe(false);
 
     await rm(dir, { recursive: true, force: true });
