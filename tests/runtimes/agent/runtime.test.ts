@@ -270,6 +270,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
+import * as registerAllModule from '../../../src/mcp/register-all.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
@@ -4406,5 +4407,45 @@ describe('AgentRuntime', () => {
       expect(runtime.popStartupMessage()).toBeNull();
       // Runtime did not throw — it continues gracefully
     });
+  });
+
+  describe('knowledge search registration', () => {
+    let registerAllSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      registerAllSpy = vi.spyOn(registerAllModule, 'registerAllTools');
+      delete (mockConfig as Record<string, unknown>).memory;
+    });
+
+    afterEach(() => {
+      registerAllSpy.mockRestore();
+      delete (mockConfig as Record<string, unknown>).memory;
+    });
+
+    it.each([
+      { sandboxPerChat: false, allowGlobalAgentSessions: false, expectedEnabled: false },
+      { sandboxPerChat: false, allowGlobalAgentSessions: true, expectedEnabled: true },
+      { sandboxPerChat: true, allowGlobalAgentSessions: false, expectedEnabled: true },
+      { sandboxPerChat: true, allowGlobalAgentSessions: true, expectedEnabled: true },
+    ])(
+      'sets enableKnowledgeSearch=$expectedEnabled when sandboxPerChat=$sandboxPerChat and global access=$allowGlobalAgentSessions',
+      ({ sandboxPerChat, allowGlobalAgentSessions, expectedEnabled }) => {
+        (mockConfig as Record<string, unknown>).memory = {
+          pinecone: { knowledgeSearch: { allowGlobalAgentSessions } },
+        };
+
+        const db = makeDb();
+        const { messenger } = makeMessenger();
+        const options = sandboxPerChat
+          ? { sandboxPerChat: true as const, sessionScope: 'per_chat' as const }
+          : undefined;
+
+        new AgentRuntime(db, messenger, 'test', options);
+
+        expect(registerAllSpy).toHaveBeenCalledOnce();
+        const [, , , callOptions] = registerAllSpy.mock.calls[0];
+        expect(callOptions).toMatchObject({ enableKnowledgeSearch: expectedEnabled });
+      },
+    );
   });
 });
