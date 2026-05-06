@@ -21,25 +21,38 @@ function makeTurn(overrides: Partial<QueuedTurn> = {}): QueuedTurn {
   };
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe('TurnQueue', () => {
   // @check CHK-062
 // @traces REQ-012.AC-01
   it('processes turns one at a time (FIFO)', async () => {
     const queue = new TurnQueue();
     const order: string[] = [];
+    const releases = [deferred(), deferred(), deferred()];
 
     queue.setProcessor(async (turn) => {
       order.push(turn.text);
-      // Simulate async work
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      await releases[order.length - 1]!.promise;
     });
 
     queue.enqueue(makeTurn({ text: 'first' }));
     queue.enqueue(makeTurn({ text: 'second' }));
     queue.enqueue(makeTurn({ text: 'third' }));
 
-    // Wait for all turns to drain
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await vi.waitFor(() => expect(order).toEqual(['first']));
+    releases[0]!.resolve();
+    await vi.waitFor(() => expect(order).toEqual(['first', 'second']));
+    releases[1]!.resolve();
+    await vi.waitFor(() => expect(order).toEqual(['first', 'second', 'third']));
+    releases[2]!.resolve();
+    await queue.idle();
 
     expect(order).toEqual(['first', 'second', 'third']);
   });
@@ -50,13 +63,14 @@ describe('TurnQueue', () => {
     const queue = new TurnQueue();
     let firstDone = false;
     let secondStartedBeforeFirst = false;
+    const firstRelease = deferred();
 
     queue.setProcessor(async (turn) => {
       if (turn.text === 'second' && !firstDone) {
         secondStartedBeforeFirst = true;
       }
       if (turn.text === 'first') {
-        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        await firstRelease.promise;
         firstDone = true;
       }
     });
@@ -64,7 +78,9 @@ describe('TurnQueue', () => {
     queue.enqueue(makeTurn({ text: 'first' }));
     queue.enqueue(makeTurn({ text: 'second' }));
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    await vi.waitFor(() => expect(queue.isProcessing).toBe(true));
+    firstRelease.resolve();
+    await queue.idle();
 
     expect(secondStartedBeforeFirst).toBe(false);
     expect(firstDone).toBe(true);
@@ -81,7 +97,7 @@ describe('TurnQueue', () => {
     queue.enqueue(makeTurn({ text: 'a' }));
     queue.enqueue(makeTurn({ text: 'b' }));
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await queue.idle();
 
     expect(processed).toEqual(['a', 'b']);
   });
@@ -110,9 +126,7 @@ describe('TurnQueue', () => {
   it('pending goes to 0 after all turns processed', async () => {
     const queue = new TurnQueue();
 
-    queue.setProcessor(async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 2));
-    });
+    queue.setProcessor(async () => {});
 
     queue.enqueue(makeTurn({ text: 'a' }));
     queue.enqueue(makeTurn({ text: 'b' }));
@@ -127,15 +141,19 @@ describe('TurnQueue', () => {
   it('isProcessing reflects active state', async () => {
     const queue = new TurnQueue();
     let processingDuringTurn = false;
+    const release = deferred();
 
     queue.setProcessor(async () => {
       processingDuringTurn = queue.isProcessing;
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      await release.promise;
     });
 
     queue.enqueue(makeTurn({ text: 'check' }));
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(processingDuringTurn).toBe(true));
+    expect(queue.isProcessing).toBe(true);
+    release.resolve();
+    await queue.idle();
 
     expect(processingDuringTurn).toBe(true);
     expect(queue.isProcessing).toBe(false);
@@ -156,7 +174,7 @@ describe('TurnQueue', () => {
     queue.enqueue(makeTurn({ text: 'bad' }));
     queue.enqueue(makeTurn({ text: 'good-after' }));
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await queue.idle();
 
     expect(processed).toEqual(['good-before', 'good-after']);
   });
@@ -173,7 +191,7 @@ describe('TurnQueue', () => {
     queue.enqueue(makeTurn({ chatJid: 'chat-b@s.whatsapp.net', text: 'msg2' }));
     queue.enqueue(makeTurn({ chatJid: 'chat-a@s.whatsapp.net', text: 'msg3' }));
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    await queue.idle();
 
     expect(order).toEqual([
       'chat-a@s.whatsapp.net:msg1',
