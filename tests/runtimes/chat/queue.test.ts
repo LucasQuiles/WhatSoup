@@ -15,25 +15,14 @@ import { ChatQueue } from '../../../src/runtimes/chat/queue.ts';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Return a task that records when it starts and resolves after `ms` ms. */
-function timedTask(
-  startLog: number[],
-  id: number,
-  ms: number,
-): () => Promise<void> {
-  return () =>
-    new Promise<void>((resolve) => {
-      startLog.push(id);
-      setTimeout(resolve, ms);
-    });
-}
-
-/** Return a task that rejects after `ms` ms. */
-function failingTask(ms: number): () => Promise<void> {
-  return () =>
-    new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error('task failed')), ms);
-    });
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (err: Error) => void } {
+  let resolve!: () => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 // ---------------------------------------------------------------------------
@@ -72,8 +61,9 @@ describe('ChatQueue — positive', () => {
     // Resolve first
     firstTaskResolve!();
 
-    // Drain the microtask/timer queue
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => {
+      expect(order).toEqual(['first-done', 'second-started']);
+    });
 
     expect(order).toEqual(['first-done', 'second-started']);
   });
@@ -81,20 +71,29 @@ describe('ChatQueue — positive', () => {
   it('cross-chat parallel: 3 different chats → all start concurrently', async () => {
     const queue = new ChatQueue(3);
     const started: string[] = [];
+    const taskX = deferred();
+    const taskY = deferred();
+    const taskZ = deferred();
 
-    const p1 = queue.enqueue('chat-X', () => { started.push('X'); return new Promise<void>(r => setTimeout(r, 50)); });
-    const p2 = queue.enqueue('chat-Y', () => { started.push('Y'); return new Promise<void>(r => setTimeout(r, 50)); });
-    const p3 = queue.enqueue('chat-Z', () => { started.push('Z'); return new Promise<void>(r => setTimeout(r, 50)); });
+    queue.enqueue('chat-X', () => { started.push('X'); return taskX.promise; });
+    queue.enqueue('chat-Y', () => { started.push('Y'); return taskY.promise; });
+    queue.enqueue('chat-Z', () => { started.push('Z'); return taskZ.promise; });
 
-    // Let all tasks start
-    await new Promise<void>(r => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(started).toEqual(expect.arrayContaining(['X', 'Y', 'Z']));
+    });
 
     expect(started).toContain('X');
     expect(started).toContain('Y');
     expect(started).toContain('Z');
     expect(started).toHaveLength(3);
 
-    await Promise.all([p1, p2, p3]);
+    taskX.resolve();
+    taskY.resolve();
+    taskZ.resolve();
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(0);
+    });
   });
 
   it('slot freed after completion → queued chat starts', async () => {
@@ -114,12 +113,16 @@ describe('ChatQueue — positive', () => {
     queue.enqueue('chat-B', secondTask);
 
     // Second chat is blocked — slot is taken by first
-    await new Promise<void>(r => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(1);
+    });
     expect(order).not.toContain('second');
 
     // Release first
     resolveFirst();
-    await new Promise<void>(r => setTimeout(r, 20));
+    await vi.waitFor(() => {
+      expect(order).toEqual(['first', 'second']);
+    });
 
     expect(order).toContain('first');
     expect(order).toContain('second');
@@ -138,13 +141,17 @@ describe('ChatQueue — positive', () => {
     queue.enqueue('chat-1', () => new Promise<void>(r => { resolve1 = r; }));
     queue.enqueue('chat-2', () => new Promise<void>(r => { resolve2 = r; }));
 
-    await new Promise<void>(r => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(2);
+    });
     const mid = queue.stats;
     expect(mid.activeChats).toBe(2);
 
     resolve1();
     resolve2();
-    await new Promise<void>(r => setTimeout(r, 20));
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(0);
+    });
 
     // After completion chains are cleared
     const final = queue.stats;
@@ -163,24 +170,27 @@ describe('ChatQueue — negative / invariant', () => {
     const results: number[] = [];
     const resolvers: Array<() => void> = [];
 
-    // Enqueue 5 tasks for the same chat, each needing explicit resolution
+    // Enqueue 5 tasks for the same chat, each needing explicit resolution.
     for (let i = 0; i < 5; i++) {
       const idx = i;
       queue.enqueue('same-chat', () =>
         new Promise<void>((r) => {
-          resolvers.push(() => { results.push(idx); r(); });
+          results.push(idx);
+          resolvers.push(r);
         }),
       );
     }
 
-    // Resolve them in order, but with slight delay each
     for (let i = 0; i < 5; i++) {
-      await new Promise<void>(r => setTimeout(r, 5));
+      await vi.waitFor(() => {
+        expect(resolvers).toHaveLength(i + 1);
+      });
       resolvers[i]?.();
-      await new Promise<void>(r => setTimeout(r, 5));
     }
 
-    await new Promise<void>(r => setTimeout(r, 20));
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(0);
+    });
     expect(results).toEqual([0, 1, 2, 3, 4]);
   });
 
@@ -202,27 +212,28 @@ describe('ChatQueue — negative / invariant', () => {
       );
     }
 
-    // Let first 3 start (they acquire slots immediately)
-    await new Promise<void>(r => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(resolvers).toHaveLength(3);
+    });
 
     // At most 3 should be running at any point in time
     expect(peakConcurrency).toBeLessThanOrEqual(3);
     expect(currentConcurrency).toBe(3);
 
-    // Resolve the first 3 one by one so the remaining 2 can start and finish
     for (let i = 0; i < 3; i++) {
       resolvers[i]?.();
-      await new Promise<void>(r => setTimeout(r, 10));
     }
 
-    // Drain remaining tasks (the 2 that were queued)
-    await new Promise<void>(r => setTimeout(r, 50));
+    await vi.waitFor(() => {
+      expect(resolvers).toHaveLength(5);
+    });
 
-    // Resolve any that started during drain
     for (let i = 3; i < resolvers.length; i++) {
       resolvers[i]?.();
     }
-    await new Promise<void>(r => setTimeout(r, 20));
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(0);
+    });
 
     // Peak concurrency never exceeded 3
     expect(peakConcurrency).toBeLessThanOrEqual(3);
@@ -234,15 +245,16 @@ describe('ChatQueue — negative / invariant', () => {
     const completed: string[] = [];
 
     // First task: fails
-    queue.enqueue('chat-A', failingTask(10));
+    queue.enqueue('chat-A', () => Promise.reject(new Error('task failed')));
     // Second task: different chat, should still run after slot is freed
     queue.enqueue('chat-B', () => {
       completed.push('B');
       return Promise.resolve();
     });
 
-    // Give enough time for failure + second task to run
-    await new Promise<void>(r => setTimeout(r, 100));
+    await vi.waitFor(() => {
+      expect(completed).toContain('B');
+    });
 
     expect(completed).toContain('B');
   });
@@ -261,23 +273,28 @@ describe('ChatQueue — negative / invariant', () => {
 
     // Enqueue 2 more at-capacity tasks (they should queue, not be dropped)
     for (let i = 2; i < 4; i++) {
-      const label = `task-${i}`;
+      const label = i === 2 ? 'jobTwo' : 'jobThree';
       queue.enqueue(`chat-${i}`, () => {
         completed.push(label);
         return Promise.resolve();
       });
     }
 
-    await new Promise<void>(r => setTimeout(r, 10));
+    await vi.waitFor(() => {
+      expect(queue.stats.activeChats).toBe(2);
+      expect(queue.stats.queuedChats).toBe(2);
+    });
     // Only 2 running, 2 queued — none should have run yet
     expect(completed).toHaveLength(0);
 
     // Release first two
     for (const r of resolvers) r();
-    await new Promise<void>(r => setTimeout(r, 50));
+    await vi.waitFor(() => {
+      expect(completed).toEqual(expect.arrayContaining(['jobTwo', 'jobThree']));
+    });
 
     // All 4 tasks must complete
-    expect(completed).toContain('task-2');
-    expect(completed).toContain('task-3');
+    expect(completed).toContain('jobTwo');
+    expect(completed).toContain('jobThree');
   });
 });
