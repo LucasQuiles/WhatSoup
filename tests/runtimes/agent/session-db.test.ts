@@ -32,6 +32,8 @@ const dbPath = tempDbPath();
 const db = new Database(dbPath);
 db.open();
 ensureAgentSchema(db);
+const sqliteTimestampPattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+const isoTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
 afterAll(() => {
   db.close();
@@ -76,7 +78,7 @@ describe('agent session-db', () => {
     expect(row?.claude_pid).toBe(12345);
     expect(row?.started_in_directory).toBe('~/project');
     expect(row?.session_id).toBeNull();
-    expect(row?.started_at).toBeTruthy();
+    expect(row?.started_at).toMatch(sqliteTimestampPattern);
   });
 
   it('getActiveSession returns the active session with new fields', () => {
@@ -89,15 +91,15 @@ describe('agent session-db', () => {
     expect(session?.claude_pid).toBe(99999);
     expect(session?.status).toBe('active');
     expect(session?.session_id).toBe('ses-abc123');
-    expect(session?.chat_jid).toBeNull();
-    expect(session?.started_at).toBeTruthy();
-    expect(session?.last_message_at).toBeNull();
+    expect(session?.chat_jid).toStrictEqual(null);
+    expect(session?.started_at).toMatch(sqliteTimestampPattern);
+    expect(session?.last_message_at).toStrictEqual(null);
     expect(session?.message_count).toBe(0);
   });
 
   it('getActiveSession returns null when no active session exists', () => {
     const session = getActiveSession(db);
-    expect(session).toBeNull();
+    expect(session).toStrictEqual(null);
   });
 
   // @check CHK-022
@@ -161,7 +163,7 @@ describe('agent session-db', () => {
     const row = db.raw
       .prepare('SELECT chat_jid FROM agent_sessions WHERE id = ?')
       .get(id) as { chat_jid: string | null } | undefined;
-    expect(row?.chat_jid).toBeNull();
+    expect(row?.chat_jid).toStrictEqual(null);
   });
 
   it('incrementMessageCount increments message_count and sets last_message_at', () => {
@@ -179,7 +181,7 @@ describe('agent session-db', () => {
       .prepare('SELECT message_count, last_message_at FROM agent_sessions WHERE id = ?')
       .get(id) as { message_count: number; last_message_at: string | null } | undefined;
     expect(after?.message_count).toBe(1);
-    expect(after?.last_message_at).toBeTruthy();
+    expect(after?.last_message_at).toMatch(sqliteTimestampPattern);
 
     incrementMessageCount(db, id);
     const after2 = db.raw
@@ -201,7 +203,7 @@ describe('agent session-db', () => {
     const row = db.raw
       .prepare('SELECT workspace_key FROM agent_sessions WHERE id = ?')
       .get(id) as { workspace_key: string | null } | undefined;
-    expect(row?.workspace_key).toBeNull();
+    expect(row?.workspace_key).toStrictEqual(null);
   });
 
   it('backfillWorkspaceKeys: root-cwd row is marked ended', () => {
@@ -214,7 +216,7 @@ describe('agent session-db', () => {
       .prepare('SELECT status, workspace_key FROM agent_sessions WHERE id = ?')
       .get(id) as { status: string; workspace_key: string | null } | undefined;
     expect(row?.status).toBe('ended');
-    expect(row?.workspace_key).toBeNull();
+    expect(row?.workspace_key).toStrictEqual(null);
   });
 
   it('backfillWorkspaceKeys: row under users/ gets workspace_key backfilled', () => {
@@ -288,7 +290,7 @@ describe('agent session-db', () => {
 
   it('getResumableSessionForChat returns null when no resumable session exists', () => {
     const result = getResumableSessionForChat(db, 'nonexistent-workspace-key');
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   // B04a: Verify Codex thread ID (stored as session_id) survives persistence
@@ -323,7 +325,7 @@ describe('agent session-db', () => {
     // status remains 'active'
 
     const result = getResumableSessionForChat(db, wk);
-    expect(result).toBeNull();
+    expect(result).toStrictEqual(null);
   });
 
   it('insertTokenEvent inserts a row in agent_token_events', () => {
@@ -378,7 +380,7 @@ describe('agent session-db', () => {
       expect(row.status).toBe(status);
       expect(row.ended_at).not.toBeNull();
       // ISO 8601 format from new Date().toISOString()
-      expect(row.ended_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      expect(row.ended_at).toMatch(isoTimestampPattern);
     }
   });
 
@@ -391,7 +393,7 @@ describe('agent session-db', () => {
     ).get(id) as { ended_at: string | null; status: string };
 
     expect(row.status).toBe('suspended');
-    expect(row.ended_at).toBeNull();
+    expect(row.ended_at).toStrictEqual(null);
   });
 
   it('updateSessionStatus does NOT set ended_at for active status', () => {
@@ -403,7 +405,7 @@ describe('agent session-db', () => {
     ).get(id) as { ended_at: string | null; status: string };
 
     expect(row.status).toBe('active');
-    expect(row.ended_at).toBeNull();
+    expect(row.ended_at).toStrictEqual(null);
   });
 
   it('accumulateTokensWithEvent rolls back both writes on failure', () => {
@@ -452,7 +454,7 @@ describe('agent session-db', () => {
     const row = db.raw.prepare(
       'SELECT provider FROM agent_sessions WHERE id = ?'
     ).get(id) as { provider: string | null };
-    expect(row.provider).toBeNull();
+    expect(row.provider).toStrictEqual(null);
   });
 
   it('backfillSessionProvider sets provider on null rows only', () => {
