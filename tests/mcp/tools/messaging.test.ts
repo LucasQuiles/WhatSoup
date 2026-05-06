@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerMessagingTools, type MessagingDeps } from '../../../src/mcp/tools/messaging.ts';
+import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -115,7 +116,13 @@ describe('registerMessagingTools', () => {
     db = makeDb();
     calls = makeCalls();
     connection = makeConnection(calls);
-    deps = { connection, db };
+    deps = {
+      connection,
+      db,
+      profiles: createProfileRegistry({
+        satellite: { prefix: '[SAT] ', tag: ' #satellite', linkPreview: 'off' },
+      }),
+    };
     registerMessagingTools(registry, deps);
   });
 
@@ -292,6 +299,52 @@ describe('registerMessagingTools', () => {
 
       const call = JSON.parse(calls[0]);
       expect(call.content).toHaveProperty('linkPreview', null);
+    });
+
+    it('applies a named profile before sending', async () => {
+      const result = await registry.call(
+        'send_message',
+        { chatJid: '15555550101@s.whatsapp.net', text: 'Hello', profile: 'satellite' },
+        { tier: 'global' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      const call = JSON.parse(calls[0]);
+      expect(call.jid).toBe('15555550101@s.whatsapp.net');
+      expect(call.content.text).toBe('[SAT] Hello #satellite');
+      expect(call.content).toHaveProperty('linkPreview', null);
+    });
+
+    it('returns unknown profile without sending', async () => {
+      const result = await registry.call(
+        'send_message',
+        { chatJid: '15555550101@s.whatsapp.net', text: 'Hello', profile: 'missing' },
+        { tier: 'global' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('unknown profile: missing');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('lets request link_preview override profile link preview policy', async () => {
+      const result = await registry.call(
+        'send_message',
+        {
+          chatJid: '15555550101@s.whatsapp.net',
+          text: 'https://example.com',
+          profile: 'satellite',
+          link_preview: 'auto',
+        },
+        { tier: 'global' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      const call = JSON.parse(calls[0]);
+      expect(call.content.text).toBe('[SAT] https://example.com #satellite');
+      expect(call.content).not.toHaveProperty('linkPreview');
     });
   });
 

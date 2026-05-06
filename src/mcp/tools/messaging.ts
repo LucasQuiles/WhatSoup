@@ -20,6 +20,7 @@ import {
   createSendPipeline,
   type PreparedTextSend,
 } from '../../core/send-pipeline.ts';
+import { UnknownProfileError, type ProfileRegistry } from '../../core/profiles.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 
@@ -56,6 +57,7 @@ function sanitizeError(err: unknown): string {
 export interface MessagingDeps {
   connection: ConnectionManager;
   db: DatabaseSync;
+  profiles?: ProfileRegistry;
 }
 
 type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
@@ -71,7 +73,8 @@ function sendPreparationErrorMessage(err: unknown): string {
     err instanceof MissingTargetError ||
     err instanceof MutuallyExclusiveError ||
     err instanceof InvalidSendRequestError ||
-    err instanceof MissingTextError
+    err instanceof MissingTextError ||
+    err instanceof UnknownProfileError
   ) {
     return err.message;
   }
@@ -112,7 +115,7 @@ export function registerMessagingTools(
   deps: MessagingDeps,
 ): void {
   const { connection, db } = deps;
-  const sendPipeline = createSendPipeline({ resolver: createChatResolver({ db }) });
+  const sendPipeline = createSendPipeline({ resolver: createChatResolver({ db }), profiles: deps.profiles });
 
   // ── send_message ──────────────────────────────────────────────────────────
 
@@ -126,6 +129,7 @@ export function registerMessagingTools(
       chatJid: z.string().optional(),
       to: z.string().optional().describe('Per-instance chat alias to resolve against this line database. Mutually exclusive with chatJid.'),
       text: z.string(),
+      profile: z.string().optional().describe('Optional per-instance send profile for text decoration and link preview policy.'),
       viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
       link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
     }),

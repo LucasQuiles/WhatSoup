@@ -43,6 +43,8 @@ vi.mock('../../src/logger.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { Database } from '../../src/core/database.ts';
+import { seedChatAliases } from '../../src/core/chats-resolver.ts';
+import { createProfileRegistry } from '../../src/core/profiles.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 
@@ -272,11 +274,17 @@ describe('POST /send — Authorization header check', () => {
   let db: Database;
   let server: ReturnType<typeof createServer>;
   let port: number;
+  let deps: HealthDeps;
 
   beforeEach(async () => {
     db = makeDb();
     delete process.env.WHATSOUP_HEALTH_TOKEN;
-    ({ server, port } = await buildTestServer(makeDeps(db)));
+    deps = makeDeps(db, {
+      profiles: createProfileRegistry({
+        satellite: { prefix: '[SAT] ', tag: ' #satellite' },
+      }),
+    });
+    ({ server, port } = await buildTestServer(deps));
   });
 
   afterEach(async () => {
@@ -336,6 +344,78 @@ describe('POST /send — Authorization header check', () => {
       authorization: 'Bearer secret-token',
     });
     expect(status).toBe(400);
+  });
+
+  it('resolves aliases through the send pipeline before sending', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    seedChatAliases(db.raw, { ops: '15550100002@s.whatsapp.net' });
+    const payload = JSON.stringify({ to: 'ops', text: 'hello alias' });
+
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body).ok).toBe(true);
+    expect(deps.connectionManager.sendMessage).toHaveBeenCalledWith(
+      '15550100002@s.whatsapp.net',
+      'hello alias',
+    );
+  });
+
+  it('applies a named profile before sending', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const payload = JSON.stringify({
+      chatJid: '15550100001@s.whatsapp.net',
+      text: 'hello',
+      profile: 'satellite',
+    });
+
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body).ok).toBe(true);
+    expect(deps.connectionManager.sendMessage).toHaveBeenCalledWith(
+      '15550100001@s.whatsapp.net',
+      '[SAT] hello #satellite',
+    );
+  });
+
+  it('returns unknown profile without sending', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const payload = JSON.stringify({
+      chatJid: '15550100001@s.whatsapp.net',
+      text: 'hello',
+      profile: 'missing',
+    });
+
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toBe('unknown profile: missing');
+    expect(deps.connectionManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects both chatJid and to without sending', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    seedChatAliases(db.raw, { ops: '15550100002@s.whatsapp.net' });
+    const payload = JSON.stringify({
+      chatJid: '15550100001@s.whatsapp.net',
+      to: 'ops',
+      text: 'hello',
+    });
+
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toMatch(/mutually exclusive/);
+    expect(deps.connectionManager.sendMessage).not.toHaveBeenCalled();
   });
 });
 
