@@ -204,6 +204,19 @@ Authorization: Bearer <WHATSOUP_HEALTH_TOKEN>
 ```
 The token comes from the `WHATSOUP_HEALTH_TOKEN` environment variable. If unset, all `/send` calls return 401.
 
+### Send Request Format
+
+`POST /send` accepts the same target contract as MCP `send_message`: provide exactly one of raw `chatJid` or alias `to`, plus `text`.
+
+Optional fields:
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| `profile` | profile name string | Applies a per-instance profile from `profiles` before sending. |
+| `link_preview` | `"auto"` or `"off"` | Overrides the selected profile's `linkPreview` for this one request. |
+
+Request errors such as both targets, neither target, unknown alias, unknown profile, or invalid `link_preview` return HTTP 400 and do not send.
+
 ### Response Format
 
 ```json
@@ -782,6 +795,188 @@ sqlite3 $DB \
 sqlite3 $DB \
   "SELECT message_id, enrichment_retries, content_type
    FROM messages WHERE enrichment_retries > 0 ORDER BY enrichment_retries DESC LIMIT 10;"
+```
+
+### Manage Chat Aliases
+
+Chat aliases let fleet HTTP callers and global MCP `send_message` callers send with `to` instead of embedding raw WhatsApp JIDs. Aliases are scoped to one instance because each instance seeds its own `chat_aliases` table from its private config.
+
+Add or update an alias:
+
+```bash
+INSTANCE=primary-line
+CONFIG=~/.config/whatsoup/instances/$INSTANCE/config.json
+
+$EDITOR "$CONFIG"
+```
+
+Add or update a `chatAliases` object:
+
+```json
+{
+  "chatAliases": {
+    "ops": "GROUP_JID@g.us",
+    "support": "USER_JID@s.whatsapp.net"
+  }
+}
+```
+
+Restart the instance to seed the DB:
+
+```bash
+systemctl --user restart whatsoup@$INSTANCE
+journalctl --user -u whatsoup@$INSTANCE -n 50 | grep 'seeded chat aliases' || true
+```
+
+Verify the stored aliases:
+
+```bash
+DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
+sqlite3 "$DB" \
+  "SELECT alias, chat_jid, updated_at FROM chat_aliases ORDER BY alias;"
+```
+
+Use the alias through fleet:
+
+```bash
+TOKEN=$(cat ~/.config/whatsoup/fleet-token)
+curl --fail-with-body -sS -X POST "http://127.0.0.1:9099/api/lines/$INSTANCE/send" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"to":"ops","text":"alias smoke test"}'
+```
+
+Use either `to` or `chatJid`, never both. If an alias points to the wrong chat, update `config.json` and restart; startup upserts changed targets without churning unchanged rows.
+
+### Manage Send Profiles
+
+Send profiles let fleet HTTP callers and global MCP `send_message` callers request instance-local message decoration without hard-coding prefixes or tags in wrapper scripts. Profiles are loaded from the private instance `config.json` at startup.
+
+Add or update a profile:
+
+```bash
+INSTANCE=primary-line
+CONFIG=~/.config/whatsoup/instances/$INSTANCE/config.json
+
+$EDITOR "$CONFIG"
+```
+
+Add a top-level `profiles` object:
+
+```json
+{
+  "profiles": {
+    "notify": {},
+    "alert": {
+      "prefix": "[ALERT] "
+    },
+    "plain": {
+      "linkPreview": "off"
+    }
+  }
+}
+```
+
+Restart the instance to load the registry:
+
+```bash
+systemctl --user restart whatsoup@$INSTANCE
+journalctl --user -u whatsoup@$INSTANCE -n 50
+```
+
+Use a profile through fleet:
+
+```bash
+TOKEN=$(cat ~/.config/whatsoup/fleet-token)
+curl --fail-with-body -sS -X POST "http://127.0.0.1:9099/api/lines/$INSTANCE/send" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"to":"ops","profile":"plain","text":"profile smoke test"}'
+```
+
+Use a profile through MCP `send_message`:
+
+```json
+{
+  "to": "ops",
+  "profile": "plain",
+  "text": "profile smoke test"
+}
+```
+
+If a profile has `linkPreview` and a request also sends `link_preview`, the request-level value wins. Unknown profiles return a tool error envelope in MCP and HTTP 400 on `/send`.
+
+### Read Outbound Send Audit
+
+Every MCP `send_message` and health `/send` attempt creates one row in the instance-local `outbound_sends` table. The public read surface is the global MCP `read_outbound_sends` tool.
+
+Query recent rows through the global MCP socket:
+
+```bash
+INSTANCE=primary-line
+SOCKET=~/.local/state/whatsoup/instances/$INSTANCE/whatsoup.sock
+
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ops-runbook","version":"1.0.0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_outbound_sends","arguments":{"limit":25}}}' \
+  | WHATSOUP_SOCKET="$SOCKET" node --experimental-strip-types deploy/mcp/whatsoup-proxy.ts
+```
+
+Filter by exact raw JID when needed. Aliases are not resolved on audit reads:
+
+```json
+{
+  "limit": 25,
+  "chatJid": "EXAMPLE_JID@s.whatsapp.net"
+}
+```
+
+The tool returns `{ "outbound_sends": [...] }`. Rows expose `id`, `chat_jid`, `text_hash`, `text_length`, `status`, `created_at`, and optional `profile`, `transport_id`, `error_text`, and `sent_at`; optional fields are omitted when the DB value is null. Message bodies are never returned.
+
+For deeper history than the MCP cap of 100 rows, query the instance DB directly:
+
+```bash
+INSTANCE=primary-line
+DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
+
+sqlite3 "$DB" \
+  "SELECT id, chat_jid, status, profile, transport_message_id, error, created_at, completed_at
+     FROM outbound_sends
+    ORDER BY created_at DESC, id DESC
+    LIMIT 200;"
+```
+
+The direct SQL columns are the raw schema names. The MCP API aliases `transport_message_id` to `transport_id`, `completed_at` to `sent_at`, and `error` to `error_text`.
+
+Common operator queries:
+
+```bash
+# Failed sends in the last hour
+sqlite3 "$DB" \
+  "SELECT id, chat_jid, profile, error, created_at, completed_at
+     FROM outbound_sends
+    WHERE status = 'failed'
+      AND created_at >= datetime('now', '-1 hour')
+    ORDER BY created_at DESC;"
+
+# Sends grouped by profile and status
+sqlite3 "$DB" \
+  "SELECT COALESCE(profile, '(none)') AS profile, status, COUNT(*) AS count
+     FROM outbound_sends
+    GROUP BY profile, status
+    ORDER BY profile, status;"
+
+# Hourly audit row growth for the last day
+sqlite3 "$DB" \
+  "SELECT strftime('%Y-%m-%d %H:00', created_at) AS hour, COUNT(*) AS count
+     FROM outbound_sends
+    WHERE created_at >= datetime('now', '-1 day')
+    GROUP BY hour
+    ORDER BY hour DESC;"
+
+# Optional manual prune after backup; retention is currently unbounded.
+sqlite3 "$DB" \
+  "DELETE FROM outbound_sends WHERE created_at < datetime('now', '-30 days');"
 ```
 
 ---

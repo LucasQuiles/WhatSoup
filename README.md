@@ -197,6 +197,8 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 
 The fleet token is stored at `~/.config/whatsoup/fleet-token` (auto-generated on first run).
 
+`POST /api/lines/:name/send` accepts exactly one target: raw `chatJid` or alias `to`. Aliases resolve through that instance's private `chatAliases` config and `chat_aliases` table. Requests may also pass a named send `profile`.
+
 ## Instance Model
 
 Each instance is an independent systemd service with isolated auth, database, logs, and config:
@@ -218,6 +220,8 @@ Config example (chat mode):
   "models": { "conversation": "claude-sonnet-4-6" },
   "accessMode": "open_dm",
   "adminPhones": ["15555550100"],
+  "chatAliases": { "ops": "GROUP_JID@g.us" },
+  "profiles": { "notify": { "prefix": "[notify] " } },
   "maxTokens": 500,
   "rateLimitPerHour": 60,
   "healthPort": 9093
@@ -271,8 +275,8 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | Document | Description |
 |----------|-------------|
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
-| [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 127 tools with scopes, parameters, replay policies |
+| [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
+| [MCP Tool Reference](docs/tools.md) | All 140 tools with scopes, parameters, replay policies |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
 
