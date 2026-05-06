@@ -13,6 +13,7 @@
     "setup": "bash deploy/setup.sh",
     "auth": "node --experimental-strip-types src/transport/auth.ts",
     "auth:instance": "node --experimental-strip-types src/bootstrap-auth.ts",
+    "audit:instance-plugins": "node --experimental-strip-types scripts/audit-instance-plugin-coverage.ts",
     "backfill-enrichment": "node --experimental-strip-types scripts/backfill-enrichment.ts",
     "migrate-memory-config": "node --experimental-strip-types scripts/migrate-memory-config.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",
