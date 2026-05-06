@@ -98,6 +98,30 @@ function parseSSE(chunks: string[]) {
   });
 }
 
+function sseSequence(chunks: string[]) {
+  return parseSSE(chunks).map((e) => ({
+    event: e.event,
+    step: e.data?.step,
+    ...(e.data?.status === undefined ? {} : { status: e.data.status }),
+  }));
+}
+
+function expectSSESequence(
+  chunks: string[],
+  expected: Array<{ event: string; step: string; status?: string }>,
+) {
+  expect(sseSequence(chunks)).toEqual(expected);
+}
+
+function execFileAsyncCalls() {
+  return execFileAsyncSpy.mock.calls.map(([cmd, args, options]: any[]) => ({
+    cmd,
+    args,
+    cwd: options?.cwd,
+    timeout: options?.timeout,
+  }));
+}
+
 function makeChecker(impl?: () => Promise<any>) {
   return {
     checkNow: vi.fn().mockImplementation(impl ?? (() => Promise.resolve({}))),
@@ -152,7 +176,7 @@ describe('SSE event format', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    expect(res.chunks.length).toBeGreaterThan(0);
+    expect(res.chunks).toHaveLength(9);
     for (const chunk of res.chunks) {
       // Must match: "event: <name>\ndata: <json>\n\n"
       expect(chunk).toMatch(/^event: [\w-]+\ndata: .+\n\n$/);
@@ -170,25 +194,39 @@ describe('handleUpdate — happy path', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+    expect(res.writeHead).toHaveBeenCalledWith(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
-    }));
+    });
   });
 
-  it('emits progress events for all 5 steps', async () => {
+  it('emits the exact happy-path progress sequence and side effects', async () => {
     setupHappyPath();
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    const steps = events.filter((e) => e.event === 'progress').map((e) => e.data?.step);
-    expect(steps).toContain('pull');
-    expect(steps).toContain('install');
-    expect(steps).toContain('console-install');
-    expect(steps).toContain('console-build');
-    expect(steps).toContain('restart');
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'progress', step: 'console-build', status: 'done' },
+      { event: 'progress', step: 'restart', status: 'running' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+      { cmd: 'npx', args: ['vite', 'build'], cwd: '/repo/console', timeout: 120_000 },
+    ]);
+    expect(serviceManagerRestartSpy).toHaveBeenCalledTimes(1);
+    expect(serviceManagerRestartSpy).toHaveBeenCalledWith('whatsoup-fleet');
   });
 
   it('emits pull:running before pull:done', async () => {
@@ -196,13 +234,10 @@ describe('handleUpdate — happy path', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    const pullIdx = {
-      running: events.findIndex((e) => e.data?.step === 'pull' && e.data?.status === 'running'),
-      done: events.findIndex((e) => e.data?.step === 'pull' && e.data?.status === 'done'),
-    };
-    expect(pullIdx.running).toBeGreaterThanOrEqual(0);
-    expect(pullIdx.done).toBeGreaterThan(pullIdx.running);
+    expect(sseSequence(res.chunks).slice(0, 2)).toEqual([
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+    ]);
   });
 
   it('calls checker.checkNow() after successful pull', async () => {
@@ -265,9 +300,10 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
     // Second call — synchronous check of flag, should immediately 409
     await handleUpdate(req2, res2, makeChecker(), '/repo');
 
-    expect(res2.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
+    expect(res2.writeHead).toHaveBeenCalledWith(409, { 'Content-Type': 'application/json' });
     const body409 = JSON.parse(res2.end.mock.calls[0][0]);
-    expect(body409.error).toMatch(/in progress/i);
+    expect(body409).toEqual({ error: 'Update already in progress' });
+    expect(res2.end).toHaveBeenCalledTimes(1);
 
     // Clean up: resolve the hanging pull so the first call can finish and reset the flag
     resolvePull({ stdout: 'Already up to date.\n', stderr: '' });
@@ -302,9 +338,14 @@ describe('handleUpdate — git pull failure', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    const pullError = events.find((e) => e.event === 'error' && e.data?.step === 'pull');
-    expect(pullError).toBeDefined();
-    expect(pullError!.data.message).toContain('could not read from remote');
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'error', step: 'pull' },
+    ]);
+    expect(events[1].data).toEqual({
+      step: 'pull',
+      message: 'fatal: could not read from remote repository.',
+    });
   });
 
   it('uses err.message when err.stderr is absent', async () => {
@@ -317,8 +358,14 @@ describe('handleUpdate — git pull failure', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    const pullError = events.find((e) => e.event === 'error');
-    expect(pullError?.data?.message).toContain('ENOENT');
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'error', step: 'pull' },
+    ]);
+    expect(events[1].data).toEqual({
+      step: 'pull',
+      message: 'ENOENT: git not found',
+    });
   });
 
   it('calls res.end after pull error (stream is closed)', async () => {
@@ -332,7 +379,11 @@ describe('handleUpdate — git pull failure', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    expect(res.end).toHaveBeenCalled();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'error', step: 'pull' },
+    ]);
+    expect(res.end).toHaveBeenCalledTimes(1);
   });
 
   it('does not emit install, build, or restart events after pull failure', async () => {
@@ -346,11 +397,10 @@ describe('handleUpdate — git pull failure', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    const laterSteps = events.filter((e) =>
-      ['install', 'console-install', 'console-build', 'restart'].includes(e.data?.step),
-    );
-    expect(laterSteps).toHaveLength(0);
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'error', step: 'pull' },
+    ]);
   });
 });
 
@@ -379,9 +429,30 @@ describe('handleUpdate — vite build failure', () => {
     await handleUpdate(req, res, checker, '/repo');
 
     const events = parseSSE(res.chunks);
-    const buildError = events.find((e) => e.event === 'error' && e.data?.step === 'console-build');
-    expect(buildError).toBeDefined();
-    expect(buildError!.data.message).toContain('Transform failed');
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'error', step: 'console-build' },
+      { event: 'progress', step: 'rollback', status: 'done' },
+    ]);
+    expect(events[7].data).toEqual({
+      step: 'console-build',
+      message: 'error: [vite] Transform failed with 3 errors.',
+    });
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+      { cmd: 'npx', args: ['vite', 'build'], cwd: '/repo/console', timeout: 120_000 },
+      { cmd: 'git', args: ['reset', '--hard', 'abc1234'], cwd: '/repo', timeout: 15_000 },
+    ]);
   });
 
   it('calls res.end after build failure', async () => {
@@ -399,7 +470,18 @@ describe('handleUpdate — vite build failure', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    expect(res.end).toHaveBeenCalled();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'error', step: 'console-build' },
+      { event: 'progress', step: 'rollback', status: 'done' },
+    ]);
+    expect(res.end).toHaveBeenCalledTimes(1);
   });
 
   it('does not emit restart event after build failure', async () => {
@@ -417,9 +499,18 @@ describe('handleUpdate — vite build failure', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    const restartEvents = events.filter((e) => e.data?.step === 'restart');
-    expect(restartEvents).toHaveLength(0);
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'error', step: 'console-build' },
+      { event: 'progress', step: 'rollback', status: 'done' },
+    ]);
+    expect(serviceManagerRestartSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -445,12 +536,41 @@ describe('handleUpdate — rollback', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    // Rollback event emitted
-    const rollbackEvent = events.find((e) => e.data?.step === 'rollback' && e.data?.status === 'done');
-    expect(rollbackEvent).toBeDefined();
-    // Error event also present
-    const installError = events.find((e) => e.event === 'error' && e.data?.step === 'install');
-    expect(installError).toBeDefined();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'error', step: 'install' },
+      { event: 'progress', step: 'rollback', status: 'done' },
+    ]);
+    expect(events[3].data).toEqual({
+      step: 'install',
+      message: 'npm ERR! peer dep missing',
+    });
+    expect(events[4].data).toEqual({
+      step: 'rollback',
+      status: 'done',
+      message: 'Rolled back to abc1234',
+    });
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      {
+        cmd: 'git',
+        args: ['diff', 'abc1234abc1234abc1234abc1234abc1234abc1234', '--name-only'],
+        cwd: '/repo',
+        timeout: 10_000,
+      },
+      { cmd: 'npm', args: ['install'], cwd: '/repo', timeout: 120_000 },
+      {
+        cmd: 'git',
+        args: ['reset', '--hard', 'abc1234abc1234abc1234abc1234abc1234abc1234'],
+        cwd: '/repo',
+        timeout: 15_000,
+      },
+    ]);
   });
 
   it('emits rollback:error when git reset --hard fails', async () => {
@@ -471,9 +591,17 @@ describe('handleUpdate — rollback', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    const rollbackError = events.find((e) => e.event === 'error' && e.data?.step === 'rollback');
-    expect(rollbackError).toBeDefined();
-    expect(rollbackError!.data.message).toContain('Rollback failed');
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'error', step: 'install' },
+      { event: 'error', step: 'rollback' },
+    ]);
+    expect(events[4].data).toEqual({
+      step: 'rollback',
+      message: 'Rollback failed: git reset failed: permission denied',
+    });
   });
 
   it('skips rollback when prePullSha is unavailable', async () => {
@@ -491,10 +619,19 @@ describe('handleUpdate — rollback', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    // No rollback event should exist
-    const rollbackEvents = events.filter((e) => e.data?.step === 'rollback');
-    expect(rollbackEvents).toHaveLength(0);
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'error', step: 'install' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'npm', args: ['install'], cwd: '/repo', timeout: 120_000 },
+    ]);
   });
 });
 
@@ -514,9 +651,22 @@ describe('handleUpdate — service manager restart error', () => {
     await new Promise((r) => setImmediate(r));
 
     const events = parseSSE(res.chunks);
-    const restartError = events.find((e) => e.event === 'error' && e.data?.step === 'restart');
-    expect(restartError).toBeDefined();
-    expect(restartError!.data.message).toMatch(/Restart manually/i);
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'progress', step: 'console-build', status: 'done' },
+      { event: 'progress', step: 'restart', status: 'running' },
+      { event: 'error', step: 'restart' },
+    ]);
+    expect(events[9].data).toEqual({
+      step: 'restart',
+      message: 'Fleet restart failed: Failed to connect to bus. Restart manually: npm run fleet',
+    });
   });
 
   it('calls res.end after service manager restart error', async () => {
@@ -527,7 +677,19 @@ describe('handleUpdate — service manager restart error', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
     await new Promise((r) => setImmediate(r));
 
-    expect(res.end).toHaveBeenCalled();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'progress', step: 'console-build', status: 'done' },
+      { event: 'progress', step: 'restart', status: 'running' },
+      { event: 'error', step: 'restart' },
+    ]);
+    expect(res.end).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -618,9 +780,23 @@ describe('handleUpdate — lockfile change detection', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
-    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'skip')).toBeDefined();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'skip' },
+      { event: 'progress', step: 'restart', status: 'running' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+    ]);
   });
 
   it('runs root npm install when package-lock.json IS in diff', async () => {
@@ -639,10 +815,24 @@ describe('handleUpdate — lockfile change detection', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
     await new Promise((r) => setImmediate(r)); // drain systemctl cb
 
-    const events = parseSSE(res.chunks);
-    // debug removed
-    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'done')).toBeDefined();
-    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'skip')).toBeDefined();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'done' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'skip' },
+      { event: 'progress', step: 'console-build', status: 'skip' },
+      { event: 'progress', step: 'restart', status: 'running' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+      { cmd: 'npm', args: ['install'], cwd: '/repo', timeout: 120_000 },
+    ]);
   });
 
   it('runs console npm install when console/package-lock.json IS in diff', async () => {
@@ -660,9 +850,26 @@ describe('handleUpdate — lockfile change detection', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
-    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'done' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'progress', step: 'console-build', status: 'done' },
+      { event: 'progress', step: 'restart', status: 'running' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+      { cmd: 'npm', args: ['install'], cwd: '/repo/console', timeout: 120_000 },
+      { cmd: 'npx', args: ['vite', 'build'], cwd: '/repo/console', timeout: 120_000 },
+    ]);
   });
 
   it('both root and console lockfiles changed — both installs run', async () => {
@@ -681,9 +888,27 @@ describe('handleUpdate — lockfile change detection', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'done')).toBeDefined();
-    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'done' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'done' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'progress', step: 'console-build', status: 'done' },
+      { event: 'progress', step: 'restart', status: 'running' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+      { cmd: 'npm', args: ['install'], cwd: '/repo', timeout: 120_000 },
+      { cmd: 'npm', args: ['install'], cwd: '/repo/console', timeout: 120_000 },
+      { cmd: 'npx', args: ['vite', 'build'], cwd: '/repo/console', timeout: 120_000 },
+    ]);
   });
 
   it('does not false-match console/package-lock.json for root lockfile check', async () => {
@@ -701,9 +926,25 @@ describe('handleUpdate — lockfile change detection', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    const events = parseSSE(res.chunks);
-    // Root should be SKIPPED — console/package-lock.json should NOT trigger root install
-    expect(events.find((e) => e.data?.step === 'install' && e.data?.status === 'skip')).toBeDefined();
-    expect(events.find((e) => e.data?.step === 'console-install' && e.data?.status === 'done')).toBeDefined();
+    expectSSESequence(res.chunks, [
+      { event: 'progress', step: 'pull', status: 'running' },
+      { event: 'progress', step: 'pull', status: 'done' },
+      { event: 'progress', step: 'install', status: 'running' },
+      { event: 'progress', step: 'install', status: 'skip' },
+      { event: 'progress', step: 'console-install', status: 'running' },
+      { event: 'progress', step: 'console-install', status: 'done' },
+      { event: 'progress', step: 'console-build', status: 'running' },
+      { event: 'progress', step: 'console-build', status: 'done' },
+      { event: 'progress', step: 'restart', status: 'running' },
+    ]);
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+      { cmd: 'npm', args: ['install'], cwd: '/repo/console', timeout: 120_000 },
+      { cmd: 'npx', args: ['vite', 'build'], cwd: '/repo/console', timeout: 120_000 },
+    ]);
   });
 });
