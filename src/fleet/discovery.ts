@@ -197,6 +197,23 @@ function validateConfig(raw: Record<string, unknown>, name: string): string | nu
     return `Invalid healthPort "${String(raw.healthPort)}": must be a number between 1 and 65535`;
   }
 
+  if (raw.chatAliases !== undefined) {
+    if (typeof raw.chatAliases !== 'object' || raw.chatAliases === null || Array.isArray(raw.chatAliases)) {
+      return 'chatAliases must be an object of alias -> chatJid strings';
+    }
+    const normalizedAliases = new Set<string>();
+    for (const [alias, chatJid] of Object.entries(raw.chatAliases as Record<string, unknown>)) {
+      const normalizedAlias = alias.trim();
+      if (normalizedAlias === '' || typeof chatJid !== 'string' || chatJid.trim() === '') {
+        return 'chatAliases must contain only non-empty alias -> chatJid strings';
+      }
+      if (normalizedAliases.has(normalizedAlias)) {
+        return `chatAliases contains duplicate alias after trimming: ${normalizedAlias}`;
+      }
+      normalizedAliases.add(normalizedAlias);
+    }
+  }
+
   if (raw.type === 'agent') {
     const agentOpts = raw.agentOptions;
     if (agentOpts !== undefined && agentOpts !== null) {

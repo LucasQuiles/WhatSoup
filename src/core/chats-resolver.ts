@@ -64,6 +64,8 @@ export interface ChatResolver {
   resolve(target: ChatTarget): string;
 }
 
+export type ChatAliasSeeds = Record<string, string>;
+
 export interface ChatResolverDeps {
   db: DatabaseSync;
 }
@@ -114,4 +116,22 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
       return row.chat_jid;
     },
   };
+}
+
+export function seedChatAliases(db: DatabaseSync, aliases: ChatAliasSeeds): number {
+  const upsert = db.prepare(`
+    INSERT INTO chat_aliases (alias, chat_jid)
+    VALUES (?, ?)
+    ON CONFLICT(alias) DO UPDATE SET
+      chat_jid = excluded.chat_jid,
+      updated_at = datetime('now')
+    WHERE chat_aliases.chat_jid != excluded.chat_jid
+  `);
+
+  let changes = 0;
+  for (const [alias, chatJid] of Object.entries(aliases)) {
+    const result = upsert.run(alias, chatJid) as { changes?: number };
+    changes += result.changes ?? 0;
+  }
+  return changes;
 }

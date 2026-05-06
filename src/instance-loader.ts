@@ -52,6 +52,7 @@ interface InstanceConfig {
   model?: string;
   models?: Record<string, string>;
   memory?: Record<string, unknown>;
+  chatAliases?: Record<string, string>;
   pineconeIndex?: string;
   pineconeAllowedIndexes?: string[];
   maxTokens?: number;
@@ -104,6 +105,24 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
   const phones = raw['adminPhones'] as unknown[];
   if (phones.some((p: unknown) => typeof p !== 'string' || (p as string).trim() === '')) {
     throw new Error(`adminPhones must contain only non-empty strings in ${instancePath}`);
+  }
+
+  const chatAliases = raw['chatAliases'];
+  if (chatAliases !== undefined) {
+    if (typeof chatAliases !== 'object' || chatAliases === null || Array.isArray(chatAliases)) {
+      throw new Error('chatAliases must be an object of alias -> chatJid strings');
+    }
+    const normalizedAliases = new Set<string>();
+    for (const [alias, chatJid] of Object.entries(chatAliases as Record<string, unknown>)) {
+      const normalizedAlias = alias.trim();
+      if (normalizedAlias === '' || typeof chatJid !== 'string' || chatJid.trim() === '') {
+        throw new Error('chatAliases must contain only non-empty alias -> chatJid strings');
+      }
+      if (normalizedAliases.has(normalizedAlias)) {
+        throw new Error(`chatAliases contains duplicate alias after trimming: ${normalizedAlias}`);
+      }
+      normalizedAliases.add(normalizedAlias);
+    }
   }
 
   // Auth-only mode: skip runtime validation (agentOptions, systemPrompt, etc.)

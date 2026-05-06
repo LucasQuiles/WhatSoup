@@ -134,7 +134,7 @@ describe('loadInstance — happy path: agent', () => {
 // ---------------------------------------------------------------------------
 
 describe('loadInstance — optional fields preserved', () => {
-  it('preserves models, pineconeIndex, maxTokens, tokenBudget, rateLimitPerHour, healthPort', () => {
+  it('preserves models, pineconeIndex, chatAliases, maxTokens, tokenBudget, rateLimitPerHour, healthPort', () => {
     const richChat = {
       ...minimalChat,
       models: {
@@ -151,6 +151,10 @@ describe('loadInstance — optional fields preserved', () => {
       },
       pineconeIndex: 'whatsapp-bot',
       pineconeAllowedIndexes: ['mw-mind'],
+      chatAliases: {
+        ops: '15555550100@s.whatsapp.net',
+        support: '120363001@g.us',
+      },
       maxTokens: 750,
       tokenBudget: 100000,
       rateLimitPerHour: 45,
@@ -164,6 +168,7 @@ describe('loadInstance — optional fields preserved', () => {
     expect(config.memory).toEqual(richChat.memory);
     expect(config.pineconeIndex).toBe('whatsapp-bot');
     expect(config.pineconeAllowedIndexes).toEqual(['mw-mind']);
+    expect(config.chatAliases).toEqual(richChat.chatAliases);
     expect(config.maxTokens).toBe(750);
     expect(config.tokenBudget).toBe(100000);
     expect(config.rateLimitPerHour).toBe(45);
@@ -299,6 +304,25 @@ describe('loadInstance — error: missing adminPhones', () => {
   it('throws when adminPhones contains non-string or empty-string elements', () => {
     writeInstance(path.join(tmpDir, 'config'), 'test-chat', { ...minimalChat, adminPhones: [null, 42, ''] });
     expect(() => loadInstance('test-chat')).toThrow(/adminPhones/i);
+  });
+
+  it('throws when chatAliases contains non-string or empty aliases', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', {
+      ...minimalChat,
+      chatAliases: { ' ': '15555550100@s.whatsapp.net', ops: '' },
+    });
+    expect(() => loadInstance('test-chat')).toThrow(/chatAliases/i);
+  });
+
+  it('throws when chatAliases contains duplicate aliases after trimming', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', {
+      ...minimalChat,
+      chatAliases: {
+        ops: '15555550100@s.whatsapp.net',
+        ' ops ': '15555550101@s.whatsapp.net',
+      },
+    });
+    expect(() => loadInstance('test-chat')).toThrow(/duplicate alias/i);
   });
 });
 

@@ -146,6 +146,28 @@ function stringArrayProp(source: Record<string, unknown> | undefined, key: strin
     : [];
 }
 
+function stringRecordProp(source: Record<string, unknown> | null | undefined, key: string): Record<string, string> {
+  const value = source?.[key];
+  if (value === undefined) return {};
+  const obj = record(value);
+  if (!obj) {
+    throw new Error(`${key} must be an object of non-empty string values`);
+  }
+
+  const result: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(obj)) {
+    const alias = rawKey.trim();
+    if (alias === '' || typeof rawValue !== 'string' || rawValue.trim() === '') {
+      throw new Error(`${key} must be an object of non-empty string values`);
+    }
+    if (result[alias] !== undefined) {
+      throw new Error(`${key} contains duplicate alias after trimming: ${alias}`);
+    }
+    result[alias] = rawValue.trim();
+  }
+  return result;
+}
+
 function pineconeSearchMode(value: unknown, fallback: PineconeSearchMode): PineconeSearchMode {
   return value === 'memory' || value === 'entity' ? value : fallback;
 }
@@ -606,6 +628,9 @@ export const config = {
 
   // Media
   mediaDir,
+
+  // Per-instance seed data for chat_aliases.
+  chatAliases: stringRecordProp(instance, 'chatAliases'),
 
   // Token budget
   tokenBudget: (instance?.tokenBudget as number | undefined) ?? 100_000,

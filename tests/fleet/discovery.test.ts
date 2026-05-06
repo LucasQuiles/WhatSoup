@@ -230,6 +230,40 @@ describe('FleetDiscovery.scan — malformed config.json', () => {
     expect(broken?.configError).toMatch(/Invalid type/i);
   });
 
+  it('keeps instances with invalid chatAliases and marks them config_error', () => {
+    writeInstanceConfig('bad-aliases', {
+      ...chatInstance,
+      name: 'bad-aliases',
+      chatAliases: { ops: '' },
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    const broken = instances.get('bad-aliases');
+    expect(broken).toBeDefined();
+    expect(broken?.configError).toMatch(/chatAliases/i);
+  });
+
+  it('keeps instances with duplicate trimmed chatAliases and marks them config_error', () => {
+    writeInstanceConfig('duplicate-aliases', {
+      ...chatInstance,
+      name: 'duplicate-aliases',
+      chatAliases: {
+        ops: '15555550100@s.whatsapp.net',
+        ' ops ': '15555550101@s.whatsapp.net',
+      },
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    const broken = instances.get('duplicate-aliases');
+    expect(broken).toBeDefined();
+    expect(broken?.configError).toMatch(/duplicate alias/i);
+  });
+
+
   it('skips directories without config.json', () => {
     writeInstanceConfig('loops', chatInstance);
 
