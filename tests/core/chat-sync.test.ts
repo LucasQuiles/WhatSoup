@@ -196,7 +196,7 @@ describe('chat-sync', () => {
         .prepare('SELECT * FROM chats WHERE jid = ?')
         .get('111@s.whatsapp.net') as any;
       expect(row.name).toBe('Alice');
-      expect(row.conversation_key).toBeTruthy();
+      expect(row.conversation_key).toBe('111');
     });
 
     it('replaces existing chat on conflict', () => {
@@ -249,10 +249,10 @@ describe('chat-sync', () => {
       handleChatsUpdate(db, [
         { id: 'nonexistent@s.whatsapp.net', name: 'Ghost' },
       ]);
-      const row = db.raw
+      const rows = db.raw
         .prepare('SELECT * FROM chats WHERE jid = ?')
-        .get('nonexistent@s.whatsapp.net') as any;
-      expect(row).toBeUndefined();
+        .all('nonexistent@s.whatsapp.net') as unknown[];
+      expect(rows).toHaveLength(0);
     });
 
     it('skips update when no recognized fields are present — no crash', () => {
@@ -280,10 +280,10 @@ describe('chat-sync', () => {
       ]);
       handleChatsDelete(db, ['111@s.whatsapp.net']);
 
-      const row = db.raw
+      const rows = db.raw
         .prepare('SELECT * FROM chats WHERE jid = ?')
-        .get('111@s.whatsapp.net') as any;
-      expect(row).toBeUndefined();
+        .all('111@s.whatsapp.net') as unknown[];
+      expect(rows).toHaveLength(0);
     });
 
     it('ignores delete for non-existent chat', () => {
@@ -304,15 +304,19 @@ describe('chat-sync', () => {
       ]);
       // Good chat must be stored
       const good = db.raw
-        .prepare('SELECT * FROM chats WHERE jid = ?')
+        .prepare('SELECT jid, conversation_key, name, unread_count FROM chats WHERE jid = ?')
         .get('111@s.whatsapp.net') as any;
-      expect(good).toBeDefined();
-      expect(good.name).toBe('Good');
+      expect({ ...good }).toStrictEqual({
+        jid: '111@s.whatsapp.net',
+        conversation_key: '111',
+        name: 'Good',
+        unread_count: 0,
+      });
       // Bad chat must not be stored
-      const bad = db.raw
+      const badRows = db.raw
         .prepare('SELECT * FROM chats WHERE jid = ?')
-        .get('invalid-no-at') as any;
-      expect(bad).toBeUndefined();
+        .all('invalid-no-at') as unknown[];
+      expect(badRows).toHaveLength(0);
     });
 
     it('handleChatsUpsert: all invalid JIDs — no crash, no rows inserted', () => {
