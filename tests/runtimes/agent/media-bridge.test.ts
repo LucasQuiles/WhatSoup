@@ -41,9 +41,16 @@ function sendRequest(
   socketPath: string,
   payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  return sendRawRequest(socketPath, JSON.stringify(payload) + '\n');
+}
+
+function sendRawRequest(
+  socketPath: string,
+  payload: string,
+): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const client = createConnection(socketPath, () => {
-      client.write(JSON.stringify(payload) + '\n');
+      client.write(payload);
     });
 
     let buf = '';
@@ -301,24 +308,7 @@ describe('bridge validation', () => {
   });
 
   it('returns error for invalid JSON', async () => {
-    // sendRequest won't work for raw invalid JSON — send it manually
-    const response = await new Promise<Record<string, unknown>>((resolve, reject) => {
-      const client = createConnection(socketPath, () => {
-        client.write('not-json\n');
-      });
-      let buf = '';
-      client.on('data', (chunk) => {
-        buf += chunk.toString();
-        const nl = buf.indexOf('\n');
-        if (nl !== -1) {
-          client.destroy();
-          try { resolve(JSON.parse(buf.slice(0, nl)) as Record<string, unknown>); }
-          catch (e) { reject(e); }
-        }
-      });
-      client.on('error', reject);
-      setTimeout(() => { client.destroy(); reject(new Error('timeout')); }, 3000);
-    });
+    const response = await sendRawRequest(socketPath, 'not-json\n');
 
     expect(response.ok).toBe(false);
     expect(response.error).toMatch(/invalid JSON/);
