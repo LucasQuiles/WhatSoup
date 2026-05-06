@@ -256,8 +256,7 @@ describe('MessageScheduler — start/stop lifecycle', () => {
     const { mock: conn } = makeMockConnection();
     const scheduler = new MessageScheduler(db, conn as ConnectionManager, { intervalMs: 10_000, maxRetries: 3 });
 
-    // Should not throw
-    scheduler.start();
-    scheduler.stop();
+    expect(() => scheduler.start()).not.toThrow();
+    expect(() => scheduler.stop()).not.toThrow();
   });
 });

@@ -420,9 +420,10 @@ describe('FleetDiscovery — auto-refresh lifecycle', () => {
 
   it('stop is safe to call multiple times', () => {
     const discovery = new FleetDiscovery(configRoot);
-    discovery.stop();
-    discovery.stop();
-    // No throw
+    expect(() => {
+      discovery.stop();
+      discovery.stop();
+    }).not.toThrow();
   });
 });
 
