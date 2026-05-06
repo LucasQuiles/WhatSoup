@@ -20,6 +20,7 @@ beforeEach(() => {
     PINECONE_INDEX: process.env.PINECONE_INDEX,
     PINECONE_PROJECT_ID: process.env.PINECONE_PROJECT_ID,
     PINECONE_EXPECTED_HOST_SUFFIX: process.env.PINECONE_EXPECTED_HOST_SUFFIX,
+    KNOWLEDGE_EMBED_URL: process.env.KNOWLEDGE_EMBED_URL,
     MW_MIND_EMBED_URL: process.env.MW_MIND_EMBED_URL,
     RECENCY_HALF_LIFE_DAYS: process.env.RECENCY_HALF_LIFE_DAYS,
     MAX_AGE_DAYS: process.env.MAX_AGE_DAYS,
@@ -52,6 +53,7 @@ beforeEach(() => {
   delete process.env.PINECONE_INDEX;
   delete process.env.PINECONE_PROJECT_ID;
   delete process.env.PINECONE_EXPECTED_HOST_SUFFIX;
+  delete process.env.KNOWLEDGE_EMBED_URL;
   delete process.env.MW_MIND_EMBED_URL;
   delete process.env.RECENCY_HALF_LIFE_DAYS;
   delete process.env.MAX_AGE_DAYS;
@@ -802,6 +804,10 @@ describe('config — BYOK memory block', () => {
           projectId: 'nf9hzvy',
           expectedHostSuffix: '-nf9hzvy.svc.aped-4627-b74a.pinecone.io',
           index: 'mw-mind',
+          embedUrl: 'http://127.0.0.1:9901/embed',
+          knowledgeProfiles: {
+            'mw-mind': { namespace: '', namespaces: [], searchMode: 'vector' },
+          },
           namespaces: {
             facts: 'team-facts',
             chunks: 'team-chunks',
@@ -830,6 +836,8 @@ describe('config — BYOK memory block', () => {
     expect(config.memory.pinecone.apiKeyEnv).toBe('PINECONE_TEAM_KEY');
     expect(config.memory.pinecone.projectId).toBe('nf9hzvy');
     expect(config.memory.pinecone.expectedHostSuffix).toBe('-nf9hzvy.svc.aped-4627-b74a.pinecone.io');
+    expect(config.memory.pinecone.embedUrl).toBe('http://127.0.0.1:9901/embed');
+    expect(config.memory.pinecone.knowledgeProfiles['mw-mind'].embedUrl).toBe('http://127.0.0.1:9901/embed');
     expect(config.memory.pinecone.namespaces.facts).toBe('team-facts');
     expect(config.memory.pinecone.namespaces.chunks).toBe('team-chunks');
     expect(config.memory.pinecone.namespaces.summaries).toBe('team-summaries');
@@ -880,6 +888,125 @@ describe('config — BYOK memory block', () => {
     expect(config.memory.pinecone.namespaces.summaries).toBe('legacy-summaries');
     expect(config.conversationWindow).toBe(33);
     expect(config.enrichmentBatchSize).toBe(44);
+  });
+
+  it('uses KNOWLEDGE_EMBED_URL before the deprecated MW_MIND_EMBED_URL alias', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    process.env.KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:9910/embed';
+    process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.pinecone.embedUrl).toBe('http://127.0.0.1:9910/embed');
+    expect(config.memory.pinecone.knowledgeProfiles['mw-mind'].embedUrl).toBe('http://127.0.0.1:9910/embed');
+  });
+
+  it('keeps MW_MIND_EMBED_URL as a deprecated compatibility alias', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { config } = await import('../src/config.ts');
+
+      expect(config.memory.pinecone.embedUrl).toBe('http://127.0.0.1:9920/embed');
+      expect(config.memory.pinecone.knowledgeProfiles['mw-mind'].embedUrl).toBe('http://127.0.0.1:9920/embed');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe('config — memory env alias warnings', () => {
+  it('warns when MW_MIND_EMBED_URL is used without a canonical value', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    delete process.env.KNOWLEDGE_EMBED_URL;
+    process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { resolveMemoryConfig } = await import('../src/config.ts');
+      resolveMemoryConfig(null);
+
+      expect(warnSpy.mock.calls).toContainEqual([
+        expect.objectContaining({
+          alias: 'MW_MIND_EMBED_URL',
+          canonical: 'memory.pinecone.embedUrl or KNOWLEDGE_EMBED_URL',
+          expires: '2026-10-26',
+        }),
+        'memory.pinecone.embedUrl is using a deprecated environment alias',
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not warn for MW_MIND_EMBED_URL when a canonical env value is present', async () => {
+    delete process.env.INSTANCE_CONFIG;
+    process.env.KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:9910/embed';
+    process.env.MW_MIND_EMBED_URL = 'http://127.0.0.1:9920/embed';
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { resolveMemoryConfig } = await import('../src/config.ts');
+      resolveMemoryConfig(null);
+
+      expect(warnSpy.mock.calls).not.toContainEqual([
+        expect.objectContaining({ alias: 'MW_MIND_EMBED_URL' }),
+        expect.any(String),
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns when allowedIndexes references a built-in profile that is not declared', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { resolveMemoryConfig } = await import('../src/config.ts');
+      resolveMemoryConfig({
+        memory: {
+          pinecone: {
+            allowedIndexes: ['mw-mind'],
+            knowledgeProfiles: {},
+          },
+        },
+      });
+
+      expect(warnSpy.mock.calls).toContainEqual([
+        expect.objectContaining({
+          profile: 'mw-mind',
+          expires: '2026-10-26',
+        }),
+        'memory.pinecone.allowedIndexes references a built-in profile that is not declared in knowledgeProfiles',
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not warn when knowledgeProfiles declares the allowed built-in profile', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { resolveMemoryConfig } = await import('../src/config.ts');
+      resolveMemoryConfig({
+        memory: {
+          pinecone: {
+            allowedIndexes: ['mw-mind'],
+            knowledgeProfiles: {
+              'mw-mind': { namespace: '', namespaces: [], searchMode: 'vector' },
+            },
+          },
+        },
+      });
+
+      expect(warnSpy.mock.calls).not.toContainEqual([
+        expect.objectContaining({ profile: 'mw-mind' }),
+        expect.any(String),
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

@@ -975,3 +975,100 @@ describe('runBackfill — P3.6 D-1 final run_complete telemetry', () => {
     expect(records[records.length - 1].action).toBe('run_complete');
   });
 });
+
+describe('parseArgs — env aliases', () => {
+  const backfillEnvKeys = [
+    'WHATSOUP_BACKFILL_INSTANCE',
+    'WHATSOUP_BACKFILL_RUN_ID',
+    'WHATSOUP_BACKFILL_TELEMETRY_DIR',
+    'MW_MIND_RUN_ID',
+    'MW_MIND_CLOSEOUT_DIR',
+  ] as const;
+
+  let savedBackfillEnv: Record<(typeof backfillEnvKeys)[number], string | undefined>;
+
+  beforeEach(() => {
+    savedBackfillEnv = {} as Record<(typeof backfillEnvKeys)[number], string | undefined>;
+    for (const key of backfillEnvKeys) {
+      savedBackfillEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of backfillEnvKeys) {
+      const value = savedBackfillEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  it('uses WHATSOUP_BACKFILL_RUN_ID before the deprecated run-id alias', () => {
+    process.env.WHATSOUP_BACKFILL_RUN_ID = 'canonical-run';
+    process.env.MW_MIND_RUN_ID = 'legacy-run';
+
+    const a = parseArgs([]);
+
+    expect(a.runId).toBe('canonical-run');
+  });
+
+  it('keeps MW_MIND_RUN_ID as a deprecated compatibility alias', () => {
+    process.env.MW_MIND_RUN_ID = 'legacy-run';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const a = parseArgs([]);
+
+      expect(a.runId).toBe('legacy-run');
+      expect(warnSpy.mock.calls).toContainEqual([
+        expect.objectContaining({
+          alias: 'MW_MIND_RUN_ID',
+          canonical: 'WHATSOUP_BACKFILL_RUN_ID',
+          expires: '2026-10-26',
+        }),
+        'backfill run id is using a deprecated environment alias',
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('uses WHATSOUP_BACKFILL_TELEMETRY_DIR before the deprecated telemetry alias', () => {
+    process.env.WHATSOUP_BACKFILL_TELEMETRY_DIR = '/tmp/canonical';
+    process.env.MW_MIND_CLOSEOUT_DIR = '/tmp/legacy';
+
+    const a = parseArgs([]);
+
+    expect(a.telemetryPath).toBe('/tmp/canonical/task-5-backfill-telemetry.jsonl');
+  });
+
+  it('keeps MW_MIND_CLOSEOUT_DIR as a deprecated compatibility alias', () => {
+    process.env.MW_MIND_CLOSEOUT_DIR = '/tmp/legacy';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const a = parseArgs([]);
+
+      expect(a.telemetryPath).toBe('/tmp/legacy/task-5-backfill-telemetry.jsonl');
+      expect(warnSpy.mock.calls).toContainEqual([
+        expect.objectContaining({
+          alias: 'MW_MIND_CLOSEOUT_DIR',
+          canonical: 'WHATSOUP_BACKFILL_TELEMETRY_DIR',
+          expires: '2026-10-26',
+        }),
+        'backfill telemetry directory is using a deprecated environment alias',
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('uses WHATSOUP_BACKFILL_INSTANCE as the default instance override', () => {
+    process.env.WHATSOUP_BACKFILL_INSTANCE = 'archive-bot';
+
+    const a = parseArgs([]);
+
+    expect(a.instance).toBe('archive-bot');
+  });
+});
