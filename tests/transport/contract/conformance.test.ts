@@ -283,13 +283,10 @@ for (const fx of fixtures) {
       if (!(a instanceof InMemoryAdapter)) return;
       await a.connect();
       let fastCalls = 0;
-      // Slow handler: returns a promise that resolves later. The dispatcher
+      // Slow handler: returns a pending promise. The dispatcher
       // is fanout-style and must not await it before delivering to siblings.
-      a.on('message', async () => {
-        await new Promise(resolve => setTimeout(resolve, 25));
-      });
+      a.on('message', () => new Promise<void>(() => {}));
       a.on('message', () => { fastCalls += 1; });
-      const start = Date.now();
       const sample = {
         kind: 'message' as const,
         data: {
@@ -302,12 +299,9 @@ for (const fx of fixtures) {
         },
       };
       a.injectInbound(sample);
-      const elapsed = Date.now() - start;
       // Fast subscriber should have been called synchronously regardless of
-      // the slow sibling. Allow a generous bound to avoid timing flakes; the
-      // assertion that matters is "did not wait for the 25ms slow handler".
+      // the slow sibling.
       expect(fastCalls).toBe(1);
-      expect(elapsed).toBeLessThan(25);
     });
 
     it('C15 — ambiguous send classification fires with phase=provider_call_started', async () => {

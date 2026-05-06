@@ -1,8 +1,12 @@
 // tests/transport/contract/queue.test.ts
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { BoundedQueue } from '../../../src/transport/contract/queue.ts';
 
 describe('BoundedQueue', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('tryEnqueue returns true while under capacity', () => {
     const q = new BoundedQueue<number>(3);
     expect(q.tryEnqueue(1)).toBe(true);
@@ -38,9 +42,10 @@ describe('BoundedQueue', () => {
   });
 
   it('oldest_age_ms reflects head age', async () => {
+    vi.useFakeTimers();
     const q = new BoundedQueue<number>(2);
     q.tryEnqueue(1);
-    await new Promise(r => setTimeout(r, 25));
+    await vi.advanceTimersByTimeAsync(25);
     expect(q.oldestAgeMs()).toBeGreaterThanOrEqual(20);
   });
 
