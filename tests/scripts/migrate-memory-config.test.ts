@@ -7,6 +7,7 @@ import {
   migrateMemoryConfigFile,
   parseArgs,
   runMigration,
+  runRollback,
 } from '../../scripts/migrate-memory-config.ts';
 
 function makeInstance(root: string, name: string, config: Record<string, unknown>): string {
@@ -26,6 +27,14 @@ describe('migrate-memory-config CLI helpers', () => {
     expect(args.write).toBe(false);
     expect(args.backup).toBe(true);
     expect(args.removeLegacy).toBe(true);
+  });
+
+  it('parses rollback mode', () => {
+    const args = parseArgs(['--root', '/tmp/ws', '--instance', 'mw-bot', '--rollback']);
+    expect(args.root).toBe('/tmp/ws');
+    expect(args.instances).toEqual(['mw-bot']);
+    expect(args.rollback).toBe(true);
+    expect(args.write).toBe(false);
   });
 
   it('finds all instance config.json files under a root', () => {
@@ -172,6 +181,103 @@ describe('migrate-memory-config CLI helpers', () => {
       const ana = JSON.parse(fs.readFileSync(path.join(tmp, 'ana-bot', 'config.json'), 'utf-8'));
       expect(mw.pineconeIndex).toBe('mw-mind');
       expect(ana.memory.pinecone.index).toBe('ana-mind');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('migrate-memory-config rollback mode', () => {
+  const backupContent = JSON.stringify({ name: 'test-bot', restored: true }, null, 2) + '\n';
+  const currentContent = JSON.stringify(
+    { name: 'test-bot', memory: { pinecone: { index: 'test-mind' } } },
+    null,
+    2,
+  ) + '\n';
+  const backupStamp = '2026-04-25T12-00-00-000Z';
+
+  function makeRollbackFixture(root: string, name: string): { configPath: string; backupPath: string } {
+    const dir = path.join(root, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const configPath = path.join(dir, 'config.json');
+    const backupPath = `${configPath}.bak-${backupStamp}`;
+    fs.writeFileSync(configPath, currentContent);
+    fs.writeFileSync(backupPath, backupContent);
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(backupPath, past, past);
+    return { configPath, backupPath };
+  }
+
+  it('dry-runs rollback without touching files', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath } = makeRollbackFixture(tmp, 'test-bot');
+
+      const results = runRollback(['--root', tmp, '--instance', 'test-bot']);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].configPath).toBe(configPath);
+      expect(results[0].backupPath).toContain(backupStamp);
+      expect(results[0].wouldRestore).toBe(true);
+      expect(results[0].restored).toBe(false);
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('write mode restores the newest backup atomically', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
+
+      const results = runRollback(['--root', tmp, '--instance', 'test-bot', '--write']);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].backupPath).toBe(backupPath);
+      expect(results[0].restored).toBe(true);
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(backupContent);
+      expect(fs.existsSync(backupPath)).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses rollback when the backup is newer than the current config', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { backupPath } = makeRollbackFixture(tmp, 'test-bot');
+      const future = new Date(Date.now() + 60_000);
+      fs.utimesSync(backupPath, future, future);
+
+      expect(() =>
+        runRollback(['--root', tmp, '--instance', 'test-bot', '--write']),
+      ).toThrowError(/backup.*newer.*config/i);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('migrate-memory-config operator errors', () => {
+  it('reports missing config files with path context', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
+    try {
+      const missingPath = path.join(tmp, 'missing', 'config.json');
+      expect(() => migrateMemoryConfigFile(missingPath)).toThrowError(/config file not found/i);
+      expect(() => migrateMemoryConfigFile(missingPath)).toThrowError(missingPath);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports malformed JSON with path context', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(configPath, '{not valid json');
+      expect(() => migrateMemoryConfigFile(configPath)).toThrowError(/malformed JSON/i);
+      expect(() => migrateMemoryConfigFile(configPath)).toThrowError(configPath);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
