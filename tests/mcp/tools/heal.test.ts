@@ -261,6 +261,12 @@ function findRegisteredTool(): ToolDeclaration | undefined {
   return registeredTools.find((t) => t.name === 'emit_heal_result');
 }
 
+function getRegisteredTool(): ToolDeclaration {
+  const tool = findRegisteredTool();
+  if (!tool) throw new Error('emit_heal_result not registered');
+  return tool;
+}
+
 /**
  * Create and start an AgentRuntime, then extract the emit_heal_result handler.
  * Returns both the runtime instance and the extracted handler so tests can
@@ -299,10 +305,42 @@ describe('emit_heal_result MCP tool', () => {
   // Registration
   // ──────────────────────────────────────────────────────────────────────────
 
-  it('registers emit_heal_result when controlPeers is non-empty', async () => {
+  it('registers emit_heal_result with the global repair contract when controlPeers is non-empty', async () => {
     const runtime = new AgentRuntime(makeDb(), makeMessenger());
     await runtime.start();
-    expect(findRegisteredTool()).toBeDefined();
+    const tool = getRegisteredTool();
+
+    expect(tool.name).toBe('emit_heal_result');
+    expect(tool.description).toBe('Signal completion of a repair cycle. Only callable during an active repair session.');
+    expect(tool.scope).toBe('global');
+    expect(tool.targetMode).toBe('caller-supplied');
+    expect(tool.replayPolicy).toBe('unsafe');
+    expect(tool.handler).toEqual(expect.any(Function));
+
+    expect(tool.schema.safeParse({
+      reportId: 'r-001',
+      errorClass: 'crash__oom',
+      result: 'fixed',
+      commitSha: 'abc1234',
+      diagnosis: 'patched',
+    }).success).toBe(true);
+    expect(tool.schema.safeParse({
+      reportId: 'r-002',
+      errorClass: 'crash__timeout',
+      result: 'escalate',
+      diagnosis: 'operator needed',
+    }).success).toBe(true);
+    expect(tool.schema.safeParse({
+      reportId: 'r-003',
+      errorClass: 'crash__missing_diagnosis',
+      result: 'fixed',
+    }).success).toBe(false);
+    expect(tool.schema.safeParse({
+      reportId: 'r-004',
+      errorClass: 'crash__bad_result',
+      result: 'retry',
+      diagnosis: 'not a valid result',
+    }).success).toBe(false);
   });
 
   it('does NOT register emit_heal_result when controlPeers is empty', async () => {
@@ -311,15 +349,6 @@ describe('emit_heal_result MCP tool', () => {
     const runtime = new AgentRuntime(makeDb(), makeMessenger());
     await runtime.start();
     expect(findRegisteredTool()).toBeUndefined();
-  });
-
-  it('registered tool has scope=global, targetMode=caller-supplied, replayPolicy=unsafe', async () => {
-    const runtime = new AgentRuntime(makeDb(), makeMessenger());
-    await runtime.start();
-    const tool = findRegisteredTool();
-    expect(tool?.scope).toBe('global');
-    expect(tool?.targetMode).toBe('caller-supplied');
-    expect(tool?.replayPolicy).toBe('unsafe');
   });
 
   // ──────────────────────────────────────────────────────────────────────────
