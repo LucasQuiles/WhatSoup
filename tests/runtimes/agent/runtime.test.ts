@@ -316,6 +316,10 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
+function fakeTimerHandle(label: string): ReturnType<typeof setTimeout> {
+  return { label } as unknown as ReturnType<typeof setTimeout>;
+}
+
 /**
  * Call handleMessage and wait for the turn chain to settle.
  * handleMessage enqueues work onto turnChain without awaiting it, so tests
@@ -910,7 +914,7 @@ describe('AgentRuntime', () => {
       const lidKey = '15550004444@lid';
       const sessionRef = { getStatus: () => mockSession.getStatus() };
       const queueRef = makeQueueMock(lidKey);
-      const imageTimer = setTimeout(() => undefined, 60_000);
+      const imageTimer = fakeTimerHandle('lid-image-coalesce');
 
       state.chatSessions.set(lidKey, sessionRef);
       state.chatQueues.set(lidKey, queueRef);
@@ -1168,7 +1172,7 @@ describe('AgentRuntime', () => {
         flushImageCoalesce: (mapKey: string) => Promise<void>;
         durability: { markInboundSkipped: ReturnType<typeof vi.fn> } | null;
       };
-      const timer = setTimeout(() => undefined, 60_000);
+      const timer = fakeTimerHandle('resume-failed-image-coalesce');
       const markInboundSkipped = vi.fn();
       state.durability = { markInboundSkipped };
       state.resumeFailedHandling.add('test@s.whatsapp.net');
@@ -1541,8 +1545,7 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
     capturedOnEventRef.current!({ type: 'result', text: null });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(mockQueue.flush).toHaveBeenCalled();
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
     // Should not add fallback because there was prior text
     const calls = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
     expect(calls).not.toContain('_(no response)_');
@@ -1557,7 +1560,7 @@ describe('AgentRuntime', () => {
 
     // No assistant_text event — go straight to result
     capturedOnEventRef.current!({ type: 'result', text: null });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_'));
 
     const calls = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('_(no response)_');
@@ -1572,7 +1575,7 @@ describe('AgentRuntime', () => {
     await runtime.handleMessage(makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'result', text: 'Context limit reached' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Context limit reached'));
 
     const calls = mockQueue.enqueueResultText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('Context limit reached');
@@ -1718,8 +1721,8 @@ describe('AgentRuntime', () => {
       };
       const targetKey = 'target@s.whatsapp.net';
       const otherKey = 'other@s.whatsapp.net';
-      const targetTimer = setTimeout(() => undefined, 60_000);
-      const otherTimer = setTimeout(() => undefined, 60_000);
+      const targetTimer = fakeTimerHandle('target-image-coalesce');
+      const otherTimer = fakeTimerHandle('other-image-coalesce');
       const markInboundSkipped = vi.fn();
       state.durability = { markInboundSkipped };
 
@@ -1888,8 +1891,8 @@ describe('AgentRuntime', () => {
       const workspaceSocketStopB = vi.fn();
       const workspaceMediaStopB = vi.fn();
       const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
-      const timeout = setTimeout(() => undefined, 60_000);
-      const imageTimer = setTimeout(() => undefined, 60_000);
+      const timeout = fakeTimerHandle('control-session');
+      const imageTimer = fakeTimerHandle('shutdown-image-coalesce');
       const markInboundSkipped = vi.fn();
 
       const runtimeState = runtime as unknown as {
@@ -2498,12 +2501,12 @@ describe('AgentRuntime', () => {
     expect(capturedOnResumeFailedRef.current).not.toBeNull();
     capturedOnResumeFailedRef.current!();
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
     // Should enqueue the expiry message through the queue (WA connected, pending already popped)
-    const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
-    expect(enqueuedTexts.some((t) => t.includes('expired'))).toBe(true);
-    expect(enqueuedTexts.some((t) => t.includes('fresh'))).toBe(true);
+    await vi.waitFor(() => {
+      const enqueuedTexts = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
+      expect(enqueuedTexts.some((t) => t.includes('expired'))).toBe(true);
+      expect(enqueuedTexts.some((t) => t.includes('fresh'))).toBe(true);
+    });
 
     // Should spawn a fresh session (no resume ID)
     // spawnSession called once for the initial resume attempt, then once fresh
@@ -2531,8 +2534,6 @@ describe('AgentRuntime', () => {
 
     // Don't pop — simulate failure before WA connects
     capturedOnResumeFailedRef.current!();
-
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     // Should NOT have sent directly (WA not connected)
     expect(sentMessages).toHaveLength(0);
@@ -2623,15 +2624,15 @@ describe('AgentRuntime', () => {
     runtime.popStartupMessage();
 
     capturedOnResumeFailedRef.current!();
-    // Wait for the spawnSession().then() and the turnChain to settle
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    await (runtime as unknown as { turnChain: Promise<void> }).turnChain;
 
-    const sendTurnCalls = mockSession.sendTurn.mock.calls as unknown as [string][];
-    expect(sendTurnCalls.length).toBeGreaterThan(0);
-    const contextCall = sendTurnCalls.find((args) =>
-      args[0].includes('CONTEXT RECOVERY'),
-    );
+    let contextCall: [string] | undefined;
+    await vi.waitFor(() => {
+      const sendTurnCalls = mockSession.sendTurn.mock.calls as unknown as [string][];
+      contextCall = sendTurnCalls.find((args) =>
+        args[0].includes('CONTEXT RECOVERY'),
+      );
+      expect(contextCall).toBeDefined();
+    });
     expect(contextCall).toBeDefined();
     expect(contextCall![0]).toContain('Alice');
   });
@@ -3823,9 +3824,7 @@ describe('AgentRuntime', () => {
 
       capturedOnEventRef.current?.({ type: 'assistant_text', text: 'Reply text' });
       capturedOnEventRef.current?.({ type: 'result', text: null });
-      // Flush the microtask queue and wait briefly
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setTimeout(r, 10));
+      await mockQueue.flush.mock.results[0]?.value;
 
       expect(mockSynthesizeSpeech).not.toHaveBeenCalled();
     });
