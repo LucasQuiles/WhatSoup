@@ -1,0 +1,38 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Repo hygiene staged smoke
+        run: npm run guard:repo:staged
+
+      - name: Repo hygiene commit-message smoke
+        run: |
+          msg="$(mktemp)"
+          printf 'chore(ci): guard smoke\n' > "$msg"
+          npm run guard:repo:commit-msg -- "$msg"
+
+      - name: Repo hygiene tests
+        run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
