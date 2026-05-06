@@ -117,10 +117,13 @@ function makeIngest(runtimeOverrides?: Partial<Runtime>) {
   return { db, messenger, runtime, handler };
 }
 
-/** Fire the handler and flush the microtask queue. */
+/** Fire the handler and wait until the ingest pipeline drains. */
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
   handler(msg);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitForStats((stats) => {
+    expect(stats.active).toBe(0);
+    expect(stats.queued).toBe(0);
+  });
 }
 
 /**
@@ -163,6 +166,19 @@ function deferred<T = void>(): Deferred<T> {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+async function waitForStats(assertStats: (stats: ReturnType<typeof getIngestStats>) => void): Promise<void> {
+  await vi.waitFor(() => {
+    assertStats(getIngestStats());
+  });
+}
+
+async function waitForIdle(): Promise<void> {
+  await waitForStats((stats) => {
+    expect(stats.active).toBe(0);
+    expect(stats.queued).toBe(0);
+  });
 }
 
 beforeEach(() => {
@@ -208,17 +224,15 @@ describe('SP1-01: normal flow below concurrency limit', () => {
       const msgs = Array.from({ length: 3 }, () => makeMsg());
       for (const msg of msgs) handler(msg);
 
-      // Give microtasks time to run
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
       // All three are active, none queued
-      const stats = getIngestStats();
-      expect(stats.active).toBeGreaterThanOrEqual(3);
-      expect(stats.queued).toBe(0);
+      await waitForStats((stats) => {
+        expect(stats.active).toBeGreaterThanOrEqual(3);
+        expect(stats.queued).toBe(0);
+      });
 
       // Resolve all
       for (const d of deferreds) d.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await waitForIdle();
     });
   });
 });
@@ -247,25 +261,27 @@ describe('SP1-02: backpressure — overflow queue', () => {
       // Fire 2 messages to fill the slots
       handler(makeMsg({ messageId: 'slot-1' }));
       handler(makeMsg({ messageId: 'slot-2' }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Both slots should be active
-      expect(getIngestStats().active).toBeGreaterThanOrEqual(2);
+      await waitForStats((stats) => {
+        expect(stats.active).toBeGreaterThanOrEqual(2);
+      });
 
       // Now fire one more — should go to queue (maxConcurrent=2 already reached)
       handler(makeMsg({ messageId: 'queued-1' }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
 
-      const stats = getIngestStats();
-      expect(stats.queued).toBeGreaterThanOrEqual(1);
+      await waitForStats((stats) => {
+        expect(stats.queued).toBeGreaterThanOrEqual(1);
+      });
       expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2); // third not yet dispatched
 
       // Release slots — third message should now process
       slot1.resolve();
       slot2.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(3);
+      await vi.waitFor(() => {
+        expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(3);
+      });
     });
   });
 });
@@ -293,28 +309,32 @@ describe('SP1-03: overflow drop — oldest message dropped when queue is full', 
 
       // Message A: takes the slot
       handler(makeMsg({ messageId: 'msg-A' }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(getIngestStats().active).toBe(1);
+      await waitForStats((stats) => {
+        expect(stats.active).toBe(1);
+      });
 
       // Message B: goes to queue (queue depth = 1 = max)
       handler(makeMsg({ messageId: 'msg-B', isGroup: false }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(getIngestStats().queued).toBe(1);
+      await waitForStats((stats) => {
+        expect(stats.queued).toBe(1);
+      });
 
       const statsBefore = getIngestStats();
 
       // Message C: queue is full — B gets dropped, C enqueues
       handler(makeMsg({ messageId: 'msg-C', isGroup: false }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
 
       // Queue is still at 1 (C replaced B), dropped counter went up
-      const statsAfter = getIngestStats();
-      expect(statsAfter.dropped).toBe(statsBefore.dropped + 1);
-      expect(statsAfter.queued).toBe(1); // still 1 queued (msg-C)
+      await waitForStats((statsAfter) => {
+        expect(statsAfter.dropped).toBe(statsBefore.dropped + 1);
+        expect(statsAfter.queued).toBe(1); // still 1 queued (msg-C)
+      });
 
       // Release slot A — msg-C should now run, msg-B was dropped and never runs
       slotA.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await vi.waitFor(() => {
+        expect(dispatched).toContain('msg-C');
+      });
 
       expect(dispatched).toContain('msg-A');
       expect(dispatched).toContain('msg-C');
@@ -336,25 +356,31 @@ describe('SP1-03: overflow drop — oldest message dropped when queue is full', 
 
       // Fill slot A
       handler(makeMsg({ messageId: 'msg-A' }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await waitForStats((stats) => {
+        expect(stats.active).toBe(1);
+      });
 
       // Queue: [DM-1, GROUP-1] (depth = 2 = max)
       handler(makeMsg({ messageId: 'dm-1', isGroup: false }));
       handler(makeMsg({ messageId: 'group-1', isGroup: true }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(getIngestStats().queued).toBe(2);
+      await waitForStats((stats) => {
+        expect(stats.queued).toBe(2);
+      });
 
       // Next message triggers eviction — group-1 should be preferred for drop
       const droppedBefore = getIngestStats().dropped;
       handler(makeMsg({ messageId: 'dm-2', isGroup: false }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
 
-      expect(getIngestStats().dropped).toBe(droppedBefore + 1);
-      expect(getIngestStats().queued).toBe(2); // still 2 (group-1 replaced by dm-2)
+      await waitForStats((stats) => {
+        expect(stats.dropped).toBe(droppedBefore + 1);
+        expect(stats.queued).toBe(2); // still 2 (group-1 replaced by dm-2)
+      });
 
       // Drain
       slotA.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await vi.waitFor(() => {
+        expect(dispatched).toContain('dm-2');
+      });
 
       // Group message was dropped, DMs went through
       expect(dispatched).toContain('dm-1');
@@ -400,18 +426,18 @@ describe('SP1-04: getIngestStats() counters', () => {
 
       handler(makeMsg({ messageId: 'active-1' }));
       handler(makeMsg({ messageId: 'active-2' }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Both active (limit=3 not reached yet)
-      expect(getIngestStats().active).toBeGreaterThanOrEqual(2);
-      expect(getIngestStats().queued).toBe(0);
+      await waitForStats((stats) => {
+        expect(stats.active).toBeGreaterThanOrEqual(2);
+        expect(stats.queued).toBe(0);
+      });
 
       // Release
       d1.resolve();
       d2.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(getIngestStats().active).toBe(0);
+      await waitForIdle();
     });
   });
 
@@ -433,25 +459,32 @@ describe('SP1-04: getIngestStats() counters', () => {
 
       // msg-A takes the slot
       handler(makeMsg({ messageId: 'drop-A' }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await waitForStats((stats) => {
+        expect(stats.active).toBe(1);
+      });
 
       // msg-B fills queue (depth=1)
       handler(makeMsg({ messageId: 'drop-B' }));
-      await new Promise((resolve) => setTimeout(resolve, 3));
+      await waitForStats((stats) => {
+        expect(stats.queued).toBe(1);
+      });
 
       // msg-C drops msg-B
       handler(makeMsg({ messageId: 'drop-C' }));
-      await new Promise((resolve) => setTimeout(resolve, 3));
+      await waitForStats((stats) => {
+        expect(stats.dropped).toBe(droppedBefore + 1);
+      });
 
       // msg-D drops msg-C
       handler(makeMsg({ messageId: 'drop-D' }));
-      await new Promise((resolve) => setTimeout(resolve, 3));
 
       // Should have dropped 2 messages (B and C)
-      expect(getIngestStats().dropped).toBe(droppedBefore + 2);
+      await waitForStats((stats) => {
+        expect(stats.dropped).toBe(droppedBefore + 2);
+      });
 
       hold.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await waitForIdle();
     });
   });
 });
@@ -475,27 +508,29 @@ describe('SP1-05: drain — queued messages process when slots free', () => {
 
       // Fill the single slot
       handler(makeMsg({ messageId: 'first' }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(getIngestStats().active).toBe(1);
+      await waitForStats((stats) => {
+        expect(stats.active).toBe(1);
+      });
 
       // Queue a second message
       handler(makeMsg({ messageId: 'second' }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(getIngestStats().queued).toBe(1);
+      await waitForStats((stats) => {
+        expect(stats.queued).toBe(1);
+      });
 
       // Second message should NOT have been dispatched yet
       expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(1);
 
       // Release the slot — second should drain
       hold.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 30));
 
-      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2);
-      expect(dispatchOrder).toEqual(['first', 'second']);
+      await vi.waitFor(() => {
+        expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2);
+        expect(dispatchOrder).toEqual(['first', 'second']);
+      });
 
       // All counters clean
-      expect(getIngestStats().active).toBe(0);
-      expect(getIngestStats().queued).toBe(0);
+      await waitForIdle();
     });
   });
 
@@ -513,21 +548,25 @@ describe('SP1-05: drain — queued messages process when slots free', () => {
 
       // Anchor fills the slot
       handler(makeMsg({ messageId: 'anchor' }));
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await waitForStats((stats) => {
+        expect(stats.active).toBe(1);
+      });
 
       // Enqueue in order
       handler(makeMsg({ messageId: 'q1' }));
       handler(makeMsg({ messageId: 'q2' }));
       handler(makeMsg({ messageId: 'q3' }));
-      await new Promise((resolve) => setTimeout(resolve, 5));
 
-      expect(getIngestStats().queued).toBe(3);
+      await waitForStats((stats) => {
+        expect(stats.queued).toBe(3);
+      });
 
       // Release anchor — remaining three should drain in order
       hold.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(dispatchOrder).toEqual(['anchor', 'q1', 'q2', 'q3']);
+      await vi.waitFor(() => {
+        expect(dispatchOrder).toEqual(['anchor', 'q1', 'q2', 'q3']);
+      });
     });
   });
 });
