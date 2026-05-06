@@ -44,6 +44,15 @@ function seedMessages(db: Database) {
   `);
 }
 
+const globalSearchToolNames = [
+  'search_chat_messages',
+  'search_contacts',
+  'search_messages',
+  'search_messages_advanced',
+];
+
+const chatSearchToolNames = ['search_chat_messages'];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -64,14 +73,12 @@ describe('search tools', () => {
   describe('search_messages', () => {
     it('is registered as global scope', () => {
       const tools = registry.listTools(globalSession());
-      const tool = tools.find((t) => t.name === 'search_messages');
-      expect(tool).toBeDefined();
+      expect(tools.map((t) => t.name)).toEqual(globalSearchToolNames);
     });
 
     it('is NOT visible in chat-scoped session', () => {
       const tools = registry.listTools(chatSession('111'));
-      const tool = tools.find((t) => t.name === 'search_messages');
-      expect(tool).toBeUndefined();
+      expect(tools.map((t) => t.name)).toEqual(chatSearchToolNames);
     });
 
     it('is rejected when called from a chat-scoped session', async () => {
@@ -125,14 +132,12 @@ describe('search tools', () => {
   describe('search_chat_messages', () => {
     it('is registered as chat scope', () => {
       const tools = registry.listTools(globalSession());
-      const tool = tools.find((t) => t.name === 'search_chat_messages');
-      expect(tool).toBeDefined();
+      expect(tools.map((t) => t.name)).toEqual(globalSearchToolNames);
     });
 
     it('is visible in chat-scoped session', () => {
       const tools = registry.listTools(chatSession('111'));
-      const tool = tools.find((t) => t.name === 'search_chat_messages');
-      expect(tool).toBeDefined();
+      expect(tools.map((t) => t.name)).toEqual(chatSearchToolNames);
     });
 
     it('filters results to the given conversation_key', async () => {
@@ -176,8 +181,7 @@ describe('search tools', () => {
   describe('search_contacts', () => {
     it('is registered as global scope', () => {
       const tools = registry.listTools(globalSession());
-      const tool = tools.find((t) => t.name === 'search_contacts');
-      expect(tool).toBeDefined();
+      expect(tools.map((t) => t.name)).toEqual(globalSearchToolNames);
     });
 
     it('is rejected in chat-scoped session', async () => {
@@ -217,8 +221,7 @@ describe('search tools', () => {
 
     it('is registered as global scope', () => {
       const tools = registry.listTools(globalSession());
-      const tool = tools.find((t) => t.name === 'search_messages_advanced');
-      expect(tool).toBeDefined();
+      expect(tools.map((t) => t.name)).toEqual(globalSearchToolNames);
     });
 
     it('is rejected in chat-scoped session', async () => {
