@@ -7,6 +7,13 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
+import {
+  AliasNotFoundError,
+  MissingTargetError,
+  MutuallyExclusiveError,
+  createChatResolver,
+} from '../../core/chats-resolver.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
 
@@ -50,6 +57,71 @@ type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_j
 interface OwnershipResult {
   row?: OwnershipRow;
   error?: string;
+}
+
+interface SendTargetResult {
+  chatJid?: string;
+  error?: string;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function chatTargetErrorMessage(err: unknown): string {
+  if (
+    err instanceof AliasNotFoundError ||
+    err instanceof MissingTargetError ||
+    err instanceof MutuallyExclusiveError
+  ) {
+    return err.message;
+  }
+  return sanitizeError(err);
+}
+
+function resolveSendTarget(
+  db: DatabaseSync,
+  params: Record<string, unknown>,
+  session: SessionContext,
+): SendTargetResult {
+  const chatJid = params['chatJid'];
+  const alias = params['to'];
+  const hasChatJid = isNonEmptyString(chatJid);
+  const hasAlias = isNonEmptyString(alias);
+
+  if (hasChatJid && hasAlias) {
+    return { error: new MutuallyExclusiveError().message };
+  }
+  if (!hasChatJid && !hasAlias) {
+    return { error: new MissingTargetError().message };
+  }
+
+  let resolvedChatJid: string;
+  if (hasChatJid) {
+    resolvedChatJid = chatJid;
+  } else {
+    try {
+      resolvedChatJid = createChatResolver({ db }).resolve({ to: alias as string });
+    } catch (err) {
+      return { error: chatTargetErrorMessage(err) };
+    }
+  }
+
+  if (session.tier === 'global' && session.conversationKey) {
+    let resolvedConversationKey: string;
+    try {
+      resolvedConversationKey = toConversationKey(resolvedChatJid);
+    } catch {
+      return { error: `Invalid chatJid "${resolvedChatJid}": must be a valid JID` };
+    }
+    if (resolvedConversationKey !== session.conversationKey) {
+      return {
+        error: `chatJid "${resolvedChatJid}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
+      };
+    }
+  }
+
+  return { chatJid: resolvedChatJid };
 }
 
 function validateMessageOwnership(
@@ -96,13 +168,18 @@ export function registerMessagingTools(
     targetMode: 'injected',
     replayPolicy: 'unsafe',
     schema: z.object({
-      chatJid: z.string(),
+      chatJid: z.string().optional(),
+      to: z.string().optional().describe('Per-instance chat alias to resolve against this line database. Mutually exclusive with chatJid.'),
       text: z.string(),
       viewOnce: z.boolean().optional().describe('Send as a view-once message that disappears after viewing.'),
       link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
     }),
-    handler: async (params, _session: SessionContext) => {
-      const chatJid = params['chatJid'] as string;
+    handler: async (params, session: SessionContext) => {
+      const target = resolveSendTarget(db, params, session);
+      if (target.error) {
+        return { error: target.error };
+      }
+      const chatJid = target.chatJid!;
       const text = params['text'] as string;
       const viewOnce = params['viewOnce'] as boolean | undefined;
       const linkPreviewMode = (params['link_preview'] as string | undefined) ?? 'auto';

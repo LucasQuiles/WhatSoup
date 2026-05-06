@@ -49,7 +49,7 @@ Complete reference for all 139 MCP tools exposed by WhatSoup. Tools are grouped 
 
 Chat-scoped messaging tools for sending, replying to, reacting to, editing, deleting, pinning, and decorating messages.
 
-> All tools in this module use `targetMode: injected`. In chat-scoped sessions `chatJid` is auto-injected and must not be passed. In global sessions `chatJid` must be supplied.
+> All tools in this module use `targetMode: injected`. In chat-scoped sessions target fields are auto-injected and must not be passed. In global sessions, tools require `chatJid` unless the tool documents an alias target such as `to`.
 
 ---
 
@@ -66,6 +66,8 @@ Send a text message to the current chat. Supports @name and @number mentions.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
+| chatJid | string | global only, xor `to` | Raw WhatsApp chat JID. Auto-injected and hidden in chat-scoped sessions. |
+| to | string | global only, xor `chatJid` | Per-instance chat alias resolved from the line's `chat_aliases` table. Auto-stripped in chat-scoped sessions. |
 | text | string | required | Message text (supports @name/@number mention syntax) |
 | viewOnce | boolean | optional | Send as a view-once message that disappears after viewing |
 

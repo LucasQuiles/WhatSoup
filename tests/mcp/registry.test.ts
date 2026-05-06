@@ -91,6 +91,26 @@ describe('ToolRegistry', () => {
     expect(schema.properties).not.toHaveProperty('chatJid');
   });
 
+  it('listTools omits caller target fields from alias-target injected tool schema in chat-scoped session', () => {
+    registry.register(
+      makeTool({
+        name: 'alias_target_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({
+          chatJid: z.string().optional(),
+          to: z.string().optional(),
+          message: z.string(),
+        }),
+      }),
+    );
+    const tools = registry.listTools(chatSession('18001234567', '18001234567@s.whatsapp.net'));
+    const schema = tools[0].inputSchema as { properties: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).not.toHaveProperty('chatJid');
+    expect(schema.properties).not.toHaveProperty('to');
+    expect(schema.required).toEqual(['message']);
+  });
+
   it('listTools adds chatJid as required in injected tool schema for global session', () => {
     registry.register(
       makeTool({
@@ -104,6 +124,26 @@ describe('ToolRegistry', () => {
     const schema = tools[0].inputSchema as { properties: Record<string, unknown>; required?: string[] };
     expect(schema.properties).toHaveProperty('chatJid');
     expect(schema.required).toContain('chatJid');
+  });
+
+  it('listTools exposes chatJid or to for alias-target injected tool schema in global session', () => {
+    registry.register(
+      makeTool({
+        name: 'alias_target_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({
+          chatJid: z.string().optional(),
+          to: z.string().optional(),
+          message: z.string(),
+        }),
+      }),
+    );
+    const tools = registry.listTools(makeSession({ tier: 'global' }));
+    const schema = tools[0].inputSchema as { properties: Record<string, unknown>; required?: string[] };
+    expect(schema.properties).toHaveProperty('chatJid');
+    expect(schema.properties).toHaveProperty('to');
+    expect(schema.required).toEqual(['message']);
   });
 
   it('listTools does not add chatJid for caller-supplied tools in global session', () => {
@@ -164,6 +204,34 @@ describe('ToolRegistry', () => {
     expect(capturedParams['message']).toBe('hello');
   });
 
+  it('auto-fills deliveryJid and ignores caller alias target for injected tool in chat-scoped session', async () => {
+    let capturedParams: Record<string, unknown> = {};
+    registry.register(
+      makeTool({
+        name: 'alias_target_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({
+          chatJid: z.string().optional(),
+          to: z.string().optional(),
+          message: z.string(),
+        }),
+        handler: async (params) => {
+          capturedParams = params;
+          return 'ok';
+        },
+      }),
+    );
+
+    const session = chatSession('18001234567', '18001234567@s.whatsapp.net');
+    const result = await registry.call('alias_target_tool', { to: 'bob', message: 'hello' }, session);
+
+    expect(result.isError).toBeUndefined();
+    expect(capturedParams['chatJid']).toBe('18001234567@s.whatsapp.net');
+    expect(capturedParams).not.toHaveProperty('to');
+    expect(capturedParams['message']).toBe('hello');
+  });
+
   it('returns error when chat-scoped session has no deliveryJid for injected tool', async () => {
     registry.register(
       makeTool({
@@ -194,6 +262,60 @@ describe('ToolRegistry', () => {
     const result = await registry.call('injected_tool', { message: 'hello' }, makeSession());
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/requires chatJid/);
+  });
+
+  it('accepts to-only params for alias-target injected tool in global session', async () => {
+    let capturedParams: Record<string, unknown> = {};
+    registry.register(
+      makeTool({
+        name: 'alias_target_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({
+          chatJid: z.string().optional(),
+          to: z.string().optional(),
+          message: z.string(),
+        }),
+        handler: async (params) => {
+          capturedParams = params;
+          return 'ok';
+        },
+      }),
+    );
+
+    const result = await registry.call(
+      'alias_target_tool',
+      { to: 'ops', message: 'hello' },
+      makeSession({ tier: 'global' }),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(capturedParams['to']).toBe('ops');
+    expect(capturedParams).not.toHaveProperty('chatJid');
+  });
+
+  it('requires chatJid or to for alias-target injected tool in global session', async () => {
+    registry.register(
+      makeTool({
+        name: 'alias_target_tool',
+        scope: 'chat',
+        targetMode: 'injected',
+        schema: z.object({
+          chatJid: z.string().optional(),
+          to: z.string().optional(),
+          message: z.string(),
+        }),
+      }),
+    );
+
+    const result = await registry.call(
+      'alias_target_tool',
+      { message: 'hello' },
+      makeSession({ tier: 'global' }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/requires chatJid or to/);
   });
 
   it('accepts chatJid for injected tool in global session and invokes handler', async () => {
