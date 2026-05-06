@@ -224,6 +224,62 @@ function rowToScheduledMessage(row: ScheduledMessageRow) {
   };
 }
 
+export interface ListScheduledMessagesParams {
+  chatJid?: string;
+  limit?: number;
+  status?: 'pending' | 'processing' | 'failed' | 'cancelled' | 'sent';
+}
+
+export function listScheduledMessages(
+  db: Database,
+  params: ListScheduledMessagesParams,
+  session: SessionContext,
+): { count: number; messages: ReturnType<typeof rowToScheduledMessage>[] } {
+  const { chatJid, limit = 100, status } = ListScheduledSchema.parse(params);
+
+  let rows: ScheduledMessageRow[];
+  if (status) {
+    rows = db.raw.prepare(
+      `SELECT * FROM scheduled_messages
+       WHERE status = ?
+       ORDER BY scheduled_at ASC, id ASC
+       LIMIT ?`,
+    ).all(status, limit) as unknown as ScheduledMessageRow[];
+  } else {
+    rows = db.raw.prepare(
+      `SELECT * FROM scheduled_messages
+       WHERE status IN ('pending', 'processing')
+       ORDER BY scheduled_at ASC, id ASC
+       LIMIT ?`,
+    ).all(limit) as unknown as ScheduledMessageRow[];
+  }
+
+  if (chatJid) {
+    const requestedConversation = toConversationKey(chatJid);
+    rows = rows.filter((row) => {
+      try {
+        return toConversationKey(row.chat_jid) === requestedConversation;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  rows = rows.filter((row) => {
+    try {
+      assertSessionAccess(row.chat_jid, session);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  return {
+    count: rows.length,
+    messages: rows.map(rowToScheduledMessage),
+  };
+}
+
 export function registerSchedulingTools(registry: ToolRegistry, deps: SchedulingDeps): void {
   const { db } = deps;
 
@@ -269,49 +325,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     replayPolicy: 'read_only',
     schema: ListScheduledSchema,
     handler: async (params, session) => {
-      const { chatJid, limit = 100, status } = ListScheduledSchema.parse(params);
-
-      let rows: ScheduledMessageRow[];
-      if (status) {
-        rows = db.raw.prepare(
-          `SELECT * FROM scheduled_messages
-           WHERE status = ?
-           ORDER BY scheduled_at ASC, id ASC
-           LIMIT ?`,
-        ).all(status, limit) as unknown as ScheduledMessageRow[];
-      } else {
-        rows = db.raw.prepare(
-          `SELECT * FROM scheduled_messages
-           WHERE status IN ('pending', 'processing')
-           ORDER BY scheduled_at ASC, id ASC
-           LIMIT ?`,
-        ).all(limit) as unknown as ScheduledMessageRow[];
-      }
-
-      if (chatJid) {
-        const requestedConversation = toConversationKey(chatJid);
-        rows = rows.filter((row) => {
-          try {
-            return toConversationKey(row.chat_jid) === requestedConversation;
-          } catch {
-            return false;
-          }
-        });
-      }
-
-      rows = rows.filter((row) => {
-        try {
-          assertSessionAccess(row.chat_jid, session);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-
-      return {
-        count: rows.length,
-        messages: rows.map(rowToScheduledMessage),
-      };
+      return listScheduledMessages(db, params, session);
     },
   });
 

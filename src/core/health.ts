@@ -9,6 +9,7 @@ import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
+import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionStateSnapshot } from '../transport/connection.ts';
 
@@ -427,55 +428,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
 
-        // Look up chat JID
-        const chatRow = deps.db.raw
-          .prepare('SELECT jid FROM chats WHERE conversation_key = ? LIMIT 1')
-          .get(conversation_key) as { jid: string } | undefined;
-
-        if (!chatRow) {
+        const result = await markConversationRead(deps.db, deps.connectionManager, conversation_key);
+        if (!result.ok) {
           res.writeHead(404, jsonHeaders);
           res.end(JSON.stringify({ error: 'chat not found', conversation_key }));
           return;
         }
 
-        const chatJid = chatRow.jid;
-
-        // Get last message for chatModify
-        const lastMsg = deps.db.raw
-          .prepare('SELECT message_id, sender_jid, timestamp FROM messages WHERE conversation_key = ? ORDER BY pk DESC LIMIT 1')
-          .get(conversation_key) as { message_id: string; sender_jid: string; timestamp: number } | undefined;
-
-        // Call chatModify if we have a last message and WhatsApp is connected
-        const sock = deps.connectionManager.getSocket();
-        if (lastMsg && sock) {
-          try {
-            await sock.chatModify(
-              {
-                markRead: true,
-                lastMessages: [
-                  {
-                    key: {
-                      id: lastMsg.message_id,
-                      fromMe: lastMsg.sender_jid === deps.connectionManager.botJid,
-                    },
-                    messageTimestamp: lastMsg.timestamp,
-                  },
-                ],
-              },
-              chatJid,
-            );
-          } catch (err) {
-            log.warn({ err, chatJid, conversation_key }, '/mark-read: chatModify failed (non-fatal)');
-          }
-        }
-
-        // Always zero out unread_count
-        deps.db.raw
-          .prepare('UPDATE chats SET unread_count = 0 WHERE conversation_key = ?')
-          .run(conversation_key);
-
         res.writeHead(200, jsonHeaders);
-        res.end(JSON.stringify({ ok: true, jid: chatJid, conversation_key }));
+        res.end(JSON.stringify(result));
       })().catch((err) => {
         log.error({ err }, 'POST /mark-read: unhandled error');
         try {
