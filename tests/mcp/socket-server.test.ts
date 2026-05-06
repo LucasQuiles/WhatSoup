@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -108,6 +108,52 @@ function waitForClientClose(client: Socket, timeoutMs = 500): Promise<void> {
   });
 }
 
+function sendJsonRpcMessagesUntilId(socketPath: string, messages: unknown[], targetId: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const client = createConnection(socketPath, () => {
+      for (const msg of messages) {
+        client.write(JSON.stringify(msg) + '\n');
+      }
+    });
+    let settled = false;
+    let buf = '';
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      client.setTimeout(0);
+      fn();
+    };
+
+    client.on('data', (chunk) => {
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const parsed = JSON.parse(line) as { id?: unknown };
+            if (parsed.id === targetId) {
+              settle(() => {
+                resolve(parsed);
+                client.end();
+              });
+            }
+          } catch {
+            // partial
+          }
+        }
+      }
+    });
+    client.once('error', (err) => settle(() => reject(err)));
+    client.setTimeout(3000, () => {
+      settle(() => {
+        client.destroy();
+        reject(new Error('timeout'));
+      });
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -124,10 +170,8 @@ describe('WhatSoupSocketServer', () => {
     session = makeSession();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     server?.stop();
-    // Give the server a moment to close before cleaning up
-    await new Promise((r) => setTimeout(r, 50));
     try { unlinkSync(socketPath); } catch { /* already gone */ }
   });
 
@@ -208,37 +252,10 @@ describe('WhatSoupSocketServer', () => {
     await waitForSocket(socketPath);
 
     // Send a notification (no id), then a regular request. Only the second should get a response.
-    const responsePromise = new Promise<unknown>((resolve, reject) => {
-      const client = createConnection(socketPath, () => {
-        // First: notification (no id)
-        client.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
-        // Second: real request
-        client.write(JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'initialize', params: {} }) + '\n');
-      });
-      let buf = '';
-      client.on('data', (chunk) => {
-        buf += chunk.toString();
-        const lines = buf.split('\n');
-        for (const line of lines) {
-          if (line.trim()) {
-            try {
-              const parsed = JSON.parse(line) as { id?: unknown };
-              // Only resolve on the actual request response (id: 99)
-              if (parsed.id === 99) {
-                resolve(parsed);
-                client.end();
-              }
-            } catch {
-              // partial
-            }
-          }
-        }
-      });
-      client.on('error', reject);
-      setTimeout(() => reject(new Error('timeout')), 3000);
-    });
-
-    const response = await responsePromise as { id: number; result: unknown };
+    const response = await sendJsonRpcMessagesUntilId(socketPath, [
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 99, method: 'initialize', params: {} },
+    ], 99) as { id: number; result: unknown };
     expect(response.id).toBe(99);
     expect(response.result).toBeDefined();
   });
@@ -440,10 +457,9 @@ describe('WhatSoupSocketServer', () => {
     // Connect and immediately get a response (which closes the connection)
     await sendJsonRpc(socketPath, { jsonrpc: '2.0', id: 300, method: 'initialize', params: {} });
 
-    // After sendJsonRpc closes, connection count should go back to 0
-    // (small delay for close event propagation)
-    await new Promise(r => setTimeout(r, 50));
-    expect(server.connectionCount).toBe(0);
+    await vi.waitFor(() => {
+      expect(server.connectionCount).toBe(0);
+    });
   });
 
   it('stop destroys active client connections', async () => {
@@ -453,8 +469,9 @@ describe('WhatSoupSocketServer', () => {
 
     const client = createConnection(socketPath);
     await waitForClientConnect(client);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(server.connectionCount).toBe(1);
+    await vi.waitFor(() => {
+      expect(server.connectionCount).toBe(1);
+    });
 
     server.stop();
 
