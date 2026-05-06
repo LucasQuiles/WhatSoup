@@ -80,7 +80,7 @@ describe('access-list', () => {
   // @traces REQ-013.AC-04
   it('unknown group returns null (silent ignore)', () => {
     const entry = lookupAccess(db, 'group', '999363999999999@g.us');
-    expect(entry).toBeNull();
+    expect(entry).toStrictEqual(null);
   });
 
   it('insertPending creates a pending entry with requested_at set', () => {
@@ -89,7 +89,7 @@ describe('access-list', () => {
     expect(entry).not.toBeNull();
     expect(entry!.status).toBe('pending');
     expect(entry!.requestedAt).not.toBeNull();
-    expect(entry!.decidedAt).toBeNull();
+    expect(entry!.decidedAt).toStrictEqual(null);
   });
 
   it('updateAccess changes status and sets decided_at', () => {
@@ -113,7 +113,7 @@ describe('access-list', () => {
 
   it('lookupAccess returns null for an unknown phone', () => {
     const entry = lookupAccess(db, 'phone', '99999999999');
-    expect(entry).toBeNull();
+    expect(entry).toStrictEqual(null);
   });
 
   it('getPendingCount returns accurate count', () => {
