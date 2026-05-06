@@ -7,6 +7,7 @@ import { Database } from '../../../src/core/database.ts';
 import { PresenceCache } from '../../../src/transport/presence-cache.ts';
 import type { ConnectionManager } from '../../../src/transport/connection.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
+import * as registerAllModule from '../../../src/mcp/register-all.ts';
 
 function makeConnection(): ConnectionManager {
   return {
@@ -111,6 +112,38 @@ describe('PassiveRuntime', () => {
       await runtime.shutdown();
       // Socket cleaned up after shutdown
       expect(existsSync(socketPath)).toBe(false);
+    });
+  });
+
+  describe('knowledge_search gate', () => {
+    let tmpDir: string;
+    let db: Database;
+    let registerAllSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'whatsoup-passive-ks-'));
+      db = new Database(':memory:');
+      db.open();
+      registerAllSpy = vi.spyOn(registerAllModule, 'registerAllTools');
+    });
+
+    afterEach(() => {
+      registerAllSpy.mockRestore();
+      db.raw.close();
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('disables knowledge_search registration explicitly', async () => {
+      const connection = makeConnection();
+      const config = { name: 'test-passive', paths: { stateRoot: tmpDir } };
+      const runtime = new PassiveRuntime(db, connection, config);
+
+      await runtime.start();
+      await runtime.shutdown();
+
+      expect(registerAllSpy).toHaveBeenCalledOnce();
+      const [, , , options] = registerAllSpy.mock.calls[0];
+      expect(options).toMatchObject({ enableKnowledgeSearch: false });
     });
   });
 });
