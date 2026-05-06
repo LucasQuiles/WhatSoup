@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { jitteredDelay, sleep } from '../../src/core/retry.ts';
+import { jitteredDelay, sleep as retrySleep } from '../../src/core/retry.ts';
 
 describe('retry helpers', () => {
   beforeEach(() => {
@@ -12,13 +12,13 @@ describe('retry helpers', () => {
   });
 
   it('exports sleep and jitteredDelay helpers', () => {
-    expect(sleep).toBeTypeOf('function');
+    expect(retrySleep).toBeTypeOf('function');
     expect(jitteredDelay).toBeTypeOf('function');
   });
 
   it('sleep resolves after the requested delay', async () => {
     let resolved = false;
-    const pending = sleep(25).then(() => {
+    const pending = retrySleep(25).then(() => {
       resolved = true;
     });
 
