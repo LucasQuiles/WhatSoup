@@ -123,6 +123,7 @@ fi
 # ---------------------------------------------------------------------------
 ACTUAL_SOURCE=""
 VITEST_TEXT=""
+VITEST_EXIT=0
 
 # Run from repo root for both branches so relative paths in the parser, baseline,
 # and any future git-aware checks resolve identically. (Process-substitution paths
@@ -141,8 +142,11 @@ if [ -n "$VITEST_OUTPUT" ]; then
   }
   ACTUAL_SOURCE="$VITEST_OUTPUT"
 else
-  ACTUAL_SOURCE="<live run: ${CMD}>"
-  VITEST_TEXT="$(eval "$CMD" 2>&1)" || true  # vitest exits non-zero on failures; we capture anyway
+  set +e
+  VITEST_TEXT="$(eval "$CMD" 2>&1)"
+  VITEST_EXIT=$?
+  set -e
+  ACTUAL_SOURCE="<live run: ${CMD} (exit ${VITEST_EXIT})>"
 fi
 
 # ---------------------------------------------------------------------------

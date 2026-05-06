@@ -66,7 +66,9 @@ capture_process() {
 # TEST 1: Health Check
 # =============================================================================
 log "TEST 1: Health and mode verification"
-HEALTH=$(curl -s http://localhost:$HEALTH_PORT/health 2>/dev/null)
+if ! HEALTH=$(curl --silent --show-error --fail-with-body "http://localhost:$HEALTH_PORT/health" 2>/dev/null); then
+  HEALTH="{}"
+fi
 MODE=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('instance',{}).get('mode','?'))" 2>/dev/null)
 CONNECTED=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('whatsapp',{}).get('connected',False))" 2>/dev/null)
 
@@ -90,9 +92,11 @@ capture_process &
 CAPTURE_PID=$!
 
 # Send via WhatsApp MCP (through our lab instance)
-curl -s -X POST "http://localhost:9096/send" \
+if ! curl --silent --show-error --fail-with-body --output /dev/null -X POST "http://localhost:9096/send" \
   -H "Content-Type: application/json" \
-  -d "{\"chatJid\":\"19297905323@s.whatsapp.net\",\"text\":\"$TURN1_TEXT\"}" 2>/dev/null || true
+  -d "{\"chatJid\":\"19297905323@s.whatsapp.net\",\"text\":\"$TURN1_TEXT\"}" 2>/dev/null; then
+  fail "Turn 1 send" "HTTP POST failed"
+fi
 
 # Wait for response
 if wait_for_response 60; then
@@ -169,9 +173,11 @@ sleep 3
 
 TURN2_TEXT="What was my name and my favorite number? You should remember from my last message."
 
-curl -s -X POST "http://localhost:9096/send" \
+if ! curl --silent --show-error --fail-with-body --output /dev/null -X POST "http://localhost:9096/send" \
   -H "Content-Type: application/json" \
-  -d "{\"chatJid\":\"19297905323@s.whatsapp.net\",\"text\":\"$TURN2_TEXT\"}" 2>/dev/null || true
+  -d "{\"chatJid\":\"19297905323@s.whatsapp.net\",\"text\":\"$TURN2_TEXT\"}" 2>/dev/null; then
+  fail "Turn 2 send" "HTTP POST failed"
+fi
 
 if wait_for_response 60; then
   pass "Turn 2: response received"
