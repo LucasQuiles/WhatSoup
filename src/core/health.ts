@@ -140,7 +140,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
-    // ── POST /agent/compact — run Claude Code /compact without WhatsApp ingest ──
+    // ── POST /agent/compact — run runtime compaction without WhatsApp ingest ──
     if (req.url === '/agent/compact' && req.method === 'POST') {
       (async () => {
         const jsonHeaders = { 'Content-Type': 'application/json' };

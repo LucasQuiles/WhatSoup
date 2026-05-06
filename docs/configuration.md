@@ -89,7 +89,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
   -d '{"chatJid":"120363410094619161@g.us"}'
 ```
 
-`chatJid` is required for `agentOptions.sessionScope: "per_chat"` and shared-session agents so the runtime compacts the intended session and routes the completion event correctly. Single-session agents can omit it only when an active chat is already known. `silent` defaults to `true`, suppressing the normal user-facing compact notice and any command output. Set `"silent": false` only for operator diagnostics.
+`chatJid` is required for per-chat and shared session agents so the runtime compacts the intended session and routes the completion event correctly. Agents using one session can omit it only when an active chat is already known. `silent` defaults to `true`, suppressing the normal user-facing compact notice and any command output. Set `"silent": false` only for operator diagnostics.
 
 ### Logging
 
