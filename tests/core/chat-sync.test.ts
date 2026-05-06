@@ -287,8 +287,9 @@ describe('chat-sync', () => {
     });
 
     it('ignores delete for non-existent chat', () => {
-      // Should not throw
-      handleChatsDelete(db, ['nonexistent@s.whatsapp.net']);
+      expect(() => handleChatsDelete(db, ['nonexistent@s.whatsapp.net'])).not.toThrow();
+      const rows = db.raw.prepare('SELECT * FROM chats').all() as unknown[];
+      expect(rows).toHaveLength(0);
     });
   });
 

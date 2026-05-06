@@ -98,8 +98,8 @@ describe('FleetRealtimeEventPoller', () => {
 
     poller.start();
     poller.stop();
-    // Double stop should not throw
-    poller.stop();
+    expect(() => poller.stop()).not.toThrow();
+    expect(publisher.calls).toHaveLength(0);
   });
 
   it('prunes stale snapshots for instances removed from discovery', async () => {

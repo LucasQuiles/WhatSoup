@@ -762,8 +762,8 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    // No session spawned — tickWatchdog should not throw
-    sm.tickWatchdog();
+    expect(() => sm.tickWatchdog()).not.toThrow();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null });
 
     vi.useRealTimers();
   });

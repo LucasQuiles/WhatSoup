@@ -22,15 +22,19 @@ describe('Provider hardening', () => {
 
     it('all mkdirSync calls in providers use mode 0o700', () => {
       const files = readdirSync(PROVIDERS_DIR).filter(f => f.endsWith('.ts'));
+      expect(files).toEqual(expect.arrayContaining(['anthropic-api.ts', 'claude.ts', 'openai-api.ts']));
+      const insecureCalls: string[] = [];
       for (const file of files) {
         const content = readFileSync(join(PROVIDERS_DIR, file), 'utf8');
         const mkdirCalls = content.match(/mkdirSync\([^)]+\)/g) ?? [];
         for (const call of mkdirCalls) {
-          if (!call.includes('import')) {
-            expect(call).toContain('0o700');
+          if (!call.includes('import') && !call.includes('0o700')) {
+            insecureCalls.push(`${file}: ${call}`);
           }
         }
       }
+      expect(files.length).toBeGreaterThan(0);
+      expect(insecureCalls).toEqual([]);
     });
   });
 
