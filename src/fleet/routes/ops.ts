@@ -87,17 +87,61 @@ export async function handleSend(
 
   const body = await readBody(req);
 
-  // Normalize JID in request body
+  // Validate target shape + normalize JID in request body.
+  // chatJid xor to: callers must commit to exactly one. Both -> 400; neither -> 400.
+  //
+  // Architectural note (P1-D, deviation from phase1-design.md Decision 3):
+  // We do NOT add a `chatResolver` field to OpsDeps. Aliases live in per-instance
+  // DBs (Decisions 1+2) and the fleet has no per-instance DB connection. Honoring
+  // the literal design would require Map<line, ChatResolver> + new infrastructure
+  // for fleet-side instance DB connections. Instead, the fleet validates xor and
+  // forwards the body verbatim; the per-instance MCP `send_message` tool (P1-E)
+  // resolves the alias against its own DB. Defense in depth: fleet xor protects
+  // HTTP callers; MCP xor protects direct-MCP callers. Instance returns its own
+  // error (propagated as 502) when an alias is unknown.
   let fixedBody = body;
   try {
     const parsed = JSON.parse(body);
-    if (typeof parsed.chatJid === 'string' && !parsed.chatJid.includes('@')) {
+
+    // Reject non-object payloads explicitly. Without this guard, a body of `null`
+    // throws TypeError on property access, the catch swallows it as "invalid
+    // JSON", and the request falls through to mcpCall with a `null` payload —
+    // bypassing xor validation. Arrays and primitives currently land at the
+    // "neither" branch by accident; explicit type-shape rejection makes the
+    // boundary deliberate.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      jsonResponse(res, 400, {
+        error: 'request body must be a JSON object with chatJid (raw JID) or to (alias)',
+      });
+      return;
+    }
+
+    // Trim before length check: whitespace-only values count as not-provided
+    // (matches resolver semantics in src/core/chats-resolver.ts and prevents
+    // forwarding `'   '` to the instance via JID normalization).
+    const hasChatJid = typeof parsed.chatJid === 'string' && parsed.chatJid.trim().length > 0;
+    const hasTo = typeof parsed.to === 'string' && parsed.to.trim().length > 0;
+
+    if (hasChatJid && hasTo) {
+      jsonResponse(res, 400, {
+        error: 'chatJid and to are mutually exclusive; provide exactly one',
+      });
+      return;
+    }
+    if (!hasChatJid && !hasTo) {
+      jsonResponse(res, 400, {
+        error: 'request body must contain chatJid (raw JID) or to (alias)',
+      });
+      return;
+    }
+
+    if (hasChatJid && !parsed.chatJid.includes('@')) {
       parsed.chatJid = isGroupConversationKey(parsed.chatJid)
         ? conversationKeyToJid(parsed.chatJid)
         : toPersonalJid(parsed.chatJid);
       fixedBody = JSON.stringify(parsed);
     }
-  } catch { /* use original body */ }
+  } catch { /* invalid JSON: existing fall-through; downstream returns 400 */ }
 
   // Route 1: Try MCP socket (passive instances with verified socket)
   if (instance.type === 'passive' && instance.socketPath) {

@@ -391,6 +391,15 @@ CREATE INDEX IF NOT EXISTS idx_fact_export_queue_pending ON fact_export_queue(st
   WHERE status = 'pending';
 `;
 
+const MIGRATION_21 = `
+CREATE TABLE IF NOT EXISTS chat_aliases (
+  alias TEXT NOT NULL PRIMARY KEY,
+  chat_jid TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -556,6 +565,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
     }
   }],
   [20, runMigration20],
+  [21, (db: DatabaseSync) => { db.exec(MIGRATION_21); }],
 ]);
 
 function runMigration20(db: DatabaseSync): void {
