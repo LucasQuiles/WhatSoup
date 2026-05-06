@@ -21,6 +21,7 @@ import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
+import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { handleContactsUpsert, handleContactsUpdate } from './core/contacts-sync.ts';
 import {
   handleReaction,
@@ -682,14 +683,12 @@ async function start(): Promise<void> {
   await runtime.start();
   await connectionManager.connect();
 
-  // Wait for history sync or 15s timeout, then allow echo grace period before
-  // running post-connect recovery so echoes from inflight messages can arrive.
-  await Promise.race([
-    new Promise<void>((resolve) => connectionManager.once('historySyncComplete', resolve)),
-    new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
-  ]);
-  await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
-  durability.postConnectRecovery();
+  // Wait for history sync or timeout, then allow echo grace before recovery so
+  // echoes from inflight messages can arrive.
+  await waitForHistorySyncThenRecover({
+    connectionManager,
+    recover: () => durability.postConnectRecovery(),
+  });
 
   log.info('WhatSoup bot started');
 
