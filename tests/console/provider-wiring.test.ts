@@ -84,18 +84,26 @@ describe('claude-cli (default)', () => {
 
   it('does NOT show provider badge (default provider hidden)', () => {
     const badge = simulateProviderBadge('agent', { agentOptions: { provider: 'claude-cli' } });
-    expect(badge).toBeNull();
+    expect({ mode: 'agent', provider: 'claude-cli', badge }).toEqual({
+      mode: 'agent',
+      provider: 'claude-cli',
+      badge: null,
+    });
   });
 
   it('does NOT show provider badge when provider field is absent', () => {
     const badge = simulateProviderBadge('agent', { agentOptions: {} });
-    expect(badge).toBeNull();
+    expect({ mode: 'agent', provider: undefined, badge }).toEqual({
+      mode: 'agent',
+      provider: undefined,
+      badge: null,
+    });
   });
 
   it('review step shows claude-cli as default', () => {
     const display = simulateReviewDisplay({});
     expect(display.provider).toBe('claude-cli');
-    expect(display.model).toBeNull();
+    expect(display).toEqual({ provider: 'claude-cli', model: null });
   });
 
   it('full E2E: select claude-cli → no extra fields → API payload correct', () => {
@@ -137,7 +145,11 @@ describe('codex-cli', () => {
 
   it('does NOT show badge for non-agent mode', () => {
     const badge = simulateProviderBadge('chat', { agentOptions: { provider: id } });
-    expect(badge).toBeNull();
+    expect({ mode: 'chat', provider: id, badge }).toEqual({
+      mode: 'chat',
+      provider: 'codex-cli',
+      badge: null,
+    });
   });
 
   it('full E2E: select → configure model → verify API payload', () => {
