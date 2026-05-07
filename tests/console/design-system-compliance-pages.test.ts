@@ -9,8 +9,8 @@ describe('design system compliance — Shannon slice', () => {
   it('uses design tokens for Nav hardcoded pixel values', () => {
     const source = read('console/src/components/Nav.tsx')
 
-    expect(source).toContain('left: "var(--sp-3)"')
-    expect(source).toContain('right: "var(--sp-3)"')
+    expect(source).toMatch(/left:\s*["']var\(--sp-3\)["']/)
+    expect(source).toMatch(/right:\s*["']var\(--sp-3\)["']/)
     expect(source).toContain('h-[var(--bw-accent)]')
     expect(source).toContain('min-w-[var(--sp-4)]')
     expect(source).toContain('py-[var(--sp-0h)] px-[var(--sp-1)]')
@@ -76,7 +76,7 @@ describe('design system compliance — Shannon slice', () => {
 
     expect(pipeline).toContain('<button')
     expect(pipeline).toContain('type="button"')
-    expect(pipeline).toContain('c-btn c-btn-sm font-mono inline-flex items-center gap-1.5')
+    expect(pipeline).toMatch(/className="[^"]*c-btn c-btn-sm font-mono inline-flex items-center gap-1\.5[^"]*"/)
     expect(pipeline).not.toContain('<span\n      className="inline-flex items-center gap-1.5"\n      onClick={onClick}')
   })
 
@@ -84,8 +84,8 @@ describe('design system compliance — Shannon slice', () => {
     const inbox = read('console/src/pages/Inbox.tsx')
 
     expect((inbox.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
-    expect(inbox).toContain('c-btn c-btn-ghost')
-    expect(inbox).toContain('c-btn c-btn-sm')
+    expect(inbox).toMatch(/className="[^"]*c-btn c-btn-ghost[^"]*"/)
+    expect(inbox).toMatch(/className="[^"]*c-btn c-btn-sm[^"]*"/)
     expect(inbox).toContain('z-[var(--z-float)]')
     expect(inbox).toContain('aria-label="Type a message"')
     expect(inbox).toContain('aria-label="Clear search"')
