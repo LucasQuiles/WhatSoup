@@ -74,21 +74,32 @@ function validateMessageOwnership(
   messageId: string,
   session: SessionContext,
 ): OwnershipResult {
+  if (session.tier === 'chat-scoped') {
+    if (!session.conversationKey) {
+      return { error: 'Chat-scoped session has no conversation key' };
+    }
+
+    const row = db
+      .prepare(
+        `SELECT conversation_key, is_from_me, chat_jid, message_id, sender_jid, content
+         FROM messages
+         WHERE message_id = ? AND conversation_key = ?`,
+      )
+      .get(messageId, session.conversationKey) as OwnershipRow | undefined;
+
+    if (!row) {
+      return { error: 'Message not found' };
+    }
+
+    return { row };
+  }
+
   const row = db
     .prepare('SELECT conversation_key, is_from_me, chat_jid, message_id, sender_jid, content FROM messages WHERE message_id = ?')
     .get(messageId) as OwnershipRow | undefined;
 
   if (!row) {
     return { error: 'Message not found' };
-  }
-
-  if (session.tier === 'chat-scoped') {
-    if (!session.conversationKey) {
-      return { error: 'Chat-scoped session has no conversation key' };
-    }
-    if (row.conversation_key !== session.conversationKey) {
-      return { error: 'Access denied: message belongs to a different conversation' };
-    }
   }
 
   return { row };

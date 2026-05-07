@@ -165,6 +165,19 @@ describe('chat-management tools', () => {
       expect(result.content[0].text).toMatch(/belongs to conversation/);
     });
 
+    it('does not leak the target conversation for cross-chat IDs in chat-scoped sessions', async () => {
+      const result = await registry.call(
+        'get_message_context',
+        { message_id: 'msg6', conversation_key: '222' },
+        chatSession('111'),
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/not found/);
+      expect(result.content[0].text).not.toContain('222');
+      expect(result.content[0].text).not.toMatch(/belongs to conversation/);
+    });
+
     it('is visible in chat-scoped session (chat scope)', () => {
       const tools = registry.listTools(chatSession('111'));
       expect(tools.find((t) => t.name === 'get_message_context')).toBeDefined();

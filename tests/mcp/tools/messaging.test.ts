@@ -52,6 +52,7 @@ function seedMessage(
     conversation_key?: string;
     sender_jid?: string;
     is_from_me?: number;
+    content?: string;
   } = {},
 ): string {
   const messageId = overrides.message_id ?? 'msg-001';
@@ -63,7 +64,7 @@ function seedMessage(
     overrides.conversation_key ?? '1234567890',
     overrides.sender_jid ?? '1234567890@s.whatsapp.net',
     messageId,
-    'hello',
+    overrides.content ?? 'hello',
     overrides.is_from_me ?? 0,
     1_700_000_000,
   );
@@ -462,7 +463,32 @@ describe('registerMessagingTools', () => {
       const result = await registry.call('reply_message', { messageId: 'msg-other', text: 'sneaky' }, session);
 
       const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/Access denied/);
+      expect(body.error).toBe('Message not found');
+    });
+
+    it('treats cross-conversation message IDs as scoped misses without exposing target data', async () => {
+      seedMessage(db, {
+        message_id: 'msg-other-secret',
+        chat_jid: 'other-chat@s.whatsapp.net',
+        conversation_key: 'other-secret-chat',
+        sender_jid: 'secret-sender@s.whatsapp.net',
+        content: 'secret message body',
+      });
+
+      const session = chatSession('current-chat', 'current-chat@s.whatsapp.net');
+      const result = await registry.call(
+        'reply_message',
+        { messageId: 'msg-other-secret', text: 'sneaky' },
+        session,
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(body.error).not.toContain('other-secret-chat');
+      expect(body.error).not.toContain('other-chat@s.whatsapp.net');
+      expect(body.error).not.toContain('secret-sender@s.whatsapp.net');
+      expect(body.error).not.toContain('secret message body');
+      expect(calls).toHaveLength(0);
     });
 
     // SP6: link_preview opt-out for reply_message
@@ -517,7 +543,7 @@ describe('registerMessagingTools', () => {
       const result = await registry.call('react_message', { messageId: 'msg-x', emoji: '❤️' }, session);
 
       const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/Access denied/);
+      expect(body.error).toBe('Message not found');
     });
   });
 
@@ -553,7 +579,7 @@ describe('registerMessagingTools', () => {
       const result = await registry.call('edit_message', { messageId: 'msg-y', newText: 'hack' }, session);
 
       const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/Access denied/);
+      expect(body.error).toBe('Message not found');
     });
   });
 
@@ -586,7 +612,7 @@ describe('registerMessagingTools', () => {
       const result = await registry.call('delete_message', { messageId: 'msg-z' }, session);
 
       const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/Access denied/);
+      expect(body.error).toBe('Message not found');
     });
   });
 
@@ -733,7 +759,7 @@ describe('registerMessagingTools', () => {
       const result = await registry.call('pin_message', { messageId: 'msg-p', pin: true }, session);
 
       const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/Access denied/);
+      expect(body.error).toBe('Message not found');
     });
   });
 });
