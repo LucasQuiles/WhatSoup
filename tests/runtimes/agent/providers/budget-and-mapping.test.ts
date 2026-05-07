@@ -216,7 +216,8 @@ describe('ProviderBudget', () => {
       expect(snap.requestsLastMinute).toBe(2);
       expect(snap.tokensLastMinute).toBe(400); // 150 + 250
       expect(snap.isThrottled).toBe(false);
-      expect(snap.throttleReason).toBeNull();
+
+      expect(budget.checkBudget()).toEqual({ allowed: true });
     });
 
     it('reports throttled when limit is exceeded', () => {
