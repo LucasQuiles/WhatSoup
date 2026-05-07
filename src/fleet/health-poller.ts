@@ -50,7 +50,11 @@ export class HealthPoller {
 
   private emitStatusChange(instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']): void {
     for (const cb of this.statusChangeListeners) {
-      try { cb(instance, newStatus, oldStatus); } catch { /* listener errors must not break poller */ }
+      try {
+        cb(instance, newStatus, oldStatus);
+      } catch (err) {
+        log.warn({ err, instance, newStatus, oldStatus }, 'status change listener failed');
+      }
     }
   }
 
