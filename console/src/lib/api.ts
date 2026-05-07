@@ -98,6 +98,76 @@ async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>
   }
 }
 
+type ApiRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): ApiRecord {
+  return value && typeof value === 'object' ? value as ApiRecord : {};
+}
+
+function stringField(source: ApiRecord, key: string, fallback = ''): string {
+  const value = source[key];
+  return typeof value === 'string' ? value : fallback;
+}
+
+function requiredStringField(source: ApiRecord, key: string, fallback = ''): string {
+  const value = stringField(source, key, fallback);
+  return value || fallback;
+}
+
+function nullableStringField(source: ApiRecord, key: string): string | null {
+  const value = source[key];
+  return typeof value === 'string' ? value : null;
+}
+
+function numberField(source: ApiRecord, key: string, fallback = 0): number {
+  const value = source[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function booleanField(source: ApiRecord, key: string, fallback = false): boolean {
+  const value = source[key];
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function normalizeChatItem(value: unknown): ChatItem {
+  const row = asRecord(value);
+  const conversationKey = requiredStringField(row, 'conversationKey');
+  return {
+    conversationKey,
+    name: requiredStringField(row, 'name', conversationKey),
+    lastMessagePreview: stringField(row, 'lastMessagePreview'),
+    lastMessageAt: stringField(row, 'lastMessageAt'),
+    unreadCount: numberField(row, 'unreadCount'),
+    isGroup: booleanField(row, 'isGroup'),
+  };
+}
+
+function normalizeMessage(value: unknown): Message {
+  const row = asRecord(value);
+  return {
+    pk: numberField(row, 'pk'),
+    conversationKey: requiredStringField(row, 'conversationKey'),
+    senderName: stringField(row, 'senderName'),
+    senderJid: stringField(row, 'senderJid'),
+    content: nullableStringField(row, 'content'),
+    timestamp: stringField(row, 'timestamp'),
+    fromMe: booleanField(row, 'fromMe'),
+    type: requiredStringField(row, 'type', 'unknown'),
+    rawMessage: nullableStringField(row, 'rawMessage') ?? undefined,
+  };
+}
+
+function normalizeSearchResponse(value: unknown): { results: Message[]; total: number; query: string } {
+  const row = asRecord(value);
+  const resultsValue = row.results;
+  const results = Array.isArray(resultsValue) ? resultsValue.map(normalizeMessage) : [];
+  return {
+    results,
+    total: numberField(row, 'total', results.length),
+    query: stringField(row, 'query'),
+  };
+}
+
 export const api = {
   getLines: () => withFallback(
     () => apiFetch<LineInstance[]>('/api/lines'),
@@ -108,12 +178,12 @@ export const api = {
     async () => { const line = (await loadMockData()).getLine(name); if (!line) throw new Error('Not found'); return line; },
   ),
   getChats: (name: string) => withFallback(
-    () => apiFetch<ChatItem[]>(`/api/lines/${encodeURIComponent(name)}/chats`),
-    async () => (await loadMockData()).getChats(name),
+    async () => (await apiFetch<unknown[]>(`/api/lines/${encodeURIComponent(name)}/chats`)).map(normalizeChatItem),
+    async () => (await loadMockData()).getChats(name).map(normalizeChatItem),
   ),
   getMessages: (name: string, conversationKey: string, beforePk?: number) => withFallback(
-    () => apiFetch<Message[]>(`/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`),
-    async () => (await loadMockData()).getMessages(name, conversationKey),
+    async () => (await apiFetch<unknown[]>(`/api/lines/${encodeURIComponent(name)}/messages?conversation_key=${encodeURIComponent(conversationKey)}${beforePk ? `&before_pk=${beforePk}` : ''}`)).map(normalizeMessage),
+    async () => (await loadMockData()).getMessages(name, conversationKey).map(normalizeMessage),
   ),
   getMetrics: (name: string, range: MetricsRange) => withFallback(
     () => apiFetch<LineMetrics>(`/api/lines/${encodeURIComponent(name)}/metrics?range=${encodeURIComponent(range)}`),
@@ -124,9 +194,9 @@ export const api = {
     async () => (await loadMockData()).getFleetMetrics(range),
   ),
   searchMessages: (name: string, query: string, conversationKey?: string) =>
-    apiFetch<{ results: Message[]; total: number; query: string }>(
+    apiFetch<unknown>(
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
-    ),
+    ).then(normalizeSearchResponse),
   saveContact: (name: string, contact: { jid: string; firstName?: string; lastName?: string }) =>
     apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
       method: 'POST',
