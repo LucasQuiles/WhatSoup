@@ -28,8 +28,19 @@ describe('parsePinoLine — provider field', () => {
       instanceType: 'passive',
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.provider).toBeUndefined();
+    expect(result).toStrictEqual({
+      time: '2023-11-14T22:13:20.000Z',
+      mode: 'passive',
+      text: 'primary-line: session started',
+      instance: 'primary-line',
+      level: 'info',
+      detail: {
+        type: 'session',
+        action: 'session started',
+        sessionId: undefined,
+        chatJid: undefined,
+      },
+    });
   });
 
   it('passes provider through for warn-level events', () => {
