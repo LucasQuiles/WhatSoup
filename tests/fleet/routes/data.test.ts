@@ -9,6 +9,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   handleGetChats,
   handleGetMessages,
+  handleSearchMessages,
   handleGetAccess,
   handleGetLogs,
 } from '../../../src/fleet/routes/data.ts';
@@ -58,6 +59,7 @@ function makeDeps(overrides: Partial<DataDeps> = {}): DataDeps {
     dbReader: {
       getChats: vi.fn(() => ({ ok: true, data: [] })),
       getMessages: vi.fn(() => ({ ok: true, data: [] })),
+      searchMessages: vi.fn(() => ({ ok: true, data: [] })),
       getAccessList: vi.fn(() => ({ ok: true, data: [] })),
       getSummaryStats: vi.fn(),
       query: vi.fn(() => ({ ok: true, data: [] })),
@@ -199,6 +201,46 @@ describe('handleGetMessages', () => {
       'test-line', inst.dbPath,
       { conversationKey: 'abc', beforePk: 42, limit: 10 },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleSearchMessages
+// ---------------------------------------------------------------------------
+
+describe('handleSearchMessages', () => {
+  it('returns 400 when q is whitespace only', () => {
+    const inst = fakeInstance();
+    const searchMessages = vi.fn(() => ({ ok: true, data: [] }));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20%20%20'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/q/);
+    expect(searchMessages).not.toHaveBeenCalled();
+  });
+
+  it('trims q before searching and echoing the query', () => {
+    const inst = fakeInstance();
+    const searchMessages = vi.fn(() => ({ ok: true, data: [] }));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20hello%20&conversation_key=chat-1'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    expect(searchMessages).toHaveBeenCalledWith('test-line', inst.dbPath, {
+      query: 'hello',
+      conversationKey: 'chat-1',
+      limit: 20,
+    });
+    expect(JSON.parse(res._body).query).toBe('hello');
   });
 });
 
