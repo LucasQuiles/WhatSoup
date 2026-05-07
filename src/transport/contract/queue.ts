@@ -56,8 +56,8 @@ export class BoundedQueue<T> {
     return slot.value;
   }
 
-  oldestAgeMs(): number {
+  oldestAgeMs(): number | null {
     const head = this.buf[0];
-    return head === undefined ? 0 : Date.now() - head.enqueuedAt;
+    return head === undefined ? null : Date.now() - head.enqueuedAt;
   }
 }
