@@ -266,7 +266,12 @@ describe('data-path integration: event write → tool read', () => {
       expect(chat).toBeDefined();
       // After delete, name and unreadCount come from LEFT JOIN null → undefined
       expect(chat!.name).toBeUndefined();
-      expect(chat!.unreadCount).toBeUndefined();
+      expect(chat).toStrictEqual({
+        conversationKey: '111',
+        chatJid: '111@s.whatsapp.net',
+        lastTimestamp: 1000,
+        messageCount: 1,
+      });
     });
   });
 
