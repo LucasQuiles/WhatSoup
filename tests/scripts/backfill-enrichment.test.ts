@@ -544,11 +544,18 @@ describe('processBatch — P3.6-H2 strict-mode fail-closed', () => {
     // The existing non-strict path captures err into batchResult.error and
     // does NOT call markProcessed — that is the PRE-H2 behavior for generic
     // errors. We assert exactly that, not "did not throw".
-    expect(result.error).toMatch(/provider 500/);
-    expect(result.markedProcessed).toBe(false);
     expect(markProcessed).not.toHaveBeenCalled();
-    // strictFailure field is only populated when strict=true.
-    expect(result.strictFailure).toBeUndefined();
+    // strictFailure field is only populated when strict=true; exact shape
+    // proves the non-strict generic error contract without a weak undefined tail.
+    expect(result).toEqual({
+      chatJid: 'a@g.us',
+      messagesInBatch: 2,
+      factsExtracted: 0,
+      factsValidated: 0,
+      enqueueResult: null,
+      markedProcessed: false,
+      error: 'provider 500',
+    });
   });
 
   it('strict: ExtractionError raised → does NOT mark processed, records strictFailure', async () => {
@@ -648,8 +655,14 @@ describe('processBatch — P3.6-H2 strict-mode fail-closed', () => {
 
     expect(markProcessed).toHaveBeenCalledTimes(1);
     expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(result.markedProcessed).toBe(true);
-    expect(result.strictFailure).toBeUndefined();
+    expect(result).toEqual({
+      chatJid: 'a@g.us',
+      messagesInBatch: 1,
+      factsExtracted: 1,
+      factsValidated: 1,
+      enqueueResult: { attempted: 1, inserted: 1, duplicates: 0, failed: 0 },
+      markedProcessed: true,
+    });
   });
 });
 
@@ -767,8 +780,15 @@ describe('runBackfill — P3.6-H2 strict-mode summary + failedBatches', () => {
     expect(summary.failedBatches).toEqual([]);
     expect(summary.batchesFailed).toBe(1);
     // perChat records the error string; strictFailure is absent.
-    expect(summary.perChat[0].error).toMatch(/generic/);
-    expect(summary.perChat[0].strictFailure).toBeUndefined();
+    expect(summary.perChat[0]).toEqual({
+      chatJid: 'a@g.us',
+      messagesInBatch: 1,
+      factsExtracted: 0,
+      factsValidated: 0,
+      enqueueResult: null,
+      markedProcessed: false,
+      error: 'generic',
+    });
   });
 
   // P3.6 review I-1: enrichment_runs status discriminator.
