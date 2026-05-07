@@ -109,7 +109,7 @@ export function handleGetFleetMetrics(
 
   const sortEntries = <T>(map: Map<string, T>) =>
     Array.from(map.entries())
-      .sort(([a], [b]) => a.localeCompare(b));
+      .sort(([a], [b]) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
 
   const messageVolume = sortEntries(msgMap).map(([bucket, v]) => ({ bucket, ...v }));
   const tokenUsage = sortEntries(tokMap).map(([bucket, v]) => ({ bucket, ...v }));

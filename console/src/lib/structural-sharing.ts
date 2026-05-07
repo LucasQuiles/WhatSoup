@@ -54,7 +54,24 @@ export function mergeMessagesByPk(
   oldData: Message[] | undefined,
   newData: Message[],
 ): Message[] {
-  return mergeByKey(oldData, newData, (message) => message.pk)
+  const mergedNewestPage = mergeByKey(oldData, newData, (message) => message.pk)
+  if (!oldData || oldData.length === 0 || newData.length === 0) {
+    return mergedNewestPage
+  }
+
+  const newKeys = new Set(newData.map((message) => message.pk))
+  const oldestNewPk = Math.min(...newData.map((message) => message.pk))
+  const preservedOlder = oldData.filter((message) => (
+    message.pk > 0
+    && message.pk < oldestNewPk
+    && !newKeys.has(message.pk)
+  ))
+
+  if (preservedOlder.length === 0) {
+    return mergedNewestPage
+  }
+
+  return [...mergedNewestPage, ...preservedOlder]
 }
 
 export function shareLinesByName(oldData: unknown, newData: unknown): unknown {

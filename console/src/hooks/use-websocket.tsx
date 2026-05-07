@@ -12,6 +12,7 @@ import {
   getFleetWebSocketUrl,
   getInvalidationKeys,
   applyTypingUpdate,
+  parseWsEvent,
   type WsEvent,
   type WsInvalidationEvent,
   type WsTypingEvent,
@@ -62,12 +63,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       };
 
       ws.onmessage = (msg) => {
-        let event: WsEvent;
-        try {
-          event = JSON.parse(msg.data);
-        } catch {
-          return;
-        }
+        const event: WsEvent | null = parseWsEvent(msg.data);
+        if (!event) return;
 
         if (event.type === 'connected') return;
 

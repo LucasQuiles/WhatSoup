@@ -92,6 +92,19 @@ const PINO_LEVEL_MAP: Record<number, 'info' | 'warn' | 'error'> = {
   10: 'info', 20: 'info', 30: 'info', 40: 'warn', 50: 'error', 60: 'error',
 };
 
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return '';
+}
+
+function optionalInt(value: unknown): number | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const parsed = typeof value === 'number' ? value : parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 interface ParseContext {
   instanceName: string;
   instanceType: 'passive' | 'chat' | 'agent';
@@ -112,7 +125,7 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
   const rawTs = obj.time ?? obj.timestamp;
   const time = normalizeTimestamp(rawTs) ?? new Date().toISOString();
 
-  const component = (obj.component ?? obj.name ?? obj.module ?? '') as string;
+  const component = firstString(obj.component, obj.name, obj.module);
   const prefix = component ? `[${component}] ` : '';
 
   const base: Omit<FeedEvent, 'detail'> = {
@@ -141,12 +154,12 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
   // 1b. Connection error — "stream errored out" (low-level Baileys, often duplicates 1a)
   if (/stream errored out/i.test(msg)) {
     const fullErr = obj.fullErrorNode as { attrs?: { code?: string } } | undefined;
-    const errCode = fullErr?.attrs?.code ? parseInt(fullErr.attrs.code, 10) : undefined;
+    const errCode = optionalInt(fullErr?.attrs?.code);
     return {
       ...base,
       detail: {
         type: 'connection',
-        statusCode: errCode,
+        ...(errCode !== undefined ? { statusCode: errCode } : {}),
         // Mark as stream-level so coalescer can suppress when a richer event exists
         reason: '_streamError',
       },

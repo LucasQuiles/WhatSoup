@@ -106,6 +106,59 @@ describe('structural sharing helpers', () => {
     expect(merged[2].pk).toBe(1)
   })
 
+  it('preserves loaded older message pages when realtime refetch returns the newest page', () => {
+    const previousNewest = makeMessage(5)
+    const previousSecond = makeMessage(4)
+    const loadedOlder = makeMessage(3)
+    const loadedOldest = makeMessage(2)
+    const previous = [previousNewest, previousSecond, loadedOlder, loadedOldest]
+
+    const merged = mergeMessagesByPk(previous, [
+      makeMessage(6),
+      makeMessage(5),
+      makeMessage(4),
+    ])
+
+    expect(merged.map((message) => message.pk)).toEqual([6, 5, 4, 3, 2])
+    expect(merged[1]).toBe(previousNewest)
+    expect(merged[2]).toBe(previousSecond)
+    expect(merged[3]).toBe(loadedOlder)
+    expect(merged[4]).toBe(loadedOldest)
+  })
+
+  it('does not preserve optimistic placeholders when replacing with server messages', () => {
+    const loadedOlder = makeMessage(4)
+    const previous = [
+      makeMessage(-100, { content: 'optimistic' }),
+      makeMessage(5),
+      loadedOlder,
+    ]
+
+    const merged = mergeMessagesByPk(previous, [
+      makeMessage(6),
+      makeMessage(5),
+    ])
+
+    expect(merged.map((message) => message.pk)).toEqual([6, 5, 4])
+    expect(merged[2]).toBe(loadedOlder)
+  })
+
+  it('does not preserve missing messages from inside the refreshed page range', () => {
+    const previous = [
+      makeMessage(5),
+      makeMessage(4),
+      makeMessage(3),
+      makeMessage(2),
+    ]
+
+    const merged = mergeMessagesByPk(previous, [
+      makeMessage(5),
+      makeMessage(3),
+    ])
+
+    expect(merged.map((message) => message.pk)).toEqual([5, 3, 2])
+  })
+
   it('reuses an unchanged single line by name', () => {
     const previous = makeLine('alpha', { unread: 7 })
 

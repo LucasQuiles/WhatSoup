@@ -114,6 +114,18 @@ describe('parsePinoLine', () => {
     }
   });
 
+  it('omits malformed stream error status codes instead of surfacing NaN', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { tag: 'stream:error', attrs: { code: 'not-a-number' } } }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.detail).toMatchObject({ type: 'connection', reason: '_streamError' });
+      expect(result.detail).not.toHaveProperty('statusCode');
+    }
+  });
+
   it('identifies connection error — WhatsApp connection closed', () => {
     const result = parsePinoLine(makeLine({ msg: 'WhatsApp connection closed' }), CTX);
     expect(result).not.toBeNull();
@@ -347,6 +359,18 @@ describe('parsePinoLine', () => {
     if (result) {
       expect(result.text).toContain('[agent-runner]');
       expect(result.component).toBe('agent-runner');
+    }
+  });
+
+  it('ignores non-string component fields instead of rendering object text', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'session start', component: { name: 'agent-runner' }, name: ['fallback'], module: 42 }),
+      CTX,
+    );
+    expect(result).not.toBeNull();
+    if (result) {
+      expect(result.text).toBe('test-line: session start');
+      expect(result.component).toBeUndefined();
     }
   });
 

@@ -18,6 +18,8 @@ function makeSocketPath(): string {
 interface MockServerOptions {
   /** Called for each incoming JSON-RPC request. Return the response object to send back. */
   onRequest?: (msg: { jsonrpc: string; id: number | string; method: string; params?: unknown }) => unknown;
+  /** Raw newline-delimited response to write for each incoming request. */
+  rawResponse?: string;
   /** If true, accept connections but never respond. */
   silent?: boolean;
   /** If true, close the connection immediately after accept. */
@@ -62,6 +64,11 @@ function startMockServer(
           if (!line.trim()) continue;
           try {
             const msg = JSON.parse(line);
+
+            if (opts.rawResponse !== undefined) {
+              socket.write(opts.rawResponse + '\n');
+              continue;
+            }
 
             if (opts.onRequest) {
               const response = opts.onRequest(msg);
@@ -216,5 +223,16 @@ describe('mcpCall', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/connection closed unexpectedly|EPIPE/);
+  });
+
+  it('fails fast on malformed complete JSON-RPC response lines', async () => {
+    const socketPath = makeSocketPath();
+    const mock = await startMockServer(socketPath, { rawResponse: '{not-json' });
+    mocks.push(mock);
+
+    const result = await mcpCall(socketPath, 'any_tool', {}, 2_000);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/malformed JSON-RPC response/i);
   });
 });

@@ -75,6 +75,62 @@ describe('repo hygiene guard', () => {
     expect(normalIssues.map((issue) => issue.code)).toEqual(['whatsapp-group-jid']);
   });
 
+  it('blocks new ad-hoc console logging in production source files', () => {
+    const issues = scanAddedLines([
+      {
+        filePath: 'src/fleet/routes/example.ts',
+        line: 42,
+        text: 'console.log("debug route payload", payload);',
+      },
+      {
+        filePath: 'src/runtimes/chat/runtime.ts',
+        line: 77,
+        text: 'console.error("chat failed", err);',
+      },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'src-console-call',
+      'src-console-call',
+    ]);
+    expect(issues.map((issue) => `${issue.filePath}:${issue.line}`)).toEqual([
+      'src/fleet/routes/example.ts:42',
+      'src/runtimes/chat/runtime.ts:77',
+    ]);
+  });
+
+  it('allows existing CLI and bootstrap console entrypoints', () => {
+    const issues = scanAddedLines([
+      {
+        filePath: 'src/bootstrap.ts',
+        line: 11,
+        text: 'console.error(err instanceof Error ? err.message : String(err));',
+      },
+      {
+        filePath: 'src/bootstrap-auth.ts',
+        line: 10,
+        text: 'console.error(err instanceof Error ? err.message : String(err));',
+      },
+      {
+        filePath: 'src/transport/auth.ts',
+        line: 27,
+        text: 'console.error("Starting WhatsApp authentication...");',
+      },
+      {
+        filePath: 'src/fleet/standalone.ts',
+        line: 27,
+        text: 'console.log("Fleet server listening");',
+      },
+      {
+        filePath: 'src/config.ts',
+        line: 440,
+        text: 'console.warn(payload, message);',
+      },
+    ]);
+
+    expect(issues).toEqual([]);
+  });
+
   it('flags public-history hygiene problems in commit messages', () => {
     const issues = scanCommitMessage(`feat(test): add coverage
 

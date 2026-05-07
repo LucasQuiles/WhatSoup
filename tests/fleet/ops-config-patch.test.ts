@@ -13,7 +13,7 @@ import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { normalizePhoneE164, isAdminPhone } from '../../src/lib/phone.ts';
+import { normalizePhone, normalizePhoneE164, isAdminPhone } from '../../src/lib/phone.ts';
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
@@ -106,6 +106,14 @@ describe('normalizePhoneE164', () => {
   it('leaves a 7-digit number unchanged (no country code prepended)', () => {
     expect(normalizePhoneE164('5551234')).toBe('5551234');
   });
+
+  it('fails closed for malformed runtime values', () => {
+    expect(normalizePhone(null)).toBe('');
+    expect(normalizePhone(undefined)).toBe('');
+    expect(normalizePhoneE164(null)).toBe('');
+    expect(normalizePhoneE164(undefined)).toBe('');
+    expect(normalizePhoneE164(8459780919)).toBe('18459780919');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -149,6 +157,11 @@ describe('isAdminPhone', () => {
 
   it('returns false for empty admin set', () => {
     expect(isAdminPhone('18459780919', new Set())).toBe(false);
+  });
+
+  it('returns false instead of throwing for malformed phone values', () => {
+    expect(isAdminPhone(null, new Set(['18459780919']))).toBe(false);
+    expect(isAdminPhone(undefined, new Set(['18459780919']))).toBe(false);
   });
 });
 

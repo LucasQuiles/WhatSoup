@@ -82,6 +82,8 @@ describe('migrate-memory-config CLI helpers', () => {
         name: 'mw-bot',
         pineconeIndex: 'mw-mind',
         pineconeFactsNamespace: 'mw-facts',
+        recencyHalfLifeDays: 21,
+        maxAgeDays: 180,
       });
 
       const result = migrateMemoryConfigFile(configPath, { write: true, backup: true });
@@ -92,7 +94,11 @@ describe('migrate-memory-config CLI helpers', () => {
       expect(fs.existsSync(result.backupPath!)).toBe(true);
       expect(next.memory.pinecone.index).toBe('mw-mind');
       expect(next.memory.pinecone.namespaces.facts).toBe('mw-facts');
+      expect(next.memory.pinecone.recencyHalfLifeDays).toBe(21);
+      expect(next.memory.pinecone.maxAgeDays).toBe(180);
       expect(next).not.toHaveProperty('pineconeIndex');
+      expect(next).not.toHaveProperty('recencyHalfLifeDays');
+      expect(next).not.toHaveProperty('maxAgeDays');
       expect(fs.readFileSync(path.join(tmp, 'mw-bot', 'tokens.env'), 'utf-8')).toBe('WHATSOUP_HEALTH_TOKEN=token\n');
       expect(fs.readFileSync(path.join(tmp, 'mw-bot', 'auth', 'creds.json'), 'utf-8')).toBe('{"auth":true}\n');
     } finally {
@@ -100,7 +106,7 @@ describe('migrate-memory-config CLI helpers', () => {
     }
   });
 
-  it('write mode preserves flat recency settings while migrating supported Pinecone fields', () => {
+  it('write mode moves flat recency settings into Pinecone memory config', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-test-'));
     try {
       const configPath = makeInstance(tmp, 'mw-bot', {
@@ -116,23 +122,23 @@ describe('migrate-memory-config CLI helpers', () => {
       expect(result.wrote).toBe(true);
       expect(result.backupPath).toBeNull();
       expect(next.memory.pinecone.index).toBe('mw-mind');
+      expect(next.memory.pinecone.recencyHalfLifeDays).toBe(21);
+      expect(next.memory.pinecone.maxAgeDays).toBe(180);
       expect(next).not.toHaveProperty('pineconeIndex');
-      expect(next.recencyHalfLifeDays).toBe(21);
-      expect(next.maxAgeDays).toBe(180);
-      expect(next.memory.pinecone).not.toHaveProperty('recencyHalfLifeDays');
-      expect(next.memory.pinecone).not.toHaveProperty('maxAgeDays');
+      expect(next).not.toHaveProperty('recencyHalfLifeDays');
+      expect(next).not.toHaveProperty('maxAgeDays');
       expect(result.moved).toContainEqual({ from: 'pineconeIndex', to: 'memory.pinecone.index' });
+      expect(result.moved).toContainEqual({ from: 'recencyHalfLifeDays', to: 'memory.pinecone.recencyHalfLifeDays' });
+      expect(result.moved).toContainEqual({ from: 'maxAgeDays', to: 'memory.pinecone.maxAgeDays' });
       expect(result.removed).toContain('pineconeIndex');
-      expect(result.moved.map((move) => move.from)).not.toContain('recencyHalfLifeDays');
-      expect(result.moved.map((move) => move.from)).not.toContain('maxAgeDays');
-      expect(result.removed).not.toContain('recencyHalfLifeDays');
-      expect(result.removed).not.toContain('maxAgeDays');
+      expect(result.removed).toContain('recencyHalfLifeDays');
+      expect(result.removed).toContain('maxAgeDays');
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it('dry-run preserves flat recency settings while reporting supported Pinecone moves', () => {
+  it('dry-run leaves files untouched while reporting recency moves', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-test-'));
     try {
       const configPath = makeInstance(tmp, 'mw-bot', {
@@ -156,11 +162,11 @@ describe('migrate-memory-config CLI helpers', () => {
       expect(next).not.toHaveProperty('memory.pinecone.recencyHalfLifeDays');
       expect(next).not.toHaveProperty('memory.pinecone.maxAgeDays');
       expect(result.moved).toContainEqual({ from: 'pineconeIndex', to: 'memory.pinecone.index' });
+      expect(result.moved).toContainEqual({ from: 'recencyHalfLifeDays', to: 'memory.pinecone.recencyHalfLifeDays' });
+      expect(result.moved).toContainEqual({ from: 'maxAgeDays', to: 'memory.pinecone.maxAgeDays' });
       expect(result.removed).toContain('pineconeIndex');
-      expect(result.moved.map((move) => move.from)).not.toContain('recencyHalfLifeDays');
-      expect(result.moved.map((move) => move.from)).not.toContain('maxAgeDays');
-      expect(result.removed).not.toContain('recencyHalfLifeDays');
-      expect(result.removed).not.toContain('maxAgeDays');
+      expect(result.removed).toContain('recencyHalfLifeDays');
+      expect(result.removed).toContain('maxAgeDays');
       expect(result).not.toHaveProperty('config');
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });

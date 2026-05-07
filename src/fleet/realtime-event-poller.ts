@@ -20,6 +20,7 @@ import {
 } from './realtime-publisher.ts';
 import { proxyToInstance } from './http-proxy.ts';
 import { findLatestLogFile } from './log-utils.ts';
+import { isTypingHealthEntry } from './typing-payload.ts';
 
 const log = createChildLogger('fleet:realtime-poller');
 
@@ -28,16 +29,10 @@ const log = createChildLogger('fleet:realtime-poller');
 // ---------------------------------------------------------------------------
 
 interface InstanceSnapshot {
-  latestMessagePk: number | null;
+  latestMessageMarker: string | null;
   latestAccessMarker: string | null;
   latestLogMtime: number | null;
   lastLogPath: string | null;
-}
-
-interface TypingEntry {
-  instance: string;
-  jid: string;
-  since: number;
 }
 
 export interface RealtimeEventPollerDeps {
@@ -98,7 +93,7 @@ export class FleetRealtimeEventPoller {
         };
 
         if (previous) {
-          if (current.latestMessagePk !== previous.latestMessagePk) {
+          if (current.latestMessageMarker !== previous.latestMessageMarker) {
             publishMessageReceived(this.deps.realtime, name);
             publishChatUpdated(this.deps.realtime, name);
             publishFeedEvent(this.deps.realtime, name);
@@ -134,12 +129,16 @@ export class FleetRealtimeEventPoller {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private getSnapshot(name: string, dbPath: string): { latestMessagePk: number | null; latestAccessMarker: string | null } {
+  private getSnapshot(name: string, dbPath: string): { latestMessageMarker: string | null; latestAccessMarker: string | null } {
     const result = this.deps.dbReader.getLatestMarkers(name, dbPath);
     if (!result.ok) {
-      return { latestMessagePk: null, latestAccessMarker: null };
+      return { latestMessageMarker: null, latestAccessMarker: null };
     }
-    return result.data;
+    return {
+      latestMessageMarker: result.data.latestMessageMarker
+        ?? (result.data.latestMessagePk == null ? null : `pk:${result.data.latestMessagePk}`),
+      latestAccessMarker: result.data.latestAccessMarker,
+    };
   }
 
   /** Stat the cached log path (1 syscall). Falls back to full dir scan if cached path is stale. */
@@ -161,7 +160,8 @@ export class FleetRealtimeEventPoller {
         const data = JSON.parse(result.body);
         if (Array.isArray(data.composing)) {
           for (const entry of data.composing) {
-            const key = `${inst.name}|${entry.jid}`;
+            if (!isTypingHealthEntry(entry)) continue;
+            const key = `${inst.name}|${entry.jid.trim()}`;
             currentTyping.set(key, entry.since);
           }
         }

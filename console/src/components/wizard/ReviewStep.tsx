@@ -2,6 +2,7 @@ import { type FC } from 'react'
 import { Pencil, Loader2, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -114,6 +115,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const tokenBudget = (data.tokenBudget as number) ?? 50000
   const agentOptions = (data.agentOptions as { cwd?: string; sessionScope?: string; provider?: string; providerConfig?: Record<string, unknown> }) ?? {}
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
+  const agentCwd = agentOptions.cwd || defaultAgentWorkspacePath(name)
 
   const accessLabels: Record<string, string> = {
     self_only: 'Admin Only',
@@ -179,7 +181,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
         <KV label="Token budget" value={tokenBudget.toLocaleString()} />
         {type === 'agent' && (
           <>
-            <KV label="CWD" value={agentOptions.cwd || 'Not set'} />
+            <KV label="CWD" value={agentCwd} />
             <KV label="Session scope" value={agentOptions.sessionScope ?? 'single'} />
             <KV label="Provider" value={agentOptions.provider ?? DEFAULT_PROVIDER_ID} />
             {agentOptions.provider && agentOptions.provider !== DEFAULT_PROVIDER_ID &&

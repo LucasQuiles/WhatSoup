@@ -123,6 +123,20 @@ describe('api auth headers', () => {
     });
   });
 
+  it('clears the availability probe timeout when fetch rejects', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getLines()).resolves.toEqual(expect.any(Array));
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('sends the fleet token on write requests', async () => {
     stubFleetToken('fleet-token-123');
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
@@ -182,5 +196,113 @@ describe('api read operations', () => {
   it('getAccess is a function accepting (name)', () => {
     expect(typeof api.getAccess).toBe('function');
     expect(api.getAccess.length).toBe(1);
+  });
+
+  it('normalizes nullable chat history rows before returning chats to the console', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([
+        {
+          conversationKey: '15551234567',
+          name: null,
+          lastMessagePreview: null,
+          lastMessageAt: null,
+          unreadCount: null,
+          isGroup: null,
+        },
+      ]));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getChats('line-a')).resolves.toEqual([
+      {
+        conversationKey: '15551234567',
+        name: '15551234567',
+        lastMessagePreview: '',
+        lastMessageAt: '',
+        unreadCount: 0,
+        isGroup: false,
+      },
+    ]);
+  });
+
+  it('normalizes nullable message history rows before returning messages to the console', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([
+        {
+          pk: 42,
+          conversationKey: '15551234567',
+          senderName: null,
+          senderJid: null,
+          content: null,
+          timestamp: null,
+          fromMe: null,
+          type: null,
+          rawMessage: null,
+        },
+      ]));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getMessages('line-a', '15551234567')).resolves.toEqual([
+      {
+        pk: 42,
+        conversationKey: '15551234567',
+        senderName: '',
+        senderJid: '',
+        content: null,
+        timestamp: '',
+        fromMe: false,
+        type: 'unknown',
+        rawMessage: undefined,
+      },
+    ]);
+  });
+
+  it('normalizes nullable message rows returned by history search', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({
+      results: [
+        {
+          pk: 43,
+          conversationKey: '15551234567',
+          senderName: null,
+          senderJid: null,
+          content: null,
+          timestamp: null,
+          fromMe: null,
+          type: null,
+          rawMessage: null,
+        },
+      ],
+      total: null,
+      query: null,
+    }));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.searchMessages('line-a', 'receipt', '15551234567')).resolves.toEqual({
+      results: [
+        {
+          pk: 43,
+          conversationKey: '15551234567',
+          senderName: '',
+          senderJid: '',
+          content: null,
+          timestamp: '',
+          fromMe: false,
+          type: 'unknown',
+          rawMessage: undefined,
+        },
+      ],
+      total: 1,
+      query: '',
+    });
   });
 });

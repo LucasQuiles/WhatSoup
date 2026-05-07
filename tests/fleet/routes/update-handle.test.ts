@@ -319,6 +319,40 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
     // Extra drain: systemctl callback runs via setImmediate-like scheduling
     await new Promise((r) => setImmediate(r));
   });
+
+  it('keeps the mutex after client disconnect while update work continues', async () => {
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })  // rev-parse HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // git status --porcelain
+
+    let resolvePull!: (value: any) => void;
+    const hangingPull = new Promise<any>((resolve) => { resolvePull = resolve; });
+    execFileAsyncSpy.mockReturnValueOnce(hangingPull);              // git pull continues after disconnect
+
+    const { req: req1, res: res1 } = makeReqRes();
+    const { req: req2, res: res2 } = makeReqRes();
+
+    const firstCall = handleUpdate(req1, res1, makeChecker(), '/repo');
+
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    req1.triggerClose();
+
+    await handleUpdate(req2, res2, makeChecker(), '/repo');
+    const secondWriteHeadCall = res2.writeHead.mock.calls[0];
+    const secondEndBody = res2.end.mock.calls[0]?.[0];
+
+    resolvePull({ stdout: 'Already up to date.\n', stderr: '' });
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })             // rev-parse --short HEAD
+      .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' })   // diff
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                      // vite build
+
+    await firstCall;
+    await new Promise((r) => setImmediate(r));
+
+    expect(secondWriteHeadCall).toEqual([409, { 'Content-Type': 'application/json' }]);
+    expect(JSON.parse(secondEndBody)).toEqual({ error: 'Update already in progress' });
+  });
 });
 
 // ---------------------------------------------------------------------------

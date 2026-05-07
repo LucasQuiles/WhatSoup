@@ -49,8 +49,17 @@ describe('BoundedQueue', () => {
     expect(q.oldestAgeMs()).toBeGreaterThanOrEqual(20);
   });
 
-  it('oldest_age_ms returns 0 for empty queue', () => {
+  it('oldest_age_ms returns null for empty queue', () => {
     const q = new BoundedQueue<number>(2);
+    expect(q.oldestAgeMs()).toBeNull();
+  });
+
+  it('oldest_age_ms returns 0 for an item enqueued at the current clock tick', () => {
+    vi.useFakeTimers();
+    const q = new BoundedQueue<number>(2);
+
+    q.tryEnqueue(1);
+
     expect(q.oldestAgeMs()).toBe(0);
   });
 

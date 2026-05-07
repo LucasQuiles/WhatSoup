@@ -1,13 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 
+const logger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 // Suppress pino output during tests
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
+    ...logger,
     child: vi.fn().mockReturnThis(),
   }),
 }));
@@ -32,6 +36,10 @@ describe('HealthPoller', () => {
 
   beforeEach(() => {
     mockFetch = vi.fn();
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    logger.error.mockClear();
+    logger.debug.mockClear();
     vi.stubGlobal('fetch', mockFetch);
     vi.useFakeTimers();
   });
@@ -187,6 +195,39 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('keeps timeout active while reading health response JSON', async () => {
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      const json = new Promise<Record<string, unknown>>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new Error('health body aborted')), { once: true });
+      });
+      return { ok: true, json: () => json };
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    const pollPromise = (poller as any).poll() as Promise<void>;
+    let settled = false;
+    pollPromise.finally(() => { settled = true; }).catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await Promise.resolve();
+
+    expect(settled).toBe(true);
+    await expect(pollPromise).resolves.toBeUndefined();
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      error: 'health body aborted',
+      consecutiveFailures: 1,
+    });
+  });
+
   // Test 6: auth token forwarded in Authorization header
   it('auth token forwarded in Authorization header', async () => {
     mockFetch.mockResolvedValue({
@@ -258,6 +299,38 @@ describe('HealthPoller', () => {
     const status = poller.getStatus('remote-1');
     expect(status!.status).toBe('degraded');
     expect(status!.error).toBe('HTTP 503');
+
+    poller.stop();
+  });
+
+  it('logs and continues when a status change listener throws', async () => {
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+    const listenerError = new Error('listener failed');
+    const throwingListener = vi.fn(() => { throw listenerError; });
+    const followingListener = vi.fn();
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.on('statusChange', throwingListener);
+    poller.on('statusChange', followingListener);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(throwingListener).toHaveBeenCalledWith('remote-1', 'degraded', 'online');
+    expect(followingListener).toHaveBeenCalledWith('remote-1', 'degraded', 'online');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: listenerError,
+        instance: 'remote-1',
+        newStatus: 'degraded',
+        oldStatus: 'online',
+      }),
+      'status change listener failed',
+    );
 
     poller.stop();
   });

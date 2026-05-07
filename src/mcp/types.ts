@@ -58,6 +58,17 @@ export function resolveConversationKey(session: SessionContext, callerKey: strin
   return session.tier === 'chat-scoped' ? session.conversationKey! : callerKey;
 }
 
+export function assertConversationAccess(
+  conversationKey: string,
+  session: SessionContext,
+  label = 'Resource',
+): void {
+  if (!session.conversationKey) return;
+  if (conversationKey !== session.conversationKey) {
+    throw new Error(`${label} belongs to a different conversation`);
+  }
+}
+
 /**
  * Check whether a resolved filesystem path is within the session's allowedRoot.
  *
@@ -83,4 +94,3 @@ export function isPathWithinAllowedRoot(
     resolvedPath.startsWith(canonicalAllowedRoot + "/")
   );
 }
-

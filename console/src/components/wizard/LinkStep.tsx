@@ -1,6 +1,7 @@
 import { type FC, useState, useEffect, useCallback, useRef } from 'react'
 import { CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
 import QrDisplay from '../QrDisplay'
+import { parseAuthErrorMessage, parseQrPayload } from './link-step-events'
 
 interface LinkStepProps {
   lineName: string
@@ -30,7 +31,15 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
     const es = new EventSource(url)
 
     es.addEventListener('qr', (e: MessageEvent) => {
-      setQrValue(JSON.parse(e.data) as string)
+      const nextQr = parseQrPayload(e.data)
+      if (!nextQr) {
+        setStatus('error')
+        setErrorMsg('Received an invalid QR code from the authentication server.')
+        if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+        es.close()
+        return
+      }
+      setQrValue(nextQr)
       setStatus('waiting')
       setErrorMsg('')
       // Reset QR age countdown on each new QR code
@@ -47,15 +56,8 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
 
     // Server-sent named 'error' events (event: error\ndata: ...)
     es.addEventListener('error', (e: MessageEvent) => {
-      let msg = 'Connection lost'
-      try {
-        if (e.data) {
-          const parsed = JSON.parse(e.data)
-          if (parsed.message) msg = parsed.message
-        }
-      } catch { /* use default */ }
       setStatus('error')
-      setErrorMsg(msg)
+      setErrorMsg(parseAuthErrorMessage(e.data))
       if (qrTimerRef.current) clearInterval(qrTimerRef.current)
       es.close()
     })

@@ -7,6 +7,7 @@ import { useToast } from '../hooks/toast-context'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { useVirtualMessages } from '../hooks/use-virtual-messages'
 import { api } from '../lib/api'
+import { resolveCurrentChat } from '../lib/inbox-chat-selection'
 import { selectVirtualMessageRows, toChronologicalMessages } from '../lib/inbox-virtualization'
 import type { Message, ChatItem } from '../types'
 import EmptyState from '../components/EmptyState'
@@ -92,7 +93,7 @@ export default function Inbox() {
   )
 
   const currentLine = lines?.find(l => l.name === activeLine)
-  const currentChat = chats?.find(c => c.conversationKey === selectedChat)
+  const currentChat = resolveCurrentChat(chats, selectedChat, messages)
   const isSearchMode = searchInput.trim().length > 0
   const isDebouncingSearch = isSearchMode && searchInput.trim() !== debouncedSearch
 
