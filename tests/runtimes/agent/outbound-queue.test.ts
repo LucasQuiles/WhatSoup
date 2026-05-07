@@ -870,7 +870,8 @@ describe('OutboundQueue', () => {
     expect(errorArg).toMatchObject({ chatJid: CHAT_JID, attempts: 3 });
     expect(typeof errorArg.textLength).toBe('number');
     expect(errorArg.textLength).toBe('terminal shape test'.length);
-    expect(errorArg.err).toBeDefined();
+    expect(errorArg.err).toBeInstanceOf(Error);
+    expect((errorArg.err as Error).message).toBe('hard fail');
   });
 
   // ─── enqueueProgressUpdate ──────────────────────────────────────────────
