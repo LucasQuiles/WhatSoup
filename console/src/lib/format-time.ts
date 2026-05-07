@@ -3,11 +3,19 @@
  * All user-facing timestamps should use these — never display raw ISO strings.
  */
 
+function normalizeTimestampInput(iso: string | null | undefined): string | null {
+  if (typeof iso !== 'string') return null;
+  const trimmed = iso.trim();
+  if (!trimmed || trimmed === 'unknown') return null;
+  return trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T') + 'Z';
+}
+
 /** "just now", "3m ago", "2h ago", "1d ago" */
-export function formatRelative(iso: string): string {
+export function formatRelative(iso: string | null | undefined): string {
   const now = Date.now();
   // Handle SQLite "YYYY-MM-DD HH:MM:SS" format (no T, no Z) — treat as UTC
-  const normalized = iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z';
+  const normalized = normalizeTimestampInput(iso);
+  if (!normalized) return "\u2014";
   const then = new Date(normalized).getTime();
   if (isNaN(then)) return "\u2014";
   const diffS = Math.floor((now - then) / 1000);
@@ -22,15 +30,19 @@ export function formatRelative(iso: string): string {
 }
 
 /** "4:02 PM", "10:45 AM" — 12h clock for message bubbles */
-export function formatTime(iso: string): string {
-  const d = new Date(iso);
+export function formatTime(iso: string | null | undefined): string {
+  const normalized = normalizeTimestampInput(iso);
+  if (!normalized) return "\u2014";
+  const d = new Date(normalized);
   if (isNaN(d.getTime())) return "\u2014";
   return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
 /** "04:02:15" — 24h with seconds for log entries (technical context) */
-export function formatTimeWithSeconds(iso: string): string {
-  const d = new Date(iso);
+export function formatTimeWithSeconds(iso: string | null | undefined): string {
+  const normalized = normalizeTimestampInput(iso);
+  if (!normalized) return "\u2014";
+  const d = new Date(normalized);
   if (isNaN(d.getTime())) return "\u2014";
   return d.toLocaleTimeString("en-GB", {
     hour: "2-digit",
@@ -40,8 +52,10 @@ export function formatTimeWithSeconds(iso: string): string {
 }
 
 /** "4:02 PM" / "Yesterday" / "Mar 29" — for chat lists */
-export function formatChatTime(iso: string): string {
-  const d = new Date(iso);
+export function formatChatTime(iso: string | null | undefined): string {
+  const normalized = normalizeTimestampInput(iso);
+  if (!normalized) return "\u2014";
+  const d = new Date(normalized);
   if (isNaN(d.getTime())) return "\u2014";
   const now = new Date();
 
