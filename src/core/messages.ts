@@ -122,24 +122,39 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
 }
 
 /**
- * Insert a message only if no row with the same message_id exists.
- * Uses INSERT OR IGNORE for an atomic check-and-insert.
- * Returns true if the row was inserted, false if it already existed.
+ * Insert a message if no row with the same message_id exists.
+ * If history sync previously wrote an envelope-only placeholder for the same
+ * message_id, replace it with the live body. Non-placeholder duplicates remain
+ * unchanged.
+ * Returns true if the row was inserted or upgraded, false if it already existed.
  */
 export function storeMessageIfNew(db: Database, msg: StoreMessageInput): boolean {
   const result = db.raw.prepare(`
-    INSERT OR IGNORE INTO messages
+    INSERT INTO messages
       (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type,
        is_from_me, timestamp, quoted_message_id, raw_message, content_text)
     VALUES
       (@chat_jid, @conversation_key, @sender_jid, @sender_name, @message_id, @content, @content_type,
        @is_from_me, @timestamp, @quoted_message_id, @raw_message, @content_text)
+    ON CONFLICT(message_id) DO UPDATE SET
+      chat_jid = excluded.chat_jid,
+      conversation_key = excluded.conversation_key,
+      sender_jid = excluded.sender_jid,
+      sender_name = excluded.sender_name,
+      content = excluded.content,
+      content_type = excluded.content_type,
+      is_from_me = excluded.is_from_me,
+      timestamp = excluded.timestamp,
+      quoted_message_id = excluded.quoted_message_id,
+      raw_message = excluded.raw_message,
+      content_text = excluded.content_text
+    WHERE messages.content_type = 'history'
   `).run(toInsertParams(msg));
-  const inserted = (result.changes as number) > 0;
-  if (inserted) {
+  const changed = (result.changes as number) > 0;
+  if (changed) {
     resolveDecryptionFailure(db, msg.messageId);
   }
-  return inserted;
+  return changed;
 }
 
 // --- Read path ---

@@ -92,6 +92,65 @@ describe('messages', () => {
     expect(results[0].content).toBe('original'); // Content remains unchanged
   });
 
+  it('storeMessageIfNew upgrades a history placeholder when the live body arrives', () => {
+    const id = `msg-${randomBytes(4).toString('hex')}`;
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
+      VALUES
+        (@chat_jid, @conversation_key, @sender_jid, @message_id, 'history', 0, @timestamp)
+    `).run({
+      chat_jid: 'old-group@g.us',
+      conversation_key: 'old-group_at_g.us',
+      sender_jid: 'old-sender@s.whatsapp.net',
+      message_id: id,
+      timestamp: BASE_TS - 10,
+    });
+
+    const upgraded = storeMessageIfNew(db, makeMsg({
+      chatJid: 'group1@g.us',
+      conversationKey: 'group1_at_g.us',
+      senderJid: 'alice@s.whatsapp.net',
+      senderName: 'Alice',
+      messageId: id,
+      content: 'live body',
+      contentText: 'Live body summary',
+      contentType: 'text',
+      timestamp: BASE_TS,
+      rawMessage: '{"message":"live"}',
+    }));
+
+    expect(upgraded).toBe(true);
+    const row = db.raw.prepare(`
+      SELECT chat_jid, conversation_key, sender_jid, sender_name, content, content_text,
+             content_type, timestamp, raw_message
+      FROM messages
+      WHERE message_id = ?
+    `).get(id) as {
+      chat_jid: string;
+      conversation_key: string;
+      sender_jid: string;
+      sender_name: string | null;
+      content: string | null;
+      content_text: string | null;
+      content_type: string;
+      timestamp: number;
+      raw_message: string | null;
+    };
+
+    expect(row).toEqual({
+      chat_jid: 'group1@g.us',
+      conversation_key: 'group1_at_g.us',
+      sender_jid: 'alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'live body',
+      content_text: 'Live body summary',
+      content_type: 'text',
+      timestamp: BASE_TS,
+      raw_message: '{"message":"live"}',
+    });
+  });
+
   it('getRecentMessages returns messages in chronological ASC order', () => {
     storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 2, content: 'third' }));
     storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + 0, content: 'first' }));
