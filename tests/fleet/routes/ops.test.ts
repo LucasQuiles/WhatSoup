@@ -473,6 +473,8 @@ describe('handleRestart', () => {
 describe('handleCreateLine', () => {
   let tmpDir: string;
   let agentCwd: string;
+  let originalCwd: string;
+  let originalHome: string | undefined;
   let originalConfigHome: string | undefined;
   let originalDataHome: string | undefined;
   let originalStateHome: string | undefined;
@@ -484,6 +486,8 @@ describe('handleCreateLine', () => {
     fs.mkdirSync(homeTmp, { recursive: true });
     agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-create-mode-'));
 
+    originalCwd = process.cwd();
+    originalHome = process.env.HOME;
     originalConfigHome = process.env.XDG_CONFIG_HOME;
     originalDataHome = process.env.XDG_DATA_HOME;
     originalStateHome = process.env.XDG_STATE_HOME;
@@ -496,7 +500,10 @@ describe('handleCreateLine', () => {
 
   afterEach(() => {
     process.umask(originalUmask);
+    process.chdir(originalCwd);
     vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
@@ -538,6 +545,225 @@ describe('handleCreateLine', () => {
       claudeMd: fileMode(claudeMdPath),
     };
     expect(modes).toEqual({ configJson: 0o600, claudeMd: 0o600 });
+  });
+
+  it('defaults an empty agent cwd to a home-confined workspace during create', async () => {
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'default-agent', 'workspace');
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'default-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: '', sessionScope: 'per_chat' },
+        claudeMd: 'Local operating instructions for this instance.\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'default-agent', 'config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions.cwd).toBe(expectedCwd);
+    expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), '.claude', 'CLAUDE.md'))).toBe(false);
+  });
+
+  it('expands a wizard tilde cwd to the home directory before writing CLAUDE.md during create', async () => {
+    const homeDir = path.join(tmpDir, 'home-tilde');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    process.chdir(homeDir);
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'tilde-agent', 'workspace');
+    const literalTildeCwd = path.join(homeDir, '~', '.local', 'share', 'whatsoup', 'instances', 'tilde-agent', 'workspace');
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'tilde-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: '~/.local/share/whatsoup/instances/tilde-agent/workspace', sessionScope: 'per_chat' },
+        claudeMd: 'Local operating instructions for this instance.\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'tilde-agent', 'config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions.cwd).toBe(expectedCwd);
+    expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+    expect(fs.existsSync(path.join(literalTildeCwd, '.claude', 'CLAUDE.md'))).toBe(false);
+  });
+
+
+  it('defaults a missing agentOptions.cwd to a home-confined workspace during create', async () => {
+    const homeDir = path.join(tmpDir, 'home-missing-cwd');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'no-cwd-agent', 'workspace');
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'no-cwd-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { sessionScope: 'per_chat' },
+        claudeMd: 'instructions\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'no-cwd-agent', 'config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions.cwd).toBe(expectedCwd);
+  });
+
+  it('defaults omitted agentOptions to a per-chat home-confined workspace during create', async () => {
+    const homeDir = path.join(tmpDir, 'home-omitted-agent-options');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'omitted-agent-options', 'workspace');
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'omitted-agent-options',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        claudeMd: 'instructions\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'omitted-agent-options', 'config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions).toEqual({ cwd: expectedCwd, sessionScope: 'per_chat' });
+    expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+  });
+
+  it('treats whitespace-only agentOptions.cwd as missing during create', async () => {
+    const homeDir = path.join(tmpDir, 'home-ws-cwd');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'ws-cwd-agent', 'workspace');
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'ws-cwd-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: '   ', sessionScope: 'per_chat' },
+        claudeMd: 'instructions\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(201);
+    const configPath = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'ws-cwd-agent', 'config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions.cwd).toBe(expectedCwd);
+  });
+
+  it('rejects a non-string agentOptions.cwd with 400 during create', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'bad-cwd-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: { cwd: 123, sessionScope: 'per_chat' },
+        claudeMd: 'instructions\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/cwd must be a string/);
+  });
+
+  it('rejects an array agentOptions with 400 during create', async () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'array-opts-agent',
+        type: 'agent',
+        adminPhones: ['15551234567'],
+        agentOptions: ['unexpected'],
+        claudeMd: 'instructions\n',
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/agentOptions must be an object/);
   });
 
   it('tightens pre-existing CLAUDE.md and settings.json modes during create', async () => {
@@ -620,16 +846,23 @@ describe('handleCreateLine', () => {
 describe('handleConfigUpdate', () => {
   let tmpDir: string;
   let agentCwd: string;
+  let originalCwd: string;
+  let originalHome: string | undefined;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-config-test-'));
     const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
     fs.mkdirSync(homeTmp, { recursive: true });
     agentCwd = fs.mkdtempSync(path.join(homeTmp, 'ops-config-mode-'));
+    originalCwd = process.cwd();
+    originalHome = process.env.HOME;
   });
 
   afterEach(() => {
     vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+    process.chdir(originalCwd);
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     fs.rmSync(tmpDir, { recursive: true, force: true });
     fs.rmSync(agentCwd, { recursive: true, force: true });
   });
@@ -753,6 +986,124 @@ describe('handleConfigUpdate', () => {
     expect(res._status).toBe(200);
     expect(fileMode(claudeMdPath)).toBe(0o600);
     expect(fileMode(settingsPath)).toBe(0o600);
+  });
+
+  it('defaults an existing empty agent cwd before writing CLAUDE.md during config update', async () => {
+    const homeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'test-line', 'workspace');
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      name: 'test-line',
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: '', sessionScope: 'per_chat' },
+    }));
+    const inst = fakeInstance({ name: 'test-line', type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      res,
+      deps,
+      { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions.cwd).toBe(expectedCwd);
+    expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), '.claude', 'CLAUDE.md'))).toBe(false);
+  });
+
+  it('expands an existing tilde agent cwd before writing CLAUDE.md during config update', async () => {
+    const homeDir = path.join(tmpDir, 'home-update-tilde');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    process.chdir(homeDir);
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'tilde-update', 'workspace');
+    const literalTildeCwd = path.join(homeDir, '~', '.local', 'share', 'whatsoup', 'instances', 'tilde-update', 'workspace');
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      name: 'tilde-update',
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: '~/.local/share/whatsoup/instances/tilde-update/workspace', sessionScope: 'per_chat' },
+    }));
+    const inst = fakeInstance({ name: 'tilde-update', type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      res,
+      deps,
+      { name: 'tilde-update' },
+    );
+
+    expect(res._status).toBe(200);
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions.cwd).toBe(expectedCwd);
+    expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+    expect(fs.existsSync(path.join(literalTildeCwd, '.claude', 'CLAUDE.md'))).toBe(false);
+  });
+
+
+  it('defaults omitted agentOptions before writing CLAUDE.md during config update', async () => {
+    const homeDir = path.join(tmpDir, 'home-update-omitted-agent-options');
+    fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+    process.env.HOME = homeDir;
+    const expectedCwd = path.join(homeDir, '.local', 'share', 'whatsoup', 'instances', 'update-no-agent-options', 'workspace');
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      name: 'update-no-agent-options',
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+    }));
+    const inst = fakeInstance({ name: 'update-no-agent-options', type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ claudeMd: 'Updated local operating instructions.\n' })),
+      res,
+      deps,
+      { name: 'update-no-agent-options' },
+    );
+
+    expect(res._status).toBe(200);
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.agentOptions).toEqual({ cwd: expectedCwd, sessionScope: 'per_chat' });
+    expect(fs.existsSync(path.join(expectedCwd, '.claude', 'CLAUDE.md'))).toBe(true);
+  });
+
+
+  it('rejects an array agentOptions with 400 during config update', async () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    }));
+    const inst = fakeInstance({ name: 'arr-update', type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ agentOptions: ['unexpected'] })),
+      res,
+      deps,
+      { name: 'arr-update' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/agentOptions must be an object/);
   });
 
   it('does not follow config tmp symlinks during config update', async () => {

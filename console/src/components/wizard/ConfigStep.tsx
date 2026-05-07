@@ -6,6 +6,7 @@ import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } f
 // form-styles static exports replaced by CSS classes (c-field-label, c-helper)
 import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -122,6 +123,7 @@ function defaultSystemPrompt(name: string, type: string): string {
 /** Generate a sensible default CLAUDE.md for a new agent instance. */
 function defaultClaudeMd(name: string, cwd: string): string {
   const titleName = name.charAt(0).toUpperCase() + name.slice(1)
+  const workspace = cwd.trim() || defaultAgentWorkspacePath(name)
   return `# ${titleName} — WhatsApp Agent
 
 You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
@@ -131,7 +133,7 @@ You are ${titleName}, an AI agent running on WhatsApp via WhatSoup.
 - You run as a Claude Code agent with tool access within your sandbox
 
 ## Workspace
-- Your working directory is \`${cwd || '/home/q/LAB/' + name}\`
+- Your working directory is \`${workspace}\`
 - You can create files, folders, and projects here freely
 - Stay within this directory for all file operations
 
@@ -169,6 +171,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const maxTokens = (data.maxTokens as number) ?? 4096
   const tokenBudget = (data.tokenBudget as number) ?? 50000
   const name = (data.name as string) ?? ''
+  const defaultWorkspace = defaultAgentWorkspacePath(name)
 
   // Pre-fill system prompt and claudeMd with sensible defaults (once only on mount)
   const prefilled = useRef(false)
@@ -422,15 +425,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {/* 3. Permissions — only for agent type */}
       {activeTab === 'permissions' && type === 'agent' && (
         <div className="flex flex-col gap-[var(--sp-4)]">
-          <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}>
+          <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? defaultWorkspace).trim().length > 0}>
             {(id) => (
               <TextInput
                 id={id}
-                value={agentOptions.cwd ?? ''}
+                value={agentOptions.cwd ?? defaultWorkspace}
                 onChange={(e) => handleAgentOption('cwd', e.target.value)}
-                placeholder="/home/q/LAB/your-project"
+                placeholder={defaultWorkspace}
                 error={!!errors.cwd}
-                confirmed={!errors.cwd && (agentOptions.cwd ?? '').trim().length > 0}
+                confirmed={!errors.cwd && (agentOptions.cwd ?? defaultWorkspace).trim().length > 0}
               />
             )}
           </Field>

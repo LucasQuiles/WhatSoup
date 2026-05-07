@@ -8,6 +8,7 @@ import ReviewStep from './wizard/ReviewStep'
 import LinkStep from './wizard/LinkStep'
 import ConfirmDialog from './ConfirmDialog'
 import { api } from '../lib/api'
+import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
 import { DEFAULT_PROVIDER_ID } from '../lib/providers'
 
 interface AddLineWizardProps {
@@ -181,7 +182,9 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const [lockedName, setLockedName] = useState<string | null>(null)
 
   const handleNext = useCallback(async () => {
-    const errs = validateStep(currentStep, formData)
+    const nextFormData = withDefaultAgentWorkspace(formData)
+    if (nextFormData !== formData) setFormData(nextFormData)
+    const errs = validateStep(currentStep, nextFormData)
     setErrors(errs)
     if (Object.keys(errs).length > 0) return
 
@@ -191,9 +194,9 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
       setCreating(true)
       setCreateError(null)
       try {
-        await api.createLine(formData)
+        await api.createLine(nextFormData)
         setInstanceCreated(true)
-        setLockedName(formData.name as string)
+        setLockedName(nextFormData.name as string)
         setCurrentStep(1)
       } catch (err) {
         setCreateError(err instanceof Error ? err.message : String(err))
@@ -233,8 +236,10 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     setCreating(true)
     setCreateError(null)
     try {
+      const nextFormData = withDefaultAgentWorkspace(formData)
+      if (nextFormData !== formData) setFormData(nextFormData)
       // Instance already created at step 0→1 transition. Update config with final settings.
-      await api.updateConfig(formData.name as string, formData)
+      await api.updateConfig(nextFormData.name as string, nextFormData)
       // Instance already linked + running from step 1. Config saved. Done.
       setWizardCompleted(true)
       onClose()

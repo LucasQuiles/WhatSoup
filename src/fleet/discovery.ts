@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { VALID_ACCESS_MODES, VALID_SESSION_SCOPES, VALID_TYPES } from '../instance-loader.ts';
+import { expandHomePath } from '../lib/home-path.ts';
 import { createChildLogger } from '../logger.ts';
 import { configRoot as defaultConfigRoot, dataRoot, stateRoot } from './paths.ts';
 
@@ -118,9 +119,7 @@ export class FleetDiscovery {
           const agentOpts = typeof raw.agentOptions === 'object' && raw.agentOptions !== null && !Array.isArray(raw.agentOptions)
             ? raw.agentOptions as Record<string, unknown> : {};
           const rawCwd = typeof agentOpts.cwd === 'string' ? agentOpts.cwd : os.homedir();
-          // Expand leading ~ to homedir (configs often use ~/path)
-          const agentCwd = rawCwd.startsWith('~/') ? path.join(os.homedir(), rawCwd.slice(2))
-            : rawCwd === '~' ? os.homedir() : rawCwd;
+          const agentCwd = expandHomePath(rawCwd);
           socketPath = path.join(agentCwd, '.claude', 'whatsoup.sock');
         }
 
