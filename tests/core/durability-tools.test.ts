@@ -53,13 +53,24 @@ describe('DurabilityEngine tool_calls', () => {
   it('recordToolCall inserts a pending row and returns an id', () => {
     const id = engine.recordToolCall('conv-1', 'send_message', '{"text":"hi"}', 'unsafe');
     expect(id).toBeGreaterThan(0);
-    const row = db.raw.prepare('SELECT * FROM tool_calls WHERE id = ?').get(id) as any;
-    expect(row.conversation_key).toBe('conv-1');
-    expect(row.tool_name).toBe('send_message');
-    expect(row.tool_input).toBe('{"text":"hi"}');
-    expect(row.status).toBe('pending');
-    expect(row.replay_policy).toBe('unsafe');
-    expect(row.session_checkpoint_id).toBeNull();
+    const row = db.raw.prepare(
+      `SELECT conversation_key,
+              tool_name,
+              tool_input,
+              status,
+              replay_policy,
+              typeof(session_checkpoint_id) AS session_checkpoint_id_type
+         FROM tool_calls
+        WHERE id = ?`,
+    ).get(id) as any;
+    expect(row).toEqual({
+      conversation_key: 'conv-1',
+      tool_name: 'send_message',
+      tool_input: '{"text":"hi"}',
+      status: 'pending',
+      replay_policy: 'unsafe',
+      session_checkpoint_id_type: 'null',
+    });
   });
 
   it('recordToolCall stores an optional checkpointId', () => {
@@ -78,12 +89,27 @@ describe('DurabilityEngine tool_calls', () => {
   it('markToolComplete transitions to complete with result and timestamp', () => {
     const id = engine.recordToolCall('conv-1', 'send_message', '{}', 'unsafe');
     engine.markToolExecuting(id);
+    const startedAt = db.raw.prepare(`SELECT unixepoch('now') AS value`).get() as { value: number };
     engine.markToolComplete(id, '{"sent":true}');
-    const row = db.raw.prepare('SELECT * FROM tool_calls WHERE id = ?').get(id) as any;
-    expect(row.status).toBe('complete');
-    expect(row.result).toBe('{"sent":true}');
-    expect(row.completed_at).not.toBeNull();
-    expect(row.outbound_op_id).toBeNull();
+    const finishedAt = db.raw.prepare(`SELECT unixepoch('now') AS value`).get() as { value: number };
+    const row = db.raw.prepare(
+      `SELECT status,
+              result,
+              typeof(completed_at) AS completed_at_type,
+              strftime('%Y-%m-%d %H:%M:%S', completed_at) = completed_at AS completed_at_has_sql_format,
+              unixepoch(completed_at) BETWEEN ? AND ? AS completed_at_recorded_during_call,
+              typeof(outbound_op_id) AS outbound_op_id_type
+         FROM tool_calls
+        WHERE id = ?`,
+    ).get(startedAt.value, finishedAt.value, id) as any;
+    expect(row).toEqual({
+      status: 'complete',
+      result: '{"sent":true}',
+      completed_at_type: 'text',
+      completed_at_has_sql_format: 1,
+      completed_at_recorded_during_call: 1,
+      outbound_op_id_type: 'null',
+    });
   });
 
   it('markToolComplete stores optional outboundOpId', () => {
