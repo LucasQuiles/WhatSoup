@@ -291,9 +291,19 @@ describe('parsePinoLine', () => {
     expect(parsePinoLine(makeLine({ msg: 'health endpoint responded' }), CTX)).toBeNull();
   });
 
-  it('returns null for non-business info line', () => {
+  it('drops non-business info line while keeping warning fallback concrete', () => {
     const result = parsePinoLine(makeLine({ msg: 'Some random debug message', level: 30 }), CTX);
     expect(result).toBeNull();
+
+    const warnResult = parsePinoLine(makeLine({ msg: 'Some random debug message', level: 40 }), CTX);
+    expect(warnResult).toMatchObject({
+      instance: 'test-line',
+      mode: 'passive',
+      text: 'test-line: Some random debug message',
+      level: 'warn',
+      isError: true,
+      detail: { type: 'generic' },
+    });
   });
 
   it('returns generic for warn-level non-pattern message', () => {
@@ -528,10 +538,31 @@ describe('noise suppression via handleGetFeed', () => {
     handleGetFeed(mockReq(), res, deps);
 
     const body = res._body as any[];
-    const sessionEvent = body.find((e: any) => e.detail?.type === 'session');
-    const messageEvent = body.find((e: any) => e.detail?.type === 'message');
-    expect(sessionEvent).toBeDefined();
-    expect(messageEvent).toBeDefined();
+    expect(body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        instance: 'zeta',
+        mode: 'agent',
+        text: 'zeta: session start',
+        level: 'info',
+        detail: expect.objectContaining({
+          type: 'session',
+          action: 'session start',
+          sessionId: 'abc',
+        }),
+      }),
+      expect.objectContaining({
+        instance: 'zeta',
+        mode: 'agent',
+        text: 'zeta: inbound message received',
+        level: 'info',
+        detail: expect.objectContaining({
+          type: 'message',
+          direction: 'inbound',
+          chatJid: '15550100001@s.whatsapp.net',
+          conversationKey: '15550100001',
+        }),
+      }),
+    ]));
   });
 
   it('skips non-existent log directories gracefully', () => {
