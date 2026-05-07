@@ -20,7 +20,7 @@ function makeDiscovery(instances: Record<string, any> = {}) {
   return { getInstances: () => map } as any;
 }
 
-function makeDbReader(markers: { latestMessagePk: number | null; latestAccessMarker: string | null } = { latestMessagePk: null, latestAccessMarker: null }) {
+function makeDbReader(markers: { latestMessagePk: number | null; latestMessageMarker?: string | null; latestAccessMarker: string | null } = { latestMessagePk: null, latestMessageMarker: null, latestAccessMarker: null }) {
   return {
     getLatestMarkers: vi.fn(() => ({ ok: true, data: { ...markers } })),
   } as any;
@@ -62,6 +62,26 @@ describe('FleetRealtimeEventPoller', () => {
 
     // Advance message pk
     markers.latestMessagePk = 11;
+    await poller.poll();
+
+    const types = publisher.calls.map((e) => e.type);
+    expect(types).toContain('message_received');
+    expect(types).toContain('chat_updated');
+    expect(types).toContain('feed_event');
+
+    poller.stop();
+  });
+
+  it('broadcasts message_received + chat_updated when a message row changes without a new pk', async () => {
+    const markers = { latestMessagePk: 10, latestMessageMarker: '10:2026-01-01T00:00:00.000Z', latestAccessMarker: '2026-01-01' };
+    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 0 } });
+    const dbReader = makeDbReader(markers);
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    await poller.poll();
+    publisher.calls.length = 0;
+
+    markers.latestMessageMarker = '10:2026-01-01T00:00:02.000Z';
     await poller.poll();
 
     const types = publisher.calls.map((e) => e.type);
