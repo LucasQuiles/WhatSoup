@@ -55,9 +55,12 @@ describe('contacts-sync', () => {
     });
 
     it('ignores updates for unknown contacts', () => {
+      handleContactsUpsert(db, [{ id: '1234@s.whatsapp.net', name: 'Alice', notify: 'Ali' }]);
       handleContactsUpdate(db, [{ id: 'unknown@s.whatsapp.net', notify: 'X' }]);
-      const row = db.raw.prepare('SELECT * FROM contacts WHERE jid = ?').get('unknown@s.whatsapp.net');
-      expect(row).toBeUndefined();
+      const rows = db.raw.prepare('SELECT jid, display_name, notify_name FROM contacts ORDER BY jid').all();
+      expect(rows).toEqual([
+        { jid: '1234@s.whatsapp.net', display_name: 'Alice', notify_name: 'Ali' },
+      ]);
     });
   });
 });
