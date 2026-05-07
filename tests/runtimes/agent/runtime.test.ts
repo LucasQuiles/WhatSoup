@@ -276,7 +276,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, isUsageLimitMessage } from '../../../src/runtimes/agent/runtime.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
 
@@ -392,6 +392,24 @@ type PerChatCleanupRuntimeState = {
 function getPerChatCleanupState(runtime: AgentRuntime): PerChatCleanupRuntimeState {
   return runtime as unknown as PerChatCleanupRuntimeState;
 }
+
+describe('isUsageLimitMessage', () => {
+  it('does not suppress ordinary discussion of usage limits or quotas', () => {
+    expect(isUsageLimitMessage(
+      'Please document how usage limit and quota exceeded errors should be handled.',
+    )).toBe(false);
+  });
+
+  it('matches distinctive provider usage-cap notices', () => {
+    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
+    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
+  });
+
+  it('requires reset-time evidence for generic quota wording', () => {
+    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
+    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
+  });
+});
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -1602,6 +1620,26 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello there!' });
 
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!');
+  });
+
+  it('suppresses provider usage-cap assistant text and logs a preview', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({ type: 'assistant_text', text: "You're out of extra usage. Claude will be available at 8pm." });
+
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatJid: 'test@s.whatsapp.net',
+        textPreview: expect.stringContaining('out of extra usage'),
+      }),
+      'suppressed usage-limit message from assistant_text',
+    );
   });
 
   it('tool_use event enqueues tool update', async () => {
