@@ -170,10 +170,14 @@ describe('FleetDiscovery.scan — tokens.env', () => {
     // No tokens.env written
 
     const discovery = new FleetDiscovery(configRoot);
-    discovery.scan();
-    const inst = discovery.getInstance('loops');
+    const instances = discovery.scan();
 
-    expect(inst!.healthToken).toBeNull();
+    expect(instances.size).toBe(1);
+    expect(instances.get('loops')).toMatchObject({
+      name: 'loops',
+      healthToken: null,
+      configPath: path.join(configRoot, 'loops', 'config.json'),
+    });
   });
 
   it('returns null when tokens.env has no WHATSOUP_HEALTH_TOKEN line', () => {
@@ -181,10 +185,14 @@ describe('FleetDiscovery.scan — tokens.env', () => {
     writeTokensEnv('loops', 'SOME_OTHER_TOKEN=abc\nFOO=bar\n');
 
     const discovery = new FleetDiscovery(configRoot);
-    discovery.scan();
-    const inst = discovery.getInstance('loops');
+    const instances = discovery.scan();
 
-    expect(inst!.healthToken).toBeNull();
+    expect(instances.size).toBe(1);
+    expect(instances.get('loops')).toMatchObject({
+      name: 'loops',
+      healthToken: null,
+      configPath: path.join(configRoot, 'loops', 'config.json'),
+    });
   });
 });
 
@@ -389,10 +397,15 @@ describe('FleetDiscovery.scan — socket path resolution', () => {
     writeInstanceConfig('loops', chatInstance);
 
     const discovery = new FleetDiscovery(configRoot);
-    discovery.scan();
-    const inst = discovery.getInstance('loops');
+    const instances = discovery.scan();
 
-    expect(inst!.socketPath).toBeNull();
+    expect(instances.size).toBe(1);
+    expect(instances.get('loops')).toMatchObject({
+      name: 'loops',
+      type: 'chat',
+      socketPath: null,
+      stateRoot: path.join(tmpDir, 'state', 'whatsoup', 'instances', 'loops'),
+    });
   });
 });
 
