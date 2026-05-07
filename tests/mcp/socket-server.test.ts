@@ -255,9 +255,20 @@ describe('WhatSoupSocketServer', () => {
     const response = await sendJsonRpcMessagesUntilId(socketPath, [
       { jsonrpc: '2.0', method: 'notifications/initialized' },
       { jsonrpc: '2.0', id: 99, method: 'initialize', params: {} },
-    ], 99) as { id: number; result: unknown };
+    ], 99) as {
+      id: number;
+      result: {
+        protocolVersion: string;
+        capabilities: { tools: Record<string, never> };
+        serverInfo: { name: string; version: string };
+      };
+    };
     expect(response.id).toBe(99);
-    expect(response.result).toBeDefined();
+    expect(response.result).toEqual({
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'whatsoup', version: '0.1.0' },
+    });
   });
 
   // --- unknown method ---
