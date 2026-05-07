@@ -145,9 +145,15 @@ describe('startMediaBridge', () => {
   });
 
   it('returns a callable handle with _server and _currentChatJid properties', () => {
-    expect(typeof bridge).toBe('function');
-    expect(bridge._server).toBeDefined();
-    expect(bridge._currentChatJid).toBeNull();
+    expect({
+      handleType: typeof bridge,
+      serverListening: bridge._server.listening,
+      currentChatJid: bridge._currentChatJid,
+    }).toStrictEqual({
+      handleType: 'function',
+      serverListening: true,
+      currentChatJid: null,
+    });
   });
 });
 
