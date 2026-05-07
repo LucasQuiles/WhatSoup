@@ -431,7 +431,7 @@ describe('FleetDbReader', () => {
       const result = reader.getSummaryStats('missing', '/tmp/does-not-exist-xyz.db');
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.error).toBeTruthy();
+      expect(result.error).toMatch(/open database file/i);
     });
 
     it('returns ok:false for corrupt database', () => {
