@@ -76,6 +76,7 @@ export interface ValidateFactsOptions {
 
 export interface ValidatedFact extends ExtractedFact {
   adjustedConfidence: number;
+  validationReason?: string;
 }
 
 function buildValidationPrompt(facts: ExtractedFact[], messages: StoredMessage[]): string {
@@ -189,7 +190,7 @@ export async function validateFacts(
   };
 
   // Build a lookup from index -> validation result
-  const resultMap = new Map<number, { grounded: boolean; adjustedConfidence: number }>();
+  const resultMap = new Map<number, { grounded: boolean; adjustedConfidence: number; reason: string }>();
   for (const item of parsed) {
     if (typeof item !== 'object' || item === null) {
       noteSchemaDrop(item);
@@ -207,7 +208,8 @@ export async function validateFacts(
       typeof obj['adjusted_confidence'] === 'number'
         ? Math.max(0, Math.min(1, obj['adjusted_confidence']))
         : facts[index]?.confidence ?? 0;
-    resultMap.set(index, { grounded, adjustedConfidence });
+    const reason = typeof obj['reason'] === 'string' ? obj['reason'] : '';
+    resultMap.set(index, { grounded, adjustedConfidence, reason });
   }
 
   // P3.6-H1: ambiguous-empty gate. If the model returned items but every item
@@ -236,7 +238,7 @@ export async function validateFacts(
     const result = resultMap.get(i);
     if (!result) {
       // Validation result missing for this fact — pass through with original confidence.
-      validated.push({ ...facts[i], adjustedConfidence: facts[i].confidence });
+      validated.push({ ...facts[i], adjustedConfidence: facts[i].confidence, validationReason: '' });
       continue;
     }
 
@@ -245,7 +247,11 @@ export async function validateFacts(
     if (!result.grounded) continue;
     if (result.adjustedConfidence < config.enrichmentMinConfidence) continue;
 
-    validated.push({ ...facts[i], adjustedConfidence: result.adjustedConfidence });
+    validated.push({
+      ...facts[i],
+      adjustedConfidence: result.adjustedConfidence,
+      validationReason: result.reason,
+    });
   }
 
   return validated;

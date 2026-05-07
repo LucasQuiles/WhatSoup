@@ -22,6 +22,12 @@ export interface ExportableFact {
   senderName: string;
   supersedesText: string;
   sourceMessagePks: number[];
+  promotionReason?: string;
+  claim?: string;
+  evidence?: string;
+  warrant?: string;
+  confidenceQualifier?: string;
+  contradicts?: string;
   namespace?: string;
 }
 
@@ -56,6 +62,12 @@ export function toExportable(fact: ValidatedFact): ExportableFact {
     senderName: fact.senderName,
     supersedesText: fact.supersedesText,
     sourceMessagePks: fact.sourceMessagePks,
+    promotionReason: fact.validationReason ?? '',
+    claim: fact.claim ?? '',
+    evidence: fact.evidence ?? '',
+    warrant: fact.warrant ?? '',
+    confidenceQualifier: fact.confidenceQualifier ?? '',
+    contradicts: '',
   };
 }
 
@@ -109,6 +121,12 @@ const PayloadSchema = z.object({
   senderName: z.string(),
   supersedesText: z.string(),
   sourceMessagePks: z.array(z.number()),
+  promotionReason: z.string().optional(),
+  claim: z.string().optional(),
+  evidence: z.string().optional(),
+  warrant: z.string().optional(),
+  confidenceQualifier: z.string().optional(),
+  contradicts: z.string().optional(),
 });
 
 /**
@@ -157,6 +175,12 @@ export function enqueueFacts(
         senderName: fact.senderName,
         supersedesText: fact.supersedesText,
         sourceMessagePks: fact.sourceMessagePks,
+        promotionReason: fact.promotionReason ?? '',
+        claim: fact.claim ?? '',
+        evidence: fact.evidence ?? '',
+        warrant: fact.warrant ?? '',
+        confidenceQualifier: fact.confidenceQualifier ?? '',
+        contradicts: fact.contradicts ?? '',
       };
 
       const result = stmt.run(

@@ -1,4 +1,5 @@
 import { Pinecone } from '@pinecone-database/pinecone';
+import { createHash } from 'node:crypto';
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
@@ -14,6 +15,13 @@ const RETRY_DELAY_MS = 500;
 
 /** Per-operation circuit breakers (threshold=3, reset after 30s) */
 const breakers: Record<string, CircuitBreaker> = {};
+
+function queryLogFields(query: string): { queryHash: string; queryLength: number } {
+  return {
+    queryHash: createHash('sha256').update(query).digest('hex').slice(0, 12),
+    queryLength: query.length,
+  };
+}
 
 function getBreaker(operation: string): CircuitBreaker {
   if (!breakers[operation]) {
@@ -177,6 +185,12 @@ export interface MemoryRecord {
   updatedAt: string;
   superseded: string;
   sourceMessagePks: string;
+  promotionReason?: string;
+  claim?: string;
+  evidence?: string;
+  warrant?: string;
+  confidenceQualifier?: string;
+  contradicts?: string;
 }
 
 export interface SearchResult {
@@ -227,6 +241,12 @@ function toPineconeRecord(record: MemoryRecord): PineconeRecord {
     updated_at: record.updatedAt,
     superseded: record.superseded,
     source_message_pks: record.sourceMessagePks,
+    promotion_reason: record.promotionReason,
+    claim: record.claim,
+    evidence: record.evidence,
+    warrant: record.warrant,
+    confidence_qualifier: record.confidenceQualifier,
+    contradicts: record.contradicts,
   };
 
   // Strip null/undefined values — Pinecone requires primitive fields only
@@ -260,6 +280,13 @@ function fromPineconeHit(hit: {
     superseded: (f['superseded'] as string) ?? '',
     sourceMessagePks: (f['source_message_pks'] as string) ?? '',
   };
+
+  if (typeof f['promotion_reason'] === 'string') record.promotionReason = f['promotion_reason'];
+  if (typeof f['claim'] === 'string') record.claim = f['claim'];
+  if (typeof f['evidence'] === 'string') record.evidence = f['evidence'];
+  if (typeof f['warrant'] === 'string') record.warrant = f['warrant'];
+  if (typeof f['confidence_qualifier'] === 'string') record.confidenceQualifier = f['confidence_qualifier'];
+  if (typeof f['contradicts'] === 'string') record.contradicts = f['contradicts'];
 
   return { id: hit._id, score: hit._score, record };
 }
@@ -342,7 +369,7 @@ export class PineconeMemory {
     return this.projectGuardCheck;
   }
 
-  async search(
+  private async _searchCore(
     query: string,
     filters: Record<string, unknown>,
     topK: number,
@@ -377,7 +404,7 @@ export class PineconeMemory {
         'Pinecone search complete',
       );
       trackSuccess('search');
-      return applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
+      return results;
     } catch (err) {
       // One retry after a short delay to catch transient blips
       await sleep(RETRY_DELAY_MS);
@@ -390,17 +417,26 @@ export class PineconeMemory {
           'Pinecone search complete (after retry)',
         );
         trackSuccess('search');
-        return applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
+        return results;
       } catch (retryErr) {
         const durationMs = Date.now() - startMs;
         trackFailure('search', retryErr);
         logger.error(
-          { err: retryErr, query: query.slice(0, 100), topK, filter: filters, durationMs },
+          { err: retryErr, ...queryLogFields(query), topK, filter: filters, durationMs },
           'Pinecone search failed — returning empty results',
         );
         return [];
       }
     }
+  }
+
+  async search(
+    query: string,
+    filters: Record<string, unknown>,
+    topK: number,
+  ): Promise<SearchResult[]> {
+    const results = await this._searchCore(query, filters, topK);
+    return applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
   }
 
   private searchByField(
@@ -523,7 +559,7 @@ export class PineconeMemory {
       const durationMs = Date.now() - startMs;
       trackFailure('searchEntities', err);
       logger.error(
-        { err, query: query.slice(0, 100), durationMs },
+        { err, ...queryLogFields(query), durationMs },
         'Pinecone entity search failed — returning empty results',
       );
       return [];
@@ -587,12 +623,27 @@ export class PineconeMemory {
       filters['sender_jid'] = { $eq: senderJid };
     }
 
-    const results = await this.search(text, filters, 1);
+    const results = await this._searchCore(text, filters, 1);
 
     if (results.length > 0 && results[0].score >= threshold) {
       return { isDuplicate: true, existingId: results[0].id, score: results[0].score };
     }
 
     return { isDuplicate: false };
+  }
+
+  async searchClaims(
+    chatJid: string,
+    senderJid: string,
+    claimText: string,
+    topK: number = 5,
+  ): Promise<SearchResult[]> {
+    const filters: Record<string, unknown> = {
+      chat_jid: { $eq: chatJid },
+    };
+    if (senderJid) {
+      filters['sender_jid'] = { $eq: senderJid };
+    }
+    return this._searchCore(claimText, filters, topK);
   }
 }
