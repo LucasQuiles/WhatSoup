@@ -108,6 +108,36 @@ describe('FanoutDispatcher', () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
+  it('dispatcher dispose stops queued delivery after the in-flight handler resolves', async () => {
+    const d = new FanoutDispatcher({ ...opts, subscriberTimeoutMs: 1000 });
+    let releaseInflight: (() => void) | undefined;
+    const handler = vi.fn(async () => {
+      await new Promise<void>(resolve => { releaseInflight = resolve; });
+    });
+    d.subscribe('s', handler);
+
+    d.enqueue(ev(1));
+    d.enqueue(ev(2));
+    d.enqueue(ev(3));
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    const disposed = d.dispose();
+    d.enqueue(ev(4));
+    releaseInflight?.();
+    await disposed;
+    await d.flush();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatcher dispose rejects new subscriptions', async () => {
+    const d = new FanoutDispatcher(opts);
+
+    await d.dispose();
+
+    expect(() => d.subscribe('late', () => {})).toThrow(/disposed/i);
+  });
+
   it('dispose() is idempotent', () => {
     const d = new FanoutDispatcher(opts);
     const sub = d.subscribe('x', () => {});
