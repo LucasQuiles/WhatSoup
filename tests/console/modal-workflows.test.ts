@@ -47,8 +47,13 @@ describe('ConfirmDialog', () => {
 describe('phone validation', () => {
   it('exports normalizePhoneInput and validatePhone', async () => {
     const mod = await import('../../console/src/lib/validation');
-    expect(mod.normalizePhoneInput).toBeDefined();
-    expect(mod.validatePhone).toBeDefined();
+    expect({
+      normalizePhoneInput: typeof mod.normalizePhoneInput,
+      validatePhone: typeof mod.validatePhone,
+    }).toEqual({
+      normalizePhoneInput: 'function',
+      validatePhone: 'function',
+    });
   });
 
   it('normalizePhoneInput strips non-numeric chars except +', async () => {

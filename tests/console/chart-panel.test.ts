@@ -53,7 +53,7 @@ describe('ChartPanel', () => {
 
     expect(findByText(element, 'Test Chart')).toBe(true);
     const shimmer = findByTestId(element, 'chart-shimmer');
-    expect(shimmer).toBeDefined();
+    expect(getProps(shimmer)).toMatchObject({ 'data-testid': 'chart-shimmer' });
   });
 
   it('renders error state with retry button', async () => {
