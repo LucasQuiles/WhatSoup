@@ -28,7 +28,7 @@ const log = createChildLogger('fleet:realtime-poller');
 // ---------------------------------------------------------------------------
 
 interface InstanceSnapshot {
-  latestMessagePk: number | null;
+  latestMessageMarker: string | null;
   latestAccessMarker: string | null;
   latestLogMtime: number | null;
   lastLogPath: string | null;
@@ -98,7 +98,7 @@ export class FleetRealtimeEventPoller {
         };
 
         if (previous) {
-          if (current.latestMessagePk !== previous.latestMessagePk) {
+          if (current.latestMessageMarker !== previous.latestMessageMarker) {
             publishMessageReceived(this.deps.realtime, name);
             publishChatUpdated(this.deps.realtime, name);
             publishFeedEvent(this.deps.realtime, name);
@@ -134,12 +134,16 @@ export class FleetRealtimeEventPoller {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private getSnapshot(name: string, dbPath: string): { latestMessagePk: number | null; latestAccessMarker: string | null } {
+  private getSnapshot(name: string, dbPath: string): { latestMessageMarker: string | null; latestAccessMarker: string | null } {
     const result = this.deps.dbReader.getLatestMarkers(name, dbPath);
     if (!result.ok) {
-      return { latestMessagePk: null, latestAccessMarker: null };
+      return { latestMessageMarker: null, latestAccessMarker: null };
     }
-    return result.data;
+    return {
+      latestMessageMarker: result.data.latestMessageMarker
+        ?? (result.data.latestMessagePk == null ? null : `pk:${result.data.latestMessagePk}`),
+      latestAccessMarker: result.data.latestAccessMarker,
+    };
   }
 
   /** Stat the cached log path (1 syscall). Falls back to full dir scan if cached path is stale. */
