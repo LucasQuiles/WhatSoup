@@ -2,4 +2,12 @@
 set -e
 
 npm run guard:repo:staged
-(cd console && npx lint-staged)
+
+if git diff --cached --name-only -- console/src | grep -Eq '\.(ts|tsx)$'; then
+  if [ ! -x console/node_modules/.bin/lint-staged ] || [ ! -x console/node_modules/.bin/eslint ]; then
+    echo "console lint dependencies are missing; run: cd console && npm ci" >&2
+    exit 1
+  fi
+
+  (cd console && ./node_modules/.bin/lint-staged)
+fi

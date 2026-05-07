@@ -133,6 +133,35 @@ describe('Database schema', () => {
     expect(col!.type).toBe('TEXT');
   });
 
+  it('messages table has updated_at column for realtime update markers', () => {
+    const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{
+      name: string;
+      type: string;
+    }>;
+    const col = cols.find((c) => c.name === 'updated_at');
+    expect(col).toBeDefined();
+    expect(col!.type).toBe('TEXT');
+  });
+
+  it('touches messages.updated_at when history content is upgraded in place', () => {
+    db.raw.prepare(`
+      INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, message_id, content, content_text, content_type, is_from_me, timestamp, updated_at)
+      VALUES
+        ('123@s.whatsapp.net', '123', '123@s.whatsapp.net', 'msg-marker-1', NULL, NULL, 'history', 0, 1700000000, '2000-01-01T00:00:00.000Z')
+    `).run();
+
+    db.raw.prepare(`
+      UPDATE messages
+      SET content = 'upgraded', content_text = 'upgraded', content_type = 'text'
+      WHERE message_id = 'msg-marker-1'
+    `).run();
+
+    const row = db.raw.prepare('SELECT updated_at FROM messages WHERE message_id = ?').get('msg-marker-1') as { updated_at: string };
+    expect(row.updated_at).not.toBe('2000-01-01T00:00:00.000Z');
+    expect(row.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
   it('FTS insert trigger references content_text (MIGRATION_13)', () => {
     const triggers = db.raw
       .prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_fts_insert'")

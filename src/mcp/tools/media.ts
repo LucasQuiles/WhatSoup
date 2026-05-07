@@ -13,7 +13,7 @@ import { createChildLogger } from '../../logger.ts';
 import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
-import { isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
+import { assertConversationAccess, isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 
@@ -212,18 +212,20 @@ export function registerMediaTools(
       message_id: z.string().describe('The message ID to download media from'),
       quoted: z.boolean().optional().describe('When true, download media from the quoted message instead of the message itself.'),
     }),
-    handler: async (params) => {
+    handler: async (params, session) => {
       const messageId = params['message_id'] as string;
       const quoted = params['quoted'] as boolean | undefined;
 
       // Look up the message
       const row = db.raw.prepare(
-        'SELECT message_id, content_type, media_path, raw_message FROM messages WHERE message_id = ?',
-      ).get(messageId) as Pick<MessageRow, 'message_id' | 'content_type' | 'media_path'> & { raw_message: string | null } | undefined;
+        'SELECT message_id, conversation_key, content_type, media_path, raw_message FROM messages WHERE message_id = ?',
+      ).get(messageId) as Pick<MessageRow, 'message_id' | 'conversation_key' | 'content_type' | 'media_path'> & { raw_message: string | null } | undefined;
 
       if (!row) {
         return { error: 'not_found', message: `No message found with ID: ${messageId}` };
       }
+
+      assertConversationAccess(row.conversation_key, session, 'Media message');
 
       // Reject non-media types unless we are explicitly targeting quoted media.
       if (!quoted && !MEDIA_CONTENT_TYPES.has(row.content_type)) {
@@ -359,14 +361,15 @@ export function registerMediaTools(
     schema: z.object({
       message_id: z.string().describe('The audio message ID to transcribe'),
     }),
-    handler: async (params) => {
+    handler: async (params, session) => {
       const messageId = params['message_id'] as string;
 
       // Look up the message
       const row = db.raw.prepare(
-        'SELECT message_id, content_type, content, content_text, media_path, raw_message FROM messages WHERE message_id = ?',
+        'SELECT message_id, conversation_key, content_type, content, content_text, media_path, raw_message FROM messages WHERE message_id = ?',
       ).get(messageId) as {
         message_id: string;
+        conversation_key: string;
         content_type: string;
         content: string | null;
         content_text: string | null;
@@ -377,6 +380,8 @@ export function registerMediaTools(
       if (!row) {
         return { error: 'not_found', message: `No message found with ID: ${messageId}` };
       }
+
+      assertConversationAccess(row.conversation_key, session, 'Audio message');
 
       if (row.content_type !== 'audio') {
         return { error: 'not_audio', message: `Message is type "${row.content_type}", not audio.` };

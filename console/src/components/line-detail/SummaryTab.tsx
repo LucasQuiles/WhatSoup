@@ -24,6 +24,12 @@ export function SummaryTab({
   const [confirmAction, setConfirmAction] = useState<'restart' | 'stop' | null>(null)
   const modeColor = getModeColor(line.mode)
   const connectionState = line.health?.connection?.state ?? 'unknown'
+  const rawConfig = line.config ?? {}
+  const agentOptions = rawConfig.agentOptions as Record<string, unknown> | undefined
+  const configProvider =
+    typeof agentOptions?.provider === 'string' ? agentOptions.provider : DEFAULT_PROVIDER_ID
+  const providerId = line.provider ?? line.health?.instance?.provider ?? configProvider
+  const providerDisplay = getProvider(providerId)?.displayName ?? providerId
 
   // All instance KPIs in one row — health, runtime, identity, tokens
   const cards = [
@@ -44,6 +50,7 @@ export function SummaryTab({
       { label: 'ENRICHMENT', value: String(line.enrichmentUnprocessed ?? 0), color: (line.enrichmentUnprocessed ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
     ] : []),
     ...(line.mode === 'agent' ? [
+      { label: 'PROVIDER', value: providerDisplay, color: 'text-m-agt' },
       { label: 'SESSIONS', value: String(line.activeSessions ?? 0), color: (line.activeSessions ?? 0) > 0 ? 'text-m-agt' : 'text-t3' },
       ...(line.health?.runtime?.agent?.lastSessionStatus
         ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
@@ -86,7 +93,6 @@ export function SummaryTab({
         { label: 'Outbound', active: (line.activeSessions ?? 0) > 0 },
       ]
 
-  const rawConfig = line.config ?? {}
   const config = line.mode !== 'passive' ? buildConfigEntries(rawConfig) : null
 
   return (

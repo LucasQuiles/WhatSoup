@@ -23,14 +23,18 @@ export interface VirtualMessagesOptions {
   overscan?: number
 }
 
-export function estimateMessageRowHeight(message: VirtualMessage): number {
-  const contentLength = Math.max((message.content ?? '').trim().length, 1)
+function contentText(message: VirtualMessage | null | undefined): string {
+  return typeof message?.content === 'string' ? message.content : ''
+}
+
+export function estimateMessageRowHeight(message: VirtualMessage | null | undefined): number {
+  const contentLength = Math.max(contentText(message).trim().length, 1)
   const estimatedLines = Math.max(1, Math.ceil(contentLength / MESSAGE_CHARS_PER_LINE))
 
   return (
     MESSAGE_BASE_ROW_HEIGHT +
-    (message.fromMe ? 0 : INCOMING_MESSAGE_LABEL_HEIGHT) +
-    (message.type === 'text' ? 0 : MEDIA_MESSAGE_BONUS_HEIGHT) +
+    (message?.fromMe === false ? INCOMING_MESSAGE_LABEL_HEIGHT : 0) +
+    (message?.type && message.type !== 'text' ? MEDIA_MESSAGE_BONUS_HEIGHT : 0) +
     (estimatedLines - 1) * MESSAGE_LINE_HEIGHT
   )
 }
@@ -49,7 +53,7 @@ export function createVirtualMessagesOptions({
     overscan,
     gap: MESSAGE_GAP,
     getItemKey: (index) => messages[index]?.pk ?? index,
-    estimateSize: (index) => estimateMessageRowHeight(messages[index]!),
+    estimateSize: (index) => estimateMessageRowHeight(messages[index]),
     measureElement: (element) =>
       Math.ceil(element.getBoundingClientRect().height) || MESSAGE_BASE_ROW_HEIGHT,
   }

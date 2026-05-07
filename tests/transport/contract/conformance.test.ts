@@ -334,6 +334,23 @@ for (const fx of fixtures) {
       }
     });
 
+    it('in-memory rate-limit injection rejects sendText with retryAfterMs', async () => {
+      const a = fx.make();
+      if (!(a instanceof InMemoryAdapter)) return;
+      await a.connect();
+
+      a.injectRateLimit(2500);
+
+      await expect(a.sendText(fx.textConv(), 'hi')).rejects.toMatchObject({
+        payload: {
+          code: 'transport.rate_limited',
+          retryable: true,
+          retryAfterMs: 2500,
+          hint: 'retry-after-ms=2500',
+        },
+      });
+    });
+
     it('C18 — every claimed extension is reachable on a fresh connection', async () => {
       const a = fx.make();
       await a.connect();

@@ -458,18 +458,28 @@ export class FleetDbReader {
   getLatestMarkers(
     name: string,
     dbPath: string,
-  ): DbResult<{ latestMessagePk: number | null; latestAccessMarker: string | null }> {
+  ): DbResult<{ latestMessagePk: number | null; latestMessageMarker: string | null; latestAccessMarker: string | null }> {
     return this.query(name, dbPath, (db) => {
+      const columns = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+      const hasUpdatedAt = columns.some((column) => column.name === 'updated_at');
       const msgRow = db.prepare(
-        'SELECT MAX(pk) AS pk FROM messages WHERE deleted_at IS NULL',
-      ).get() as { pk: number | null } | undefined;
+        hasUpdatedAt
+          ? 'SELECT MAX(pk) AS pk, MAX(updated_at) AS updatedAt FROM messages'
+          : 'SELECT MAX(pk) AS pk, NULL AS updatedAt FROM messages',
+      ).get() as { pk: number | null; updatedAt: string | null } | undefined;
 
       const accessRow = db.prepare(
         'SELECT MAX(COALESCE(decided_at, requested_at)) AS marker FROM access_list',
       ).get() as { marker: string | null } | undefined;
 
+      const latestMessagePk = msgRow?.pk ?? null;
+      const latestMessageUpdatedAt = msgRow?.updatedAt ?? null;
+
       return {
-        latestMessagePk: msgRow?.pk ?? null,
+        latestMessagePk,
+        latestMessageMarker: latestMessagePk == null
+          ? null
+          : `${latestMessagePk}:${latestMessageUpdatedAt ?? ''}`,
         latestAccessMarker: accessRow?.marker ?? null,
       };
     });

@@ -45,6 +45,16 @@ type SessionDetail = Extract<FeedDetail, { type: "session" }>;
 type HealthDetail = Extract<FeedDetail, { type: "health" }>;
 type ImportDetail = Extract<FeedDetail, { type: "import" }>;
 
+const EMPTY_TEXT = "\u2014";
+
+function displayText(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value : EMPTY_TEXT;
+}
+
+function optionalText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 function edgeColor(event: FeedEvent): string {
   const d = event.detail;
   if (!d) return "var(--b1)";
@@ -64,7 +74,7 @@ function edgeColor(event: FeedEvent): string {
 }
 
 function cleanText(event: FeedEvent): string {
-  let text = event.text;
+  let text = displayText(event.text);
   if (event.instance && text.startsWith(`${event.instance}: `))
     text = text.slice(event.instance.length + 2);
   if (event.component && text.startsWith(`[${event.component}] `))
@@ -174,8 +184,9 @@ function connectionPresentation(event: FeedEvent, d: ConnectionDetail): CardPres
 function messagePresentation(event: FeedEvent, d: MessageDetail): CardPresentation {
   const isIn = d.direction === "inbound";
   const isNonText = d.contentType && d.contentType !== "text";
-  const count = parseCollapsedCount(event.text);
+  const count = parseCollapsedCount(displayText(event.text));
   const chatShort = shortChatJid(d.chatJid);
+  const preview = optionalText(d.preview);
 
   return {
     badge: `${isIn ? "recv" : "sent"}${count && count > 1 ? ` \u00d7${count}` : ""}`,
@@ -186,7 +197,7 @@ function messagePresentation(event: FeedEvent, d: MessageDetail): CardPresentati
       d.senderName ? chatShort : undefined,
       isNonText ? `[${d.contentType}]` : undefined,
     ]),
-    detail: d.preview ? formatWhatsAppText(d.preview) : isNonText ? `[${d.contentType}]` : undefined,
+    detail: preview ? formatWhatsAppText(preview) : isNonText ? `[${d.contentType}]` : undefined,
   };
 }
 
@@ -196,7 +207,7 @@ function toolErrorPresentation(d: ToolErrorDetail): CardPresentation {
     badgeTone: "crit",
     headline: "tool failed",
     headlineTone: "crit",
-    detail: formatWhatsAppText(d.error),
+    detail: formatWhatsAppText(displayText(d.error)),
     detailClassName: "fc-detail--error fc-detail--wrap",
   };
 }
@@ -389,10 +400,10 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
 
 function copyContent(event: FeedEvent): string {
   const d = event.detail;
-  if (!d) return event.text;
+  if (!d) return displayText(event.text);
   switch (d.type) {
-    case "message": return (d as { preview?: string }).preview ?? event.text;
-    case "tool_error": return d.error;
+    case "message": return optionalText((d as { preview?: unknown }).preview) ?? displayText(event.text);
+    case "tool_error": return displayText(d.error);
     case "session": return `${d.action}${d.reason ? ` — ${d.reason}` : ""}`;
     case "connection": {
       const code = d.statusCode ? `${d.statusCode} ` : "";
@@ -400,14 +411,14 @@ function copyContent(event: FeedEvent): string {
       let text = `${code}${reason}`.trim();
       if (d.reconnecting) text += " \u2192 reconnecting";
       if (d.state === "connected" && d.statusCode) text += " \u2192 reconnected";
-      return text || event.text;
+      return text || displayText(event.text);
     }
     case "health": {
       if (d.status === "online") return "came online";
       if (d.status === "unreachable") return "connection lost";
       return `degraded \u2014 ${d.error ?? "unknown"}`;
     }
-    default: return event.text;
+    default: return displayText(event.text);
   }
 }
 

@@ -1,7 +1,7 @@
 import { type FC, useState, useRef, useCallback } from 'react'
 import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
-import { formatTime } from '../lib/format-time'
+import { formatFullTime, formatTime } from '../lib/format-time'
 import MessageContent from './MessageContent'
 import type { Message } from '../types'
 
@@ -20,11 +20,7 @@ const isRawJid = (name: string) => /^\d{5,}$/.test(name)
 
 /** Styled hover detail card — shown on hover. */
 const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
-  const ts = new Date(msg.timestamp)
-  const fullTime = ts.toLocaleString('en-US', {
-    weekday: 'short', month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  })
+  const fullTime = formatFullTime(msg.timestamp)
 
   return (
     <div

@@ -357,6 +357,31 @@ describe('chat-management tools', () => {
         { text: 'First message' },
       );
     });
+
+    it('rejects forwarding a source message outside a bound global conversation', async () => {
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg6', to_jid: '111@s.whatsapp.net' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('different conversation');
+      expect(result.content[0].text).not.toContain('Bob chat');
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('rejects forwarding to a destination outside a bound global conversation', async () => {
+      const result = await registry.call(
+        'forward_message',
+        { message_id: 'msg1', to_jid: '222@s.whatsapp.net' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('different conversation');
+      expect(mockSock.sendMessage).not.toHaveBeenCalled();
+    });
   });
 
   // --- archive_chat ---

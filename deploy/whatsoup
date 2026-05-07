@@ -44,7 +44,7 @@ keyring_lookup() {
   local keyring_value=""
   case "$(uname -s)" in
     Darwin) keyring_value="$(security find-generic-password -s "$service" -a "$account" -w 2>/dev/null || true)" ;;
-    *)      keyring_value="$(secret-tool lookup service "$service" "$@" 2>/dev/null || true)" ;;
+    *)      keyring_value="$(timeout 3s secret-tool lookup service "$service" "$@" 2>/dev/null || true)" ;;
   esac
   if [ -n "$keyring_value" ]; then
     echo "$keyring_value"
@@ -123,9 +123,13 @@ else
 fi
 
 # Health server auth token — used by POST /heal and POST /send on all instances.
-WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup-health-token "" user "$INSTANCE")"
-if [ -z "$WHATSOUP_HEALTH_TOKEN" ]; then
-  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"
+# Prefer an already-loaded value (e.g. from EnvironmentFile=tokens.env in the systemd unit) so a
+# missing or unresponsive platform keyring cannot delay startup.
+if [ -z "${WHATSOUP_HEALTH_TOKEN:-}" ]; then
+  WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup-health-token "" user "$INSTANCE")"
+  if [ -z "$WHATSOUP_HEALTH_TOKEN" ]; then
+    WHATSOUP_HEALTH_TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"
+  fi
 fi
 if [ -n "$WHATSOUP_HEALTH_TOKEN" ]; then
   export WHATSOUP_HEALTH_TOKEN

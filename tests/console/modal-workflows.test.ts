@@ -71,4 +71,13 @@ describe('phone validation', () => {
     const { validatePhone } = await import('../../console/src/lib/validation');
     expect(validatePhone('')).toBe(false);
   });
+
+  it('fails closed for malformed runtime phone values', async () => {
+    const { normalizePhoneInput, validatePhone } = await import('../../console/src/lib/validation');
+    expect(normalizePhoneInput(null)).toBe('');
+    expect(normalizePhoneInput(undefined)).toBe('');
+    expect(normalizePhoneInput(5550001234)).toBe('15550001234');
+    expect(validatePhone(null)).toBe(false);
+    expect(validatePhone(undefined)).toBe(false);
+  });
 });

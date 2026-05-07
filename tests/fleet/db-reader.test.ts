@@ -41,6 +41,7 @@ const MINIMAL_SCHEMA = `
     edited_at TEXT,
     deleted_at TEXT,
     raw_message TEXT,
+    updated_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -371,6 +372,28 @@ describe('FleetDbReader', () => {
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error).toMatch(/Invalid FTS MATCH query/i);
+    });
+  });
+
+  // ── getLatestMarkers ────────────────────────────────────────────────────
+
+  describe('getLatestMarkers', () => {
+    it('includes message row updates in the message marker', () => {
+      selfDb.prepare("UPDATE messages SET updated_at = '2026-01-01T00:00:00.000Z' WHERE conversation_key = '5551234'").run();
+
+      const before = reader.getLatestMarkers('self', '');
+      expect(before.ok).toBe(true);
+      if (!before.ok) return;
+
+      selfDb.prepare("UPDATE messages SET content = 'upgraded body', updated_at = '2026-01-01T00:00:02.000Z' WHERE conversation_key = '5551234' AND content = 'hello'").run();
+
+      const after = reader.getLatestMarkers('self', '');
+      expect(after.ok).toBe(true);
+      if (!after.ok) return;
+
+      expect(after.data.latestMessagePk).toBe(before.data.latestMessagePk);
+      expect(after.data.latestMessageMarker).not.toBe(before.data.latestMessageMarker);
+      expect(after.data.latestMessageMarker).toContain('2026-01-01T00:00:02.000Z');
     });
   });
 

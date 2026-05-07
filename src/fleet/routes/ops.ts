@@ -22,6 +22,7 @@ import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
 import type { ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
+import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
@@ -427,8 +428,15 @@ export async function handleConfigUpdate(
   const merged = deepMergeRecords(existing, patch);
 
   // Validate cwd path traversal (same guard as handleCreateLine)
-  if (merged.agentOptions && typeof (merged.agentOptions as Record<string, unknown>).cwd === 'string') {
-    if (resolveAndValidateCwd(merged.agentOptions as Record<string, unknown>, res) === null) return;
+  if (merged.type === 'agent') {
+    if (merged.agentOptions == null) {
+      merged.agentOptions = defaultAgentOptions(params.name);
+    }
+    if (typeof merged.agentOptions !== 'object' || Array.isArray(merged.agentOptions)) {
+      jsonResponse(res, 400, { error: 'agentOptions must be an object' });
+      return;
+    }
+    if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) return;
   }
 
   // Validate numeric bounds if present in patch
@@ -625,7 +633,11 @@ function realpathExistingPrefix(targetPath: string): string {
 }
 
 function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
-  const resolved = path.resolve(inputPath);
+  if (hasUnsupportedTildePrefix(inputPath)) {
+    jsonResponse(res, 400, { error });
+    return null;
+  }
+  const resolved = path.resolve(expandHomePath(inputPath));
   const homePath = path.resolve(os.homedir());
   if (!pathIsInsideDirectory(resolved, homePath)) {
     jsonResponse(res, 400, { error });
@@ -675,6 +687,33 @@ function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: Serve
   if (safeCwd === null) return null;
   agentOptions.cwd = safeCwd;
   return safeCwd;
+}
+
+function defaultAgentCwd(name: string): string {
+  return path.join(os.homedir(), '.local', 'share', 'whatsoup', 'instances', name, 'workspace');
+}
+
+function defaultAgentOptions(name: string): Record<string, unknown> {
+  return { cwd: defaultAgentCwd(name), sessionScope: 'per_chat' };
+}
+
+function resolveAndValidateAgentCwd(
+  name: string,
+  agentOptions: Record<string, unknown>,
+  res: ServerResponse,
+): string | null {
+  const cwd = agentOptions.cwd;
+  if (cwd == null || (typeof cwd === 'string' && !cwd.trim())) {
+    agentOptions.cwd = defaultAgentCwd(name);
+  } else if (typeof cwd !== 'string') {
+    jsonResponse(res, 400, { error: 'agentOptions.cwd must be a string within the home directory' });
+    return null;
+  }
+  if (agentOptions.sessionScope == null || (typeof agentOptions.sessionScope === 'string' && !agentOptions.sessionScope.trim())) {
+    agentOptions.sessionScope = 'per_chat';
+  }
+
+  return resolveAndValidateCwd(agentOptions, res);
 }
 
 /**
@@ -826,9 +865,12 @@ export async function handleCreateLine(
   }
 
   // --- Validate agent-specific options (only if provided — may come via PATCH later) ---
-  if (type === 'agent' && body.agentOptions) {
+  if (type === 'agent') {
+    if (body.agentOptions == null) {
+      body.agentOptions = defaultAgentOptions(name);
+    }
     const ao = body.agentOptions as Record<string, unknown>;
-    if (typeof ao !== 'object') {
+    if (typeof ao !== 'object' || Array.isArray(ao)) {
       jsonResponse(res, 400, { error: 'agentOptions must be an object' });
       return;
     }
@@ -840,10 +882,7 @@ export async function handleCreateLine(
       jsonResponse(res, 400, { error: 'agent with sessionScope "single" requires accessMode "self_only"' });
       return;
     }
-    // Confine cwd to user home directory if provided
-    if (typeof ao.cwd === 'string' && ao.cwd.trim()) {
-      if (resolveAndValidateCwd(ao, res) === null) return;
-    }
+    if (resolveAndValidateAgentCwd(name, ao, res) === null) return;
     // Confine pluginDirs to user home directory
     if (Array.isArray(ao.pluginDirs)) {
       if (!validatePluginDirs(ao.pluginDirs as unknown[], res)) return;

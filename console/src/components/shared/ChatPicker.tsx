@@ -11,6 +11,10 @@ interface ChatPickerProps {
   placeholder?: string
 }
 
+function chatLabel(chat: ChatItem): string {
+  return typeof chat.name === 'string' && chat.name.trim() ? chat.name : chat.conversationKey
+}
+
 export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = 'Search chats...' }: ChatPickerProps) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -34,7 +38,7 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
     if (!query) return chats
     const q = query.toLowerCase()
     return chats.filter((c) =>
-      c.name.toLowerCase().includes(q) || c.conversationKey.toLowerCase().includes(q),
+      chatLabel(c).toLowerCase().includes(q) || c.conversationKey.toLowerCase().includes(q),
     )
   }, [chats, query])
 
@@ -44,7 +48,7 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
         className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md [border:var(--bw)_solid_var(--b1)]"
       >
         {selected.isGroup ? <Users size={14} className="text-t4" /> : <MessageSquare size={14} className="text-t4" />}
-        <span className="c-data flex-1 truncate">{selected.name}</span>
+        <span className="c-data flex-1 truncate">{chatLabel(selected)}</span>
         <button type="button" onClick={onClear} className="c-btn c-btn-ghost c-btn-sm" aria-label="Clear selection">
           <X size={14} />
         </button>
@@ -73,7 +77,7 @@ export function ChatPicker({ chats, selected, onSelect, onClear, placeholder = '
               onClick={() => { onSelect(chat); setOpen(false); setQuery('') }}
             >
               {chat.isGroup ? <Users size={14} className="text-t4" /> : <MessageSquare size={14} className="text-t4" />}
-              <span className="c-data truncate">{chat.name}</span>
+              <span className="c-data truncate">{chatLabel(chat)}</span>
             </button>
           ))}
         </div>

@@ -4,12 +4,28 @@
 // fetch_message_history, request_placeholder_resend, get_reactions, get_message_receipts.
 
 import { z } from 'zod';
-import type { ToolDeclaration } from '../types.ts';
+import { assertConversationAccess, type SessionContext, type ToolDeclaration } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('chat-operations');
+
+function assertMessageConversationAccess(
+  db: Database,
+  messageId: string,
+  session: SessionContext,
+  label: string,
+): void {
+  if (!session.conversationKey) return;
+  const row = db.raw
+    .prepare('SELECT conversation_key FROM messages WHERE message_id = ? AND deleted_at IS NULL')
+    .get(messageId) as { conversation_key: string } | undefined;
+  if (!row) {
+    throw new Error(`${label} "${messageId}" not found`);
+  }
+  assertConversationAccess(row.conversation_key, session, label);
+}
 
 // ---------------------------------------------------------------------------
 // W2-01: clear_chat
@@ -354,8 +370,9 @@ function makeGetReactions(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
-    handler: async (params) => {
+    handler: async (params, session) => {
       const { message_id } = GetReactionsSchema.parse(params);
+      assertMessageConversationAccess(db, message_id, session, 'Message reactions');
 
       const rows = db.raw
         .prepare('SELECT sender_jid, reaction, timestamp FROM reactions WHERE message_id = ? ORDER BY timestamp')
@@ -382,8 +399,9 @@ function makeGetMessageReceipts(db: Database): ToolDeclaration {
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
-    handler: async (params) => {
+    handler: async (params, session) => {
       const { message_id } = GetReceiptsSchema.parse(params);
+      assertMessageConversationAccess(db, message_id, session, 'Message receipts');
 
       const rows = db.raw
         .prepare('SELECT recipient_jid, type, timestamp FROM receipts WHERE message_id = ? ORDER BY timestamp')

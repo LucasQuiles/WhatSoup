@@ -404,12 +404,14 @@ The operation tracker detects and recovers from stuck operations regardless of t
 
 ### `agentOptions`
 
-Required when `type` is `agent`. All sub-fields are validated by `instance-loader.ts`.
+Optional when `type` is `agent`. Fleet create/update APIs fill a default
+`sessionScope` and `cwd` when they are omitted; hand-written configs that
+include `agentOptions` should keep these fields explicit.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `sessionScope` | string | yes | — | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
-| `cwd` | string | yes | — | Working directory for the Claude Code subprocess. Tilde is expanded (`~` → `$HOME`). |
+| `sessionScope` | string | no | `per_chat` via fleet API | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
+| `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
 | `sandbox` | object | no | — | Sandbox constraints applied via Claude Code hooks. See [sandbox](#agentoptions-sandbox). |
@@ -468,8 +470,8 @@ The loader enforces these constraints before the process starts:
 - `adminPhones` must be a non-empty array of non-empty strings.
 - `chat` instances must have a non-empty `systemPrompt`.
 - `passive` instances must not have a `systemPrompt` and must use `accessMode: self_only`.
-- `agent` instances without `agentOptions` must use `accessMode: self_only`.
-- `agent` instances with `agentOptions` must have a valid `sessionScope` and non-empty `cwd`.
+- Fleet create/update APIs default omitted `agentOptions` to `sessionScope: per_chat` with a per-instance workspace under the user's home directory.
+- `agent` instances with hand-written `agentOptions` must have a valid `sessionScope`; an empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
 - `agent` with `sessionScope: single` must use `accessMode: self_only`.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.

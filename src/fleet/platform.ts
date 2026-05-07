@@ -157,6 +157,10 @@ export function parseInstanceName(unit: string): string {
   return match ? match[1] : unit;
 }
 
+export function systemdUnitName(name: string): string {
+  return name === 'whatsoup-fleet' ? 'whatsoup-fleet.service' : `whatsoup@${name}.service`;
+}
+
 /**
  * Base class providing a default `startFire` implementation that delegates to `start()`.
  * Subclasses with async start semantics inherit this default; NoSystemdServiceManager
@@ -181,7 +185,7 @@ abstract class BaseServiceManager implements ServiceManager {
 
 class SystemdServiceManager extends BaseServiceManager {
   private unit(name: string): string {
-    return `whatsoup@${name}`;
+    return systemdUnitName(name);
   }
 
   async enable(name: string): Promise<void> {

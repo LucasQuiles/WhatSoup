@@ -707,8 +707,10 @@ export class OutboundQueue implements IOutboundQueue {
         if (attempt < OutboundQueue.MAX_SEND_ATTEMPTS - 1) {
           const truncated = text.length > 80 ? text.slice(0, 80) + '…' : text;
           const isTimeout = (err as Error).message === 'SEND_TIMEOUT';
-          log.warn({ chatJid: this.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }) }, 'outbound send failed — retrying');
-          await new Promise<void>((resolve) => setTimeout(resolve, jitteredDelay(OutboundQueue.SEND_RETRY_BASE_MS, attempt, OutboundQueue.SEND_RETRY_MAX_MS)));
+          const retryAfterMs = OutboundQueue.retryAfterMs(err);
+          const delayMs = retryAfterMs ?? jitteredDelay(OutboundQueue.SEND_RETRY_BASE_MS, attempt, OutboundQueue.SEND_RETRY_MAX_MS);
+          log.warn({ chatJid: this.chatJid, attempt: attempt + 1, maxAttempts: OutboundQueue.MAX_SEND_ATTEMPTS, textPreview: truncated, ...(isTimeout && { timeout: true }), ...(retryAfterMs !== undefined && { retryAfterMs }) }, 'outbound send failed — retrying');
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
         }
       }
     }
@@ -726,5 +728,11 @@ export class OutboundQueue implements IOutboundQueue {
       this.messenger.sendMessage(this.chatJid, '⚠️ A response could not be delivered after 3 attempts.'),
       new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), SEND_TIMEOUT_MS)),
     ]).catch(() => { /* best effort only */ });
+  }
+
+  private static retryAfterMs(err: unknown): number | undefined {
+    const retryAfterMs = (err as { payload?: { retryAfterMs?: unknown } })?.payload?.retryAfterMs;
+    if (typeof retryAfterMs !== 'number' || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return undefined;
+    return Math.min(retryAfterMs, OutboundQueue.SEND_RETRY_MAX_MS);
   }
 }

@@ -32,6 +32,7 @@ export class FanoutDispatcher {
   private readonly subs = new Map<string, SubscriberState>();
   private readonly opts: FanoutOptions;
   private readonly drains: Set<Promise<void>> = new Set();
+  private disposed = false;
 
   readonly metrics: FanoutMetrics = {
     subscriberFailures: new Map(),
@@ -45,6 +46,9 @@ export class FanoutDispatcher {
   }
 
   subscribe(id: string, handler: SubscriberHandler): Subscription {
+    if (this.disposed) {
+      throw new Error('FanoutDispatcher is disposed');
+    }
     if (this.subs.has(id)) {
       throw new Error(`subscriber id already registered: ${id}`);
     }
@@ -72,6 +76,7 @@ export class FanoutDispatcher {
   }
 
   enqueue(event: InboundEvent): void {
+    if (this.disposed) return;
     for (const sub of this.subs.values()) {
       if (sub.suspended) {
         this.metrics.droppedForSuspended += 1;
@@ -97,6 +102,19 @@ export class FanoutDispatcher {
     while (this.drains.size > 0) {
       await Promise.allSettled(Array.from(this.drains));
     }
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) {
+      await this.flush();
+      return;
+    }
+    this.disposed = true;
+    for (const sub of this.subs.values()) {
+      this.suspend(sub, 'disposed');
+    }
+    this.subs.clear();
+    await this.flush();
   }
 
   private kickDrain(sub: SubscriberState): void {

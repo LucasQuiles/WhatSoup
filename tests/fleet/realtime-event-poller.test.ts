@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FleetRealtimeEventPoller } from '../../src/fleet/realtime-event-poller.ts';
 import type { FleetRealtimePublisher } from '../../src/fleet/realtime-publisher.ts';
+import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 
 // Mock proxyToInstance
 vi.mock('../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn().mockResolvedValue({ status: 200, body: '{"composing":[]}' }),
 }));
+
+const mockProxyToInstance = vi.mocked(proxyToInstance);
 
 function makePublisher(): FleetRealtimePublisher & { calls: any[] } {
   const calls: any[] = [];
@@ -20,7 +23,7 @@ function makeDiscovery(instances: Record<string, any> = {}) {
   return { getInstances: () => map } as any;
 }
 
-function makeDbReader(markers: { latestMessagePk: number | null; latestAccessMarker: string | null } = { latestMessagePk: null, latestAccessMarker: null }) {
+function makeDbReader(markers: { latestMessagePk: number | null; latestMessageMarker?: string | null; latestAccessMarker: string | null } = { latestMessagePk: null, latestMessageMarker: null, latestAccessMarker: null }) {
   return {
     getLatestMarkers: vi.fn(() => ({ ok: true, data: { ...markers } })),
   } as any;
@@ -62,6 +65,26 @@ describe('FleetRealtimeEventPoller', () => {
 
     // Advance message pk
     markers.latestMessagePk = 11;
+    await poller.poll();
+
+    const types = publisher.calls.map((e) => e.type);
+    expect(types).toContain('message_received');
+    expect(types).toContain('chat_updated');
+    expect(types).toContain('feed_event');
+
+    poller.stop();
+  });
+
+  it('broadcasts message_received + chat_updated when a message row changes without a new pk', async () => {
+    const markers = { latestMessagePk: 10, latestMessageMarker: '10:2026-01-01T00:00:00.000Z', latestAccessMarker: '2026-01-01' };
+    const discovery = makeDiscovery({ test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 0 } });
+    const dbReader = makeDbReader(markers);
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    await poller.poll();
+    publisher.calls.length = 0;
+
+    markers.latestMessageMarker = '10:2026-01-01T00:00:02.000Z';
     await poller.poll();
 
     const types = publisher.calls.map((e) => e.type);
@@ -128,5 +151,38 @@ describe('FleetRealtimeEventPoller', () => {
 
     expect((poller as any).snapshots.has('alpha')).toBe(true);
     expect((poller as any).snapshots.has('beta')).toBe(false);
+  });
+
+  it('ignores malformed typing entries without publishing invalid updates', async () => {
+    mockProxyToInstance.mockResolvedValueOnce({
+      status: 200,
+      body: JSON.stringify({
+        composing: [
+          {},
+          { jid: '', since: 10 },
+          { jid: 'bad-since@g.us', since: 'now' },
+          { jid: 12345, since: 20 },
+          { jid: 'group@g.us', since: 30 },
+        ],
+      }),
+    });
+    const discovery = makeDiscovery({
+      test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 9099 },
+    });
+    const dbReader = makeDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    await poller.poll();
+
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({
+        type: 'typing_update',
+        instance: 'test',
+        jid: 'group@g.us',
+        composing: true,
+      }),
+    ]);
+
+    poller.stop();
   });
 });

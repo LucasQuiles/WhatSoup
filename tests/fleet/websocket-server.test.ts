@@ -118,6 +118,31 @@ describe('FleetWebSocketServer', () => {
     ws.close();
   });
 
+  it('continues broadcasting when one client send fails', async () => {
+    await startServer();
+    const failingClient = {
+      readyState: WebSocket.OPEN,
+      send: vi.fn(() => { throw new Error('socket write failed'); }),
+      close: vi.fn(),
+    };
+    const healthyClient = {
+      readyState: WebSocket.OPEN,
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    const clients = (wsServer as unknown as { clients: Set<{ readyState: number; send: (data: string) => void; close: () => void }> }).clients;
+    clients.add(failingClient);
+    clients.add(healthyClient);
+
+    const event: WsEvent = { type: 'feed_event', instance: 'test-line' };
+    expect(() => wsServer.broadcast(event)).not.toThrow();
+
+    expect(failingClient.send).toHaveBeenCalledWith(JSON.stringify(event));
+    expect(healthyClient.send).toHaveBeenCalledWith(JSON.stringify(event));
+    expect(clients.has(failingClient)).toBe(false);
+    expect(clients.has(healthyClient)).toBe(true);
+  });
+
   it('tracks client count correctly on connect/disconnect', async () => {
     await startServer();
     expect(wsServer.clientCount).toBe(0);

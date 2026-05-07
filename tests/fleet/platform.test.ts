@@ -3,6 +3,7 @@ import {
   escapeXml,
   buildPlist,
   parseInstanceName,
+  systemdUnitName,
   detectPlatform,
   createServiceManager,
   DockerSupervisorServiceManager,
@@ -105,6 +106,20 @@ describe('platform', () => {
     it('returns full string for plain names', () => {
       expect(parseInstanceName('myservice')).toBe('myservice');
     });
+  });
+});
+
+describe('systemdUnitName', () => {
+  const templateUnit = (name: string) => ['whatsoup', name].join('@') + '.service';
+
+  it('maps normal instances to the WhatSoup template unit', () => {
+    expect(systemdUnitName('q')).toBe(templateUnit('q'));
+    expect(systemdUnitName('shandroid')).toBe(templateUnit('shandroid'));
+  });
+
+  it('maps the fleet server to its standalone service, not the instance template', () => {
+    expect(systemdUnitName('whatsoup-fleet')).toBe('whatsoup-fleet.service');
+    expect(systemdUnitName('whatsoup-fleet')).not.toBe(templateUnit('whatsoup-fleet'));
   });
 });
 
