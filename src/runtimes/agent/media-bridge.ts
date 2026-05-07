@@ -218,14 +218,10 @@ async function handleRequest(
     return { ok: false, error: 'path not allowed' };
   }
 
-  // Determine chatJid
-  const chatJid =
-    typeof req.chatJid === 'string'
-      ? req.chatJid
-      : bridge._currentChatJid;
+  const chatJid = bridge._currentChatJid;
 
   if (!chatJid) {
-    return { ok: false, error: 'chatJid is required (not in request and no current chat set)' };
+    return { ok: false, error: 'current chat is required' };
   }
 
   let buffer: Buffer;
