@@ -20,6 +20,7 @@ import {
 } from './realtime-publisher.ts';
 import { proxyToInstance } from './http-proxy.ts';
 import { findLatestLogFile } from './log-utils.ts';
+import { isTypingHealthEntry } from './typing-payload.ts';
 
 const log = createChildLogger('fleet:realtime-poller');
 
@@ -32,12 +33,6 @@ interface InstanceSnapshot {
   latestAccessMarker: string | null;
   latestLogMtime: number | null;
   lastLogPath: string | null;
-}
-
-interface TypingEntry {
-  instance: string;
-  jid: string;
-  since: number;
 }
 
 export interface RealtimeEventPollerDeps {
@@ -165,7 +160,8 @@ export class FleetRealtimeEventPoller {
         const data = JSON.parse(result.body);
         if (Array.isArray(data.composing)) {
           for (const entry of data.composing) {
-            const key = `${inst.name}|${entry.jid}`;
+            if (!isTypingHealthEntry(entry)) continue;
+            const key = `${inst.name}|${entry.jid.trim()}`;
             currentTyping.set(key, entry.since);
           }
         }
