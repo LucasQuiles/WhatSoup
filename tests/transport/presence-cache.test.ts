@@ -25,10 +25,12 @@ describe('PresenceCache', () => {
     expect(result!.lastSeen).toBe(1700000000);
   });
 
-  it('returns undefined for unknown JID', () => {
+  it('returns no entry and leaves cache empty for unknown JID', () => {
     const cache = new PresenceCache();
     const result = cache.get('unknown@s.whatsapp.net');
-    expect(result).toBeUndefined();
+
+    expect({ result, size: cache.size }).toEqual({ result: undefined, size: 0 });
+    expect(Array.from(cache.getAll())).toEqual([]);
   });
 
   it('entry is not stale immediately after update', () => {
