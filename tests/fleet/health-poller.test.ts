@@ -187,6 +187,22 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('clears the per-request timeout when fetch rejects before timeout', async () => {
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    await (poller as any).poll();
+
+    expect(poller.getStatus('remote-1')!.status).toBe('degraded');
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+  });
+
   // Test 6: auth token forwarded in Authorization header
   it('auth token forwarded in Authorization header', async () => {
     mockFetch.mockResolvedValue({

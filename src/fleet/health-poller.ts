@@ -107,11 +107,15 @@ export class HealthPoller {
           headers['Authorization'] = `Bearer ${inst.healthToken}`;
         }
 
-        const res = await fetch(`http://127.0.0.1:${inst.healthPort}/health`, {
-          signal: controller.signal,
-          headers,
-        });
-        clearTimeout(timeout);
+        let res: Response;
+        try {
+          res = await fetch(`http://127.0.0.1:${inst.healthPort}/health`, {
+            signal: controller.signal,
+            headers,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
 
         if (!res.ok) {
           this.updateFailure(name, `HTTP ${res.status}`);
