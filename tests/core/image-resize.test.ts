@@ -262,17 +262,21 @@ describe('resizeImageIfNeeded', () => {
     it('does not populate metadata for non-image MIME', async () => {
       const buf = Buffer.alloc(20_000);
       const result = await resizeImageIfNeeded(buf, 'application/octet-stream');
-      expect(result.originalWidth).toBeUndefined();
-      expect(result.originalHeight).toBeUndefined();
-      expect(result.finalWidth).toBeUndefined();
-      expect(result.finalHeight).toBeUndefined();
+      expect(result).toEqual({
+        buffer: buf,
+        mimeType: 'application/octet-stream',
+        resized: false,
+      });
     });
 
     it('does not populate metadata for small buffer skip', async () => {
       const buf = Buffer.alloc(5_000);
       const result = await resizeImageIfNeeded(buf, 'image/png');
-      expect(result.originalWidth).toBeUndefined();
-      expect(result.originalHeight).toBeUndefined();
+      expect(result).toEqual({
+        buffer: buf,
+        mimeType: 'image/png',
+        resized: false,
+      });
     });
   });
 
