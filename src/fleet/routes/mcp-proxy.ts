@@ -35,6 +35,10 @@ interface ProxyOptions {
   successCode?: number;
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function socketCheck(instance: { socketPath?: string | null }, res: ServerResponse): boolean {
   if (!instance.socketPath || !fs.existsSync(instance.socketPath)) {
     jsonResponse(res, 503, { error: 'MCP socket not available — instance must be running' });
@@ -85,8 +89,12 @@ function mcpWithBody<P extends { name: string }>(
     if (!instance) return;
     if (!socketCheck(instance, res)) return;
     const raw = await readBody(req);
-    let parsed: Record<string, unknown>;
+    let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { jsonResponse(res, 400, { error: 'Invalid JSON body' }); return; }
+    if (!isJsonObject(parsed)) {
+      jsonResponse(res, 400, { error: 'JSON body must be an object' });
+      return;
+    }
     const args = buildArgs ? buildArgs(parsed, params) : parsed;
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
     if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
@@ -278,8 +286,8 @@ export async function handleSearchContacts(
   const result = await mcpCall(instance.socketPath!, 'search_contacts', { query });
   if (result.success) {
     // search_contacts returns {results, total} — normalize to {contacts} for console
-    const unwrapped = unwrapMcpResult(result.result) as Record<string, unknown>;
-    const contacts = unwrapped.results ?? unwrapped.contacts ?? unwrapped;
+    const unwrapped = unwrapMcpResult(result.result);
+    const contacts = isJsonObject(unwrapped) ? (unwrapped.results ?? unwrapped.contacts ?? unwrapped) : unwrapped;
     jsonResponse(res, 200, { contacts: Array.isArray(contacts) ? contacts : [] });
   }
   else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
