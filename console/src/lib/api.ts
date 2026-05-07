@@ -71,12 +71,15 @@ async function checkFleetAvailable(): Promise<boolean> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
-      const res = await fetch(`${API_BASE}/api/lines`, {
-        signal: controller.signal,
-        headers: authHeaders(),
-      });
-      clearTimeout(timer);
-      fleetAvailable = res.ok;
+      try {
+        const res = await fetch(`${API_BASE}/api/lines`, {
+          signal: controller.signal,
+          headers: authHeaders(),
+        });
+        fleetAvailable = res.ok;
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       fleetAvailable = false;
     }
