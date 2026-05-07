@@ -99,7 +99,7 @@ describe('proxyToInstance', () => {
     const result = await proxyToInstance(port, '/health', 'GET', null, null);
     expect(result.status).toBe(200);
     const parsed = JSON.parse(result.body);
-    expect(parsed.headers['authorization']).toBeUndefined();
+    expect(parsed.headers).not.toHaveProperty('authorization');
   });
 
   it('returns server error status as-is', async () => {
@@ -135,6 +135,14 @@ describe('proxyToInstance', () => {
     const result = await proxyToInstance(port, '/health', 'GET', '{"ignored":true}', null);
     expect(result.status).toBe(200);
     const parsed = JSON.parse(result.body);
-    expect(parsed.body).toBeNull();
+    expect({
+      method: parsed.method,
+      url: parsed.url,
+      body: parsed.body,
+    }).toEqual({
+      method: 'GET',
+      url: '/health',
+      body: null,
+    });
   });
 });
