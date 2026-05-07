@@ -299,7 +299,8 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    expect(config.settingsJson).toBeUndefined();
+    expect(config).not.toHaveProperty('settingsJson');
+    expect(config).toEqual(existingConfig);
   });
 
   it('response body does not contain settingsJson', async () => {
@@ -331,7 +332,14 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     await handleConfigUpdate(req, res, deps, { name: 'test-agent' });
 
     const body = JSON.parse(res._body);
-    expect(body.settingsJson).toBeUndefined();
+    expect(body).not.toHaveProperty('settingsJson');
+    expect(body).toEqual({
+      name: 'test-agent',
+      type: 'agent',
+      adminPhones: ['18001234567'],
+      accessMode: 'self_only',
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    });
   });
 
   it('clears enabledPlugins in settings.json when null is sent', async () => {
