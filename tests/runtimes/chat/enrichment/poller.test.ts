@@ -442,11 +442,22 @@ describe('EnrichmentPoller', () => {
   it('lastRunAt is only updated when messages were fetched (not on empty batch)', async () => {
     vi.mocked(getUnprocessedMessages).mockReturnValue([]);
 
-    const { poller } = makePoller();
+    const { poller, db } = makePoller();
+    const previousLastRunAt = '2026-05-07T00:00:00.000Z';
+    poller.lastRunAt = previousLastRunAt;
+
     await triggerOneCycle(poller);
 
-    // With empty batch, runCycle returns early before setting lastRunAt
-    expect(poller.lastRunAt).toBeNull();
+    expect(getUnprocessedMessages).toHaveBeenCalledTimes(1);
+    expect(getUnprocessedMessages).toHaveBeenCalledWith(db, 200);
+    expect(extractFacts).not.toHaveBeenCalled();
+    expect(validateFacts).not.toHaveBeenCalled();
+    expect(enqueueFacts).not.toHaveBeenCalled();
+    expect(markMessagesProcessed).not.toHaveBeenCalled();
+    expect(markMessagesWithError).not.toHaveBeenCalled();
+    expect(incrementEnrichmentRetries).not.toHaveBeenCalled();
+    expect(db._prepareFn).not.toHaveBeenCalled();
+    expect(poller.lastRunAt).toBe(previousLastRunAt);
   });
 
   // ── T1 hardening: accounting-gated markMessagesProcessed ─────────────────
