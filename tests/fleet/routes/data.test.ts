@@ -11,9 +11,17 @@ import {
   handleGetMessages,
   handleGetAccess,
   handleGetLogs,
+  handleGetTyping,
 } from '../../../src/fleet/routes/data.ts';
 import type { DataDeps } from '../../../src/fleet/routes/data.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
+
+vi.mock('../../../src/fleet/http-proxy.ts', () => ({
+  proxyToInstance: vi.fn(),
+}));
+
+const mockProxyToInstance = vi.mocked(proxyToInstance);
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -357,5 +365,45 @@ describe('handleGetLogs', () => {
     handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
     const body = JSON.parse(res._body);
     expect(body).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetTyping
+// ---------------------------------------------------------------------------
+
+describe('handleGetTyping', () => {
+  beforeEach(() => {
+    mockProxyToInstance.mockReset();
+  });
+
+  it('ignores malformed typing entries from instance health responses', async () => {
+    const inst = fakeInstance({ name: 'test-line', healthPort: 3010, healthToken: 'token' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([[inst.name, inst]])),
+      } as any,
+    });
+    mockProxyToInstance.mockResolvedValueOnce({
+      status: 200,
+      body: JSON.stringify({
+        composing: [
+          {},
+          { jid: '', since: 10 },
+          { jid: 'bad-since@g.us', since: 'now' },
+          { jid: 12345, since: 20 },
+          { jid: ' group@g.us ', since: 30 },
+        ],
+      }),
+    });
+
+    const res = mockRes();
+    await handleGetTyping(mockReq('/api/typing'), res, deps);
+
+    expect(mockProxyToInstance).toHaveBeenCalledWith(3010, '/typing', 'GET', null, 'token', 2000);
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([
+      { instance: 'test-line', jid: 'group@g.us', since: 30 },
+    ]);
   });
 });

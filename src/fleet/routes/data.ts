@@ -12,6 +12,7 @@ import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
+import { isTypingHealthEntry } from '../typing-payload.ts';
 
 export interface DataDeps {
   discovery: FleetDiscovery;
@@ -393,7 +394,8 @@ export async function handleGetTyping(
       const data = JSON.parse(result.body);
       if (Array.isArray(data.composing)) {
         for (const entry of data.composing) {
-          typing.push({ instance: inst.name, jid: entry.jid, since: entry.since });
+          if (!isTypingHealthEntry(entry)) continue;
+          typing.push({ instance: inst.name, jid: entry.jid.trim(), since: entry.since });
         }
       }
     } catch { /* instance unreachable — skip */ }
