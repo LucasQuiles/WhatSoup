@@ -62,9 +62,21 @@ describe('Database schema', () => {
   });
 
   it('contacts table has canonical_phone column', () => {
-    const cols = db.raw.prepare('PRAGMA table_info(contacts)').all() as Array<{ name: string }>;
+    const cols = db.raw.prepare('PRAGMA table_info(contacts)').all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+      pk: number;
+    }>;
     const col = cols.find((c) => c.name === 'canonical_phone');
-    expect(col).toBeDefined();
+    expect(col).toMatchObject({
+      name: 'canonical_phone',
+      type: 'TEXT',
+      notnull: 0,
+      dflt_value: null,
+      pk: 0,
+    });
   });
 
   it('access_list table exists with subject_type and subject_id primary key', () => {
@@ -177,7 +189,12 @@ describe('Database schema', () => {
     expect(colMap['created_at'].type).toBe('INTEGER');
     expect(colMap['sent_at']).toBeDefined();
     expect(colMap['error']).toBeDefined();
-    expect(colMap['retry_count']).toBeDefined();
+    expect(colMap['retry_count']).toMatchObject({
+      name: 'retry_count',
+      type: 'INTEGER',
+      notnull: 1,
+      dflt_value: '0',
+    });
   });
 
   it('idx_scheduled_pending partial index exists (MIGRATION_14)', () => {
@@ -775,25 +792,15 @@ describe('migration 18 — agent_token_events + ended_at', () => {
         AND ended_at IS NULL
     `).run();
 
-    const ended = db.raw.prepare(
-      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 1"
-    ).get() as { ended_at: string | null };
-    expect(ended.ended_at).toBe('2026-04-01T11:00:00.000Z');
-
-    const crashed = db.raw.prepare(
-      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 2"
-    ).get() as { ended_at: string | null };
-    expect(crashed.ended_at).toBe('2026-04-01T12:00:00.000Z');
-
-    const active = db.raw.prepare(
-      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 3"
-    ).get() as { ended_at: string | null };
-    expect(active.ended_at).toBeNull();
-
-    const suspended = db.raw.prepare(
-      "SELECT ended_at FROM agent_sessions WHERE claude_pid = 4"
-    ).get() as { ended_at: string | null };
-    expect(suspended.ended_at).toBeNull();
+    const rows = db.raw.prepare(
+      'SELECT id, status, ended_at FROM agent_sessions ORDER BY id'
+    ).all() as Array<{ id: number; status: string; ended_at: string | null }>;
+    expect(rows).toEqual([
+      { id: 1, status: 'ended', ended_at: '2026-04-01T11:00:00.000Z' },
+      { id: 2, status: 'crashed', ended_at: '2026-04-01T12:00:00.000Z' },
+      { id: 3, status: 'active', ended_at: null },
+      { id: 4, status: 'suspended', ended_at: null },
+    ]);
   });
 });
 
