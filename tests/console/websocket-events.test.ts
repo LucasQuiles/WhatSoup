@@ -34,9 +34,9 @@ describe('getInvalidationKeys', () => {
     expect(keys).toEqual([['lines'], ['lines', 'q']]);
   });
 
-  it('maps message_received to messages + chats', () => {
+  it('maps message_received to messages, chats, and history search', () => {
     const keys = getInvalidationKeys({ type: 'message_received', instance: 'q' });
-    expect(keys).toEqual([['messages', 'q'], ['chats', 'q']]);
+    expect(keys).toEqual([['messages', 'q'], ['chats', 'q'], ['search', 'q']]);
   });
 
   it('maps feed_event to feed', () => {
