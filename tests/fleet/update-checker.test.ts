@@ -1,8 +1,12 @@
 // tests/fleet/update-checker.test.ts
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { UpdateChecker } from '../../src/fleet/update-checker.ts';
 
 describe('UpdateChecker', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('getState() returns initial state before first check', () => {
     const checker = new UpdateChecker('/tmp/fake-repo');
     const state = checker.getState();
@@ -13,6 +17,9 @@ describe('UpdateChecker', () => {
   });
 
   it('getState() returns cached state after check — remote ahead', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-02T12:34:56.789Z'));
+
     const checker = new UpdateChecker('/tmp/fake-repo');
     (checker as any).execGit = vi.fn()
       .mockResolvedValueOnce('abc1234')   // rev-parse HEAD
@@ -24,7 +31,7 @@ describe('UpdateChecker', () => {
     expect(state.sha).toBe('abc1234');
     expect(state.remoteSha).toBe('def5678');
     expect(state.updateAvailable).toBe(true);
-    expect(state.checkedAt).toBeTruthy();
+    expect(state.checkedAt).toBe('2026-04-02T12:34:56.789Z');
   });
 
   it('updateAvailable is false when SHAs match', async () => {
