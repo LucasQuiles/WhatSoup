@@ -99,11 +99,11 @@ function stubProvider(): LLMProvider {
   return {
     name: 'stub',
     generate: vi.fn(async () => ({
-      text: '',
-      usage: { inputTokens: 0, outputTokens: 0 },
-      provider: 'stub',
+      content: '',
+      inputTokens: 0,
+      outputTokens: 0,
       model: 'stub',
-      elapsedMs: 0,
+      durationMs: 0,
     })),
   };
 }
@@ -327,7 +327,7 @@ describe('runBackfill', () => {
     db.close();
   });
 
-  function depsFor(validated: ValidatedFact[], enqResult?: EnqueueFactsResult): Parameters<typeof runBackfill>[3] {
+  function depsFor(validated: ValidatedFact[], enqResult?: EnqueueFactsResult): BackfillBatchDeps {
     const markProcessed = vi.fn();
     const enqueue = vi.fn((): EnqueueFactsResult =>
       enqResult ?? { attempted: validated.length, inserted: validated.length, duplicates: 0, failed: 0 },
@@ -335,10 +335,10 @@ describe('runBackfill', () => {
     const extract = vi.fn(async () => validated.map<ExtractedFact>((v) => v));
     const validate = vi.fn(async () => validated);
     return {
-      extract: extract as unknown as Parameters<typeof runBackfill>[3]['extract'],
-      validate: validate as unknown as Parameters<typeof runBackfill>[3]['validate'],
-      enqueue: enqueue as unknown as Parameters<typeof runBackfill>[3]['enqueue'],
-      markProcessed: markProcessed as unknown as Parameters<typeof runBackfill>[3]['markProcessed'],
+      extract: extract as unknown as BackfillBatchDeps['extract'],
+      validate: validate as unknown as BackfillBatchDeps['validate'],
+      enqueue: enqueue as unknown as BackfillBatchDeps['enqueue'],
+      markProcessed: markProcessed as unknown as BackfillBatchDeps['markProcessed'],
     };
   }
 

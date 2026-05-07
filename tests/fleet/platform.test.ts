@@ -179,8 +179,8 @@ describe('detectPlatform — Docker detection', () => {
 describe('DockerSupervisorServiceManager', () => {
   it('enable and disable are no-ops that resolve', async () => {
     const mgr = new DockerSupervisorServiceManager();
-    await expect(mgr.enable('test')).resolves.toBeUndefined();
-    await expect(mgr.disable('test')).resolves.toBeUndefined();
+    await expect(mgr.enable()).resolves.toBeUndefined();
+    await expect(mgr.disable()).resolves.toBeUndefined();
   });
 
   it('stop on unknown instance is a no-op', async () => {

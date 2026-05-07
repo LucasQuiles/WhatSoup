@@ -708,7 +708,8 @@ describe('SessionManager', () => {
     await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
     const err = await turn;
 
-    expect(err.message).toBe('aborted by watchdog');
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('aborted by watchdog');
     expect(killSpy).toHaveBeenCalled();
     expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
     expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({

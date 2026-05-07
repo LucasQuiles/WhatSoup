@@ -9,7 +9,7 @@ describe('ToolRegistry.listTools ordering', () => {
       name,
       description: `${name} tool`,
       scope: 'chat' as const,
-      targetMode: 'native' as const,
+      targetMode: 'caller-supplied' as const,
       schema: z.object({}),
       handler: async () => ({ content: [{ type: 'text' as const, text: '' }] }),
     });
