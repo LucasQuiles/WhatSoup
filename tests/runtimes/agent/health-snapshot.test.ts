@@ -245,12 +245,32 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
 
   it('lastSessionStatus is null when no sessions exist', () => {
     const snapshot = runtime.getHealthSnapshot();
-    expect(snapshot.details['lastSessionStatus']).toBeNull();
+    expect(snapshot).toStrictEqual({
+      status: 'healthy',
+      details: {
+        activeSessions: 0,
+        lastSessionStatus: null,
+        lastSessionStartedAt: null,
+        sessionCount: 0,
+        recentCrashes: 0,
+        lastCrashAt: null,
+      },
+    });
   });
 
   it('lastSessionStartedAt is null when no sessions exist', () => {
     const snapshot = runtime.getHealthSnapshot();
-    expect(snapshot.details['lastSessionStartedAt']).toBeNull();
+    expect(snapshot).toStrictEqual({
+      status: 'healthy',
+      details: {
+        activeSessions: 0,
+        lastSessionStatus: null,
+        lastSessionStartedAt: null,
+        sessionCount: 0,
+        recentCrashes: 0,
+        lastCrashAt: null,
+      },
+    });
   });
 
   it('activeSessions is 0 when no sessions exist', () => {
