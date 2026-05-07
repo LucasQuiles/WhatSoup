@@ -187,6 +187,39 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('keeps timeout active while reading health response JSON', async () => {
+    mockFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      const json = new Promise<Record<string, unknown>>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new Error('health body aborted')), { once: true });
+      });
+      return { ok: true, json: () => json };
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    const pollPromise = (poller as any).poll() as Promise<void>;
+    let settled = false;
+    pollPromise.finally(() => { settled = true; }).catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await Promise.resolve();
+
+    expect(settled).toBe(true);
+    await expect(pollPromise).resolves.toBeUndefined();
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      error: 'health body aborted',
+      consecutiveFailures: 1,
+    });
+  });
+
   // Test 6: auth token forwarded in Authorization header
   it('auth token forwarded in Authorization header', async () => {
     mockFetch.mockResolvedValue({
