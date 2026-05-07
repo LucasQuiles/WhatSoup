@@ -291,9 +291,12 @@ describe('community tools', () => {
         { jid: 'community1@g.us' },
         globalSession(),
       );
-      const data = JSON.parse(result.content[0].text) as { inviteCode: null; inviteLink: null };
-      expect(data.inviteCode).toBeNull();
-      expect(data.inviteLink).toBeNull();
+      const data = JSON.parse(result.content[0].text) as { jid: string; inviteCode: null; inviteLink: null };
+      expect(data).toStrictEqual({
+        jid: 'community1@g.us',
+        inviteCode: null,
+        inviteLink: null,
+      });
     });
   });
 
