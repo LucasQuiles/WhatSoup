@@ -28,7 +28,7 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+  const actual = (await importOriginal()) as typeof import('node:fs');
   return {
     ...actual,
     existsSync: vi.fn(actual.existsSync),

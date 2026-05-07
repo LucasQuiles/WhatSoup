@@ -103,7 +103,7 @@ vi.mock('../../../src/core/messages.ts', () => ({
 }));
 
 vi.mock('../../../src/core/access-list.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../src/core/access-list.ts')>();
+  const actual = (await importOriginal()) as typeof import('../../../src/core/access-list.ts');
   return actual;
 });
 
@@ -144,7 +144,7 @@ vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+  const actual = (await importOriginal()) as typeof import('node:fs');
   return { ...actual, mkdirSync: vi.fn(), writeFileSync: vi.fn() };
 });
 

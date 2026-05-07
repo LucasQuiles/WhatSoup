@@ -173,7 +173,7 @@ vi.mock('../../../src/core/media-download.ts', () => ({
 // extractLocal is a pure function — no need to mock, but mock the module so
 // vi.mock doesn't try to load the real database-importing module chain.
 vi.mock('../../../src/core/access-list.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../src/core/access-list.ts')>();
+  const actual = (await importOriginal()) as typeof import('../../../src/core/access-list.ts');
   return actual;
 });
 
@@ -251,7 +251,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
 
 // Mock node:fs for socket server path creation in start()
 vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+  const actual = (await importOriginal()) as typeof import('node:fs');
   return {
     ...actual,
     mkdirSync: vi.fn(),

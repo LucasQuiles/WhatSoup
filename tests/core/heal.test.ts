@@ -44,7 +44,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 // Mock sendTracked so tests don't attempt real sends
 vi.mock('../../src/core/durability.ts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/core/durability.ts')>();
+  const actual = (await importOriginal()) as typeof import('../../src/core/durability.ts');
   return {
     ...actual,
     sendTracked: vi.fn().mockResolvedValue(undefined),

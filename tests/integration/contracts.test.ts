@@ -34,7 +34,7 @@ const port2Promise = getFreePort();
 
 // Mock config so health server uses an ephemeral port
 vi.mock('../../src/config.ts', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../../src/config.ts')>();
+  const original = (await importOriginal()) as typeof import('../../src/config.ts');
   const reservedPort = await port1Promise;
   return {
     config: {
