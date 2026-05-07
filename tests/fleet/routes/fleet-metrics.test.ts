@@ -183,4 +183,94 @@ describe('handleGetFleetMetrics', () => {
       providers: [],
     });
   });
+
+  it('does not depend on the runtime default locale for bucket ordering', () => {
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([
+          ['alpha', { name: 'alpha', dbPath: '/tmp/alpha.db' }],
+        ])),
+      } as any,
+      dbReader: {
+        getMetrics: vi.fn(() => ({
+          ok: true,
+          data: {
+            messageVolume: [
+              { bucket: '2026-04-05T19:00:00.000Z', inbound: 1, outbound: 0, media: 0 },
+              { bucket: '2026-04-05T17:00:00.000Z', inbound: 2, outbound: 0, media: 0 },
+            ],
+            tokenUsage: [
+              { bucket: '2026-04-05T19:00:00.000Z', input: 9, output: 0 },
+              { bucket: '2026-04-05T17:00:00.000Z', input: 7, output: 0 },
+            ],
+            sessionActivity: [
+              { bucket: '2026-04-05T19:00:00.000Z', active: 9, started: 0 },
+              { bucket: '2026-04-05T17:00:00.000Z', active: 7, started: 0 },
+            ],
+            activeHours: [],
+            hasMessageData: true,
+            hasTokenData: true,
+            hasSessionData: true,
+            tokenUsageByProvider: {
+              local: [
+                { bucket: '2026-04-05T19:00:00.000Z', input: 9, output: 0 },
+                { bucket: '2026-04-05T17:00:00.000Z', input: 7, output: 0 },
+              ],
+            },
+            sessionActivityByProvider: {
+              local: [
+                { bucket: '2026-04-05T19:00:00.000Z', active: 9, started: 0 },
+                { bucket: '2026-04-05T17:00:00.000Z', active: 7, started: 0 },
+              ],
+            },
+            providers: ['local'],
+          },
+        })),
+      } as any,
+    });
+    const nativeLocaleCompare = String.prototype.localeCompare;
+    const localeSpy = vi
+      .spyOn(String.prototype, 'localeCompare')
+      .mockImplementation(function (
+        this: string,
+        compareString: string,
+        locales?: Intl.LocalesArgument,
+        options?: Intl.CollatorOptions,
+      ) {
+        if (locales === 'en' && options?.sensitivity === 'base') {
+          return nativeLocaleCompare.call(this, compareString, locales, options);
+        }
+        return -nativeLocaleCompare.call(this, compareString, 'en', { sensitivity: 'base' });
+      });
+    const res = mockRes();
+
+    try {
+      handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    } finally {
+      localeSpy.mockRestore();
+    }
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body.messageVolume.map((bucket: { bucket: string }) => bucket.bucket)).toEqual([
+      '2026-04-05T17:00:00.000Z',
+      '2026-04-05T19:00:00.000Z',
+    ]);
+    expect(body.tokenUsage.map((bucket: { bucket: string }) => bucket.bucket)).toEqual([
+      '2026-04-05T17:00:00.000Z',
+      '2026-04-05T19:00:00.000Z',
+    ]);
+    expect(body.sessionActivity.map((bucket: { bucket: string }) => bucket.bucket)).toEqual([
+      '2026-04-05T17:00:00.000Z',
+      '2026-04-05T19:00:00.000Z',
+    ]);
+    expect(body.tokenUsageByProvider.local.map((bucket: { bucket: string }) => bucket.bucket)).toEqual([
+      '2026-04-05T17:00:00.000Z',
+      '2026-04-05T19:00:00.000Z',
+    ]);
+    expect(body.sessionActivityByProvider.local.map((bucket: { bucket: string }) => bucket.bucket)).toEqual([
+      '2026-04-05T17:00:00.000Z',
+      '2026-04-05T19:00:00.000Z',
+    ]);
+  });
 });
