@@ -90,7 +90,8 @@ export async function mcpCall(
             return;
           }
         } catch {
-          // Ignore parse errors on partial lines
+          settle({ success: false, error: 'malformed JSON-RPC response' });
+          return;
         }
       }
     });
