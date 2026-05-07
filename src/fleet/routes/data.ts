@@ -252,7 +252,7 @@ export function handleSearchMessages(
   if (!instance) return;
 
   const qs = parseQueryString(req.url);
-  const query = qs.q;
+  const query = qs.q?.trim() ?? '';
   if (!query) {
     jsonResponse(res, 400, { error: 'missing required query parameter: q' });
     return;
