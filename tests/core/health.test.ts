@@ -245,9 +245,14 @@ describe('GET /health', () => {
   });
 
   it('returns instance.socketPath as null when not provided', async () => {
-    const { body } = await httpReq(port, '/health', 'GET');
-    const json = JSON.parse(body);
-    expect(json.instance.socketPath).toBeNull();
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    expect(JSON.parse(body).instance).toEqual({
+      name: 'WhatSoup',
+      mode: 'chat',
+      accessMode: 'allowlist',
+      socketPath: null,
+    });
   });
 
   it('returns instance.socketPath when provided in deps', async () => {
