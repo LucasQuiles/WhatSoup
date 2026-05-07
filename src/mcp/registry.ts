@@ -206,7 +206,7 @@ export class ToolRegistry {
       });
     }
 
-    return result.sort((a, b) => a.name.localeCompare(b.name));
+    return result.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
   }
 
   /**
