@@ -3,6 +3,7 @@ import {
   getFleetWebSocketUrl,
   getInvalidationKeys,
   applyTypingUpdate,
+  parseWsEvent,
   type TypingEntry,
   type WsTypingEvent,
 } from '../../console/src/lib/realtime-events';
@@ -77,5 +78,32 @@ describe('applyTypingUpdate', () => {
     const event: WsTypingEvent = { type: 'typing_update', instance: 'q', jid: '123@s.whatsapp.net', composing: true, since: 1000 };
     const result = applyTypingUpdate(undefined, event);
     expect(result).toHaveLength(1);
+  });
+});
+
+describe('parseWsEvent', () => {
+  it('returns null for frames that are not valid JSON objects', () => {
+    expect(parseWsEvent('not json')).toBeNull();
+    expect(parseWsEvent('null')).toBeNull();
+    expect(parseWsEvent('[]')).toBeNull();
+  });
+
+  it('accepts valid connected and invalidation events', () => {
+    expect(parseWsEvent('{"type":"connected","timestamp":1000}')).toEqual({
+      type: 'connected',
+      timestamp: 1000,
+    });
+    expect(parseWsEvent('{"type":"message_received","instance":"q","conversationKey":"123"}')).toEqual({
+      type: 'message_received',
+      instance: 'q',
+      conversationKey: '123',
+    });
+  });
+
+  it('rejects invalid event payload shapes', () => {
+    expect(parseWsEvent('{"type":"connected","timestamp":"soon"}')).toBeNull();
+    expect(parseWsEvent('{"type":"message_received","instance":""}')).toBeNull();
+    expect(parseWsEvent('{"type":"typing_update","instance":"q","jid":"","composing":true,"since":1}')).toBeNull();
+    expect(parseWsEvent('{"type":"typing_update","instance":"q","jid":"123@s.whatsapp.net","composing":"yes","since":1}')).toBeNull();
   });
 });
