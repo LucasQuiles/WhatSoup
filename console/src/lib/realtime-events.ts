@@ -12,6 +12,7 @@ export interface WsInvalidationEvent {
   type: 'instance_status' | 'message_received' | 'chat_updated' | 'log_entry' | 'feed_event' | 'access_changed';
   instance: string;
   conversationKey?: string;
+  messagePk?: number;
 }
 
 export interface WsTypingEvent {
@@ -28,6 +29,74 @@ export interface WsConnectedEvent {
 }
 
 export type WsEvent = WsInvalidationEvent | WsTypingEvent | WsConnectedEvent;
+
+const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
+  'instance_status',
+  'message_received',
+  'chat_updated',
+  'log_entry',
+  'feed_event',
+  'access_changed',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+/** Parse and validate a WebSocket frame before the React hook uses it. */
+export function parseWsEvent(data: unknown): WsEvent | null {
+  if (typeof data !== 'string') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed) || typeof parsed.type !== 'string') return null;
+
+  if (parsed.type === 'connected') {
+    return typeof parsed.timestamp === 'number' && Number.isFinite(parsed.timestamp)
+      ? { type: 'connected', timestamp: parsed.timestamp }
+      : null;
+  }
+
+  if (parsed.type === 'typing_update') {
+    if (
+      !isNonEmptyString(parsed.instance) ||
+      !isNonEmptyString(parsed.jid) ||
+      typeof parsed.composing !== 'boolean' ||
+      typeof parsed.since !== 'number' ||
+      !Number.isFinite(parsed.since)
+    ) {
+      return null;
+    }
+    return {
+      type: 'typing_update',
+      instance: parsed.instance,
+      jid: parsed.jid,
+      composing: parsed.composing,
+      since: parsed.since,
+    };
+  }
+
+  if (!INVALIDATION_TYPES.has(parsed.type as WsInvalidationEvent['type']) || !isNonEmptyString(parsed.instance)) {
+    return null;
+  }
+
+  const event: WsInvalidationEvent = {
+    type: parsed.type as WsInvalidationEvent['type'],
+    instance: parsed.instance,
+  };
+  if (typeof parsed.conversationKey === 'string') event.conversationKey = parsed.conversationKey;
+  if (typeof parsed.messagePk === 'number' && Number.isFinite(parsed.messagePk)) event.messagePk = parsed.messagePk;
+  return event;
+}
 
 // ---------------------------------------------------------------------------
 // URL construction
@@ -52,7 +121,7 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
     case 'instance_status':
       return [['lines'], ['lines', instance]];
     case 'message_received':
-      return [['messages', instance], ['chats', instance]];
+      return [['messages', instance], ['chats', instance], ['search', instance]];
     case 'chat_updated':
       return [['chats', instance]];
     case 'log_entry':

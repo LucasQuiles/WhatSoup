@@ -293,6 +293,27 @@ describe('chat-operations tools', () => {
       expect(parsed.reactions).toHaveLength(0);
       expect(parsed.count).toBe(0);
     });
+
+    it('rejects reaction reads outside a bound session conversation', async () => {
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob', 'msg-other', 'Secret', 'text', 0, 3000);
+        INSERT INTO reactions (message_id, conversation_key, sender_jid, reaction)
+        VALUES ('msg-other', '222', 'bob@s.whatsapp.net', '🔥');
+      `);
+
+      const result = await registry.call(
+        'get_reactions',
+        { message_id: 'msg-other' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('different conversation');
+      expect(result.content[0].text).not.toContain('🔥');
+    });
   });
 
   // --- W2-11: get_message_receipts ---
@@ -325,6 +346,27 @@ describe('chat-operations tools', () => {
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.receipts).toHaveLength(0);
       expect(parsed.count).toBe(0);
+    });
+
+    it('rejects receipt reads outside a bound session conversation', async () => {
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('222@s.whatsapp.net', '222', '222@s.whatsapp.net', 'Bob', 'msg-other', 'Secret', 'text', 0, 3000);
+        INSERT INTO receipts (message_id, recipient_jid, type)
+        VALUES ('msg-other', 'bob@s.whatsapp.net', 'read');
+      `);
+
+      const result = await registry.call(
+        'get_message_receipts',
+        { message_id: 'msg-other' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('different conversation');
+      expect(result.content[0].text).not.toContain('bob@s.whatsapp.net');
     });
   });
 

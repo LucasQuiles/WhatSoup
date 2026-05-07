@@ -13,9 +13,15 @@
  * for admin checks so "8459780919" matches "18459780919".
  */
 
+function phoneText(input: string | number | null | undefined): string {
+  if (typeof input === 'string') return input;
+  if (typeof input === 'number' && Number.isFinite(input)) return String(input);
+  return '';
+}
+
 /** Strip a phone number to digits only. */
-export function normalizePhone(input: string): string {
-  return input.replace(/\D/g, '');
+export function normalizePhone(input: string | number | null | undefined): string {
+  return phoneText(input).replace(/\D/g, '');
 }
 
 /**
@@ -25,8 +31,8 @@ export function normalizePhone(input: string): string {
  * Otherwise returns digits-only as-is.
  */
 // NOTE: Browser-side duplicate exists at console/src/lib/validation.ts normalizePhoneInput()
-export function normalizePhoneE164(input: string): string {
-  const digits = input.replace(/\D/g, '');
+export function normalizePhoneE164(input: string | number | null | undefined): string {
+  const digits = normalizePhone(input);
   // 10-digit NANP number → prepend country code 1
   if (digits.length === 10) return `1${digits}`;
   return digits;
@@ -43,13 +49,16 @@ export function normalizePhoneE164(input: string): string {
  * Also handles the reverse: admin has "18459780919", extracted is
  * "8459780919" (less common but possible with LID JIDs).
  */
-export function isAdminPhone(phone: string, adminPhones: Set<string>): boolean {
+export function isAdminPhone(phone: string | number | null | undefined, adminPhones: Set<string>): boolean {
+  const rawPhone = phoneText(phone);
+  if (!rawPhone) return false;
+
   // Exact match first (fast path)
-  if (adminPhones.has(phone)) return true;
+  if (adminPhones.has(rawPhone)) return true;
 
   // Suffix match: either the phone ends with an admin entry or vice versa
   // Minimum 7 digits required to prevent degenerate matches from misconfigured entries
-  const digits = normalizePhone(phone);
+  const digits = normalizePhone(rawPhone);
   if (digits.length < 7) return false;
   for (const admin of adminPhones) {
     const adminDigits = normalizePhone(admin);

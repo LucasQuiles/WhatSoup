@@ -396,7 +396,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
 
     db2.close();
   });
@@ -499,7 +499,7 @@ describe('Test 5 — schema_migrations version tracking', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
 
     db.close();
   });
@@ -699,7 +699,7 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
 
     const tables = (
       db.raw
@@ -745,6 +745,92 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
 
     db.close();
   });
+
+  it('migration 24 upgrades existing messages with update markers and triggers', () => {
+    const dbPath = tmpFile();
+
+    try {
+      {
+        const raw = new DatabaseSync(dbPath);
+        raw.exec('PRAGMA journal_mode = WAL');
+        raw.exec(`
+          CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          CREATE TABLE messages (
+            pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_jid TEXT NOT NULL,
+            conversation_key TEXT NOT NULL,
+            sender_jid TEXT NOT NULL,
+            sender_name TEXT,
+            message_id TEXT UNIQUE,
+            content TEXT,
+            content_text TEXT,
+            content_type TEXT NOT NULL DEFAULT 'text',
+            is_from_me INTEGER NOT NULL DEFAULT 0,
+            timestamp INTEGER NOT NULL,
+            quoted_message_id TEXT,
+            edited_at TEXT,
+            deleted_at TEXT,
+            media_path TEXT,
+            raw_message TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          )
+        `);
+        for (let version = 1; version <= 23; version += 1) {
+          raw.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(version);
+        }
+        raw
+          .prepare(
+            `INSERT INTO messages
+               (chat_jid, conversation_key, sender_jid, message_id, content, content_text, content_type, is_from_me, timestamp, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            '15550100001@s.whatsapp.net',
+            '15550100001',
+            '15550100001@s.whatsapp.net',
+            'migration-24-msg',
+            'placeholder',
+            'placeholder',
+            'history',
+            0,
+            1700000001,
+            '2026-01-01T00:00:00.000Z',
+          );
+        raw.close();
+      }
+
+      const db = new Database(dbPath);
+      db.open();
+
+      const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toContain('updated_at');
+
+      const backfilled = db.raw
+        .prepare('SELECT updated_at FROM messages WHERE message_id = ?')
+        .get('migration-24-msg') as { updated_at: string } | undefined;
+      expect(backfilled?.updated_at).toBe('2026-01-01T00:00:00.000Z');
+
+      db.raw
+        .prepare("UPDATE messages SET content_text = 'upgraded' WHERE message_id = ?")
+        .run('migration-24-msg');
+      const touched = db.raw
+        .prepare('SELECT updated_at FROM messages WHERE message_id = ?')
+        .get('migration-24-msg') as { updated_at: string };
+      expect(touched.updated_at).not.toBe('2026-01-01T00:00:00.000Z');
+
+      const version = db.raw
+        .prepare('SELECT version FROM schema_migrations WHERE version = 24')
+        .get() as { version: number } | undefined;
+      expect(version?.version).toBe(24);
+
+      db.close();
+    } finally {
+      cleanup(dbPath);
+    }
+  });
 });
 
 // ─── Test 9: Migration ordering — partial state ───────────────────────────────
@@ -780,7 +866,7 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
 
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
 
     // raw_message column from migration 5
     const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;

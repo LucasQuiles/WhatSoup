@@ -602,6 +602,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [21, (db: DatabaseSync) => { db.exec(MIGRATION_21); }],
   [22, (db: DatabaseSync) => { db.exec(MIGRATION_22); }],
   [23, runMigration23],
+  [24, runMigration24],
 ]);
 
 function runMigration20(db: DatabaseSync): void {
@@ -610,6 +611,38 @@ function runMigration20(db: DatabaseSync): void {
 
 function runMigration23(db: DatabaseSync): void {
   db.exec(SUBSTRATE_MIGRATION);
+}
+
+function runMigration24(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+  if (!cols.some(c => c.name === 'updated_at')) {
+    db.exec('ALTER TABLE messages ADD COLUMN updated_at TEXT');
+    db.exec(`
+      UPDATE messages
+      SET updated_at = COALESCE(created_at, datetime(timestamp, 'unixepoch'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      WHERE updated_at IS NULL
+    `);
+  }
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_touch_updated_at_insert;
+    DROP TRIGGER IF EXISTS messages_touch_updated_at_update;
+
+    CREATE TRIGGER messages_touch_updated_at_insert AFTER INSERT ON messages
+      WHEN NEW.updated_at IS NULL
+    BEGIN
+      UPDATE messages SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE pk = NEW.pk;
+    END;
+
+    CREATE TRIGGER messages_touch_updated_at_update
+      AFTER UPDATE OF content, content_text, content_type, sender_name, sender_jid,
+                      raw_message, quoted_message_id, timestamp, deleted_at, media_path
+      ON messages
+      WHEN NEW.updated_at IS OLD.updated_at
+    BEGIN
+      UPDATE messages SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE pk = NEW.pk;
+    END;
+  `);
 }
 
 // ─── Database class ──────────────────────────────────────────────────────────

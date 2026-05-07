@@ -121,8 +121,9 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       const raw = JSON.parse(msg.rawMessage)
       const doc = raw?.message?.documentMessage || raw?.message?.documentWithCaptionMessage?.message?.documentMessage
       if (doc) {
-        const fileName = doc.fileName || 'Document'
-        const fileSize = doc.fileLength ? formatBytes(Number(doc.fileLength)) : ''
+        const fileName = typeof doc.fileName === 'string' && doc.fileName.trim() ? doc.fileName : 'Document'
+        const fileLength = doc.fileLength ? Number(doc.fileLength) : 0
+        const fileSize = Number.isFinite(fileLength) && fileLength > 0 ? formatBytes(fileLength) : ''
         const ext = fileName.includes('.') ? fileName.split('.').pop()?.toUpperCase() : ''
         return (
           <div className="flex items-center gap-[var(--sp-3)] py-[var(--sp-1)] px-0">
@@ -193,9 +194,10 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
       const inner = msgContent[key]
       if (inner?.contextInfo?.quotedMessage) {
         const quoted = inner.contextInfo.quotedMessage
-        const participant = inner.contextInfo.participant ?? inner.contextInfo.remoteJid ?? undefined
+        const rawParticipant = inner.contextInfo.participant ?? inner.contextInfo.remoteJid ?? undefined
+        const participant = typeof rawParticipant === 'string' ? rawParticipant : undefined
         // Extract text from quoted message (check common message types)
-        const text = quoted.conversation
+        const rawText = quoted.conversation
           ?? quoted.extendedTextMessage?.text
           ?? (quoted.imageMessage ? '📷 Photo' : undefined)
           ?? (quoted.videoMessage ? '🎥 Video' : undefined)
@@ -203,6 +205,7 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
           ?? (quoted.documentMessage ? `📎 ${quoted.documentMessage.fileName ?? 'Document'}` : undefined)
           ?? (quoted.stickerMessage ? '🏷️ Sticker' : undefined)
           ?? undefined
+        const text = typeof rawText === 'string' ? rawText : undefined
         if (text || participant) return { participant, text }
       }
     }

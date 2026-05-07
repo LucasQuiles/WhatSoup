@@ -11,6 +11,11 @@ import { splitSearchHighlights } from './search-highlight'
  */
 
 const WA_FORMAT_PATTERN = '```([\\s\\S]*?)```|`([^`]+)`|\\*\\*(.+?)\\*\\*|\\*(.+?)\\*|_(.+?)_|~(.+?)~|(https?:\\/\\/[^\\s<]+)';
+const EMPTY_TEXT = '\u2014';
+
+function displayText(text: string | null | undefined): string {
+  return typeof text === 'string' && text.trim() ? text : EMPTY_TEXT;
+}
 
 function renderHighlightedText(text: string, query: string | undefined, keyRef: { value: number }): ReactNode[] {
   return splitSearchHighlights(text, query).map((segment) => {
@@ -26,11 +31,11 @@ function renderHighlightedText(text: string, query: string | undefined, keyRef: 
   })
 }
 
-export function formatWhatsAppText(text: string, highlightQuery?: string): ReactNode[] {
+export function formatWhatsAppText(text: string | null | undefined, highlightQuery?: string): ReactNode[] {
   const parts: ReactNode[] = [];
   const keyRef = { value: 0 };
 
-  const lines = text.split('\n');
+  const lines = displayText(text).split('\n');
 
   for (let li = 0; li < lines.length; li++) {
     if (li > 0) parts.push(<br key={`br-${keyRef.value++}`} />);

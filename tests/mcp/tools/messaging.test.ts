@@ -509,6 +509,31 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.content).toHaveProperty('linkPreview', null);
     });
+
+    it('rejects foreign message IDs in bound global sessions', async () => {
+      seedMessage(db, {
+        message_id: 'msg-foreign-reply',
+        chat_jid: '222@s.whatsapp.net',
+        conversation_key: '222',
+        sender_jid: 'bob@s.whatsapp.net',
+        content: 'foreign reply body',
+      });
+
+      const result = await registry.call(
+        'reply_message',
+        {
+          chatJid: '111@s.whatsapp.net',
+          messageId: 'msg-foreign-reply',
+          text: 'no leak',
+        },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(JSON.stringify(result)).not.toContain('foreign reply body');
+      expect(calls).toHaveLength(0);
+    });
   });
 
   // ── react_message ─────────────────────────────────────────────────────────
@@ -544,6 +569,24 @@ describe('registerMessagingTools', () => {
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
+    });
+
+    it('rejects foreign message IDs in bound global sessions', async () => {
+      seedMessage(db, {
+        message_id: 'msg-foreign-react',
+        chat_jid: '222@s.whatsapp.net',
+        conversation_key: '222',
+      });
+
+      const result = await registry.call(
+        'react_message',
+        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-react', emoji: '👍' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(calls).toHaveLength(0);
     });
   });
 
@@ -581,6 +624,25 @@ describe('registerMessagingTools', () => {
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
     });
+
+    it('rejects foreign message IDs in bound global sessions', async () => {
+      seedMessage(db, {
+        message_id: 'msg-foreign-edit',
+        chat_jid: '222@s.whatsapp.net',
+        conversation_key: '222',
+        is_from_me: 1,
+      });
+
+      const result = await registry.call(
+        'edit_message',
+        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-edit', newText: 'no leak' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(calls).toHaveLength(0);
+    });
   });
 
   // ── delete_message ────────────────────────────────────────────────────────
@@ -613,6 +675,25 @@ describe('registerMessagingTools', () => {
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
+    });
+
+    it('rejects foreign message IDs in bound global sessions', async () => {
+      seedMessage(db, {
+        message_id: 'msg-foreign-delete',
+        chat_jid: '222@s.whatsapp.net',
+        conversation_key: '222',
+        is_from_me: 1,
+      });
+
+      const result = await registry.call(
+        'delete_message',
+        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-delete' },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(calls).toHaveLength(0);
     });
   });
 
@@ -760,6 +841,24 @@ describe('registerMessagingTools', () => {
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
+    });
+
+    it('rejects foreign message IDs in bound global sessions', async () => {
+      seedMessage(db, {
+        message_id: 'msg-foreign-pin',
+        chat_jid: '222@s.whatsapp.net',
+        conversation_key: '222',
+      });
+
+      const result = await registry.call(
+        'pin_message',
+        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-pin', pin: true },
+        { tier: 'global', conversationKey: '111' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(calls).toHaveLength(0);
     });
   });
 });

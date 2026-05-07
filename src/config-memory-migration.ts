@@ -31,6 +31,8 @@ const LEGACY_FIELD_MAPPINGS: ReadonlyArray<{ from: string; to: string }> = [
   { from: 'pineconeContextTopK', to: 'memory.pinecone.contextTopK' },
   { from: 'pineconeSenderTopK', to: 'memory.pinecone.senderTopK' },
   { from: 'pineconeSelfFactTopK', to: 'memory.pinecone.selfFactTopK' },
+  { from: 'recencyHalfLifeDays', to: 'memory.pinecone.recencyHalfLifeDays' },
+  { from: 'maxAgeDays', to: 'memory.pinecone.maxAgeDays' },
   { from: 'pineconeAllowedIndexes', to: 'memory.pinecone.allowedIndexes' },
   { from: 'pineconeKnowledgeSearch', to: 'memory.pinecone.knowledgeSearch' },
   { from: 'pineconeKnowledgeProfiles', to: 'memory.pinecone.knowledgeProfiles' },

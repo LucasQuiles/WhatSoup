@@ -15,6 +15,13 @@ describe('splitSearchHighlights', () => {
 });
 
 describe('formatWhatsAppText', () => {
+  it('returns an empty-state marker for nullish or blank text', () => {
+    expect(formatWhatsAppText(null as unknown as string)).toEqual(['—']);
+    expect(formatWhatsAppText(undefined as unknown as string)).toEqual(['—']);
+    expect(formatWhatsAppText('')).toEqual(['—']);
+    expect(formatWhatsAppText('   ')).toEqual(['—']);
+  });
+
   it('highlights matches inside formatted spans', () => {
     const parts = formatWhatsAppText('hello *beta* world', 'beta');
 

@@ -5,12 +5,13 @@
 
 import { z } from 'zod';
 import type { ToolDeclaration, SessionContext } from '../types.ts';
-import { resolveConversationKey } from '../types.ts';
+import { assertConversationAccess, resolveConversationKey } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
 
 const log = createChildLogger('chat-management');
 
@@ -311,7 +312,7 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'unsafe',
-    handler: async (params) => {
+    handler: async (params, session) => {
       const { message_id, to_jid } = ForwardMessageSchema.parse(params);
 
       const sock = getSock();
@@ -326,6 +327,17 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
 
       if (!row) {
         throw new Error(`Message "${message_id}" not found`);
+      }
+
+      if (session.conversationKey) {
+        assertConversationAccess(row.conversation_key, session, 'Forwarded message');
+        let targetConversationKey: string;
+        try {
+          targetConversationKey = toConversationKey(to_jid);
+        } catch {
+          throw new Error(`Invalid to_jid "${to_jid}": must be a valid JID`);
+        }
+        assertConversationAccess(targetConversationKey, session, 'Forward target');
       }
 
       // Try true forward via raw Baileys proto (raw_message column may not exist yet)

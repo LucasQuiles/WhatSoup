@@ -528,6 +528,26 @@ describe('download_media', () => {
     expect(body.content_type).toBe('image');
   });
 
+  it('does not return cached media from a different bound conversation', async () => {
+    const filePath = join(workspace, 'other-chat.jpg');
+    writeFileSync(filePath, 'fake-image-data');
+    filesToClean.push(filePath);
+
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, media_path)
+      VALUES ('other@g.us', 'other_at_g.us', 'sender@s.whatsapp.net', 'msg-other-chat', 'image', 0, 1700000000, ?)
+    `).run(filePath);
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-other-chat' },
+      { tier: 'global', conversationKey: 'chat_at_g.us' } as SessionContext,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('different conversation');
+  });
+
   it('returns unsupported_type error for text messages', async () => {
     insertMessage('msg-text', 'text');
 
@@ -764,6 +784,25 @@ describe('transcribe_audio', () => {
     const body = JSON.parse(result.content[0].text);
     expect(body.transcription).toBe('Already done');
     expect(body.cached).toBe(true);
+  });
+
+  it('does not return cached transcription from a different bound conversation', async () => {
+    testDb.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type,
+        content, content_text, is_from_me, timestamp)
+      VALUES ('other@g.us', 'other_at_g.us', 'sender@s.whatsapp.net', 'msg-other-audio', 'audio',
+        ?, 'Secret transcript', 0, 1700000000)
+    `).run(JSON.stringify({ type: 'audio', transcription: 'Secret transcript' }));
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-other-audio' },
+      { tier: 'global', conversationKey: 'chat_at_g.us' } as SessionContext,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('different conversation');
+    expect(result.content[0].text).not.toContain('Secret transcript');
   });
 
   it('returns error when no media_path and no raw_message', async () => {

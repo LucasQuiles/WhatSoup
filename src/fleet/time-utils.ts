@@ -27,7 +27,10 @@ export function normalizeTimestamp(ts: unknown): string | null {
   if (typeof ts === 'number') return toIsoFromUnix(ts);
   if (typeof ts !== 'string') return null;
   // Already ISO 8601 (has T and Z or timezone offset)
-  if (ts.includes('T')) return ts;
+  if (ts.includes('T')) {
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? null : ts;
+  }
   // SQLite datetime format "YYYY-MM-DD HH:MM:SS" — treat as UTC
   const d = new Date(ts.replace(' ', 'T') + 'Z');
   return isNaN(d.getTime()) ? null : d.toISOString();
