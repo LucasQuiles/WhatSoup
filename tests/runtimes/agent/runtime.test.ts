@@ -47,6 +47,8 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, c
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    setToolUpdateRedirectJid: vi.fn(),
+    setTextAggregateDelayMs: vi.fn(),
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
@@ -142,7 +144,9 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
   const mockConfig = {
     adminPhones: new Set<string>(['15550100001']),
     controlPeers: new Map<string, string>(),
-    toolUpdateMode: 'full' as 'full' | 'minimal',
+    toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
+    toolUpdateRedirectJid: null as string | null,
+    textAggregateDelayMs: 2_000,
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
     elevenlabs: {
@@ -360,6 +364,8 @@ function makeQueueMock(targetChatJid: string): IOutboundQueue {
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    setToolUpdateRedirectJid: vi.fn(),
+    setTextAggregateDelayMs: vi.fn(),
     targetChatJid,
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
@@ -429,6 +435,9 @@ describe('AgentRuntime', () => {
     );
     // Reset voice reply config to default (never) between tests
     mockConfig.voiceReply = 'never';
+    mockConfig.toolUpdateMode = 'full';
+    mockConfig.toolUpdateRedirectJid = null;
+    mockConfig.textAggregateDelayMs = 2_000;
     mockSynthesizeSpeech.mockClear();
     mockWriteTempFile.mockClear();
     mockRuntimeLogger.info.mockClear();
@@ -448,6 +457,24 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(ensureAgentSchema).toHaveBeenCalledWith(db);
+  });
+
+  it('applies outbound status routing config when creating queues', () => {
+    mockConfig.toolUpdateMode = 'friendly';
+    mockConfig.toolUpdateRedirectJid = 'status-log@g.us';
+    mockConfig.textAggregateDelayMs = 30_000;
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+
+    const queue = (runtime as unknown as {
+      createOutboundQueue(chatJid: string, reason: string): typeof mockQueue;
+    }).createOutboundQueue('15550100001@s.whatsapp.net', 'unit test');
+
+    expect(queue).toBe(mockQueue);
+    expect(mockQueue.setToolUpdateMode).toHaveBeenCalledWith('friendly');
+    expect(mockQueue.setToolUpdateRedirectJid).toHaveBeenCalledWith('status-log@g.us');
+    expect(mockQueue.setTextAggregateDelayMs).toHaveBeenCalledWith(30_000);
   });
 
   it('start() calls ensurePermissionsSettings with agent type', async () => {

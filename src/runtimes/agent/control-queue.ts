@@ -44,7 +44,17 @@ export class ControlQueue implements IOutboundQueue {
   }
 
   /** No-op — control sessions don't surface tool updates to users. */
-  setToolUpdateMode(_mode: 'full' | 'minimal'): void {
+  setToolUpdateMode(_mode: 'full' | 'minimal' | 'friendly'): void {
+    // intentional no-op
+  }
+
+  /** No-op — control sessions don't surface tool updates to users. */
+  setToolUpdateRedirectJid(_jid: string | null): void {
+    // intentional no-op
+  }
+
+  /** No-op — control sessions buffer all output locally. */
+  setTextAggregateDelayMs(_ms: number): void {
     // intentional no-op
   }
 

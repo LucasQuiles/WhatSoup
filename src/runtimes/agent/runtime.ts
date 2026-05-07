@@ -1121,6 +1121,8 @@ export class AgentRuntime implements Runtime {
     const q = new OutboundQueue(this.messenger, chatJid);
     if (this.durability) q.setDurability(this.durability);
     q.setToolUpdateMode(config.toolUpdateMode);
+    q.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
+    q.setTextAggregateDelayMs(config.textAggregateDelayMs);
     log.debug({
       chatJid,
       reason,

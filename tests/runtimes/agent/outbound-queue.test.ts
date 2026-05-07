@@ -4,6 +4,7 @@ import {
   TOOL_BATCH_DELAY_MS,
   MIN_SEND_GAP_MS,
   TYPING_REFRESH_MS,
+  TEXT_AGGREGATE_DELAY_MS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -86,6 +87,84 @@ describe('OutboundQueue', () => {
 
   it('TYPING_REFRESH_MS is 8000 ms', () => {
     expect(TYPING_REFRESH_MS).toBe(8_000);
+  });
+
+  it('routes tool-status batches to a redirect JID when configured', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.setToolUpdateRedirectJid('status-log@g.us');
+    queue.enqueueToolUpdate({ category: 'running', detail: 'Running migration probe' });
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+    await queue.flush();
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      'status-log@g.us',
+      expect.stringContaining('Running migration probe'),
+    );
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(
+      CHAT_JID,
+      expect.stringContaining('Running migration probe'),
+    );
+  });
+
+  it('keeps normal text delivery on the main chat when tool-status redirect is configured', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.setToolUpdateRedirectJid('status-log@g.us');
+    queue.enqueueText('Final answer for the user');
+    await vi.runAllTimersAsync();
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user');
+    expect(messenger.sendMessage).not.toHaveBeenCalledWith(
+      'status-log@g.us',
+      expect.stringContaining('Final answer'),
+    );
+  });
+
+  it('uses the default streaming aggregation window until overridden', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueStreamingText('hello ');
+    queue.enqueueStreamingText('world');
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS - 100);
+    expect(calls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toEqual(['hello world']);
+    await queue.flush();
+  });
+
+  it('honors a positive streaming aggregation window override', async () => {
+    const { messenger, calls, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.setTextAggregateDelayMs(30_000);
+    queue.enqueueStreamingText('chunk-a ');
+    queue.enqueueStreamingText('chunk-b');
+
+    expect(typingCalls.filter((value) => value === true)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toEqual(['chunk-a chunk-b']);
+    await queue.flush();
+  });
+
+  it('ignores non-positive streaming aggregation window overrides', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.setTextAggregateDelayMs(0);
+    queue.setTextAggregateDelayMs(-500);
+    queue.enqueueStreamingText('default-window');
+
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
+    expect(calls).toEqual(['default-window']);
+    await queue.flush();
   });
 
   it('tracks lastActivity when text is enqueued', async () => {
