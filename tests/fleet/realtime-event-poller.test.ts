@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FleetRealtimeEventPoller } from '../../src/fleet/realtime-event-poller.ts';
 import type { FleetRealtimePublisher } from '../../src/fleet/realtime-publisher.ts';
+import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 
 // Mock proxyToInstance
 vi.mock('../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn().mockResolvedValue({ status: 200, body: '{"composing":[]}' }),
 }));
+
+const mockProxyToInstance = vi.mocked(proxyToInstance);
 
 function makePublisher(): FleetRealtimePublisher & { calls: any[] } {
   const calls: any[] = [];
@@ -128,5 +131,38 @@ describe('FleetRealtimeEventPoller', () => {
 
     expect((poller as any).snapshots.has('alpha')).toBe(true);
     expect((poller as any).snapshots.has('beta')).toBe(false);
+  });
+
+  it('ignores malformed typing entries without publishing invalid updates', async () => {
+    mockProxyToInstance.mockResolvedValueOnce({
+      status: 200,
+      body: JSON.stringify({
+        composing: [
+          {},
+          { jid: '', since: 10 },
+          { jid: 'bad-since@g.us', since: 'now' },
+          { jid: 12345, since: 20 },
+          { jid: 'group@g.us', since: 30 },
+        ],
+      }),
+    });
+    const discovery = makeDiscovery({
+      test: { name: 'test', dbPath: '/tmp/test.db', logDir: '/tmp/test-logs', healthPort: 9099 },
+    });
+    const dbReader = makeDbReader();
+    const poller = new FleetRealtimeEventPoller({ discovery, dbReader, realtime: publisher });
+
+    await poller.poll();
+
+    expect(publisher.calls).toEqual([
+      expect.objectContaining({
+        type: 'typing_update',
+        instance: 'test',
+        jid: 'group@g.us',
+        composing: true,
+      }),
+    ]);
+
+    poller.stop();
   });
 });

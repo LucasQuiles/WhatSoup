@@ -34,10 +34,21 @@ interface InstanceSnapshot {
   lastLogPath: string | null;
 }
 
-interface TypingEntry {
-  instance: string;
+interface TypingHealthEntry {
   jid: string;
   since: number;
+}
+
+function isTypingHealthEntry(entry: unknown): entry is TypingHealthEntry {
+  if (!entry || typeof entry !== 'object') return false;
+
+  const candidate = entry as { jid?: unknown; since?: unknown };
+  return (
+    typeof candidate.jid === 'string'
+    && candidate.jid.trim().length > 0
+    && typeof candidate.since === 'number'
+    && Number.isFinite(candidate.since)
+  );
 }
 
 export interface RealtimeEventPollerDeps {
@@ -161,7 +172,8 @@ export class FleetRealtimeEventPoller {
         const data = JSON.parse(result.body);
         if (Array.isArray(data.composing)) {
           for (const entry of data.composing) {
-            const key = `${inst.name}|${entry.jid}`;
+            if (!isTypingHealthEntry(entry)) continue;
+            const key = `${inst.name}|${entry.jid.trim()}`;
             currentTyping.set(key, entry.since);
           }
         }
