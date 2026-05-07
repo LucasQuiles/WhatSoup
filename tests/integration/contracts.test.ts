@@ -92,6 +92,12 @@ function makeInMemoryDb() {
       decided_at TEXT,
       PRIMARY KEY (subject_type, subject_id)
     );
+    CREATE TABLE chat_aliases (
+      alias TEXT NOT NULL PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   return { raw: db };
 }
@@ -177,6 +183,11 @@ describe('WhatSoupError contract', () => {
   it('cause field works with undefined (no cause provided)', () => {
     const err = new WhatSoupError('no cause', 'DATABASE_ERROR');
     expect(err.cause).toBeUndefined();
+    expect(err).toMatchObject({
+      name: 'WhatSoupError',
+      message: 'no cause',
+      code: 'DATABASE_ERROR',
+    });
   });
 
   it('WhatSoupError is instanceof Error', () => {
@@ -348,10 +359,11 @@ describe('Health endpoint contract', () => {
 
   it('last_run is null when no enrichment run has occurred', async () => {
     lastRun = null;
-    const { body } = await httpRequest(`${baseUrl}/health`);
+    const { status, body } = await httpRequest(`${baseUrl}/health`);
+    expect(status).toBe(200);
     const data = JSON.parse(body) as Record<string, unknown>;
     const en = data['enrichment'] as Record<string, unknown>;
-    expect(en['last_run']).toBeNull();
+    expect(en).toEqual({ last_run: null });
   });
 
   it('last_run reflects ISO string when enrichment run has occurred', async () => {
