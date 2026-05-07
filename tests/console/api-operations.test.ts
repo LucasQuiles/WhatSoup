@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { api } from '../../console/src/lib/api.ts';
 
 /**
@@ -7,6 +7,39 @@ import { api } from '../../console/src/lib/api.ts';
  * function signatures — guarding against accidental removal or signature changes.
  * They don't make real HTTP calls.
  */
+
+afterEach(() => {
+  vi.resetModules();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+function stubFleetToken(token: string | null): void {
+  vi.stubGlobal('document', {
+    querySelector: (selector: string) => {
+      if (selector !== 'meta[name="fleet-token"]' || token === null) return null;
+      return { content: token };
+    },
+  });
+}
+
+function jsonResponse(data: unknown): Response {
+  return {
+    ok: true,
+    json: async () => data,
+    text: async () => '',
+  } as Response;
+}
+
+function fetchInit(fetchMock: ReturnType<typeof vi.fn>, index: number): RequestInit {
+  const init = fetchMock.mock.calls[index]?.[1];
+  expect(init).toBeDefined();
+  return init as RequestInit;
+}
+
+function headersFor(init: RequestInit): Record<string, string> {
+  return init.headers as Record<string, string>;
+}
 
 describe('api write operations', () => {
   it('restart is a function accepting (name)', () => {
@@ -47,6 +80,82 @@ describe('api write operations', () => {
   it('deleteLine is a function accepting (name)', () => {
     expect(typeof api.deleteLine).toBe('function');
     expect(api.deleteLine.length).toBe(1);
+  });
+});
+
+describe('api auth headers', () => {
+  it('sends the fleet token on availability probes and fallback-backed reads', async () => {
+    stubFleetToken('fleet-token-123');
+    const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getLines()).resolves.toEqual([]);
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 0))).toEqual({
+      Authorization: 'Bearer fleet-token-123',
+    });
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 1))).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer fleet-token-123',
+    });
+  });
+
+  it('omits Authorization on availability probes and reads when no meta token exists', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getLines()).resolves.toEqual([]);
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 0))).toEqual({});
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 1))).toEqual({
+      'Content-Type': 'application/json',
+    });
+  });
+
+  it('sends the fleet token on write requests', async () => {
+    stubFleetToken('fleet-token-123');
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.restart('line-a')).resolves.toEqual({ status: 'ok', instance: 'line-a' });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines/line-a/restart');
+    expect(fetchInit(fetch, 0).method).toBe('POST');
+    expect(headersFor(fetchInit(fetch, 0))).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer fleet-token-123',
+    });
+  });
+
+  it('omits Authorization on write requests when no meta token exists', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.restart('line-a')).resolves.toEqual({ status: 'ok', instance: 'line-a' });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines/line-a/restart');
+    expect(fetchInit(fetch, 0).method).toBe('POST');
+    expect(headersFor(fetchInit(fetch, 0))).toEqual({
+      'Content-Type': 'application/json',
+    });
   });
 });
 
