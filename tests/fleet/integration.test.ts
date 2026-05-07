@@ -601,14 +601,20 @@ describe('fleet integration -- DB error resilience', () => {
   it('GET /api/lines/:name for corrupt DB returns detail with null dbStats', async () => {
     const { status, body } = await fetchJson(`/api/lines/${corruptInstance}`);
     expect(status).toBe(200);
-    expect(body.name).toBe(corruptInstance);
-    expect(body.dbStats).toBeNull();
+    expect(body).toMatchObject({
+      name: corruptInstance,
+      type: 'chat',
+      mode: 'chat',
+      accessMode: 'self_only',
+      dbStats: null,
+      config: { type: 'chat', accessMode: 'self_only', healthPort: 19099 },
+    });
   });
 
   it('GET /api/lines/:name/chats for corrupt DB returns 500', async () => {
     const { status, body } = await fetchJson(`/api/lines/${corruptInstance}/chats`);
     expect(status).toBe(500);
-    expect(body.error).toBeDefined();
+    expect(body).toEqual({ error: 'file is not a database' });
   });
 
   it('healthy instances still work when a sibling DB is corrupt', async () => {
