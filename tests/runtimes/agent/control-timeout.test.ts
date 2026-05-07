@@ -284,6 +284,9 @@ describe('control session hard timeout', () => {
 
     expect(getTimeout(runtime)).toBeNull();
     expect(runtime.currentControlReportId).toBeNull();
+    expect(mockSession.sendTurn).toHaveBeenLastCalledWith(
+      '[REPAIR REQUEST — report_id: r-002]\n{"reportId":"r-002","errorClass":"crash__x"}',
+    );
   });
 
   it('fires after 15 minutes and calls shutdown + clearControlReport', async () => {
@@ -303,6 +306,16 @@ describe('control session hard timeout', () => {
 
     // activeControlReportId should be cleared after timeout fires
     expect(runtime.currentControlReportId).toBeNull();
+    expect(runtime.getControlQueue()?.sendControlMessage).toHaveBeenCalledWith(
+      '15559990001@s.whatsapp.net',
+      'HEAL_ESCALATE',
+      {
+        reportId: 'r-003',
+        errorClass: 'timeout',
+        diagnosis: 'Repair session timed out after 15 minutes without resolution',
+      },
+      undefined,
+    );
   });
 
   it('dequeues next report after timeout fires', async () => {
@@ -344,6 +357,7 @@ describe('control session hard timeout', () => {
     // On send failure: no timeout left pending, control report cleared
     expect(getTimeout(runtime)).toBeNull();
     expect(runtime.currentControlReportId).toBeNull();
+    expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
   });
 
   it('releases the control slot when provisioning fails before session startup', async () => {
