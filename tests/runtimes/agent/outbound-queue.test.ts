@@ -9,6 +9,7 @@ import {
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
 const mockLog = vi.hoisted(() => ({
@@ -845,6 +846,45 @@ describe('OutboundQueue', () => {
     // With random=0.0 → delay=750ms; random=1.0 → delay=2500ms.
     // The two delays (randomCallIndex advanced twice) confirm non-identical backoff.
     expect(randomCallIndex).toBeGreaterThanOrEqual(2);
+  });
+
+  it('honors structured rate-limit retryAfterMs before retrying', async () => {
+    mockLog.warn.mockClear();
+    let callCount = 0;
+    const rateLimitedMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new RateLimitedError({
+            channelId: 'whatsapp:test',
+            operation: 'sendText',
+            correlationId: 'corr-rate-limit',
+            message: 'rate limited',
+            scope: 'provider',
+            retryAfterMs: 4_000,
+          });
+        }
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(rateLimitedMessenger, CHAT_JID);
+    queue.enqueueText('respect retry-after');
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rateLimitedMessenger.sendMessage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(rateLimitedMessenger.sendMessage).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await queue.flush();
+
+    expect(rateLimitedMessenger.sendMessage).toHaveBeenCalledTimes(2);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ retryAfterMs: 4_000 }),
+      expect.stringContaining('retrying'),
+    );
   });
 
   // ─── B05: Empty string guard ───────────────────────────────────────────────
