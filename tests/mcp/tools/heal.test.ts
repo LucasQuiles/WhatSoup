@@ -478,14 +478,22 @@ describe('emit_heal_result MCP tool', () => {
 
     expect(runtime.currentControlReportId).toBe('r-CLEAR');
 
-    await handler({
+    const result = await handler({
       reportId: 'r-CLEAR',
       errorClass: 'crash__x',
       result: 'fixed',
       diagnosis: 'done',
     }, { tier: 'global' });
 
-    expect(runtime.currentControlReportId).toBeNull();
+    expect(result).toEqual({ sent: true, reportId: 'r-CLEAR', result: 'fixed' });
+
+    await expect(handler({
+      reportId: 'r-CLEAR',
+      errorClass: 'crash__x',
+      result: 'fixed',
+      diagnosis: 'duplicate completion',
+    }, { tier: 'global' })).rejects.toThrow('No active repair session');
+    expect(mockControlQueueInstance.sendControlMessage).toHaveBeenCalledTimes(1);
   });
 
   it('attempts to resolve pending_heal_reports row (best-effort, no throw on missing table)', async () => {
