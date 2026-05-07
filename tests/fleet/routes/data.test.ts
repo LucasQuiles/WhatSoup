@@ -285,6 +285,49 @@ describe('handleGetLogs', () => {
     expect(body[0].timestamp).toBe('2026-04-05T19:30:00.000Z');
   });
 
+  it('normalizes malformed log display fields to strings', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    const logLines = [
+      JSON.stringify({
+        level: 30,
+        msg: { event: 'started', count: 2 },
+        name: { nested: true },
+        module: 'fallback-module',
+        component: ['bad'],
+        time: '2026-04-05 19:30:00',
+      }),
+      JSON.stringify({
+        level: 40,
+        msg: 123,
+        module: 'worker',
+        component: 'health',
+        time: '2026-04-05 19:31:00',
+      }),
+    ];
+    fs.writeFileSync(path.join(tmpDir, 'current.log'), logLines.join('\n') + '\n');
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body[0]).toEqual({
+      timestamp: '2026-04-05T19:30:00.000Z',
+      level: 'info',
+      msg: '{"event":"started","count":2}',
+      source: 'fallback-module',
+    });
+    expect(body[1]).toMatchObject({
+      level: 'warn',
+      msg: '123',
+      source: 'worker',
+      component: 'health',
+    });
+  });
+
   it('filters by numeric level', () => {
     const inst = fakeInstance({ logDir: tmpDir });
     const logLines = [
