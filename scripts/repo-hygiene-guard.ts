@@ -35,6 +35,14 @@ const fixtureFiles = new Set([
   'tests/scripts/repo-hygiene-guard.test.ts',
 ]);
 
+const srcConsoleAllowedFiles = new Set([
+  'src/bootstrap.ts',
+  'src/bootstrap-auth.ts',
+  'src/config.ts',
+  'src/fleet/standalone.ts',
+  'src/transport/auth.ts',
+]);
+
 const addedLinePatterns: GuardPattern[] = [
   {
     code: 'merge-conflict-marker',
@@ -186,7 +194,20 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
   for (const line of lines) {
-    if (fixtureFiles.has(normalizeRepoPath(line.filePath))) continue;
+    const filePath = normalizeRepoPath(line.filePath);
+    if (fixtureFiles.has(filePath)) continue;
+    if (
+      filePath.startsWith('src/')
+      && !srcConsoleAllowedFiles.has(filePath)
+      && /\bconsole\.(?:debug|error|info|log|warn)\s*\(/.test(line.text)
+    ) {
+      issues.push({
+        code: 'src-console-call',
+        message: 'Production source should use the structured logger instead of ad-hoc console calls.',
+        filePath: line.filePath,
+        line: line.line,
+      });
+    }
     for (const pattern of addedLinePatterns) {
       if (pattern.regex.test(line.text)) {
         issues.push({
