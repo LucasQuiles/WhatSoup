@@ -88,7 +88,12 @@ export class FleetWebSocketServer {
     const data = JSON.stringify(event);
     for (const client of this.clients) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(data);
+        try {
+          client.send(data);
+        } catch (err) {
+          this.clients.delete(client);
+          log.warn({ err: err instanceof Error ? err.message : String(err) }, 'ws_broadcast_failed');
+        }
       }
     }
   }
