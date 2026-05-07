@@ -50,7 +50,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
-import { generateMcpConfigFile } from './providers/mcp-bridge.ts';
+import { createProviderMcpBridge, generateMcpConfigFile } from './providers/mcp-bridge.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -3039,6 +3039,20 @@ export class AgentRuntime implements Runtime {
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
   }): SessionManager {
+    const conversationKey = toConversationKey(opts.chatJid);
+    const providerToolSession: SessionContext =
+      this.sandboxPerChat || this.sessionScope === 'per_chat'
+        ? {
+            tier: 'chat-scoped',
+            conversationKey,
+            deliveryJid: opts.chatJid,
+            ...(opts.cwd ? { allowedRoot: opts.cwd } : {}),
+          }
+        : {
+            tier: 'global',
+            ...(!this.shared ? { conversationKey } : {}),
+          };
+
     const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
@@ -3054,6 +3068,7 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       provider: this.agentProvider,
       providerConfig: this.agentProviderConfig,
+      mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
     });
     if (this.durability) {
       session.setDurability(this.durability);

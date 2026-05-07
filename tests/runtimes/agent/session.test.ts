@@ -4,6 +4,7 @@ import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,8 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
+import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -95,6 +98,16 @@ function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: str
   return { messenger, sentMessages };
 }
 
+function makeSseResponse(events: Array<Record<string, unknown> | string>): Response {
+  const body = events
+    .map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`)
+    .join('');
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
 // ─── DB mock helpers ──────────────────────────────────────────────────────────
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -108,6 +121,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 
 import {
   createSession,
+  incrementMessageCount,
   updateSessionId,
   updateSessionStatus,
 } from '../../../src/runtimes/agent/session-db.ts';
@@ -126,6 +140,7 @@ describe('SessionManager', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -427,6 +442,282 @@ describe('SessionManager', () => {
       toConversationKey(CHAT_JID),
       'opencode-cli',
     );
+  });
+
+  it.each([
+    {
+      provider: 'openai-api',
+      responseText: 'OpenAI API response.',
+      makeResponse: () => makeSseResponse([
+        {
+          choices: [{
+            delta: { content: 'OpenAI API response.' },
+          }],
+        },
+        {
+          usage: {
+            prompt_tokens: 7,
+            completion_tokens: 5,
+          },
+        },
+        '[DONE]',
+      ]),
+      spyOnSendTurn: () => vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn'),
+    },
+    {
+      provider: 'anthropic-api',
+      responseText: 'Anthropic API response.',
+      makeResponse: () => makeSseResponse([
+        {
+          type: 'message_start',
+          message: {
+            usage: {
+              input_tokens: 8,
+              output_tokens: 0,
+            },
+          },
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: {
+            type: 'text',
+            text: '',
+          },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: {
+            type: 'text_delta',
+            text: 'Anthropic API response.',
+          },
+        },
+        {
+          type: 'message_delta',
+          usage: {
+            output_tokens: 6,
+          },
+        },
+        { type: 'message_stop' },
+      ]),
+      spyOnSendTurn: () => vi.spyOn(AnthropicApiProvider.prototype, 'sendTurn'),
+    },
+  ])('$provider initializes as a managed-loop provider without spawning a child', async ({ provider, responseText, makeResponse, spyOnSendTurn }) => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const sendTurnSpy = spyOnSendTurn();
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider,
+      providerConfig: {
+        baseUrl: 'https://api.test.invalid/v1',
+        model: 'unit-test-model',
+      },
+    });
+
+    await sm.spawnSession();
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(createSession).toHaveBeenCalledWith(
+      db,
+      0,
+      '/mock/home',
+      CHAT_JID,
+      toConversationKey(CHAT_JID),
+      provider,
+    );
+    expect(updateSessionId).toHaveBeenCalledWith(
+      db,
+      42,
+      expect.stringMatching(new RegExp(`^${provider}-\\d+$`)),
+    );
+    expect(events.some((event) => event.type === 'init')).toBe(true);
+    expect(sm.getStatus()).toMatchObject({
+      active: true,
+      pid: null,
+      sessionId: expect.stringMatching(new RegExp(`^${provider}-\\d+$`)),
+      messageCount: 0,
+    });
+
+    await sm.sendTurn('hello managed provider');
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(sendTurnSpy).toHaveBeenCalledTimes(1);
+    expect(sendTurnSpy.mock.calls[0]?.[0]).toMatchObject({
+      role: 'user',
+      conversationKey: toConversationKey(CHAT_JID),
+      parts: [{ kind: 'text', text: 'hello managed provider' }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(incrementMessageCount).toHaveBeenCalledWith(db, 42);
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'assistant_text', text: responseText },
+      expect.objectContaining({ type: 'result', text: null }),
+    ]));
+    expect(sm.getStatus()).toMatchObject({
+      active: true,
+      pid: null,
+      messageCount: 1,
+      lastMessageAt: expect.any(String),
+    });
+  });
+
+  it('openai-api forwards native tool calls through the MCP bridge', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const executeTool = vi.fn(async () => ({ content: 'tool result', isError: false }));
+    const mcpBridge: ProviderMcpBridge = {
+      listTools: () => [{
+        name: 'lookup_chat',
+        description: 'Looks up chat data',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query'],
+        },
+      }],
+      executeTool,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'lookup_chat',
+                  arguments: '{"query":"status"}',
+                },
+              }],
+            },
+          }],
+        },
+        '[DONE]',
+      ]))
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          choices: [{
+            delta: { content: 'Tool complete.' },
+          }],
+        },
+        '[DONE]',
+      ]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: (event) => events.push(event),
+      provider: 'openai-api',
+      providerConfig: {
+        baseUrl: 'https://api.test.invalid/v1',
+        model: 'unit-test-model',
+      },
+      mcpBridge,
+    });
+
+    await sm.spawnSession();
+    await sm.sendTurn('use a tool');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(firstBody.tools).toEqual([expect.objectContaining({
+      type: 'function',
+      function: expect.objectContaining({ name: 'lookup_chat' }),
+    })]);
+    expect(executeTool).toHaveBeenCalledWith('lookup_chat', { query: 'status' });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'tool_use', toolName: 'lookup_chat', toolId: 'call_1' }),
+      expect.objectContaining({ type: 'tool_result', toolId: 'call_1', content: 'tool result' }),
+      { type: 'assistant_text', text: 'Tool complete.' },
+    ]));
+  });
+
+  it('openai-api marks the session crashed when a managed turn rejects', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    const failure = new Error('stream failed');
+    vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn').mockRejectedValue(failure);
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+      notifyUser,
+    });
+
+    await sm.spawnSession();
+    await expect(sm.sendTurn('fail this turn')).rejects.toThrow('stream failed');
+
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: null,
+      signal: null,
+      sessionId: expect.stringMatching(/^openai-api-\d+$/),
+      dbRowId: 42,
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('provider request failed'));
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, sessionId: null });
+  });
+
+  it('openai-api hard watchdog kills a stalled managed turn and marks it crashed', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const notifyUser = vi.fn();
+    let rejectTurn!: (err: Error) => void;
+    const stalledTurn = new Promise<void>((_resolve, reject) => {
+      rejectTurn = reject;
+    });
+    vi.spyOn(OpenAIApiProvider.prototype, 'sendTurn').mockReturnValue(stalledTurn);
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(function () {
+      rejectTurn(new Error('aborted by watchdog'));
+    });
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+      notifyUser,
+    });
+
+    await sm.spawnSession();
+    const turn = sm.sendTurn('stall this turn').catch((err) => err as Error);
+    await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+    const err = await turn;
+
+    expect(err.message).toBe('aborted by watchdog');
+    expect(killSpy).toHaveBeenCalled();
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 42, 'crashed');
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: expect.stringMatching(/^openai-api-\d+$/),
+      dbRowId: 42,
+    }));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('30 minutes'));
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, sessionId: null });
+    vi.useRealTimers();
   });
 
   it('spawnSession with resumeSessionId includes --resume flag', async () => {
