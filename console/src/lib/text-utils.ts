@@ -1,21 +1,34 @@
+function textValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
 /** Capitalize the first letter of a string. */
-export function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
+export function capitalize(s: string | number | null | undefined): string {
+  const text = textValue(s)
+  return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
 /** Capitalize single-letter instance names for display. */
-export function displayInstanceName(name: string): string {
-  return name.length === 1 ? name.toUpperCase() : name
+export function displayInstanceName(name: string | number | null | undefined): string {
+  const text = textValue(name).trim()
+  if (!text) return '—'
+  return text.length === 1 ? text.toUpperCase() : text
 }
 
 /** Extract up to 2 initials from a name string. */
-export function getInitials(name: string): string {
-  return name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
+export function getInitials(name: string | number | null | undefined): string {
+  const text = textValue(name).trim()
+  if (!text) return ''
+  return text.split(/\s+/).map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
 }
 
 /** Strip markdown formatting for display in previews. */
-export function stripMarkdown(text: string): string {
-  return text
+export function stripMarkdown(text: string | number | null | undefined): string {
+  const source = textValue(text)
+  if (!source) return ''
+  return source
     .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold**
     .replace(/\*(.+?)\*/g, '$1')        // *italic*
     .replace(/_(.+?)_/g, '$1')          // _italic_
@@ -30,17 +43,18 @@ export function stripMarkdown(text: string): string {
 }
 
 /** Resolve a chat display name — format raw JIDs as phone numbers. */
-export function resolveDisplayName(name: string | null | undefined): string {
-  if (!name) return '—'
+export function resolveDisplayName(name: string | number | null | undefined): string {
+  const text = textValue(name).trim()
+  if (!text) return '—'
   // LID format (WhatsApp Linked IDs) — very long digit strings that aren't phone numbers
-  if (/^\d{15,}$/.test(name)) return `Contact ${name.slice(-4)}`
+  if (/^\d{15,}$/.test(text)) return `Contact ${text.slice(-4)}`
   // If it ends with @lid, it's a Linked ID JID
-  if (name.endsWith('@lid')) return `Contact ${name.split('@')[0].slice(-4)}`
+  if (text.endsWith('@lid')) return `Contact ${text.split('@')[0].slice(-4)}`
   // If it's all digits (raw JID), format as phone
-  if (/^\d{5,}$/.test(name)) return formatPhone(name)
+  if (/^\d{5,}$/.test(text)) return formatPhone(text)
   // If it ends with @g.us or @s.whatsapp.net, extract and format
-  if (name.includes('@')) return formatPhone(name.split('@')[0])
-  return name
+  if (text.includes('@')) return formatPhone(text.split('@')[0])
+  return text
 }
 
 /** Format large numbers compactly: 1234 → "1.2K", 2450000 → "2.4M" */
@@ -51,9 +65,10 @@ export function formatCompact(n: number): string {
 }
 
 /** Format a phone-like JID for display. */
-export function formatPhone(raw: string): string {
-  if (!raw || raw === 'unknown') return '—'
-  const digits = raw.replace(/\D/g, '')
+export function formatPhone(raw: string | number | null | undefined): string {
+  const text = textValue(raw).trim()
+  if (!text || text === 'unknown') return '—'
+  const digits = text.replace(/\D/g, '')
   // US number: +1 XXX-XXX-XXXX
   if (digits.length === 11 && digits.startsWith('1')) {
     return `+1 ${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7)}`
@@ -69,5 +84,6 @@ export function formatPhone(raw: string): string {
   if (digits.length > 15) {
     return `#${digits.slice(-6)}`
   }
+  if (!digits) return '—'
   return `+${digits}`
 }
