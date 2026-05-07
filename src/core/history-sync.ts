@@ -17,10 +17,8 @@
  * withTransaction callback. `prepareStatements` runs before withTransaction
  * by design, so a statement-prepare failure never leaves a transaction open.
  *
- * Known gap (tracked, not fixed here): if the live `messages.upsert` path later
- * receives the same message_id, `INSERT OR IGNORE` no-ops and the placeholder
- * stays stuck at content_type='history' until a future history-sync cycle
- * re-delivers it. A follow-up should add an upgrade hook on the live path.
+ * Live message ingest also upgrades these placeholders when a body arrives
+ * through the real-time path before history sync replays it.
  */
 import type { Logger } from 'pino';
 import type { Database } from './database.ts';
@@ -269,4 +267,3 @@ export function processHistoryBatch(
 
   return stats;
 }
-
