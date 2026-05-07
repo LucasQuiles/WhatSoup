@@ -50,7 +50,11 @@ export async function handleUpdate(
     'Connection': 'keep-alive',
   });
 
-  const { writeSSE, endOnce } = createSSEWriter(res, () => { updateInProgress = false; });
+  const { writeSSE, endOnce } = createSSEWriter(res);
+  const finishUpdate = () => {
+    updateInProgress = false;
+    endOnce();
+  };
   _req.on('close', endOnce);
 
   try {
@@ -68,7 +72,7 @@ export async function handleUpdate(
       const trackedChanges = porcelain.split('\n').filter(l => l.trim() && !l.startsWith('??'));
       if (trackedChanges.length > 0) {
         writeSSE('error', { step: 'pull', message: `Working tree has ${trackedChanges.length} uncommitted change(s). Commit or stash before updating.` });
-        endOnce();
+        finishUpdate();
         return;
       }
     } catch { /* git status failed — proceed anyway, pull will fail if truly dirty */ }
@@ -96,7 +100,7 @@ export async function handleUpdate(
       checker.checkNow().catch(() => {});
     } catch (err: any) {
       writeSSE('error', { step: 'pull', message: err.stderr?.trim() || err.message });
-      endOnce();
+      finishUpdate();
       return;
     }
 
@@ -122,7 +126,7 @@ export async function handleUpdate(
       } catch (err: any) {
         writeSSE('error', { step: 'install', message: err.stderr?.trim() || err.message });
         if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
-        endOnce();
+        finishUpdate();
         return;
       }
     } else {
@@ -141,7 +145,7 @@ export async function handleUpdate(
       } catch (err: any) {
         writeSSE('error', { step: 'console-install', message: err.stderr?.trim() || err.message });
         if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
-        endOnce();
+        finishUpdate();
         return;
       }
     } else {
@@ -160,7 +164,7 @@ export async function handleUpdate(
       } catch (err: any) {
         writeSSE('error', { step: 'console-build', message: err.stderr?.trim() || err.message });
         if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
-        endOnce();
+        finishUpdate();
         return;
       }
     } else {
@@ -179,10 +183,10 @@ export async function handleUpdate(
       // Always release mutex + end response — on success the process is about
       // to be killed by the service manager, but if it survives (e.g. slow),
       // the endpoint must not stay permanently locked.
-      endOnce();
+      finishUpdate();
     });
   } catch (err: any) {
     writeSSE('error', { step: 'unknown', message: err.message });
-    endOnce();
+    finishUpdate();
   }
 }
