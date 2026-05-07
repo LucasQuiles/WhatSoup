@@ -41,6 +41,8 @@ import { spawn } from 'node:child_process';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+type UpsertSessionCheckpointCall = Parameters<DurabilityEngine['upsertSessionCheckpoint']>;
+
 function makeDb(): Database {
   return {
     raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })), exec: vi.fn() },
@@ -54,11 +56,11 @@ function makeMessenger(): Messenger {
   };
 }
 
-function makeDurability(): { durability: DurabilityEngine; upsertCalls: Array<[string, object]> } {
-  const upsertCalls: Array<[string, object]> = [];
+function makeDurability(): { durability: DurabilityEngine; upsertCalls: UpsertSessionCheckpointCall[] } {
+  const upsertCalls: UpsertSessionCheckpointCall[] = [];
   const durability: DurabilityEngine = {
-    upsertSessionCheckpoint: vi.fn((key: string, fields: object) => {
-      upsertCalls.push([key, fields]);
+    upsertSessionCheckpoint: vi.fn((...call: UpsertSessionCheckpointCall) => {
+      upsertCalls.push(call);
     }),
     markSessionOrphaned: vi.fn(),
     getSessionCheckpoint: vi.fn(),
@@ -88,6 +90,7 @@ function makeMockChild(pid = 12345) {
 }
 
 const CHAT_JID = 'test@s.whatsapp.net';
+const CONVERSATION_KEY = 'test';
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -117,13 +120,9 @@ describe('SessionManager — durability checkpoints', () => {
 
     await sm.spawnSession();
 
-    expect(upsertCalls.length).toBeGreaterThan(0);
-    const spawnCall = upsertCalls.find(([, fields]) => (fields as any).sessionStatus === 'active');
-    expect(spawnCall).toBeDefined();
-    // conversationKey should be derived from chatJid
-    expect(spawnCall![0]).toBeTruthy();
-    // claudePid should be set
-    expect((spawnCall![1] as any).claudePid).toBe(12345);
+    expect(upsertCalls).toStrictEqual([
+      [CONVERSATION_KEY, { claudePid: 12345, sessionStatus: 'active' }],
+    ]);
   });
 
   it('works fine without durability set (no crash)', async () => {
@@ -144,8 +143,9 @@ describe('SessionManager — durability checkpoints', () => {
 
     await sm.shutdown(true);
 
-    const suspendCall = upsertCalls.find(([, fields]) => (fields as any).sessionStatus === 'suspended');
-    expect(suspendCall).toBeDefined();
+    expect(upsertCalls).toStrictEqual([
+      [CONVERSATION_KEY, { sessionStatus: 'suspended' }],
+    ]);
   });
 
   it('shutdown(false) calls upsertSessionCheckpoint with ended', async () => {
@@ -159,8 +159,9 @@ describe('SessionManager — durability checkpoints', () => {
 
     await sm.shutdown(false);
 
-    const endedCall = upsertCalls.find(([, fields]) => (fields as any).sessionStatus === 'ended');
-    expect(endedCall).toBeDefined();
+    expect(upsertCalls).toStrictEqual([
+      [CONVERSATION_KEY, { sessionStatus: 'ended' }],
+    ]);
   });
 
   it('crash triggers checkpoint with orphaned status', async () => {
@@ -180,9 +181,18 @@ describe('SessionManager — durability checkpoints', () => {
     upsertCalls.length = 0; // reset after spawn
 
     // Simulate unexpected exit
-    mockChild._exitCb?.(1, null);
+    const exitCallback = mockChild._exitCb;
+    if (exitCallback === null) throw new Error('spawnSession did not register an exit handler');
+    exitCallback(1, null);
 
-    const orphanedCall = upsertCalls.find(([, fields]) => (fields as any).sessionStatus === 'orphaned');
-    expect(orphanedCall).toBeDefined();
+    expect(upsertCalls).toStrictEqual([
+      [CONVERSATION_KEY, { sessionStatus: 'orphaned' }],
+    ]);
+    expect(onCrash).toHaveBeenCalledWith({
+      exitCode: 1,
+      signal: null,
+      sessionId: null,
+      dbRowId: 42,
+    });
   });
 });
