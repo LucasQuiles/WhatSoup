@@ -129,7 +129,7 @@ describe('retention tools', () => {
     const row = db.raw
       .prepare('SELECT media_path FROM messages WHERE message_id = ?')
       .get('msg-2') as { media_path: string | null };
-    expect(row.media_path).toBeNull();
+    expect(row).toEqual({ media_path: null });
   });
 
   it('respects max_age_hours override and leaves newer files untouched', async () => {
