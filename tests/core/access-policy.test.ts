@@ -739,6 +739,9 @@ describe('LID resolver', () => {
   it('returns null for an unknown LID', () => {
     const result = resolveLid(lidDb, NON_ADMIN_LID_NUM);
     expect(result).toBeNull();
+    expect(
+      lidDb.raw.prepare('SELECT COUNT(*) AS count FROM lid_mappings WHERE lid = ?').get(NON_ADMIN_LID_NUM),
+    ).toEqual({ count: 0 });
   });
 
   it('upsertLidMapping updates existing entries', () => {
