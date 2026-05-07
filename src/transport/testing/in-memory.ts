@@ -77,6 +77,7 @@ export class InMemoryAdapter implements
   // Injection state
   private nextSendError: { op: string; ctor: new (input: any) => TransportErrorBase } | null = null;
   private nextSendAmbiguous: string | null = null;
+  private rateLimitRetryAfterMs: number | undefined;
 
   private msgCounter = 0;
 
@@ -156,7 +157,8 @@ export class InMemoryAdapter implements
     this.transitionTo({ state: 'auth_required', since: new Date(), reasonCode: 'in-memory-injected' });
   }
 
-  injectRateLimit(_retryAfterMs: number): void {
+  injectRateLimit(retryAfterMs: number): void {
+    this.rateLimitRetryAfterMs = retryAfterMs;
     this.transitionTo({ state: 'rate_limited', since: new Date(), reasonCode: 'in-memory-injected' });
   }
 
@@ -225,6 +227,15 @@ export class InMemoryAdapter implements
     if (opts?.idempotencyKey !== undefined) {
       const prior = this.idempotencyLedger.get(`${operation}:${opts.idempotencyKey}`);
       if (prior !== undefined) return prior;
+    }
+
+    if (this.health.state === 'rate_limited') {
+      throw new RateLimitedError({
+        channelId: this.capabilities.channel,
+        operation, correlationId, scope: 'provider',
+        message: 'in-memory rate limited',
+        retryAfterMs: this.rateLimitRetryAfterMs,
+      });
     }
 
     // Injected ambiguous
