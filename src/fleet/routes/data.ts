@@ -26,6 +26,22 @@ interface ChatNameRow { name: string }
 interface ParticipantRow { sender_name: string }
 interface DmNameRow { sender_name: string }
 
+function logFieldToString(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return fallback;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value) ?? fallback;
+  } catch {
+    return String(value);
+  }
+}
+
+function optionalLogFieldToString(value: unknown): string | undefined {
+  const normalized = logFieldToString(value);
+  return normalized === '' ? undefined : normalized;
+}
+
 /** GET /api/lines/:name/chats — paginated chat list (ChatItem shape). */
 export function handleGetChats(
   req: IncomingMessage,
@@ -344,10 +360,11 @@ export function handleGetLogs(
       const level: 'debug' | 'info' | 'warn' | 'error' =
         typeof obj.level === 'number' ? (pinoLevelMap[obj.level] ?? 'info') : 'info';
 
-      const source: string = obj.name ?? obj.module ?? 'system';
-      const component: string | undefined = obj.component ?? undefined;
+      const source = logFieldToString(obj.name ?? obj.module, 'system');
+      const component = optionalLogFieldToString(obj.component);
+      const msg = logFieldToString(obj.msg);
 
-      entries.push({ timestamp, level, msg: obj.msg ?? '', source, ...(component != null ? { component } : {}) });
+      entries.push({ timestamp, level, msg, source, ...(component !== undefined ? { component } : {}) });
     } catch {
       // Skip non-JSON lines
     }
