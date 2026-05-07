@@ -176,10 +176,10 @@ describe('Control message interception', () => {
     expect(ctrlRow?.protocol).toBe('LOOPS_HEAL');
 
     // Must NOT be in messages table
-    const msgRow = db.raw.prepare(
-      `SELECT * FROM messages WHERE message_id = ?`,
+    const msgCount = db.raw.prepare(
+      `SELECT COUNT(*) AS count FROM messages WHERE message_id = ?`,
     ).get(msg.messageId) as Record<string, unknown> | undefined;
-    expect(msgRow).toBeUndefined();
+    expect(msgCount?.count).toBe(0);
   });
 
   // ---------------------------------------------------------------------------
@@ -231,10 +231,10 @@ describe('Control message interception', () => {
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
 
     // Nothing in control_messages
-    const ctrlRow = db.raw.prepare(
-      `SELECT * FROM control_messages WHERE message_id = ?`,
+    const ctrlCount = db.raw.prepare(
+      `SELECT COUNT(*) AS count FROM control_messages WHERE message_id = ?`,
     ).get(msg.messageId) as Record<string, unknown> | undefined;
-    expect(ctrlRow).toBeUndefined();
+    expect(ctrlCount?.count).toBe(0);
   });
 
   // ---------------------------------------------------------------------------
@@ -263,10 +263,10 @@ describe('Control message interception', () => {
     expect(msgRow).toBeDefined();
 
     // Control intercept must NOT have triggered
-    const ctrlRow = db.raw.prepare(
-      `SELECT * FROM control_messages WHERE message_id = ?`,
+    const ctrlCount = db.raw.prepare(
+      `SELECT COUNT(*) AS count FROM control_messages WHERE message_id = ?`,
     ).get(msg.messageId) as Record<string, unknown> | undefined;
-    expect(ctrlRow).toBeUndefined();
+    expect(ctrlCount?.count).toBe(0);
 
     // Normal dispatch occurred (shouldRespond was consulted)
     expect(vi.mocked(shouldRespond)).toHaveBeenCalled();
@@ -301,10 +301,10 @@ describe('Control message interception', () => {
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
 
     // Nothing in control_messages
-    const ctrlRow = db.raw.prepare(
-      `SELECT * FROM control_messages WHERE message_id = ?`,
+    const ctrlCount = db.raw.prepare(
+      `SELECT COUNT(*) AS count FROM control_messages WHERE message_id = ?`,
     ).get(msg.messageId) as Record<string, unknown> | undefined;
-    expect(ctrlRow).toBeUndefined();
+    expect(ctrlCount?.count).toBe(0);
   });
 
   // ---------------------------------------------------------------------------
