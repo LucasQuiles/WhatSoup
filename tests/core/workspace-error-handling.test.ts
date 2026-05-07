@@ -1,6 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockLogError, mockMkdirSync, mockWriteFileSync, mockSymlinkSync, mockUnlinkSync, mockReadFileSync, mockExistsSync } = vi.hoisted(() => ({
+const {
+  mockLogError,
+  mockMkdirSync,
+  mockWriteFileSync,
+  mockSymlinkSync,
+  mockUnlinkSync,
+  mockReadFileSync,
+  mockExistsSync,
+  mockLstatSync,
+  mockOpenSync,
+  mockFstatSync,
+  mockFchmodSync,
+  mockFtruncateSync,
+  mockCloseSync,
+  mockChmodSync,
+} = vi.hoisted(() => ({
   mockLogError: vi.fn(),
   mockMkdirSync: vi.fn(),
   mockWriteFileSync: vi.fn(),
@@ -8,6 +23,13 @@ const { mockLogError, mockMkdirSync, mockWriteFileSync, mockSymlinkSync, mockUnl
   mockUnlinkSync: vi.fn(),
   mockReadFileSync: vi.fn(),
   mockExistsSync: vi.fn(),
+  mockLstatSync: vi.fn(),
+  mockOpenSync: vi.fn(),
+  mockFstatSync: vi.fn(),
+  mockFchmodSync: vi.fn(),
+  mockFtruncateSync: vi.fn(),
+  mockCloseSync: vi.fn(),
+  mockChmodSync: vi.fn(),
 }));
 
 vi.mock('../../src/logger.ts', () => ({
@@ -20,7 +42,20 @@ vi.mock('../../src/logger.ts', () => ({
 }));
 
 vi.mock('node:fs', () => ({
+  chmodSync: mockChmodSync,
+  closeSync: mockCloseSync,
+  constants: {
+    O_WRONLY: 1,
+    O_CREAT: 64,
+    O_NOFOLLOW: 131072,
+    O_NONBLOCK: 2048,
+  },
+  fchmodSync: mockFchmodSync,
+  fstatSync: mockFstatSync,
+  ftruncateSync: mockFtruncateSync,
+  lstatSync: mockLstatSync,
   mkdirSync: mockMkdirSync,
+  openSync: mockOpenSync,
   writeFileSync: mockWriteFileSync,
   symlinkSync: mockSymlinkSync,
   unlinkSync: mockUnlinkSync,
@@ -35,6 +70,19 @@ describe('provisionWorkspace error handling', () => {
     vi.clearAllMocks();
     mockExistsSync.mockReturnValue(false);
     mockReadFileSync.mockReturnValue('{}');
+    mockLstatSync.mockImplementation((target) => {
+      const path = String(target);
+      if (path.endsWith('.json')) {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      return {
+        isSymbolicLink: () => false,
+        isDirectory: () => true,
+        isFile: () => false,
+      };
+    });
+    mockOpenSync.mockReturnValue(10);
+    mockFstatSync.mockReturnValue({ isFile: () => true });
   });
 
   it('logs and rethrows symlink failures during provisioning', () => {

@@ -1,8 +1,22 @@
 // src/core/workspace.ts
 // Pure functions for mapping chat JIDs to workspace paths.
 
-import { chmodSync, mkdirSync, writeFileSync, symlinkSync, unlinkSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  ftruncateSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { defaultSettingsJson, type PermissionsSettings } from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
@@ -10,14 +24,64 @@ import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('workspace');
 
-function writePrivateFileSync(filePath: string, data: string): void {
+function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function assertPrivateDirectorySync(dirPath: string): void {
+  const stat = lstatSync(dirPath);
+  if (stat.isSymbolicLink()) {
+    throw privateWriteError('refusing to use private directory through symlink', 'ELOOP');
+  }
+  if (!stat.isDirectory()) {
+    throw privateWriteError('refusing to use private directory over non-directory path', 'EINVAL');
+  }
+}
+
+function ensurePrivateDirectorySync(dirPath: string): void {
   try {
-    chmodSync(filePath, 0o600);
+    assertPrivateDirectorySync(dirPath);
+    return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  writeFileSync(filePath, data, { mode: 0o600 });
-  chmodSync(filePath, 0o600);
+
+  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  assertPrivateDirectorySync(dirPath);
+}
+
+function writePrivateFileSync(filePath: string, data: string): void {
+  assertPrivateDirectorySync(dirname(filePath));
+
+  try {
+    const stat = lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw privateWriteError('refusing to write private file through symlink', 'ELOOP');
+    }
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  let fd: number | undefined;
+  try {
+    fd = openSync(filePath, flags, 0o600);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
+    }
+    fchmodSync(fd, 0o600);
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, data, { encoding: 'utf-8' });
+    fchmodSync(fd, 0o600);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export interface WorkspaceInfo {
@@ -99,14 +163,14 @@ export function writeSandboxArtifacts(
   hookPath: string,
 ): void {
   try {
-    writeFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2), { mode: 0o600 });
+    writePrivateFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2));
 
     const settings = {
       hooks: {
         PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
       },
     };
-    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2), { mode: 0o600 });
+    writePrivateFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
   } catch (err) {
     log.error({ err, claudeDir }, 'failed to write sandbox artifacts');
     throw err;
@@ -125,7 +189,7 @@ export function writePermissionsSettings(
   settings: PermissionsSettings,
 ): void {
   try {
-    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(claudeDir);
     const settingsPath = join(claudeDir, 'settings.json');
 
     let existing: Record<string, unknown> = {};
@@ -170,7 +234,7 @@ export function ensurePermissionsSettings(
     const defaults = defaultSettingsJson(type);
     if (!defaults) return;
 
-    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(claudeDir);
     const settingsPath = join(claudeDir, 'settings.json');
 
     if (existsSync(settingsPath)) {
@@ -179,17 +243,17 @@ export function ensurePermissionsSettings(
         // Apply enabledPlugins from config — always overwrite to stay in sync
         if (enabledPlugins) {
           existing.enabledPlugins = enabledPlugins;
-          writeFileSync(settingsPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+          writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
         }
         if (existing.permissions) return; // Already has permissions — don't overwrite
         // Has settings (e.g. hooks) but no permissions — add them
         const merged = { ...existing, permissions: defaults.permissions };
-        writeFileSync(settingsPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+        writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
       } catch {
         // Corrupt file — overwrite with defaults
         const out: Record<string, unknown> = { ...defaults };
         if (enabledPlugins) out.enabledPlugins = enabledPlugins;
-        writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
+        writePrivateFileSync(settingsPath, JSON.stringify(out, null, 2));
       }
       return;
     }
@@ -197,7 +261,7 @@ export function ensurePermissionsSettings(
     // No settings.json at all — write defaults + enabledPlugins if provided
     const out: Record<string, unknown> = { ...defaults };
     if (enabledPlugins) out.enabledPlugins = enabledPlugins;
-    writeFileSync(settingsPath, JSON.stringify(out, null, 2), { mode: 0o600 });
+    writePrivateFileSync(settingsPath, JSON.stringify(out, null, 2));
   } catch (err) {
     log.error({ err, claudeDir, type }, 'failed to ensure permissions settings');
     throw err;
@@ -212,9 +276,10 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
   const { workspacePath, instanceCwd, sandbox, hookPath, mcpServerPath, sendMediaServerPath } = opts;
 
   try {
-    // 1. Ensure .claude/ directory exists
+    // 1. Ensure .claude/ directory exists without following directory symlinks.
+    ensurePrivateDirectorySync(workspacePath);
     const claudeDir = join(workspacePath, '.claude');
-    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(claudeDir);
 
     // 2. Write sandbox-policy.json and settings.json via shared helper
     const mcpAllowlist = opts.chatScopedToolNames

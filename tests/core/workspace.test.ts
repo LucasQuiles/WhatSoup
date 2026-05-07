@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { chatJidToWorkspace, provisionWorkspace } from '../../src/core/workspace.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
@@ -94,6 +94,17 @@ describe('provisionWorkspace', () => {
     readFileSync(join(workspacePath, '.mcp.json'), 'utf8');
     const symlinkStat = lstatSync(join(workspacePath, 'CLAUDE.md'));
     expect(symlinkStat.isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses to provision through a pre-existing .claude directory symlink', () => {
+    const workspacePath = makeTmp();
+    const targetDir = makeTmp();
+    const instanceCwd = makeTmp();
+    symlinkSync(targetDir, join(workspacePath, '.claude'), 'dir');
+
+    expect(() => provisionWorkspace(makeOpts(workspacePath, instanceCwd))).toThrow(/directory.*symlink/);
+    expect(existsSync(join(targetDir, 'sandbox-policy.json'))).toBe(false);
+    expect(existsSync(join(targetDir, 'settings.json'))).toBe(false);
   });
 
   it('sandbox-policy.json has workspacePath in allowedPaths, inherits bash/allowedTools/allowedMcpTools from input', () => {
