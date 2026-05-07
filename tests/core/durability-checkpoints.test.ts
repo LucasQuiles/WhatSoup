@@ -74,7 +74,11 @@ describe('DurabilityEngine — session checkpoints', () => {
   describe('getSessionCheckpoint', () => {
     it('returns undefined for unknown conversation', () => {
       const row = engine.getSessionCheckpoint('nonexistent');
+      const checkpoints = db.raw.prepare(
+        'SELECT conversation_key FROM session_checkpoints WHERE conversation_key = ?',
+      ).all('nonexistent');
       expect(row).toBeUndefined();
+      expect(checkpoints).toEqual([]);
     });
   });
 
