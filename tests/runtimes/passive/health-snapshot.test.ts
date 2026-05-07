@@ -100,7 +100,7 @@ describe('PassiveRuntime.getHealthSnapshot — shape', () => {
   it('lastActivityAt is null when no chats exist', () => {
     const runtime = new PassiveRuntime(makeDb({ total: 0, last_at: null }), makeConnection(), makeConfig());
     const snapshot = runtime.getHealthSnapshot();
-    expect(snapshot.details['lastActivityAt']).toBeNull();
+    expect(snapshot.details).toEqual({ unreadCount: 0, lastActivityAt: null });
   });
 
   it('gracefully returns defaults when DB query throws', () => {
@@ -116,13 +116,12 @@ describe('PassiveRuntime.getHealthSnapshot — shape', () => {
     } as unknown as Database;
     const runtime = new PassiveRuntime(db, makeConnection(), makeConfig());
     const snapshot = runtime.getHealthSnapshot();
-    expect(snapshot.details['unreadCount']).toBe(0);
-    expect(snapshot.details['lastActivityAt']).toBeNull();
+    expect(snapshot.details).toEqual({ unreadCount: 0, lastActivityAt: null });
   });
 
   it('snapshot has a valid status string', () => {
     const runtime = new PassiveRuntime(makeDb(), makeConnection(), makeConfig());
     const snapshot = runtime.getHealthSnapshot();
-    expect(['healthy', 'degraded', 'unhealthy']).toContain(snapshot.status);
+    expect(snapshot.status).toBe('healthy');
   });
 });
