@@ -166,7 +166,13 @@ describe('writePermissionsSettings', () => {
     writePermissionsSettings(claudeDir, settings);
 
     const written = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
-    expect(written.enabledPlugins).toBeUndefined();
+    expect(written).toEqual({
+      permissions: {
+        allow: ['Bash'],
+        deny: [],
+        defaultMode: 'bypassPermissions',
+      },
+    });
   });
 
   it('recovers from corrupt settings.json', () => {
