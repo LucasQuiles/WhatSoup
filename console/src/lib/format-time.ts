@@ -8,7 +8,7 @@ const EMPTY_TIME = "\u2014";
 function normalizeTimestamp(iso: string | null | undefined): string | null {
   if (typeof iso !== 'string') return null;
   const trimmed = iso.trim();
-  if (!trimmed) return null;
+  if (!trimmed || trimmed === 'unknown') return null;
   // Handle SQLite "YYYY-MM-DD HH:MM:SS" format (no T, no Z) — treat as UTC
   return trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T') + 'Z';
 }
