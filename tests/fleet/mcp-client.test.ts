@@ -202,7 +202,7 @@ describe('mcpCall', () => {
     const result = await mcpCall(socketPath, 'any_tool', {}, 1_000);
 
     expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
+    expect(result.error).toMatch(/ENOENT|connect/);
   });
 
   // --- server closes connection unexpectedly ---
@@ -215,6 +215,6 @@ describe('mcpCall', () => {
     const result = await mcpCall(socketPath, 'any_tool', {}, 2_000);
 
     expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
+    expect(result.error).toMatch(/connection closed unexpectedly|EPIPE/);
   });
 });
