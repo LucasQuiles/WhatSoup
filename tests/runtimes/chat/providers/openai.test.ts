@@ -143,8 +143,10 @@ describe('OpenAI Provider', () => {
     const userMsg = (callArgs.messages as Array<{ role: string; content: unknown }>)
       .find((m) => m.role === 'user');
     expect(Array.isArray(userMsg?.content)).toBe(true);
-    const imgPart = (userMsg?.content as Array<{ type: string }>).find((p) => p.type === 'image_url');
-    expect(imgPart).toBeDefined();
+    expect(userMsg?.content).toEqual([
+      { type: 'text', text: 'What is this?' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,abc123' } },
+    ]);
   });
 
   it('multi-modal request: image_url contains data: URI', async () => {
