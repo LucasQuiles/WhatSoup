@@ -20,6 +20,7 @@ describe('fleet time-utils', () => {
   it('returns null for unsupported timestamp inputs', () => {
     expect(normalizeTimestamp(null)).toBeNull();
     expect(normalizeTimestamp('')).toBeNull();
+    expect(normalizeTimestamp('not-a-timestampTstill-invalid')).toBeNull();
     expect(normalizeTimestamp({})).toBeNull();
   });
 
