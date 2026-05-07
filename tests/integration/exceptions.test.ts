@@ -161,8 +161,18 @@ describe('Tool handlers with disconnected WhatsApp socket', () => {
       globalSession(),
     );
 
-    // Tool handler catches the error and returns it in the result (not an uncaught throw)
-    expect(result).toBeDefined();
+    expect(result).toEqual({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: 'WhatsApp is temporarily disconnected. Try again in a moment.',
+        }, null, 2),
+      }],
+    });
+    expect(throwingConn.sendRaw).toHaveBeenCalledWith(
+      '15551234567@s.whatsapp.net',
+      { text: 'hello' },
+    );
   });
 
   it('archive_chat with null socket → isError, message mentions not connected', async () => {
@@ -360,11 +370,36 @@ describe('ToolRegistry.call always returns ToolCallResult, never throws', () => 
   });
 
   const brokenInputs = [
-    { name: 'null params value', params: { conversation_key: null } },
-    { name: 'undefined params value', params: { conversation_key: undefined } },
-    { name: 'numeric instead of string', params: { conversation_key: 0 } },
-    { name: 'object instead of string', params: { conversation_key: {} } },
-    { name: 'array instead of string', params: { conversation_key: [] } },
+    {
+      name: 'null params value',
+      params: { conversation_key: null },
+      received: 'null',
+      message: 'Expected string, received null',
+    },
+    {
+      name: 'undefined params value',
+      params: { conversation_key: undefined },
+      received: 'undefined',
+      message: 'Required',
+    },
+    {
+      name: 'numeric instead of string',
+      params: { conversation_key: 0 },
+      received: 'number',
+      message: 'Expected string, received number',
+    },
+    {
+      name: 'object instead of string',
+      params: { conversation_key: {} },
+      received: 'object',
+      message: 'Expected string, received object',
+    },
+    {
+      name: 'array instead of string',
+      params: { conversation_key: [] },
+      received: 'array',
+      message: 'Expected string, received array',
+    },
   ];
 
   for (const tc of brokenInputs) {
@@ -380,8 +415,21 @@ describe('ToolRegistry.call always returns ToolCallResult, never throws', () => 
       }
 
       expect(threw).toBe(false);
-      expect(result).toBeDefined();
-      expect(result!.content).toBeDefined();
+      expect(result).toEqual({
+        content: [{
+          type: 'text',
+          text: `Invalid parameters for tool "list_messages": ${JSON.stringify([
+            {
+              code: 'invalid_type',
+              expected: 'string',
+              received: tc.received,
+              path: ['conversation_key'],
+              message: tc.message,
+            },
+          ], null, 2)}`,
+        }],
+        isError: true,
+      });
     });
   }
 
