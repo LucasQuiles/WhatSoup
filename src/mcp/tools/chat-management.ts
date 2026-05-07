@@ -91,14 +91,22 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
       const { message_id, conversation_key: caller_key, context_size = 5 } = GetMessageContextSchema.parse(params);
       const conversation_key = resolveConversationKey(session, caller_key);
 
-      // Fetch the target message and validate ownership
-      const target = db.raw
-        .prepare(
-          `SELECT * FROM messages
-           WHERE message_id = ?
-             AND deleted_at IS NULL`,
-        )
-        .get(message_id) as unknown as MessageRow | undefined;
+      const target = session.tier === 'chat-scoped'
+        ? db.raw
+            .prepare(
+              `SELECT * FROM messages
+               WHERE message_id = ?
+                 AND conversation_key = ?
+                 AND deleted_at IS NULL`,
+            )
+            .get(message_id, conversation_key) as unknown as MessageRow | undefined
+        : db.raw
+            .prepare(
+              `SELECT * FROM messages
+               WHERE message_id = ?
+                 AND deleted_at IS NULL`,
+            )
+            .get(message_id) as unknown as MessageRow | undefined;
 
       if (!target) {
         throw new Error(`Message "${message_id}" not found`);
