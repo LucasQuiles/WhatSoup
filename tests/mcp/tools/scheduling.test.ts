@@ -132,9 +132,13 @@ describe('scheduling tools', () => {
     );
 
     const row = db.raw.prepare(
-      'SELECT media_blob FROM scheduled_messages WHERE id = 1',
-    ).get() as { media_blob: Uint8Array | null };
-    expect(row.media_blob).toBeNull();
+      'SELECT content_type, payload, media_blob FROM scheduled_messages WHERE id = 1',
+    ).get() as { content_type: string; payload: string; media_blob: Uint8Array | null };
+    expect(row).toEqual({
+      content_type: 'text',
+      payload: JSON.stringify({ text: 'just text' }),
+      media_blob: null,
+    });
   });
 
   it('list_scheduled shows pending and processing rows for the current chat only', async () => {
