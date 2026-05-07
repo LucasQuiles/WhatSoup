@@ -24,8 +24,13 @@ describe('Nav component', () => {
 describe('realtime provider exports', () => {
   it('exports RealtimeProvider and useRealtime', async () => {
     const mod = await import('../../console/src/hooks/use-websocket');
-    expect(mod.RealtimeProvider).toBeDefined();
-    expect(mod.useRealtime).toBeDefined();
+    expect({
+      RealtimeProvider: typeof mod.RealtimeProvider,
+      useRealtime: typeof mod.useRealtime,
+    }).toEqual({
+      RealtimeProvider: 'function',
+      useRealtime: 'function',
+    });
   });
 });
 

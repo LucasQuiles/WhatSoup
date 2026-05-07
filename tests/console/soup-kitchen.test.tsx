@@ -126,7 +126,7 @@ describe('SoupKitchen loading state', () => {
 
   it('defaults fleet metrics sparklines to undefined when no data', () => {
     const sparklines = deriveFleetMessageSparklines(undefined);
-    expect(sparklines).toBeUndefined();
+    expect({ sparklines }).toEqual({ sparklines: undefined });
   });
 });
 
