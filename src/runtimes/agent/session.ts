@@ -18,6 +18,9 @@ import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, bu
 import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
 import { buildBaseChildEnv } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
+import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
+import { OpenAIApiProvider } from './providers/openai-api.ts';
+import { AnthropicApiProvider } from './providers/anthropic-api.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -66,6 +69,7 @@ export interface SessionManagerOptions {
   pluginDirs?: string[];
   provider?: string;
   providerConfig?: Record<string, unknown>;
+  mcpBridge?: ProviderMcpBridge;
 }
 
 /**
@@ -123,10 +127,12 @@ export class SessionManager {
   private readonly pluginDirs: string[];
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
+  private readonly mcpBridge: ProviderMcpBridge | undefined;
 
   private systemPrompt: string = '';
 
   private child: ReturnType<typeof spawn> | null = null;
+  private managedProviderSession: ProviderSession | null = null;
   private dbRowId: number | null = null;
   private sessionId: string | null = null;
   private active = false;
@@ -198,6 +204,7 @@ export class SessionManager {
     this.pluginDirs = opts.pluginDirs ?? [];
     this.provider = opts.provider ?? 'claude-cli';
     this.providerConfig = opts.providerConfig;
+    this.mcpBridge = opts.mcpBridge;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -211,10 +218,27 @@ export class SessionManager {
   /** Whether this provider uses a spawn-per-turn model (vs. long-running stdin pipe). */
   private get isSpawnPerTurn(): boolean {
     // Claude CLI, Codex app-server, and Gemini ACP are persistent subprocesses.
+    // HTTP API providers are managed-loop sessions and never spawn a child.
     // Others (opencode) still spawn per turn.
-    return this.provider !== 'claude-cli'
+    return !this.isManagedLoopProvider
+      && this.provider !== 'claude-cli'
       && this.provider !== 'codex-cli'
       && this.provider !== 'gemini-cli';
+  }
+
+  private get isManagedLoopProvider(): boolean {
+    return this.provider === 'openai-api' || this.provider === 'anthropic-api';
+  }
+
+  private createManagedProviderSession(): ProviderSession {
+    switch (this.provider) {
+      case 'openai-api':
+        return new OpenAIApiProvider(this.providerConfig);
+      case 'anthropic-api':
+        return new AnthropicApiProvider(this.providerConfig);
+      default:
+        throw new Error(`Provider "${this.provider}" is not a managed-loop provider.`);
+    }
   }
 
   private getProviderBinary(): string {
@@ -511,7 +535,7 @@ export class SessionManager {
   async spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> {
     this.clearShutdownKillTimer();
 
-    if (this.active && this.child !== null) {
+    if (this.active && (this.child !== null || this.managedProviderSession !== null)) {
       return;
     }
 
@@ -538,6 +562,98 @@ export class SessionManager {
         `You have full access to the local machine via bypassPermissions mode.`,
         `Working directory: ${cwd}`,
       ].join(' ');
+    }
+
+    if (this.isManagedLoopProvider) {
+      const providerSession = this.createManagedProviderSession();
+
+      this.managedProviderSession = providerSession;
+      this.active = true;
+      this.resetStdoutBuffers();
+      this.startedAt = new Date().toISOString();
+      this.messageCount = 0;
+      this.lastMessageAt = null;
+      this.systemPrompt = systemPrompt;
+      this.configuredCwd = cwd;
+      this.resumeAttemptId = null;
+
+      try {
+        if (existingRowId !== undefined) {
+          this.dbRowId = existingRowId;
+          updateSessionStatus(this.db, existingRowId, 'active');
+        } else {
+          this.dbRowId = createSession(this.db, 0, cwd, this.chatJid, workspaceKey, this.provider);
+        }
+      } catch (err) {
+        log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'session: failed to persist managed provider');
+        this.active = false;
+        this.managedProviderSession = null;
+        this.dbRowId = null;
+        this.sessionId = null;
+        this.startedAt = null;
+        this.messageCount = 0;
+        this.lastMessageAt = null;
+        throw err;
+      }
+
+      try {
+        await providerSession.initialize({
+          cwd,
+          systemPrompt,
+          model: this.model,
+          pluginDirs: this.pluginDirs,
+          instanceName: this.instanceName,
+          onEvent: (event) => this.handleProviderEvent(event),
+          onCrash: ({ exitCode, signal }) => {
+            const crashedSessionId = this.sessionId;
+            const crashedDbRowId = this.dbRowId;
+            if (this.dbRowId !== null) {
+              updateSessionStatus(this.db, this.dbRowId, 'crashed');
+            }
+            this.clearTurnWatchdog();
+            this.active = false;
+            this.managedProviderSession = null;
+            this.sessionId = null;
+            this.onCrash?.({
+              exitCode,
+              signal: signal as NodeJS.Signals | null,
+              sessionId: crashedSessionId,
+              dbRowId: crashedDbRowId,
+            });
+          },
+          mcpBridge: this.mcpBridge,
+        });
+      } catch (err) {
+        log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'managed provider failed to initialize');
+        if (this.dbRowId !== null) {
+          updateSessionStatus(this.db, this.dbRowId, 'crashed');
+        }
+        this.clearTurnWatchdog();
+        this.active = false;
+        this.managedProviderSession = null;
+        this.dbRowId = null;
+        this.sessionId = null;
+        this.startedAt = null;
+        this.messageCount = 0;
+        this.lastMessageAt = null;
+        throw err;
+      }
+
+      if (this.durability) {
+        this.durability.upsertSessionCheckpoint(workspaceKey, {
+          sessionStatus: 'active',
+        });
+      }
+
+      log.info({
+        provider: this.provider,
+        chatJid: this.chatJid,
+        cwd,
+        rowId: this.dbRowId,
+        existingRowId: existingRowId ?? null,
+        resumeSessionId: resumeSessionId ?? null,
+      }, 'managed-loop provider session initialized');
+      return;
     }
 
     // Spawn-per-turn providers (codex, gemini, opencode) should NOT eagerly spawn
@@ -909,7 +1025,7 @@ export class SessionManager {
    * assistant_text, compact_boundary) so that only truly stalled sessions are killed.
    */
   tickWatchdog(): void {
-    if (!this.active || this.child === null) return;
+    if (!this.active || (this.child === null && this.managedProviderSession === null)) return;
     this.clearTurnWatchdog();
     this.armWatchdog();
   }
@@ -977,13 +1093,59 @@ export class SessionManager {
 
   private handleWatchdogHard(): void {
     this.watchdogHard = null;
-    if (!this.active || this.child === null) return;
+    if (!this.active) return;
+
+    if (this.managedProviderSession !== null) {
+      log.warn({ sessionId: this.sessionId, provider: this.provider, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled managed provider session');
+      this.notifyUser?.('_Session terminated after 30 minutes of inactivity — restarting._');
+      this.crashManagedProviderSession('managed provider turn watchdog fired');
+      return;
+    }
+
+    if (this.child === null) return;
     log.warn({ sessionId: this.sessionId, pid: this.child?.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
     // Notify user with a specific message before the kill — the generic crash
     // notice ("Agent session crashed") follows via the exit handler, but this
     // message explains WHY it was terminated.
     this.notifyUser?.('_Session terminated after 30 minutes of inactivity — restarting._');
     this.child?.kill('SIGKILL');
+  }
+
+  private crashManagedProviderSession(reason: string, err?: unknown): void {
+    if (this.managedProviderSession === null && !this.active) return;
+
+    const crashedSessionId = this.sessionId;
+    const crashedDbRowId = this.dbRowId;
+    const providerSession = this.managedProviderSession;
+
+    this.clearTurnWatchdog();
+    this.active = false;
+    this.managedProviderSession = null;
+    this.sessionId = null;
+
+    if (providerSession !== null) {
+      try {
+        providerSession.kill();
+      } catch (killErr) {
+        log.debug({ err: killErr, provider: this.provider, chatJid: this.chatJid }, 'managed provider kill failed during crash cleanup');
+      }
+    }
+
+    if (this.dbRowId !== null) {
+      updateSessionStatus(this.db, this.dbRowId, 'crashed');
+    }
+
+    if (this.durability) {
+      this.durability.upsertSessionCheckpoint(toConversationKey(this.chatJid), { sessionStatus: 'orphaned' });
+    }
+
+    log.warn({ err, provider: this.provider, chatJid: this.chatJid, sessionId: crashedSessionId, dbRowId: crashedDbRowId, reason }, 'managed provider session crashed');
+    this.onCrash?.({
+      exitCode: null,
+      signal: null,
+      sessionId: crashedSessionId,
+      dbRowId: crashedDbRowId,
+    });
   }
 
   /** Write a user message turn to the agent — via stdin (Claude) or spawn-per-turn (others). */
@@ -1000,6 +1162,42 @@ export class SessionManager {
         this.onEvent({ type: 'result', text: `_Throttled: ${check.reason}_` });
         return;
       }
+    }
+
+    if (this.isManagedLoopProvider) {
+      if (this.managedProviderSession === null) {
+        throw new Error('Managed provider session is not initialized. Call spawnSession() first.');
+      }
+
+      this.clearTurnWatchdog();
+      this.armWatchdog();
+      try {
+        await this.managedProviderSession.sendTurn({
+          role: 'user',
+          conversationKey: toConversationKey(this.chatJid),
+          parts: [{ kind: 'text', text }],
+          ...(this.model ? { model: this.model } : {}),
+        });
+      } catch (err) {
+        if (this.active || this.managedProviderSession !== null) {
+          this.crashManagedProviderSession('managed provider turn failed', err);
+          this.notifyUser?.('Agent provider request failed — send any message to start a new session.');
+        }
+        throw err;
+      } finally {
+        this.clearTurnWatchdog();
+      }
+
+      if (!this.active || this.managedProviderSession === null) {
+        throw new Error('Managed provider session ended before the turn completed.');
+      }
+
+      if (this.dbRowId !== null) {
+        incrementMessageCount(this.db, this.dbRowId);
+      }
+      this.messageCount += 1;
+      this.lastMessageAt = new Date().toISOString();
+      return;
     }
 
     if (this.isSpawnPerTurn) {
@@ -1305,6 +1503,13 @@ export class SessionManager {
       }, SessionManager.SHUTDOWN_GRACE_MS);
       this.child = null;
       log.info({ chatJid: this.chatJid, sessionId: terminatedSessionId, pid: currentPid }, 'claude process terminated');
+    }
+
+    if (this.managedProviderSession !== null) {
+      const providerSession = this.managedProviderSession;
+      this.managedProviderSession = null;
+      await providerSession.shutdown(suspend ? 'suspend' : 'end');
+      log.info({ chatJid: this.chatJid, sessionId: this.sessionId, provider: this.provider }, 'managed provider session terminated');
     }
 
     this.sessionId = null;
