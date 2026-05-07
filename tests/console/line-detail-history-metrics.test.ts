@@ -11,27 +11,51 @@ import { describe, it, expect } from 'vitest';
 describe('line-detail tab components', () => {
   it('barrel exports all expected tab components', async () => {
     const mod = await import('../../console/src/components/line-detail/index.ts');
-    expect(mod.SummaryTab).toBeDefined();
-    expect(mod.ModeTab).toBeDefined();
-    expect(mod.PipelineTab).toBeDefined();
-    expect(mod.AccessTab).toBeDefined();
-    expect(mod.HistoryTab).toBeDefined();
-    expect(mod.LogsTab).toBeDefined();
-    expect(mod.MetricsTab).toBeDefined();
+    expect({
+      SummaryTab: typeof mod.SummaryTab,
+      ModeTab: typeof mod.ModeTab,
+      PipelineTab: typeof mod.PipelineTab,
+      AccessTab: typeof mod.AccessTab,
+      HistoryTab: typeof mod.HistoryTab,
+      LogsTab: typeof mod.LogsTab,
+      MetricsTab: typeof mod.MetricsTab,
+    }).toEqual({
+      SummaryTab: 'function',
+      ModeTab: 'function',
+      PipelineTab: 'function',
+      AccessTab: 'function',
+      HistoryTab: 'function',
+      LogsTab: 'function',
+      MetricsTab: 'function',
+    });
   });
 
   it('barrel exports dialog components', async () => {
     const mod = await import('../../console/src/components/line-detail/index.ts');
-    expect(mod.ConfigEditDialog).toBeDefined();
-    expect(mod.ModeSwitchDialog).toBeDefined();
+    expect({
+      ConfigEditDialog: typeof mod.ConfigEditDialog,
+      ModeSwitchDialog: typeof mod.ModeSwitchDialog,
+    }).toEqual({
+      ConfigEditDialog: 'function',
+      ModeSwitchDialog: 'function',
+    });
   });
 
-  it('exports exactly 10 named items', async () => {
+  it('exports exactly 11 named items', async () => {
     const mod = await import('../../console/src/components/line-detail/index.ts');
-    const exportNames = Object.keys(mod);
-    expect(exportNames.length).toBe(11);
-    expect(mod).toHaveProperty('ScheduledTab');
-    expect(mod).toHaveProperty('GroupsTab');
+    expect(Object.keys(mod).sort()).toEqual([
+      'AccessTab',
+      'ConfigEditDialog',
+      'GroupsTab',
+      'HistoryTab',
+      'LogsTab',
+      'MetricsTab',
+      'ModeSwitchDialog',
+      'ModeTab',
+      'PipelineTab',
+      'ScheduledTab',
+      'SummaryTab',
+    ]);
   });
 });
 
@@ -54,10 +78,17 @@ describe('ActiveHoursHeatmap', () => {
 describe('metrics hooks', () => {
   it('exports useMetrics and useFleetMetrics', async () => {
     const mod = await import('../../console/src/hooks/use-metrics.ts');
-    expect(mod.useMetrics).toBeDefined();
-    expect(mod.useFleetMetrics).toBeDefined();
-    expect(mod.getMetricsQueryOptions).toBeDefined();
-    expect(mod.getFleetMetricsQueryOptions).toBeDefined();
+    expect({
+      useMetrics: typeof mod.useMetrics,
+      useFleetMetrics: typeof mod.useFleetMetrics,
+      getMetricsQueryOptions: typeof mod.getMetricsQueryOptions,
+      getFleetMetricsQueryOptions: typeof mod.getFleetMetricsQueryOptions,
+    }).toEqual({
+      useMetrics: 'function',
+      useFleetMetrics: 'function',
+      getMetricsQueryOptions: 'function',
+      getFleetMetricsQueryOptions: 'function',
+    });
   });
 });
 
