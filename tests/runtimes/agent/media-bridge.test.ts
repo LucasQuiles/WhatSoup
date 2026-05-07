@@ -199,7 +199,7 @@ describe('bridge request handling', () => {
     );
   });
 
-  it('accepts chatJid in the request, overriding the current bridge chat', async () => {
+  it('ignores request chatJid and uses the current bridge chat', async () => {
     const filePath = join(allowedRoot, 'doc.txt');
     writeFileSync(filePath, 'hello');
 
@@ -211,7 +211,7 @@ describe('bridge request handling', () => {
 
     expect(res.ok).toBe(true);
     expect(messenger.sendMedia).toHaveBeenCalledWith(
-      'explicit@g.us',
+      'default@g.us',
       expect.anything(),
     );
   });
@@ -302,15 +302,15 @@ describe('bridge validation', () => {
     expect(res.error).toMatch(/file not found/);
   });
 
-  it('returns ok:false when no chatJid and no current chat set', async () => {
-    // bridge._currentChatJid is null and request has no chatJid
+  it('returns ok:false when no current chat is set', async () => {
+    // bridge._currentChatJid is null; request-level chatJid is intentionally ignored.
     const filePath = join(allowedRoot, 'test.png');
     writeFileSync(filePath, Buffer.alloc(4));
 
-    const res = await sendRequest(socketPath, { path: filePath });
+    const res = await sendRequest(socketPath, { path: filePath, chatJid: 'explicit@g.us' });
 
     expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/chatJid/);
+    expect(res.error).toMatch(/current chat/);
   });
 
   it('returns error for invalid JSON', async () => {
