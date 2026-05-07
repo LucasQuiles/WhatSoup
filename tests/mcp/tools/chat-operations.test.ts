@@ -68,8 +68,10 @@ describe('chat-operations tools', () => {
       const tool = tools.find((t) => t.name === 'clear_chat');
       expect(tool).toBeDefined();
       // Injected tools in global sessions get chatJid added to schema
-      const props = (tool!.inputSchema as any).properties;
-      expect(props.chatJid).toBeDefined();
+      const schema = tool!.inputSchema as any;
+      const props = schema.properties;
+      expect(props.chatJid).toEqual({ type: 'string' });
+      expect(schema.required).toEqual(['chatJid', 'messages']);
     });
   });
 
