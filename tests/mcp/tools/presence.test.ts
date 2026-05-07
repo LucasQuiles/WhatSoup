@@ -119,10 +119,18 @@ describe('presence tools', () => {
         globalSession(),
       );
       expect(result.isError).toBeUndefined();
-      const data = JSON.parse(result.content[0].text) as { status: null; lastSeen: null; stale: null };
-      expect(data.status).toBeNull();
-      expect(data.lastSeen).toBeNull();
-      expect(data.stale).toBeNull();
+      const data = JSON.parse(result.content[0].text) as {
+        jid: string;
+        status: null;
+        lastSeen: null;
+        stale: null;
+      };
+      expect(data).toStrictEqual({
+        jid: '111@s.whatsapp.net',
+        status: null,
+        lastSeen: null,
+        stale: null,
+      });
     });
 
     it('returns cached presence data for known jid', async () => {
