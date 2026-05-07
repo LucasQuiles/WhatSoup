@@ -422,6 +422,58 @@ describe('handleSearchMessages', () => {
 });
 
 // ---------------------------------------------------------------------------
+// handleSearchMessages
+// ---------------------------------------------------------------------------
+
+describe('handleSearchMessages', () => {
+  it('returns 400 when q is missing', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/q/);
+  });
+
+  it('returns 400 for blank q without querying the database', () => {
+    const inst = fakeInstance();
+    const searchMessages = vi.fn(() => ({ ok: false, error: 'Invalid FTS MATCH query: query must not be empty' }));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20%20%20'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/q/);
+    expect(searchMessages).not.toHaveBeenCalled();
+  });
+
+  it('trims q before searching and echoing the response query', () => {
+    const inst = fakeInstance();
+    const searchMessages = vi.fn(() => ({ ok: true, data: [] }));
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=%20hello%20&conversation_key=abc'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    expect(searchMessages).toHaveBeenCalledWith('test-line', inst.dbPath, {
+      query: 'hello',
+      conversationKey: 'abc',
+      limit: 20,
+    });
+    expect(JSON.parse(res._body).query).toBe('hello');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // handleGetAccess
 // ---------------------------------------------------------------------------
 
