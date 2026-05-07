@@ -253,7 +253,15 @@ describe('messages', () => {
       .all(msg.messageId) as unknown as MessageRow[];
 
     const mapped = rowToMessage(rows[0]);
-    expect(mapped.mediaPath).toBeNull();
+    expect(mapped).toMatchObject({
+      messageId: msg.messageId,
+      chatJid: msg.chatJid,
+      conversationKey: msg.conversationKey,
+      content: 'text only',
+      contentType: 'text',
+      mediaPath: null,
+      contentText: 'text only',
+    });
   });
 
   // --- Task 3: updateMediaPath helper ---
