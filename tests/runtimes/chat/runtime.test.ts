@@ -213,7 +213,7 @@ function setHappyPathDefaults() {
   mockProcessMedia.mockResolvedValue({ content: 'hello bot', images: [] });
   mockLoadContext.mockResolvedValue('');
   mockLoadConversationWindow.mockReturnValue([]);
-  mockStoreMessage.mockImplementation(() => undefined);
+  mockStoreMessage.mockReturnValue(true);
   mockRecordResponse.mockImplementation(() => undefined);
 }
 

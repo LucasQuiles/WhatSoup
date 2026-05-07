@@ -33,8 +33,8 @@ describe('metricsToCSV', () => {
   it('converts message volume to CSV string', async () => {
     const { metricsToCSV } = await import('../../console/src/lib/csv-export.ts');
     const csv = metricsToCSV([
-      { bucket: '2026-01-01T00:00:00Z', inbound: 5, outbound: 3 },
-      { bucket: '2026-01-01T01:00:00Z', inbound: 2, outbound: 1 },
+      { bucket: '2026-01-01T00:00:00Z', inbound: 5, outbound: 3, media: 0 },
+      { bucket: '2026-01-01T01:00:00Z', inbound: 2, outbound: 1, media: 0 },
     ]);
     expect(csv).toContain('bucket,inbound,outbound');
     expect(csv).toContain('2026-01-01T00:00:00Z,5,3');

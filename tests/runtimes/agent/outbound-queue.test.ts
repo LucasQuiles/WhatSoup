@@ -9,6 +9,7 @@ import {
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
@@ -856,7 +857,7 @@ describe('OutboundQueue', () => {
         callCount += 1;
         if (callCount === 1) {
           throw new RateLimitedError({
-            channelId: 'whatsapp:test',
+            channelId: makeChannelId('whatsapp', 'test'),
             operation: 'sendText',
             correlationId: 'corr-rate-limit',
             message: 'rate limited',

@@ -24,8 +24,8 @@ describe('useVirtualMessages module', () => {
   it('builds stable virtualizer options from message content', async () => {
     const mod = await import('../../console/src/hooks/use-virtual-messages.ts')
     const messages = [
-      { pk: 'm-1', content: 'short text', type: 'text', fromMe: true },
-      { pk: 'm-2', content: 'x'.repeat(90), type: 'image', fromMe: false },
+      { pk: 1, content: 'short text', type: 'text', fromMe: true },
+      { pk: 2, content: 'x'.repeat(90), type: 'image', fromMe: false },
     ]
     const getScrollElement = () => null
 
@@ -39,7 +39,7 @@ describe('useVirtualMessages module', () => {
     expect(options.getScrollElement).toBe(getScrollElement)
     expect(options.overscan).toBe(3)
     expect(options.gap).toBe(12)
-    expect(options.getItemKey?.(0)).toBe('m-1')
+    expect(options.getItemKey?.(0)).toBe(1)
     expect(options.getItemKey?.(99)).toBe(99)
     expect(options.estimateSize?.(0)).toBe(76)
     expect(options.estimateSize?.(1)).toBe(154)
@@ -50,13 +50,18 @@ describe('useVirtualMessages module', () => {
 
     expect(mod.estimateMessageRowHeight(null)).toBe(76)
     expect(mod.estimateMessageRowHeight(undefined)).toBe(76)
-    expect(mod.estimateMessageRowHeight({ pk: 'm-1', content: null, type: 'text', fromMe: true })).toBe(76)
-    expect(mod.estimateMessageRowHeight({ pk: 'm-2', content: { text: 'bad payload' }, type: 'text', fromMe: true })).toBe(76)
+    expect(mod.estimateMessageRowHeight({ pk: 1, content: null, type: 'text', fromMe: true })).toBe(76)
+    expect(mod.estimateMessageRowHeight({
+      pk: 2,
+      content: { text: 'bad payload' },
+      type: 'text',
+      fromMe: true,
+    } as unknown as Parameters<typeof mod.estimateMessageRowHeight>[0])).toBe(76)
   })
 
   it('passes created options to the virtualizer hook', async () => {
     const mod = await import('../../console/src/hooks/use-virtual-messages.ts')
-    const messages = [{ pk: 'm-1', content: '', type: 'text', fromMe: true }]
+    const messages = [{ pk: 1, content: '', type: 'text', fromMe: true }]
 
     const result = mod.useVirtualMessages({
       messages,

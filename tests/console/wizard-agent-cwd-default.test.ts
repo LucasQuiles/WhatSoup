@@ -73,7 +73,7 @@ describe('agent workspace defaults', () => {
       type: 'agent',
       agentOptions: { cwd: null, sessionScope: 'per_chat' },
     });
-    expect((result.agentOptions as { cwd: string }).cwd).toBe('~/.local/share/whatsoup/instances/lab-test/workspace');
+    expect((result.agentOptions as unknown as { cwd: string }).cwd).toBe('~/.local/share/whatsoup/instances/lab-test/workspace');
   });
 
   it('creates agentOptions when an agent line has none and a name is set', () => {
@@ -86,7 +86,7 @@ describe('agent workspace defaults', () => {
     const input = { name: 'lab-test', type: 'agent', agentOptions: ['unexpected'] };
     const result = withDefaultAgentWorkspace(input);
     // Array agentOptions is non-conforming input; helper falls back to a fresh object containing the default.
-    expect((result.agentOptions as Record<string, unknown>).cwd)
+    expect((result.agentOptions as unknown as Record<string, unknown>).cwd)
       .toBe('~/.local/share/whatsoup/instances/lab-test/workspace');
     expect(Array.isArray(result.agentOptions)).toBe(false);
   });

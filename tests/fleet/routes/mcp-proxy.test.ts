@@ -5,8 +5,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleCreateGroup, handleSearchContacts } from '../../../src/fleet/routes/mcp-proxy.ts';
+import type { McpProxyDeps } from '../../../src/fleet/routes/mcp-proxy.ts';
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
-import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import type { DiscoveredInstance, FleetDiscovery } from '../../../src/fleet/discovery.ts';
 
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({
   mcpCall: vi.fn(),
@@ -30,20 +31,21 @@ function makeInstance(): DiscoveredInstance {
   };
 }
 
-function makeDeps() {
+function makeDeps(): McpProxyDeps {
   return {
     discovery: {
       getInstance: vi.fn(() => makeInstance()),
-    },
+    } as unknown as FleetDiscovery,
   };
 }
 
 function mockReq(body: string, url = '/api/lines/alpha/groups'): IncomingMessage {
-  const req = new PassThrough() as IncomingMessage;
+  const stream = new PassThrough();
+  const req = stream as unknown as IncomingMessage;
   req.method = 'POST';
   req.url = url;
   process.nextTick(() => {
-    req.end(body);
+    stream.end(body);
   });
   return req;
 }
