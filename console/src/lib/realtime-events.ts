@@ -52,7 +52,7 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
     case 'instance_status':
       return [['lines'], ['lines', instance]];
     case 'message_received':
-      return [['messages', instance], ['chats', instance]];
+      return [['messages', instance], ['chats', instance], ['search', instance]];
     case 'chat_updated':
       return [['chats', instance]];
     case 'log_entry':
