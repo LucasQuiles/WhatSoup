@@ -65,5 +65,8 @@
     "recharts": "^3.8.1",
     "typescript": "5.9.3",
     "vitest": "3.2.4"
+  },
+  "overrides": {
+    "protobufjs": "7.5.6"
   }
 }
