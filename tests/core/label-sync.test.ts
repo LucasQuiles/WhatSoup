@@ -43,17 +43,18 @@ describe('label-sync', () => {
     it('inserts a label into the labels table', () => {
       handleLabelsEdit(db, [{ id: 'lbl-1', name: 'Important', color: 1 }]);
 
-      const row = db.raw.prepare("SELECT * FROM labels WHERE id = ?").get('lbl-1') as {
+      const row = db.raw.prepare("SELECT id, name, color, predefined_id FROM labels WHERE id = ?").get('lbl-1') as {
         id: string;
         name: string;
         color: number | null;
         predefined_id: string | null;
       };
-      expect(row).toBeDefined();
-      expect(row.id).toBe('lbl-1');
-      expect(row.name).toBe('Important');
-      expect(row.color).toBe(1);
-      expect(row.predefined_id).toBeNull();
+      expect(row).toEqual({
+        id: 'lbl-1',
+        name: 'Important',
+        color: 1,
+        predefined_id: null,
+      });
     });
 
     it('inserts a label with predefinedId', () => {
