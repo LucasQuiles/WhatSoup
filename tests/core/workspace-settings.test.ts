@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { writePermissionsSettings } from '../../src/core/workspace.ts';
 
@@ -86,6 +86,43 @@ describe('writePermissionsSettings', () => {
     writePermissionsSettings(claudeDir, settings);
 
     expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses to write settings.json through a final symlink', () => {
+    const cwd = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    const settingsPath = join(claudeDir, 'settings.json');
+    const targetPath = join(cwd, 'settings-target.json');
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(targetPath, JSON.stringify({ keep: true }));
+    symlinkSync(targetPath, settingsPath);
+
+    const settings = {
+      permissions: {
+        allow: ['Bash'],
+        deny: [],
+        defaultMode: 'bypassPermissions' as const,
+      },
+    };
+    expect(() => writePermissionsSettings(claudeDir, settings)).toThrow(/symlink/);
+    expect(JSON.parse(readFileSync(targetPath, 'utf8'))).toEqual({ keep: true });
+  });
+
+  it('refuses to write settings.json through a .claude directory symlink', () => {
+    const cwd = makeTmp();
+    const targetDir = makeTmp();
+    const claudeDir = join(cwd, '.claude');
+    symlinkSync(targetDir, claudeDir, 'dir');
+
+    const settings = {
+      permissions: {
+        allow: ['Bash'],
+        deny: [],
+        defaultMode: 'bypassPermissions' as const,
+      },
+    };
+    expect(() => writePermissionsSettings(claudeDir, settings)).toThrow(/directory.*symlink/);
+    expect(existsSync(join(targetDir, 'settings.json'))).toBe(false);
   });
 
   it('creates .claude/ directory if it does not exist', () => {

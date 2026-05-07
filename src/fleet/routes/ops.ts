@@ -54,18 +54,63 @@ function deepMergeRecords(
   return result;
 }
 
-/**
- * Writes via chmod/write/chmod and follows symlinks. Parent confinement and
- * symlink/O_NOFOLLOW hardening are tracked separately.
- */
-function writePrivateFileSync(filePath: string, data: string): void {
+interface PrivateWriteOptions {
+  exclusive?: boolean;
+}
+
+function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function assertPrivateDirectorySync(dirPath: string): void {
+  const stat = fs.lstatSync(dirPath);
+  if (stat.isSymbolicLink()) {
+    throw privateWriteError('refusing to use private directory through symlink', 'ELOOP');
+  }
+  if (!stat.isDirectory()) {
+    throw privateWriteError('refusing to use private directory over non-directory path', 'EINVAL');
+  }
+}
+
+function writePrivateFileSync(filePath: string, data: string, options: PrivateWriteOptions = {}): void {
+  assertPrivateDirectorySync(path.dirname(filePath));
+
   try {
-    fs.chmodSync(filePath, 0o600);
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw privateWriteError('refusing to write private file through symlink', 'ELOOP');
+    }
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
+    }
+    if (options.exclusive) {
+      throw privateWriteError('refusing to create private file because it already exists', 'EEXIST');
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  fs.writeFileSync(filePath, data, { encoding: 'utf-8', mode: 0o600 });
-  fs.chmodSync(filePath, 0o600);
+
+  const flags = fs.constants.O_WRONLY |
+    fs.constants.O_CREAT |
+    fs.constants.O_NOFOLLOW |
+    fs.constants.O_NONBLOCK |
+    (options.exclusive ? fs.constants.O_EXCL : 0);
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, flags, 0o600);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
+    }
+    fs.fchmodSync(fd, 0o600);
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, data, { encoding: 'utf-8' });
+    fs.fchmodSync(fd, 0o600);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 export interface OpsDeps {
@@ -428,7 +473,7 @@ export async function handleConfigUpdate(
     if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
       try {
         const claudeDir = path.join(ao.cwd, '.claude');
-        fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+        ensureHomeConfinedDirectory(claudeDir);
         writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
       } catch (err) {
         jsonResponse(res, 500, { error: `failed to write CLAUDE.md: ${(err as Error).message}` });
@@ -444,7 +489,10 @@ export async function handleConfigUpdate(
       try {
         const claudeDir = path.join(ao.cwd, '.claude');
         const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
-        if (settings) writePermissionsSettings(claudeDir, settings);
+        if (settings) {
+          ensureHomeConfinedDirectory(claudeDir);
+          writePermissionsSettings(claudeDir, settings);
+        }
       } catch (err) {
         jsonResponse(res, 500, { error: `failed to write settings.json: ${(err as Error).message}` });
         return;
@@ -460,6 +508,7 @@ export async function handleConfigUpdate(
       if (ao && typeof ao.cwd === 'string' && ao.cwd.trim()) {
         try {
           const claudeDir = path.join(ao.cwd, '.claude');
+          ensureHomeConfinedDirectory(claudeDir);
           // Build a full PermissionsSettings so writePermissionsSettings handles the merge
           const settingsPath = path.join(claudeDir, 'settings.json');
           let existingPerms = defaultSettingsJson('agent')!.permissions;
@@ -551,6 +600,69 @@ function validateNumericBounds(body: Record<string, unknown>, res: ServerRespons
   return true;
 }
 
+function pathIsInsideDirectory(candidate: string, parent: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function pathIsAtOrInsideDirectory(candidate: string, parent: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function realpathExistingPrefix(targetPath: string): string {
+  let current = targetPath;
+  while (true) {
+    try {
+      return fs.realpathSync(current);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+}
+
+function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
+  const resolved = path.resolve(inputPath);
+  const homePath = path.resolve(os.homedir());
+  if (!pathIsInsideDirectory(resolved, homePath)) {
+    jsonResponse(res, 400, { error });
+    return null;
+  }
+
+  try {
+    const homeReal = fs.realpathSync(homePath);
+    const existingReal = realpathExistingPrefix(resolved);
+    if (!pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+      jsonResponse(res, 400, { error });
+      return null;
+    }
+  } catch {
+    jsonResponse(res, 400, { error });
+    return null;
+  }
+
+  return resolved;
+}
+
+function ensureHomeConfinedDirectory(dirPath: string): void {
+  const resolved = path.resolve(dirPath);
+  const homePath = path.resolve(os.homedir());
+  const homeReal = fs.realpathSync(homePath);
+  const existingReal = realpathExistingPrefix(resolved);
+  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+    throw privateWriteError('directory must be within the home directory', 'EACCES');
+  }
+
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const dirReal = fs.realpathSync(resolved);
+  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(dirReal, homeReal)) {
+    throw privateWriteError('directory must be within the home directory', 'EACCES');
+  }
+}
+
 /**
  * Resolve agentOptions.cwd and verify it is within the home directory.
  * Mutates agentOptions.cwd in-place to the resolved absolute path.
@@ -559,11 +671,8 @@ function validateNumericBounds(body: Record<string, unknown>, res: ServerRespons
 function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: ServerResponse): string | null {
   const cwd = agentOptions.cwd as string;
   if (!cwd.trim()) return cwd; // empty — caller decides whether it's valid
-  const safeCwd = path.resolve(cwd);
-  if (!safeCwd.startsWith(os.homedir() + path.sep)) {
-    jsonResponse(res, 400, { error: 'agentOptions.cwd must be within the home directory' });
-    return null;
-  }
+  const safeCwd = resolveHomeConfinedPath(cwd, res, 'agentOptions.cwd must be within the home directory');
+  if (safeCwd === null) return null;
   agentOptions.cwd = safeCwd;
   return safeCwd;
 }
@@ -574,10 +683,11 @@ function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: Serve
  */
 function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
   for (const dir of dirs) {
-    if (typeof dir !== 'string' || !path.resolve(dir).startsWith(os.homedir() + path.sep)) {
+    if (typeof dir !== 'string') {
       jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
       return false;
     }
+    if (resolveHomeConfinedPath(dir, res, 'pluginDirs entries must be within the home directory') === null) return false;
   }
   return true;
 }
@@ -770,15 +880,24 @@ export async function handleCreateLine(
   // --- Create directories ---
   const createdExtras: string[] = [];
   try {
-    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(configDir, { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      jsonResponse(res, 409, { error: `instance '${name}' already exists` });
+      return;
+    }
+    jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
+    return;
+  }
+
+  try {
     fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
 
     // --- Write config.json ---
-    // Safe inline here: configDir is freshly created after the name uniqueness guard;
-    // existing-file writes route through writePrivateFileSync.
-    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    writePrivateFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { exclusive: true });
 
     // Decision: instance creation ignores any per-instance provider key material for now.
     // The deploy wrapper still reads a shared provider key from the keyring, and we will only
@@ -788,7 +907,7 @@ export async function handleCreateLine(
     try {
       const token = lookupCredential('whatsoup-health-token', { user: name, skipEnv: true, skipMigrationFallbacks: true });
       if (token) {
-        fs.writeFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { mode: 0o600 });
+        writePrivateFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { exclusive: true });
       }
     } catch { /* keyring unavailable — skip token */ }
 
@@ -797,7 +916,7 @@ export async function handleCreateLine(
         typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
       const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
       const claudeDir = path.join(cwd, '.claude');
-      fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+      ensureHomeConfinedDirectory(claudeDir);
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
       writePrivateFileSync(claudeMdPath, body.claudeMd as string);
       createdExtras.push(claudeMdPath);
@@ -810,6 +929,7 @@ export async function handleCreateLine(
       const claudeDir = path.join(cwd, '.claude');
       const settings = mergeSettingsJson('agent', body.settingsJson as PermissionsSettings | undefined);
       if (settings) {
+        ensureHomeConfinedDirectory(claudeDir);
         // Include enabledPlugins from agentOptions if provided
         const ao = body.agentOptions as Record<string, unknown>;
         if (ao.enabledPlugins && typeof ao.enabledPlugins === 'object') {

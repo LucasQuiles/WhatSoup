@@ -35,7 +35,8 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-const { existsSync: actualExistsSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+const { existsSync: actualExistsSync } = actualFs;
 
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
@@ -495,6 +496,7 @@ describe('handleCreateLine', () => {
 
   afterEach(() => {
     process.umask(originalUmask);
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
@@ -571,6 +573,44 @@ describe('handleCreateLine', () => {
     expect(fileMode(claudeMdPath)).toBe(0o600);
     expect(fileMode(settingsPath)).toBe(0o600);
   });
+
+  it('returns 409 without overwriting when config dir appears during create', async () => {
+    const name = 'race-line';
+    const configDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name);
+    const configPath = path.join(configDir, 'config.json');
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(configPath, JSON.stringify({ sentinel: true, healthPort: 3101 }) + '\n');
+    vi.mocked(fs.existsSync).mockImplementation((target) => {
+      if (target === configDir) return false;
+      return actualExistsSync(target);
+    });
+
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'chat',
+        adminPhones: ['test-admin-id'],
+        healthPort: 3201,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(409);
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).sentinel).toBe(true);
+    expect(svc.enable).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -589,6 +629,7 @@ describe('handleConfigUpdate', () => {
   });
 
   afterEach(() => {
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
     fs.rmSync(tmpDir, { recursive: true, force: true });
     fs.rmSync(agentCwd, { recursive: true, force: true });
   });
@@ -712,6 +753,104 @@ describe('handleConfigUpdate', () => {
     expect(res._status).toBe(200);
     expect(fileMode(claudeMdPath)).toBe(0o600);
     expect(fileMode(settingsPath)).toBe(0o600);
+  });
+
+  it('does not follow config tmp symlinks during config update', async () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ type: 'chat', healthPort: 3010, accessMode: 'self_only' }));
+    const targetPath = path.join(tmpDir, 'tmp-target.json');
+    fs.writeFileSync(targetPath, 'keep me');
+    fs.symlinkSync(targetPath, configPath + '.tmp');
+
+    const inst = fakeInstance({ configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/failed to write config/);
+    expect(fs.readFileSync(targetPath, 'utf-8')).toBe('keep me');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).accessMode).toBe('self_only');
+  });
+
+  it('does not write config updates through a symlinked config directory', async () => {
+    const targetDir = path.join(tmpDir, 'config-target');
+    const linkDir = path.join(tmpDir, 'config-link');
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.symlinkSync(targetDir, linkDir, 'dir');
+    const configPath = path.join(linkDir, 'config.json');
+    const targetConfigPath = path.join(targetDir, 'config.json');
+    fs.writeFileSync(targetConfigPath, JSON.stringify({ type: 'chat', healthPort: 3010, accessMode: 'self_only' }));
+
+    const inst = fakeInstance({ configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ accessMode: 'allowlist' })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/failed to write config/);
+    expect(JSON.parse(fs.readFileSync(targetConfigPath, 'utf-8')).accessMode).toBe('self_only');
+    expect(actualExistsSync(path.join(targetDir, 'config.json.tmp'))).toBe(false);
+  });
+
+  it('rejects agent cwd symlinks that resolve outside home', async () => {
+    const outsideCwd = path.join(tmpDir, 'outside-cwd');
+    fs.mkdirSync(outsideCwd, { recursive: true });
+    const symlinkCwd = path.join(agentCwd, 'cwd-link');
+    fs.symlinkSync(outsideCwd, symlinkCwd, 'dir');
+
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: symlinkCwd, sessionScope: 'per_chat' },
+    }));
+    const inst = fakeInstance({ type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ accessMode: 'self_only' })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/cwd.*home directory/);
+  });
+
+  it('rejects pluginDirs symlinks that resolve outside home', async () => {
+    const outsidePluginDir = path.join(tmpDir, 'outside-plugin-dir');
+    fs.mkdirSync(outsidePluginDir, { recursive: true });
+    const symlinkPluginDir = path.join(agentCwd, 'plugin-link');
+    fs.symlinkSync(outsidePluginDir, symlinkPluginDir, 'dir');
+
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+    }));
+    const inst = fakeInstance({ type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ agentOptions: { pluginDirs: [symlinkPluginDir] } })),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/pluginDirs.*home directory/);
   });
 
   it('returns 500 when config file cannot be read', async () => {
