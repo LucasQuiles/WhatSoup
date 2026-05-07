@@ -74,11 +74,7 @@ function validateMessageOwnership(
   messageId: string,
   session: SessionContext,
 ): OwnershipResult {
-  if (session.tier === 'chat-scoped') {
-    if (!session.conversationKey) {
-      return { error: 'Chat-scoped session has no conversation key' };
-    }
-
+  if (session.conversationKey) {
     const row = db
       .prepare(
         `SELECT conversation_key, is_from_me, chat_jid, message_id, sender_jid, content
@@ -92,6 +88,10 @@ function validateMessageOwnership(
     }
 
     return { row };
+  }
+
+  if (session.tier === 'chat-scoped') {
+    return { error: 'Chat-scoped session has no conversation key' };
   }
 
   const row = db
