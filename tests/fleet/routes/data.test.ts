@@ -577,6 +577,33 @@ describe('handleGetLogs', () => {
     const body = JSON.parse(res._body);
     expect(body).toHaveLength(2);
   });
+
+  it('normalizes non-string log fields before returning entries', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    const repeated = { level: 40, msg: { error: 'socket hung up' }, name: { worker: 'fleet' }, component: ['ws'] };
+    fs.writeFileSync(
+      path.join(tmpDir, 'current.log'),
+      [JSON.stringify(repeated), JSON.stringify(repeated)].join('\n') + '\n',
+    );
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    expect(() => handleGetLogs(mockReq(), res, deps, { name: 'test-line' })).not.toThrow();
+    const body = JSON.parse(res._body);
+    expect(body).toHaveLength(1);
+    expect(body[0]).toMatchObject({
+      level: 'warn',
+      msg: '{"error":"socket hung up"} (×2)',
+      source: '{"worker":"fleet"}',
+      component: '["ws"]',
+    });
+    expect(typeof body[0].msg).toBe('string');
+    expect(typeof body[0].source).toBe('string');
+    expect(typeof body[0].component).toBe('string');
+  });
 });
 
 // ---------------------------------------------------------------------------
