@@ -64,15 +64,44 @@ describe('voice tools', () => {
   describe('send_voice_reply', () => {
     it('is registered as chat scope', () => {
       const tools = registry.listTools(chatSession('111'));
-      const tool = tools.find((t) => t.name === 'send_voice_reply');
-      expect(tool).toBeDefined();
+      expect(registry.getChatScopedToolNames()).toEqual(['send_voice_reply']);
+      expect(tools).toEqual([
+        {
+          name: 'send_voice_reply',
+          description:
+            'Synthesize text to speech via ElevenLabs and send as a WhatsApp voice note (PTT). Use this to reply with a spoken voice message.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              text: { type: 'string' },
+              voice_id: { type: 'string' },
+            },
+            required: ['text'],
+          },
+        },
+      ]);
     });
 
     it('is NOT visible in global session (chat-scoped tool)', () => {
       // Chat-scoped tools are visible in global session but rejected on call
       const tools = registry.listTools(globalSession());
-      const tool = tools.find((t) => t.name === 'send_voice_reply');
-      expect(tool).toBeDefined();
+      expect(registry.getChatScopedToolNames()).toEqual(['send_voice_reply']);
+      expect(tools).toEqual([
+        {
+          name: 'send_voice_reply',
+          description:
+            'Synthesize text to speech via ElevenLabs and send as a WhatsApp voice note (PTT). Use this to reply with a spoken voice message.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              chatJid: { type: 'string' },
+              text: { type: 'string' },
+              voice_id: { type: 'string' },
+            },
+            required: ['chatJid', 'text'],
+          },
+        },
+      ]);
     });
 
     it('synthesizes text and sends as voice note', async () => {
