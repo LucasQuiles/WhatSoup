@@ -478,15 +478,24 @@ function humanizeError(_toolName: string, text: string): string | null {
  */
 export function isUsageLimitMessage(text: string): boolean {
   const lower = text.toLowerCase();
-  return (
+  if (
     lower.includes('out of extra usage') ||
+    lower.includes('usage limit reached') ||
+    lower.includes('usage cap reached') ||
+    lower.includes("you've reached your usage limit") ||
+    lower.includes('you have reached your usage limit') ||
+    lower.includes('you have hit your usage limit') ||
+    lower.includes('claude usage limit')
+  ) {
+    return true;
+  }
+
+  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
+  return resetPattern.test(text) && (
     lower.includes('usage limit') ||
     lower.includes('usage cap') ||
-    lower.includes('exceeded your') && lower.includes('usage') ||
     lower.includes('plan limit') ||
-    lower.includes('quota exceeded') ||
-    // Claude-specific patterns
-    /resets?\s+\d{1,2}\s*(am|pm)/i.test(text) && lower.includes('usage')
+    lower.includes('quota exceeded')
   );
 }
 
@@ -2380,7 +2389,7 @@ export class AgentRuntime implements Runtime {
           if (!normalizedText) break;
           // Suppress usage-limit messages — don't flood WhatsApp with them
           if (isUsageLimitMessage(normalizedText)) {
-            log.warn({ chatJid: queue.targetChatJid }, 'suppressed usage-limit message from assistant_text');
+            log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
             break;
           }
           queue.enqueueStreamingText(normalizedText);
@@ -2442,7 +2451,7 @@ export class AgentRuntime implements Runtime {
         if (event.text) {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
-            log.warn({ chatJid: queue.targetChatJid }, 'suppressed usage-limit message from result — session will be killed');
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -3802,7 +3811,7 @@ export class AgentRuntime implements Runtime {
           if (!normalizedText) break;
           // Suppress usage-limit messages — don't flood WhatsApp with them
           if (isUsageLimitMessage(normalizedText)) {
-            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'suppressed usage-limit message from assistant_text');
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
             break;
           }
           queue.enqueueStreamingText(normalizedText);
@@ -3875,7 +3884,7 @@ export class AgentRuntime implements Runtime {
         if (event.text) {
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (isUsageLimitMessage(event.text)) {
-            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'suppressed usage-limit message from result — session will be killed');
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
