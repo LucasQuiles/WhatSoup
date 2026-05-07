@@ -1443,7 +1443,17 @@ describe('Codex session resume via thread ID', () => {
     });
     expect(freshThreadStart).toBeDefined();
     const payload = JSON.parse(String(freshThreadStart![0]));
-    expect(payload.params.threadId).toBeUndefined();
+    expect(payload).toEqual({
+      jsonrpc: '2.0',
+      id: expect.any(String),
+      method: 'thread/start',
+      params: {
+        cwd: '/mock/home',
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
+        persistExtendedHistory: true,
+      },
+    });
   });
 
   it('clears stale thread ID from DB after resume failure', async () => {
@@ -1492,7 +1502,18 @@ describe('Codex session resume via thread ID', () => {
     });
     expect(threadStartCall).toBeDefined();
     const payload = JSON.parse(String(threadStartCall![0]));
-    expect(payload.params.threadId).toBeUndefined();
+    expect(payload).toEqual({
+      jsonrpc: '2.0',
+      id: expect.any(String),
+      method: 'thread/start',
+      params: {
+        cwd: '/mock/home',
+        approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
+        persistExtendedHistory: true,
+        baseInstructions: expect.stringMatching(/a personal .+ CLI agent/),
+      },
+    });
   });
 });
 
