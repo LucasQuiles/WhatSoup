@@ -643,9 +643,9 @@ describe('download_media', () => {
     expect(existsSync(body.file_path)).toBe(true);
     filesToClean.push(body.file_path);
 
-    const row = db.raw.prepare('SELECT media_path FROM messages WHERE message_id = ?')
-      .get('msg-quoted') as { media_path: string | null };
-    expect(row.media_path).toBeNull();
+    const row = db.raw.prepare('SELECT content_type, media_path FROM messages WHERE message_id = ?')
+      .get('msg-quoted') as { content_type: string; media_path: string | null };
+    expect({ ...row }).toStrictEqual({ content_type: 'text', media_path: null });
   });
 
   it('returns no_quoted_media when quoted=true but no downloadable quoted message exists', async () => {
