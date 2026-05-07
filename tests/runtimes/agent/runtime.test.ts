@@ -206,6 +206,7 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
     start: vi.fn(),
     stop: vi.fn(),
     updateDeliveryJid: vi.fn(),
+    updateActorJid: vi.fn(),
   };
   // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   const MockWhatSoupSocketServer = vi.fn().mockImplementation(function () {
@@ -3472,10 +3473,11 @@ describe('AgentRuntime', () => {
       return ctx?.tier === 'chat-scoped';
     });
     expect(chatScopedCall).toBeDefined();
-    const sessionCtx = chatScopedCall![2] as { tier: string; conversationKey: string; deliveryJid: string };
+    const sessionCtx = chatScopedCall![2] as { tier: string; conversationKey: string; deliveryJid: string; actorJid?: string };
     expect(sessionCtx.tier).toBe('chat-scoped');
     expect(sessionCtx.conversationKey).toBe('15550100001');
     expect(sessionCtx.deliveryJid).toBe('15550100001@s.whatsapp.net');
+    expect(sessionCtx.actorJid).toBe('sender@s.whatsapp.net');
   });
 
   it('sandboxPerChat: updateDeliveryJid called on socket server when JID changes', async () => {

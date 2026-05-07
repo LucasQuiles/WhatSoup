@@ -164,6 +164,19 @@ export class WhatSoupSocketServer {
     }
   }
 
+  /**
+   * Update actor JID (caller identity) on the base session AND all active
+   * connections. Set per-message by the runtime before dispatching to the
+   * subprocess, so admin-gated substrate tools see the sender's phone JID
+   * rather than the group chat JID.
+   */
+  updateActorJid(jid: string | undefined): void {
+    this.baseSession.actorJid = jid;
+    for (const session of this.connectionSessions.values()) {
+      session.actorJid = jid;
+    }
+  }
+
   private async handleRequest(req: JsonRpcRequest, session: SessionContext): Promise<JsonRpcResponse | null> {
     const id = req.id ?? null;
 

@@ -421,6 +421,24 @@ describe('WhatSoupSocketServer', () => {
     expect(capturedJids[1]).toBe('initial@s.whatsapp.net');
   });
 
+  // --- updateActorJid ---
+
+  it('updateActorJid updates base session actorJid', () => {
+    session = makeSession({ tier: 'global' });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+
+    expect(session.actorJid).toBeUndefined();
+    server.updateActorJid('user-1@s.whatsapp.net');
+    expect(session.actorJid).toBe('user-1@s.whatsapp.net');
+  });
+
+  it('updateActorJid undefined clears actorJid', () => {
+    session = makeSession({ tier: 'global', actorJid: 'old@s.whatsapp.net' });
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.updateActorJid(undefined);
+    expect(session).toEqual({ tier: 'global', actorJid: undefined });
+  });
+
   it('SP11: updateDeliveryJid propagates to all active connections', async () => {
     const capturedJids: string[] = [];
     registry.register(

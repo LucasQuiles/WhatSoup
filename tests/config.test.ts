@@ -314,6 +314,88 @@ describe('config — transport profiles', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Substrate memory config — tilde expansion and defaults
+// ---------------------------------------------------------------------------
+
+describe('config — memory section (substrate slice 1)', () => {
+  it('expands leading ~/ in vaultPath to $HOME', async () => {
+    const instancePaths = {
+      configRoot: path.join(tmpDir, 'inst-config'),
+      dataRoot: path.join(tmpDir, 'inst-data'),
+      stateRoot: path.join(tmpDir, 'inst-state'),
+      authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'inst-data', 'logs'),
+      lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+    };
+    const instanceConfig = {
+      name: 'mem-test', type: 'chat',
+      adminPhones: ['15550100001'],
+      accessMode: 'allowlist', paths: instancePaths,
+      memory: {
+        vaultPath: '~/Documents/Obsidian/test-vault',
+      },
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.vaultPath.startsWith('~')).toBe(false);
+    expect(config.memory.vaultPath).toBe(`${process.env.HOME}/Documents/Obsidian/test-vault`);
+  });
+
+  it('defaults apply when memory is absent from instance.json', async () => {
+    const instancePaths = {
+      configRoot: path.join(tmpDir, 'inst-config'),
+      dataRoot: path.join(tmpDir, 'inst-data'),
+      stateRoot: path.join(tmpDir, 'inst-state'),
+      authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'inst-data', 'logs'),
+      lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+    };
+    const instanceConfig = {
+      name: 'mem-default', type: 'chat',
+      adminPhones: ['15550100001'],
+      accessMode: 'allowlist', paths: instancePaths,
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.observationConfidenceMin).toBe(0.4);
+    expect(config.memory.sweep.beadProposeMin).toBe(0.55);
+    expect(config.memory.sweep.beadUpdateMin).toBe(0.8);
+    expect(config.memory.sweep.reviewByDays).toBe(7);
+    expect(config.memory.watchTtl.defaultHours).toBe(24);
+    expect(config.memory.watchTtl.maxHours).toBe(72);
+    expect(config.memory.vaultPath.startsWith('/')).toBe(true);
+  });
+
+  it('accepts absolute vaultPath unchanged', async () => {
+    const instancePaths = {
+      configRoot: path.join(tmpDir, 'inst-config'),
+      dataRoot: path.join(tmpDir, 'inst-data'),
+      stateRoot: path.join(tmpDir, 'inst-state'),
+      authDir: path.join(tmpDir, 'inst-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'inst-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'inst-data', 'logs'),
+      lockPath: path.join(tmpDir, 'inst-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'inst-data', 'media', 'tmp'),
+    };
+    const instanceConfig = {
+      name: 'abs', type: 'chat',
+      adminPhones: ['15550100001'],
+      accessMode: 'allowlist', paths: instancePaths,
+      memory: { vaultPath: '/tmp/some/absolute/vault' },
+    };
+    process.env.INSTANCE_CONFIG = JSON.stringify(instanceConfig);
+    const { config } = await import('../src/config.ts');
+    expect(config.memory.vaultPath).toBe('/tmp/some/absolute/vault');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Test 3: Partial models deep merge
 // ---------------------------------------------------------------------------
 

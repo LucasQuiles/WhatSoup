@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
+import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { createSession, incrementMessageCount, updateSessionId, updateSessionStatus, updateTranscriptPath } from './session-db.ts';
@@ -70,6 +71,7 @@ export interface SessionManagerOptions {
   provider?: string;
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
+  mcpSessionContext?: SessionContext;
 }
 
 /**
@@ -128,6 +130,7 @@ export class SessionManager {
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
+  private readonly mcpSessionContext: SessionContext | undefined;
 
   private systemPrompt: string = '';
 
@@ -205,11 +208,18 @@ export class SessionManager {
     this.provider = opts.provider ?? 'claude-cli';
     this.providerConfig = opts.providerConfig;
     this.mcpBridge = opts.mcpBridge;
+    this.mcpSessionContext = opts.mcpSessionContext;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
     if (budgetConfig) {
       this.budget = new ProviderBudget(opts.provider ?? 'claude-cli', budgetConfig);
+    }
+  }
+
+  updateMcpActorJid(actorJid: string): void {
+    if (this.mcpSessionContext) {
+      this.mcpSessionContext.actorJid = actorJid;
     }
   }
 
