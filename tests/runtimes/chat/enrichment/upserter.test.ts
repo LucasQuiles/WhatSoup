@@ -1,27 +1,31 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 
+const mockUpserterLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../../../src/config.ts', () => ({
   config: {
     enrichmentDedupThreshold: 0.95,
     pineconeIndex: 'test-index',
     pineconeContextTopK: 10,
     pineconeSenderTopK: 5,
+    models: { validation: 'test-validation-model' },
   },
 }));
 
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockUpserterLogger,
 }));
 
 import { upsertFacts } from '../../../../src/runtimes/chat/enrichment/upserter.ts';
 import type { ValidatedFact } from '../../../../src/runtimes/chat/enrichment/validator.ts';
 import type { PineconeMemory, MemoryRecord, SearchResult } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -43,6 +47,7 @@ function makePinecone(overrides?: Partial<{
       ? vi.fn().mockRejectedValue(overrides.checkDuplicateError)
       : vi.fn().mockResolvedValue(checkResult),
     search: vi.fn().mockResolvedValue(searchResults),
+    searchClaims: vi.fn().mockResolvedValue([]),
     upsert: overrides?.upsertError
       ? vi.fn().mockRejectedValue(overrides.upsertError)
       : vi.fn().mockResolvedValue(undefined),
@@ -62,6 +67,11 @@ function makeValidatedFact(overrides?: Partial<ValidatedFact>): ValidatedFact {
     supersedesText: '',
     sourceMessagePks: [1, 2],
     adjustedConfidence: 0.9,
+    validationReason: 'test reason',
+    claim: '',
+    evidence: '',
+    warrant: '',
+    confidenceQualifier: '',
     ...overrides,
   };
 }
@@ -82,6 +92,12 @@ function makeSearchResult(text: string, score: number): SearchResult {
       updatedAt: '2025-01-01T00:00:00.000Z',
       superseded: '',
       sourceMessagePks: '1',
+      promotionReason: '',
+      claim: '',
+      evidence: '',
+      warrant: '',
+      confidenceQualifier: '',
+      contradicts: '',
     } as MemoryRecord,
   };
 }
@@ -180,6 +196,7 @@ describe('upsertFacts', () => {
         .mockResolvedValueOnce({ isDuplicate: false })
         .mockResolvedValueOnce({ isDuplicate: false }),
       search: vi.fn().mockResolvedValue([makeSearchResult('Old preference', 0.9)]),
+      searchClaims: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue(undefined),
       searchForChat: vi.fn().mockResolvedValue([]),
       searchForSender: vi.fn().mockResolvedValue([]),
@@ -198,12 +215,12 @@ describe('upsertFacts', () => {
     expect(result.superseded).toBe(1);
   });
 
-  it('returns {upserted:0, deduplicated:0, superseded:0} for empty facts array', async () => {
+  it('returns zeroed counters for empty facts array', async () => {
     const pinecone = makePinecone();
 
     const result = await upsertFacts(pinecone, []);
 
-    expect(result).toEqual({ upserted: 0, deduplicated: 0, superseded: 0 });
+    expect(result).toEqual({ upserted: 0, deduplicated: 0, superseded: 0, contradictions: 0 });
     expect(pinecone.checkDuplicate).not.toHaveBeenCalled();
     expect(pinecone.upsert).not.toHaveBeenCalled();
   });
@@ -261,7 +278,7 @@ describe('upsertFacts', () => {
     // supersedesText = '   ' is truthy, so search IS called, but if no hits
     // above 0.8 threshold then superseded stays 0.
     expect(pinecone.upsert).toHaveBeenCalledTimes(1);
-    expect(pinecone.search).toHaveBeenCalledWith('   ', expect.any(Object), 1);
+    expect(pinecone.search).toHaveBeenCalledWith('   ', { chat_jid: { $eq: factWithWhitespace.chatJid } }, 1);
   });
 
   it('does NOT increment superseded when supersede search returns low-score results', async () => {
@@ -282,6 +299,7 @@ describe('upsertFacts', () => {
     const pinecone = {
       checkDuplicate: vi.fn().mockResolvedValue({ isDuplicate: false }),
       search: vi.fn().mockRejectedValue(new Error('Search failed')),
+      searchClaims: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue(undefined),
       searchForChat: vi.fn().mockResolvedValue([]),
       searchForSender: vi.fn().mockResolvedValue([]),
@@ -305,5 +323,124 @@ describe('upsertFacts', () => {
     const upsertCall = vi.mocked(pinecone.upsert).mock.calls[0][0][0];
     const expectedId = `${fact.chatJid}:group:${shortHash(fact.text)}`;
     expect(upsertCall.id).toBe(expectedId);
+  });
+
+  it('stores validation and Toulmin metadata on new records', async () => {
+    const pinecone = makePinecone();
+    const fact = makeValidatedFact({
+      validationReason: 'grounded in source',
+      claim: 'User lives in London',
+      evidence: 'said moved to London',
+      warrant: 'direct statement',
+      confidenceQualifier: 'stated once',
+    });
+
+    await upsertFacts(pinecone, [fact]);
+
+    const upsertCall = vi.mocked(pinecone.upsert).mock.calls[0][0][0];
+    expect(upsertCall).toMatchObject({
+      promotionReason: 'grounded in source',
+      claim: 'User lives in London',
+      evidence: 'said moved to London',
+      warrant: 'direct statement',
+      confidenceQualifier: 'stated once',
+      contradicts: '',
+    });
+  });
+
+  it('stores contradicts field when contradiction is found', async () => {
+    const existingResult = makeSearchResult('Lives in Paris', 0.85);
+    existingResult.id = 'existing-fact-1';
+    existingResult.record.id = 'existing-fact-1';
+
+    const pinecone = makePinecone({ checkDuplicateResult: { isDuplicate: false } });
+    vi.mocked(pinecone.searchClaims as ReturnType<typeof vi.fn>).mockResolvedValue([existingResult]);
+
+    const provider: LLMProvider = {
+      name: 'test-provider',
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify([
+          { index: 0, relationship: 'contradiction', explanation: 'Paris vs London' },
+        ]),
+        inputTokens: 50,
+        outputTokens: 30,
+        model: 'test-model',
+        durationMs: 100,
+      }),
+    };
+
+    const result = await upsertFacts(
+      pinecone,
+      [makeValidatedFact({ text: 'Lives in London', claim: 'Lives in London' })],
+      provider,
+    );
+
+    expect(result.contradictions).toBe(1);
+    const upsertCall = vi.mocked(pinecone.upsert).mock.calls[0][0][0];
+    expect(upsertCall.contradicts).toBe('existing-fact-1');
+  });
+
+  it('redacts fact text from contradiction logs', async () => {
+    const sensitiveFact = 'Sensitive London address is 221B Baker Street';
+    const existingResult = makeSearchResult('Lives in Paris', 0.85);
+    existingResult.id = 'existing-fact-1';
+    existingResult.record.id = 'existing-fact-1';
+
+    const pinecone = makePinecone({ checkDuplicateResult: { isDuplicate: false } });
+    vi.mocked(pinecone.searchClaims as ReturnType<typeof vi.fn>).mockResolvedValue([existingResult]);
+
+    const provider: LLMProvider = {
+      name: 'test-provider',
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify([
+          { index: 0, relationship: 'contradiction', explanation: 'Paris vs London' },
+        ]),
+        inputTokens: 50,
+        outputTokens: 30,
+        model: 'test-model',
+        durationMs: 100,
+      }),
+    };
+
+    await upsertFacts(
+      pinecone,
+      [makeValidatedFact({ text: sensitiveFact, claim: sensitiveFact })],
+      provider,
+    );
+
+    const serializedLogs = JSON.stringify(mockUpserterLogger.info.mock.calls);
+    expect(serializedLogs).not.toContain(sensitiveFact);
+    expect(serializedLogs).toContain('factHash');
+  });
+
+  it('does not set contradicts when no provider is supplied', async () => {
+    const pinecone = makePinecone({ checkDuplicateResult: { isDuplicate: false } });
+
+    const result = await upsertFacts(pinecone, [
+      makeValidatedFact({ text: 'Lives in London', claim: 'Lives in London' }),
+    ]);
+
+    expect(result.contradictions).toBe(0);
+    const upsertCall = vi.mocked(pinecone.upsert).mock.calls[0][0][0];
+    expect(upsertCall.contradicts).toBe('');
+  });
+
+  it('proceeds with upsert when contradiction check throws', async () => {
+    const pinecone = makePinecone({ checkDuplicateResult: { isDuplicate: false } });
+    vi.mocked(pinecone.searchClaims as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('search failed'));
+
+    const provider: LLMProvider = {
+      name: 'test-provider',
+      generate: vi.fn(),
+    };
+
+    const result = await upsertFacts(
+      pinecone,
+      [makeValidatedFact({ text: 'Lives in London', claim: 'Lives in London' })],
+      provider,
+    );
+
+    expect(result.upserted).toBe(1);
+    expect(result.contradictions).toBe(0);
   });
 });

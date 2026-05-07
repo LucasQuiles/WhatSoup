@@ -124,6 +124,18 @@ describe('validateFacts', () => {
     expect(validated[0].adjustedConfidence).toBe(0.95);
   });
 
+  it('stores validation reason when returned by the model', async () => {
+    const facts = [makeFact({ confidence: 0.5 })];
+    const response = validationResponse([
+      { index: 0, grounded: true, adjusted_confidence: 0.95, reason: 'grounded in the source message' },
+    ]);
+    const provider = mockProvider(response);
+
+    const validated = await validateFacts(provider, facts, [makeStoredMsg()]);
+
+    expect(validated[0].validationReason).toBe('grounded in the source message');
+  });
+
   it('passes through original fact fields unchanged (text, chatJid, etc.)', async () => {
     const fact = makeFact({
       text: 'Prefers dark mode',

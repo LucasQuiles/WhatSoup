@@ -1,6 +1,8 @@
 import { createChildLogger } from '../../../logger.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
+import type { LLMProvider } from '../providers/types.ts';
 import type { ValidatedFact } from './validator.ts';
+import { detectContradictions } from './contradiction.ts';
 import { shortHash } from './fact-export-queue.ts';
 
 const log = createChildLogger('enrichment');
@@ -8,10 +10,12 @@ const log = createChildLogger('enrichment');
 export async function upsertFacts(
   pinecone: PineconeMemory,
   facts: ValidatedFact[],
-): Promise<{ upserted: number; deduplicated: number; superseded: number }> {
+  provider?: LLMProvider,
+): Promise<{ upserted: number; deduplicated: number; superseded: number; contradictions: number }> {
   let upserted = 0;
   let deduplicated = 0;
   let superseded = 0;
+  let contradictions = 0;
 
   for (const fact of facts) {
     const senderSegment = fact.senderJid || 'group';
@@ -51,7 +55,34 @@ export async function upsertFacts(
           superseded = superseded + 1;
         }
       } catch (err) {
-        log.warn({ err, supersedesText: fact.supersedesText, operation: 'supersede_lookup', elapsed_ms: Date.now() - supersedeStart }, 'upserter: supersede lookup failed — continuing');
+        log.warn({
+          err,
+          supersedesHash: shortHash(fact.supersedesText),
+          supersedesLength: fact.supersedesText.length,
+          operation: 'supersede_lookup',
+          elapsed_ms: Date.now() - supersedeStart,
+        }, 'upserter: supersede lookup failed — continuing');
+      }
+    }
+
+    let contradictIds = '';
+    if (provider && (fact.claim || fact.text)) {
+      try {
+        const existing = await pinecone.searchClaims(fact.chatJid, fact.senderJid, fact.claim || fact.text, 5);
+        const existingForNli = existing.map((r) => ({
+          id: r.id,
+          claim: r.record.claim ?? r.record.text,
+          text: r.record.text,
+          score: r.score,
+        }));
+        const contradictionResults = await detectContradictions(provider, fact, existingForNli);
+        if (contradictionResults.length > 0) {
+          contradictIds = contradictionResults.map((c) => c.existingId).join(',');
+          contradictions += 1;
+          log.info({ factHash: shortHash(fact.claim || fact.text), contradictIds }, 'contradiction detected');
+        }
+      } catch (err) {
+        log.warn({ err }, 'contradiction check failed — proceeding without');
       }
     }
 
@@ -71,6 +102,12 @@ export async function upsertFacts(
         updatedAt: now,
         superseded: '',
         sourceMessagePks: fact.sourceMessagePks.join(','),
+        promotionReason: fact.validationReason ?? '',
+        claim: fact.claim ?? '',
+        evidence: fact.evidence ?? '',
+        warrant: fact.warrant ?? '',
+        confidenceQualifier: fact.confidenceQualifier ?? '',
+        contradicts: contradictIds,
       }]);
       upserted = upserted + 1;
     } catch (err) {
@@ -78,5 +115,5 @@ export async function upsertFacts(
     }
   }
 
-  return { upserted, deduplicated, superseded };
+  return { upserted, deduplicated, superseded, contradictions };
 }

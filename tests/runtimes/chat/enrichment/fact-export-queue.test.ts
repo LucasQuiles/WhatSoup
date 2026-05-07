@@ -183,6 +183,12 @@ describe('enqueueFacts', () => {
       memoryType: 'preference',
       confidence: 0.82,
       sourceMessagePks: [5, 6, 7],
+      promotionReason: 'grounded in source',
+      claim: 'User prefers morning meetings',
+      evidence: 'said mornings are best',
+      warrant: 'direct preference statement',
+      confidenceQualifier: 'stated once',
+      contradicts: 'old-fact',
     });
     enqueueFacts(db, [fact]);
 
@@ -194,6 +200,12 @@ describe('enqueueFacts', () => {
     expect(payload.memoryType).toBe('preference');
     expect(payload.confidence).toBe(0.82);
     expect(payload.sourceMessagePks).toEqual([5, 6, 7]);
+    expect(payload.promotionReason).toBe('grounded in source');
+    expect(payload.claim).toBe('User prefers morning meetings');
+    expect(payload.evidence).toBe('said mornings are best');
+    expect(payload.warrant).toBe('direct preference statement');
+    expect(payload.confidenceQualifier).toBe('stated once');
+    expect(payload.contradicts).toBe('old-fact');
   });
 
   it('is idempotent: enqueueing the same factId twice does not duplicate', () => {
@@ -586,8 +598,10 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
 
     // Good row is returned with parsed payload.
     const goodRow = claimed.find((c) => c.factId === 'healthy-1');
-    expect(goodRow).toBeDefined();
-    expect(goodRow?.payload.text).toBe('Good payload');
+    expect(goodRow).toMatchObject({
+      factId: 'healthy-1',
+      payload: { text: 'Good payload' },
+    });
 
     // Hard negative: the corrupt row MUST NOT appear in the claimed result.
     expect(claimed.find((c) => c.factId === 'corrupt-1')).toBeUndefined();
@@ -653,7 +667,10 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
 
     // Healthy row is still returned
     const healthy = claimed.find((c) => c.factId === 'healthy-2');
-    expect(healthy).toBeDefined();
+    expect(healthy).toMatchObject({
+      factId: 'healthy-2',
+      payload: { text: 'Fine' },
+    });
 
     // Hard negative: the schema-bad row MUST NOT appear in the claimed result.
     expect(claimed.find((c) => c.factId === 'schema-bad-1')).toBeUndefined();

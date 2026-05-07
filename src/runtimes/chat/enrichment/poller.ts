@@ -34,6 +34,12 @@ function toExportable(fact: ValidatedFact): ExportableFact {
     senderName: fact.senderName,
     supersedesText: fact.supersedesText,
     sourceMessagePks: fact.sourceMessagePks,
+    promotionReason: fact.validationReason ?? '',
+    claim: fact.claim ?? '',
+    evidence: fact.evidence ?? '',
+    warrant: fact.warrant ?? '',
+    confidenceQualifier: fact.confidenceQualifier ?? '',
+    contradicts: '',
   };
 }
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
 import { config } from '../config.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
@@ -13,6 +14,10 @@ import type { MemoryCluster, ConsolidationResult } from './types.ts';
  */
 
 const log = createChildLogger('consolidation');
+
+function shortHash(text: string, length: number = 12): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, length);
+}
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories from an AI agent's episodic history, identify which patterns represent durable knowledge worth keeping long-term.
 
@@ -54,6 +59,8 @@ export function clusterMemories(
     evidence: string;
     createdAt: string;
     confidence: number;
+    chatJid?: string;
+    senderJid?: string;
   }>,
 ): MemoryCluster[] {
   if (records.length === 0) return [];
@@ -78,8 +85,9 @@ export function clusterMemories(
     for (let j = i + 1; j < records.length; j++) {
       if (assigned.has(j)) continue;
       const tokensJ = tokenize(records[j].claim || records[j].text);
-      const overlap = tokensJ.filter((t) => tokensI.has(t)).length;
-      const jaccardish = overlap / Math.max(tokensI.size, tokensJ.length, 1);
+      const tokensJSet = new Set(tokensJ);
+      const overlap = [...tokensJSet].filter((t) => tokensI.has(t)).length;
+      const jaccardish = overlap / Math.max(tokensI.size + tokensJSet.size - overlap, 1);
 
       if (jaccardish >= 0.3) {
         cluster.records.push(records[j]);
@@ -121,7 +129,7 @@ export async function consolidateCluster(
     });
     raw = response.content.trim();
   } catch (err) {
-    log.warn({ err, topic: cluster.topic }, 'consolidation LLM call failed');
+    log.warn({ err, recordCount: cluster.records.length }, 'consolidation LLM call failed');
     return empty;
   }
 
@@ -136,7 +144,7 @@ export async function consolidateCluster(
       discarded: Array.isArray(parsed.discarded) ? parsed.discarded : [],
     };
   } catch {
-    log.warn({ raw: raw.slice(0, 200) }, 'consolidation JSON parse failed');
+    log.warn({ rawHash: shortHash(raw), rawLength: raw.length }, 'consolidation JSON parse failed');
     return empty;
   }
 }

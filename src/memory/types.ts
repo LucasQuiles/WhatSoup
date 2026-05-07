@@ -22,6 +22,8 @@ export interface MemoryCluster {
     evidence: string;
     createdAt: string;
     confidence: number;
+    chatJid?: string;
+    senderJid?: string;
   }>;
 }
 

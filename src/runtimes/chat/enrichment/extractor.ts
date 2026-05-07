@@ -90,6 +90,10 @@ export interface ExtractedFact {
   confidence: number;
   supersedesText: string;
   sourceMessagePks: number[];
+  claim?: string;
+  evidence?: string;
+  warrant?: string;
+  confidenceQualifier?: string;
 }
 
 const EXTRACTION_SYSTEM_PROMPT = `You are an extraction engine. Given a batch of WhatsApp messages, extract factual information about the participants.
@@ -97,6 +101,10 @@ const EXTRACTION_SYSTEM_PROMPT = `You are an extraction engine. Given a batch of
 For each fact, output a JSON object:
 {
   "text": "description of the fact",
+  "claim": "the durable assertion being made",
+  "evidence": "the exact words or context from the conversation supporting this claim",
+  "warrant": "the reasoning connecting the evidence to the claim",
+  "confidence_qualifier": "always | usually | sometimes | stated once | inferred",
   "sender_jid": "JID of the person this fact is about",
   "sender_name": "display name",
   "memory_type": "user_fact | group_context | preference | correction | self_fact",
@@ -112,6 +120,8 @@ Rules:
 - Skip greetings, filler, and small talk with no factual content
 - Group dynamics: note recurring topics, relationships between participants, shared interests
 - Messages from Loops (is_from_me) contain claims Loops made about itself. Extract these as self_fact with Loops' JID and name. Examples: "Loops said he lived in Montreal", "Loops mentioned he does freelance dev work". These ensure Loops maintains a consistent identity across conversations.
+- "claim" is the durable assertion. "evidence" is the verbatim or paraphrased source. "warrant" explains the inference.
+- confidence_qualifier describes epistemic strength: "always" for repeated/permanent facts, "usually" for habitual behavior, "sometimes" for occasional mentions, "stated once" for single mentions, "inferred" for indirect conclusions.
 
 Output ONLY a JSON array. No markdown, no explanation.`;
 
@@ -223,6 +233,11 @@ export async function extractFacts(
     const confidence = typeof obj['confidence'] === 'number' ? obj['confidence'] : 0.5;
     const supersedesText =
       typeof obj['supersedes_text'] === 'string' ? obj['supersedes_text'] : '';
+    const claim = typeof obj['claim'] === 'string' ? obj['claim'] : '';
+    const evidence = typeof obj['evidence'] === 'string' ? obj['evidence'] : '';
+    const warrant = typeof obj['warrant'] === 'string' ? obj['warrant'] : '';
+    const confidenceQualifier =
+      typeof obj['confidence_qualifier'] === 'string' ? obj['confidence_qualifier'] : '';
 
     if (!text) {
       // Missing required `text` field — schema failure, not a semantic drop.
@@ -239,6 +254,10 @@ export async function extractFacts(
       confidence: Math.max(0, Math.min(1, confidence)),
       supersedesText,
       sourceMessagePks: pks,
+      claim,
+      evidence,
+      warrant,
+      confidenceQualifier,
     });
   }
 

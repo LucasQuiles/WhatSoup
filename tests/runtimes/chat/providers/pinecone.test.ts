@@ -5,6 +5,12 @@ import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 const mockSearchRecords = vi.fn();
 const mockUpsertRecords = vi.fn();
 const mockRerank = vi.fn();
+const mockPineconeLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
 const mockIndex = {
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
@@ -45,12 +51,7 @@ vi.mock('../../../../src/config.ts', () => ({
 }));
 
 vi.mock('../../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockPineconeLogger,
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';
@@ -190,6 +191,32 @@ describe('PineconeMemory', () => {
           },
         },
       ]);
+    });
+
+    it('maps Toulmin metadata fields when present', async () => {
+      mockSearchRecords.mockResolvedValueOnce({
+        result: {
+          hits: [makePineconeHit('rec-meta', 0.91, {
+            promotion_reason: 'grounded by validator',
+            claim: 'User lives in London',
+            evidence: 'said moved to London',
+            warrant: 'direct statement',
+            confidence_qualifier: 'stated once',
+            contradicts: 'old-rec',
+          })],
+        },
+      });
+
+      const results = await memory.search('query', {}, 5);
+
+      expect(results[0].record).toMatchObject({
+        promotionReason: 'grounded by validator',
+        claim: 'User lives in London',
+        evidence: 'said moved to London',
+        warrant: 'direct statement',
+        confidenceQualifier: 'stated once',
+        contradicts: 'old-rec',
+      });
     });
 
     it('returns multiple results in order', async () => {
@@ -347,6 +374,28 @@ describe('PineconeMemory', () => {
           ],
         },
       ]]);
+    });
+
+    it('upserts Toulmin metadata fields as snake_case fields', async () => {
+      mockUpsertRecords.mockResolvedValueOnce(undefined);
+      await memory.upsert([makeMemoryRecord({
+        promotionReason: 'grounded by validator',
+        claim: 'User lives in London',
+        evidence: 'said moved to London',
+        warrant: 'direct statement',
+        confidenceQualifier: 'stated once',
+        contradicts: 'old-rec',
+      })]);
+
+      const record = mockUpsertRecords.mock.calls[0][0].records[0];
+      expect(record).toMatchObject({
+        promotion_reason: 'grounded by validator',
+        claim: 'User lives in London',
+        evidence: 'said moved to London',
+        warrant: 'direct statement',
+        confidence_qualifier: 'stated once',
+        contradicts: 'old-rec',
+      });
     });
 
     it('strips null values from upserted records', async () => {
@@ -514,7 +563,7 @@ describe('PineconeMemory', () => {
         result: { hits: [makePineconeHit('dup-id', 0.97)] },
       });
       const result = await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same text');
-      expect(result).toEqual({ isDuplicate: true, existingId: 'dup-id', score: expectedDecayedScore(0.97) });
+      expect(result).toEqual({ isDuplicate: true, existingId: 'dup-id', score: 0.97 });
       expect(mockSearchRecords.mock.calls).toEqual([[
         {
           query: {
@@ -538,7 +587,7 @@ describe('PineconeMemory', () => {
       expect(result).toEqual({
         isDuplicate: true,
         existingId: 'existing-123',
-        score: expectedDecayedScore(0.96),
+        score: 0.96,
       });
     });
 
@@ -575,6 +624,90 @@ describe('PineconeMemory', () => {
       mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
       const result = await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'text');
       expect(result).toEqual({ isDuplicate: false });
+    });
+
+    it('detects duplicate for old records without decay penalty', async () => {
+      const thirtyDaysAgo = new Date(FIXED_NOW_MS - 30 * MS_PER_DAY).toISOString();
+      mockSearchRecords.mockResolvedValueOnce({
+        result: {
+          hits: [makePineconeHit('old-dup', 0.97, {
+            created_at: thirtyDaysAgo,
+          })],
+        },
+      });
+
+      const result = await memory.checkDuplicate('chat-1@g.us', 'sender-1@s.whatsapp.net', 'same old text');
+
+      expect(result).toEqual({ isDuplicate: true, existingId: 'old-dup', score: 0.97 });
+    });
+  });
+
+  describe('searchClaims', () => {
+    it('searches by chat and sender for contradiction candidates', async () => {
+      mockSearchRecords.mockResolvedValueOnce({
+        result: { hits: [makePineconeHit('claim-hit', 0.82)] },
+      });
+
+      const results = await memory.searchClaims('chat-1@g.us', 'sender-1@s.whatsapp.net', 'Lives in London', 5);
+
+      expect(results.map((r) => r.id)).toEqual(['claim-hit']);
+      expect(mockSearchRecords.mock.calls).toEqual([[
+        {
+          query: {
+            topK: 5,
+            inputs: { text: 'Lives in London' },
+            filter: {
+              chat_jid: { $eq: 'chat-1@g.us' },
+              sender_jid: { $eq: 'sender-1@s.whatsapp.net' },
+            },
+          },
+          fields: ['*'],
+        },
+      ]]);
+    });
+
+    it('returns old contradiction candidates without recency decay filtering', async () => {
+      const mutableConfig = configModule.config as unknown as {
+        recencyHalfLifeDays: number;
+        maxAgeDays: number;
+      };
+      const previousHalfLife = mutableConfig.recencyHalfLifeDays;
+      const previousMaxAge = mutableConfig.maxAgeDays;
+      mutableConfig.recencyHalfLifeDays = 14;
+      mutableConfig.maxAgeDays = 1;
+
+      try {
+        const oldCreatedAt = new Date(FIXED_NOW_MS - 30 * MS_PER_DAY).toISOString();
+        mockSearchRecords.mockResolvedValueOnce({
+          result: {
+            hits: [makePineconeHit('old-claim-hit', 0.88, {
+              created_at: oldCreatedAt,
+            })],
+          },
+        });
+
+        const results = await memory.searchClaims('chat-1@g.us', 'sender-1@s.whatsapp.net', 'Lives in London', 5);
+
+        expect(results.map((r) => ({ id: r.id, score: r.score }))).toEqual([
+          { id: 'old-claim-hit', score: 0.88 },
+        ]);
+      } finally {
+        mutableConfig.recencyHalfLifeDays = previousHalfLife;
+        mutableConfig.maxAgeDays = previousMaxAge;
+      }
+    });
+
+    it('redacts claim text from failed search logs', async () => {
+      const sensitiveClaim = 'Sensitive London address is 221B Baker Street';
+      mockSearchRecords.mockRejectedValue(new Error('pinecone unavailable'));
+
+      const results = await memory.searchClaims('chat-1@g.us', 'sender-1@s.whatsapp.net', sensitiveClaim, 5);
+
+      expect(results).toEqual([]);
+      const serializedLogs = JSON.stringify(mockPineconeLogger.error.mock.calls);
+      expect(serializedLogs).not.toContain(sensitiveClaim);
+      expect(serializedLogs).toContain('queryHash');
+      expect(serializedLogs).toContain('queryLength');
     });
   });
 });
