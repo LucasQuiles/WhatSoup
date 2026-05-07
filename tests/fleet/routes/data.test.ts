@@ -9,6 +9,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   handleGetChats,
   handleGetMessages,
+  handleSearchMessages,
   handleGetAccess,
   handleGetLogs,
 } from '../../../src/fleet/routes/data.ts';
@@ -58,6 +59,7 @@ function makeDeps(overrides: Partial<DataDeps> = {}): DataDeps {
     dbReader: {
       getChats: vi.fn(() => ({ ok: true, data: [] })),
       getMessages: vi.fn(() => ({ ok: true, data: [] })),
+      searchMessages: vi.fn(() => ({ ok: true, data: [] })),
       getAccessList: vi.fn(() => ({ ok: true, data: [] })),
       getSummaryStats: vi.fn(),
       query: vi.fn(() => ({ ok: true, data: [] })),
@@ -92,7 +94,13 @@ describe('handleGetChats', () => {
     const res = mockRes();
     handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
     expect(res._status).toBe(200);
-    expect(JSON.parse(res._body)).toEqual(chatData);
+    expect(JSON.parse(res._body)).toEqual([{
+      conversationKey: '123@s.whatsapp.net',
+      messageCount: 10,
+      name: '123@s.whatsapp.net',
+      lastMessagePreview: '',
+      lastMessageAt: '',
+    }]);
     expect(deps.dbReader.getChats).toHaveBeenCalledWith('test-line', inst.dbPath, { limit: 50, offset: 0 });
   });
 
@@ -137,6 +145,46 @@ describe('handleGetChats', () => {
     handleGetChats(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toBe('db locked');
+  });
+
+  it('returns display-safe strings for null preview and timestamp fields', () => {
+    const inst = fakeInstance();
+    const chatData = [{
+      conversationKey: '123@s.whatsapp.net',
+      senderName: null,
+      messageCount: 1,
+      lastMessageAt: null,
+      isGroup: false,
+      lastMessagePreview: null,
+      lastMessageSender: null,
+    }];
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: {
+        getChats: vi.fn(() => ({ ok: true, data: chatData })),
+        query: vi.fn(() => ({ ok: true, data: [{
+          conversationKey: '123@s.whatsapp.net',
+          name: '123@s.whatsapp.net',
+          lastMessagePreview: null,
+          lastMessageAt: null,
+          unreadCount: 0,
+          isGroup: false,
+        }] })),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetChats(mockReq('/api/lines/test-line/chats'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([{
+      conversationKey: '123@s.whatsapp.net',
+      name: '123@s.whatsapp.net',
+      lastMessagePreview: '',
+      lastMessageAt: '',
+      unreadCount: 0,
+      isGroup: false,
+    }]);
   });
 });
 
@@ -199,6 +247,129 @@ describe('handleGetMessages', () => {
       'test-line', inst.dbPath,
       { conversationKey: 'abc', beforePk: 42, limit: 10 },
     );
+  });
+
+  it('returns display-safe message DTOs when database fields are null', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: {
+        getMessages: vi.fn(() => ({ ok: true, data: [{
+          pk: 42,
+          conversation_key: 'abc',
+          chat_jid: 'abc@s.whatsapp.net',
+          sender_jid: null,
+          sender_name: null,
+          message_id: null,
+          content: null,
+          content_type: null,
+          timestamp: null,
+          is_from_me: null,
+          raw_message: null,
+        }] })),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetMessages(mockReq('/api/lines/test-line/messages?conversation_key=abc'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual([{
+      pk: 42,
+      conversationKey: 'abc',
+      senderJid: '',
+      senderName: '',
+      content: null,
+      type: 'unknown',
+      timestamp: '',
+      fromMe: false,
+    }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleSearchMessages
+// ---------------------------------------------------------------------------
+
+describe('handleSearchMessages', () => {
+  it('returns 404 for unknown instance', () => {
+    const deps = makeDeps();
+    const res = mockRes();
+    handleSearchMessages(mockReq(), res, deps, { name: 'nope' });
+    expect(res._status).toBe(404);
+  });
+
+  it('returns 400 when q is missing', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search'), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/q/);
+  });
+
+  it('passes query, conversation_key, and limit to db reader', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: { searchMessages: vi.fn(() => ({ ok: true, data: [] })) } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(
+      mockReq('/api/lines/test-line/messages/search?q=receipt&conversation_key=abc&limit=7'),
+      res, deps, { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(200);
+    expect(deps.dbReader.searchMessages).toHaveBeenCalledWith(
+      'test-line', inst.dbPath,
+      { query: 'receipt', conversationKey: 'abc', limit: 7 },
+    );
+  });
+
+  it('returns display-safe search result DTOs when database fields are null', () => {
+    const inst = fakeInstance();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+      dbReader: {
+        searchMessages: vi.fn(() => ({ ok: true, data: [{
+          pk: 43,
+          conversation_key: 'abc',
+          chat_jid: 'abc@s.whatsapp.net',
+          sender_jid: null,
+          sender_name: null,
+          message_id: null,
+          content: null,
+          content_type: null,
+          timestamp: null,
+          is_from_me: null,
+          raw_message: null,
+        }] })),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleSearchMessages(mockReq('/api/lines/test-line/messages/search?q=receipt'), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual({
+      results: [{
+        pk: 43,
+        conversationKey: 'abc',
+        senderJid: '',
+        senderName: '',
+        content: null,
+        type: 'unknown',
+        timestamp: '',
+        fromMe: false,
+      }],
+      total: 1,
+      query: 'receipt',
+    });
   });
 });
 

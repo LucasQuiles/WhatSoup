@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { jsonResponse, parseQueryString, requireInstance, parseIntParam } from '../../lib/http.ts';
 import type { FleetDiscovery } from '../discovery.ts';
-import type { FleetDbReader } from '../db-reader.ts';
+import type { FleetDbReader, MessageRow } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { configRoot } from '../paths.ts';
 
@@ -25,6 +25,47 @@ interface GroupNameRow { subject: string }
 interface ChatNameRow { name: string }
 interface ParticipantRow { sender_name: string }
 interface DmNameRow { sender_name: string }
+
+function stringOrEmpty(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function requiredString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+function isoFromMaybeUnix(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? toIsoFromUnix(value) : '';
+}
+
+function messageDto(row: MessageRow) {
+  const dto: {
+    pk: number;
+    conversationKey: string;
+    senderJid: string;
+    senderName: string;
+    content: string | null;
+    type: string;
+    timestamp: string;
+    fromMe: boolean;
+    rawMessage?: string;
+  } = {
+    pk: row.pk,
+    conversationKey: stringOrEmpty(row.conversation_key),
+    senderJid: stringOrEmpty(row.sender_jid),
+    senderName: stringOrEmpty(row.sender_name),
+    content: typeof row.content === 'string' ? row.content : null,
+    type: requiredString(row.content_type, 'unknown'),
+    timestamp: isoFromMaybeUnix(row.timestamp),
+    fromMe: row.is_from_me === 1,
+  };
+
+  if (typeof row.raw_message === 'string') {
+    dto.rawMessage = row.raw_message;
+  }
+
+  return dto;
+}
 
 /** GET /api/lines/:name/chats — paginated chat list (ChatItem shape). */
 export function handleGetChats(
@@ -127,10 +168,10 @@ export function handleGetChats(
       return {
         conversationKey: chat.conversationKey,
         name: displayName,
-        lastMessagePreview: formattedPreview,
+        lastMessagePreview: formattedPreview ?? '',
         lastMessageAt: chat.lastMessageAt != null
           ? toIsoFromUnix(chat.lastMessageAt)
-          : null,
+          : '',
         unreadCount: unread,
         isGroup,
         _needsBackfill: needsBackfill,
@@ -147,7 +188,12 @@ export function handleGetChats(
   const groupsNeedingBackfill: string[] = [];
   const response = enriched.data.map(({ _needsBackfill, ...chat }) => {
     if (_needsBackfill) groupsNeedingBackfill.push(chat.conversationKey);
-    return chat;
+    return {
+      ...chat,
+      name: requiredString((chat as { name?: unknown }).name, chat.conversationKey),
+      lastMessagePreview: stringOrEmpty((chat as { lastMessagePreview?: unknown }).lastMessagePreview),
+      lastMessageAt: stringOrEmpty((chat as { lastMessageAt?: unknown }).lastMessageAt),
+    };
   });
 
   jsonResponse(res, 200, response);
@@ -190,17 +236,7 @@ export function handleGetMessages(
   }
 
   // Transform MessageRow → Message shape expected by the console frontend.
-  const messages = result.data.map((row) => ({
-    pk: row.pk,
-    conversationKey: row.conversation_key,
-    senderJid: row.sender_jid,
-    senderName: row.sender_name,
-    content: row.content,
-    type: row.content_type,
-    timestamp: toIsoFromUnix(row.timestamp),
-    fromMe: row.is_from_me === 1,
-    rawMessage: row.raw_message ?? null,
-  }));
+  const messages = result.data.map(messageDto);
 
   jsonResponse(res, 200, messages);
 }
@@ -236,17 +272,7 @@ export function handleSearchMessages(
     return;
   }
 
-  const messages = result.data.map((row) => ({
-    pk: row.pk,
-    conversationKey: row.conversation_key,
-    senderJid: row.sender_jid,
-    senderName: row.sender_name,
-    content: row.content,
-    type: row.content_type,
-    timestamp: toIsoFromUnix(row.timestamp),
-    fromMe: row.is_from_me === 1,
-    rawMessage: row.raw_message ?? null,
-  }));
+  const messages = result.data.map(messageDto);
 
   jsonResponse(res, 200, { results: messages, total: messages.length, query });
 }
