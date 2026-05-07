@@ -27,16 +27,19 @@ export async function proxyToInstance(
       headers['Authorization'] = `Bearer ${healthToken}`;
     }
 
-    const res = await fetch(`http://127.0.0.1:${healthPort}${path}`, {
-      method,
-      headers,
-      body: body && method !== 'GET' ? body : undefined,
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+    try {
+      const res = await fetch(`http://127.0.0.1:${healthPort}${path}`, {
+        method,
+        headers,
+        body: body && method !== 'GET' ? body : undefined,
+        signal: controller.signal,
+      });
 
-    const responseBody = await res.text();
-    return { status: res.status, body: responseBody };
+      const responseBody = await res.text();
+      return { status: res.status, body: responseBody };
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (err) {
     const message = (err as Error).message ?? 'proxy error';
     log.warn({ healthPort, path, error: message }, 'proxy request failed');

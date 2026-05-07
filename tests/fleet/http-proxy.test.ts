@@ -3,7 +3,7 @@
  *
  * Integration tests using a real HTTP server to verify proxy forwarding.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 
@@ -64,6 +64,11 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
 // ---------------------------------------------------------------------------
 // proxyToInstance
 // ---------------------------------------------------------------------------
@@ -114,6 +119,30 @@ describe('proxyToInstance', () => {
     expect(result.status).toBe(502);
     const parsed = JSON.parse(result.body);
     expect(parsed.error).toMatch(/proxy error/);
+  });
+
+  it('keeps the timeout active while reading the response body', async () => {
+    vi.useFakeTimers();
+
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      const text = new Promise<string>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new Error('body aborted')), { once: true });
+      });
+      return { status: 200, text: () => text };
+    }));
+
+    const resultPromise = proxyToInstance(port, '/headers-then-stall', 'GET', null, null, 100);
+    let settled = false;
+    resultPromise.finally(() => { settled = true; }).catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await Promise.resolve();
+
+    expect(settled).toBe(true);
+    await expect(resultPromise).resolves.toMatchObject({ status: 502 });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('returns 502 when connection is refused', async () => {
