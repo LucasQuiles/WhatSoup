@@ -3877,7 +3877,18 @@ describe('AgentRuntime', () => {
     });
     expect(queue.markLastTerminal).not.toHaveBeenCalled();
     expect(queue.clearLastOpId).toHaveBeenCalledOnce();
-    expect(state.currentInboundSeq).toBeUndefined();
+    expect(queue.enqueueResultText).toHaveBeenCalledWith('done');
+    expect(queue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
+    expect(queue.flush).toHaveBeenCalledOnce();
+    expect({
+      activeTurnChatJid: state.currentTurnChatJid,
+      pendingInboundSeq: state.currentInboundSeq,
+      visibleOutputForNextTurn: state.turnHadVisibleOutput,
+    }).toEqual({
+      activeTurnChatJid: null,
+      pendingInboundSeq: undefined,
+      visibleOutputForNextTurn: false,
+    });
   });
 
   // ─── Voice reply integration tests (SP4) ─────────────────────────────────────
