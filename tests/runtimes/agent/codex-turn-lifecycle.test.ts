@@ -149,7 +149,10 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    setToolUpdateRedirectJid: vi.fn(),
+    setTextAggregateDelayMs: vi.fn(),
     getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
     targetChatJid: '1234@s.whatsapp.net',
   };
 
@@ -215,6 +218,8 @@ vi.mock('../../../src/config.ts', () => ({
     adminPhones: new Set<string>(),
     controlPeers: new Map<string, string>(),
     toolUpdateMode: 'full',
+    toolUpdateRedirectJid: null,
+    textAggregateDelayMs: 2_000,
     pineconeAllowedIndexes: [],
   },
 }));
@@ -319,7 +324,7 @@ describe('Codex turn lifecycle — runtime level', () => {
       exec: vi.fn(),
     },
   } as any;
-  const fakeMessenger = { sendMessage: vi.fn() } as any;
+  const fakeMessenger = { sendMessage: vi.fn(async () => ({ waMessageId: null })) } as any;
 
   beforeEach(() => {
     vi.clearAllMocks();

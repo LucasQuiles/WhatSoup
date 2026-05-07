@@ -127,6 +127,8 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.memory.pinecone.namespaces.facts).toBe('whatsapp-facts');
     expect(config.memory.pinecone.knowledgeProfiles['mw-mind'].namespaces).toContain('whatsapp-summaries');
     expect(config.logLevel).toBe('info');
+    expect(config.toolUpdateRedirectJid).toBeNull();
+    expect(config.textAggregateDelayMs).toBe(2_000);
   });
 
   it('preserves non-overridable constants', async () => {
@@ -200,6 +202,8 @@ describe('config — full INSTANCE_CONFIG override', () => {
       healthPort: 9999,
       tokenBudget: 200_000,
       pineconeIndex: 'custom-index',
+      toolUpdateRedirectJid: 'status-log@g.us',
+      textAggregateDelayMs: 30_000,
       chatAliases: {
         ops: '15555550100@s.whatsapp.net',
         support: '120363001@g.us',
@@ -224,6 +228,8 @@ describe('config — full INSTANCE_CONFIG override', () => {
     expect(config.healthPort).toBe(9999);
     expect(config.tokenBudget).toBe(200_000);
     expect(config.pineconeIndex).toBe('custom-index');
+    expect(config.toolUpdateRedirectJid).toBe('status-log@g.us');
+    expect(config.textAggregateDelayMs).toBe(30_000);
     expect(config.chatAliases).toEqual({
       ops: '15555550100@s.whatsapp.net',
       support: '120363001@g.us',
@@ -1125,6 +1131,18 @@ describe('config — memory recency env-var overrides', () => {
     const { config } = await import('../src/config.ts');
     expect(config.recencyHalfLifeDays).toBe(14);
     expect(config.maxAgeDays).toBe(90);
+  });
+});
+
+describe('config — outbound queue controls', () => {
+  it('ignores non-positive streaming aggregation overrides', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      textAggregateDelayMs: 0,
+    }));
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.textAggregateDelayMs).toBe(2_000);
   });
 });
 

@@ -704,6 +704,8 @@ export const config = {
   // 'friendly' (all updates in plain language for non-technical users),
   // 'minimal' (suppress most updates — only critical status shown)
   toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'friendly' | 'minimal',
+  toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
+  textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2_000),
 
   // Operation tracker: per-tool progress reporting & stall detection
   operationTracker: {

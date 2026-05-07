@@ -47,6 +47,8 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     markLastTerminal: vi.fn(),
     clearLastOpId: vi.fn(),
     setToolUpdateMode: vi.fn(),
+    setToolUpdateRedirectJid: vi.fn(),
+    setTextAggregateDelayMs: vi.fn(),
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
@@ -145,6 +147,8 @@ vi.mock('../../../src/config.ts', () => ({
       ['q', '15559990002'],
     ]),
     toolUpdateMode: 'full',
+    toolUpdateRedirectJid: null,
+    textAggregateDelayMs: 2_000,
     pineconeAllowedIndexes: [],
   },
 }));

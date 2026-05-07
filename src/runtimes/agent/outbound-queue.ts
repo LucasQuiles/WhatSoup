@@ -130,6 +130,10 @@ export interface IOutboundQueue {
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
   setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void;
+  /** Set an optional redirect JID for tool-status batches. */
+  setToolUpdateRedirectJid(jid: string | null): void;
+  /** Override the streaming-text aggregation window in milliseconds. */
+  setTextAggregateDelayMs(ms: number): void;
   /** Start the composing indicator immediately without adding any content to the queue. */
   indicateTyping(): void;
   flush(): Promise<void>;
@@ -190,6 +194,10 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
+  /** Optional destination for tool-status batches; regular text still uses chatJid. */
+  private toolUpdateRedirectJid: string | null = null;
+  /** Debounce window for streaming text fragments. */
+  private textAggregateDelayMs = TEXT_AGGREGATE_DELAY_MS;
 
   /** In friendly mode: progress event tool IDs already reported (dedup — only first per tool). */
   private friendlyProgressSent = new Set<string>();
@@ -204,6 +212,16 @@ export class OutboundQueue implements IOutboundQueue {
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
   setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void {
     this.toolUpdateMode = mode;
+  }
+
+  setToolUpdateRedirectJid(jid: string | null): void {
+    this.toolUpdateRedirectJid = jid;
+  }
+
+  setTextAggregateDelayMs(ms: number): void {
+    if (Number.isFinite(ms) && ms > 0) {
+      this.textAggregateDelayMs = ms;
+    }
   }
 
   /**
@@ -307,10 +325,11 @@ export class OutboundQueue implements IOutboundQueue {
     if (!text) return;
     this.turnHasVisibleText = true;
     this.streamBufferParts.push(text);
+    this.startTyping();
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
       this.flushStreamBuffer();
-    }, TEXT_AGGREGATE_DELAY_MS);
+    }, this.textAggregateDelayMs);
   }
 
   /** Flush the streaming text buffer into the send queue. */
@@ -580,10 +599,18 @@ export class OutboundQueue implements IOutboundQueue {
     }
 
     this.toolBuffer = [];
+    const statusText = sections.join('\n\n');
+    if (this.toolUpdateRedirectJid !== null) {
+      this.messenger.sendMessage(this.toolUpdateRedirectJid, statusText).catch((err) => {
+        log.warn({ err, target: this.toolUpdateRedirectJid, textLength: statusText.length }, 'tool-status redirect send failed');
+      });
+      return;
+    }
+
     // Typing indicator stays active — the turn is still in progress.
     // WhatsApp clears the composing state on delivery, but the heartbeat
     // will re-assert it within TYPING_REFRESH_MS.
-    this.enqueueText(sections.join('\n\n'));
+    this.enqueueText(statusText);
   }
 
   private enqueue(chunk: string): void {
