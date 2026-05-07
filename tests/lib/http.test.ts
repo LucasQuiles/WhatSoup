@@ -141,12 +141,12 @@ describe('parseRoute', () => {
 
   it('returns null for wrong method', () => {
     const result = parseRoute('POST', '/health', { method: 'GET', path: /^\/health$/ });
-    expect(result).toBeNull();
+    expect({ result }).toEqual({ result: null });
   });
 
   it('returns null for non-matching path', () => {
     const result = parseRoute('GET', '/unknown', { method: 'GET', path: /^\/health$/ });
-    expect(result).toBeNull();
+    expect({ result }).toEqual({ result: null });
   });
 
   it('strips query string before matching', () => {
