@@ -238,9 +238,21 @@ describe('enqueueFacts', () => {
     const fact = makeFact({ factId: 'group-fact', senderJid: null });
     enqueueFacts(db, [fact]);
     const row = db.raw
-      .prepare(`SELECT sender_jid FROM fact_export_queue WHERE fact_id = ?`)
-      .get('group-fact') as { sender_jid: string | null };
-    expect(row.sender_jid).toBeNull();
+      .prepare(`SELECT fact_id, chat_jid, sender_jid, namespace, status FROM fact_export_queue WHERE fact_id = ?`)
+      .get('group-fact') as {
+        fact_id: string;
+        chat_jid: string;
+        sender_jid: string | null;
+        namespace: string;
+        status: string;
+      };
+    expect(row).toEqual({
+      fact_id: 'group-fact',
+      chat_jid: 'test-chat@s.whatsapp.net',
+      sender_jid: null,
+      namespace: 'whatsapp-facts',
+      status: 'pending',
+    });
   });
 });
 
@@ -347,16 +359,22 @@ describe('markFactsExported', () => {
     markFactsExported(db, ['exp-1']);
 
     const row = db.raw
-      .prepare(`SELECT status, exported_at FROM fact_export_queue WHERE fact_id = ?`)
-      .get('exp-1') as { status: string; exported_at: string | null };
-    expect(row.status).toBe('exported');
-    expect(row.exported_at).not.toBeNull();
+      .prepare(`SELECT fact_id, status, exported_at FROM fact_export_queue WHERE fact_id = ?`)
+      .get('exp-1') as { fact_id: string; status: string; exported_at: string | null };
+    expect(row).toEqual({
+      fact_id: 'exp-1',
+      status: 'exported',
+      exported_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
+    });
 
     const otherRow = db.raw
-      .prepare(`SELECT status, exported_at FROM fact_export_queue WHERE fact_id = ?`)
-      .get('exp-2') as { status: string; exported_at: string | null };
-    expect(otherRow.status).toBe('pending');
-    expect(otherRow.exported_at).toBeNull();
+      .prepare(`SELECT fact_id, status, exported_at FROM fact_export_queue WHERE fact_id = ?`)
+      .get('exp-2') as { fact_id: string; status: string; exported_at: string | null };
+    expect(otherRow).toEqual({
+      fact_id: 'exp-2',
+      status: 'pending',
+      exported_at: null,
+    });
   });
 
   it('does NOT mutate payload_json', () => {
