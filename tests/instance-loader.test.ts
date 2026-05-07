@@ -125,7 +125,16 @@ describe('loadInstance — happy path: agent', () => {
     expect(config.name).toBe('test-agent');
     expect(config.type).toBe('agent');
     expect(config.accessMode).toBe('self_only');
-    expect(config.paths).toBeDefined();
+    expect(config.paths).toEqual({
+      configRoot: path.join(tmpDir, 'config', 'whatsoup', 'instances', 'test-agent'),
+      dataRoot: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent'),
+      stateRoot: path.join(tmpDir, 'state', 'whatsoup', 'instances', 'test-agent'),
+      authDir: path.join(tmpDir, 'config', 'whatsoup', 'instances', 'test-agent', 'auth'),
+      dbPath: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'bot.db'),
+      logDir: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'logs'),
+      lockPath: path.join(tmpDir, 'state', 'whatsoup', 'instances', 'test-agent', 'whatsoup.lock'),
+      mediaDir: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'media', 'tmp'),
+    });
   });
 });
 
@@ -400,7 +409,7 @@ describe('loadInstance — agentOptions: cwd is optional', () => {
     });
     loadInstance('no-cwd-agent');
     const config = JSON.parse(process.env.INSTANCE_CONFIG!);
-    expect(config.agentOptions.cwd).toBeUndefined();
+    expect(config.agentOptions).toEqual({ sessionScope: 'single' });
   });
 
   it('accepts agent with empty string cwd (defaults to homedir at runtime)', () => {
