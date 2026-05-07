@@ -123,6 +123,20 @@ describe('api auth headers', () => {
     });
   });
 
+  it('clears the availability probe timeout when fetch rejects', async () => {
+    stubFleetToken(null);
+    const fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getLines()).resolves.toEqual(expect.any(Array));
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('sends the fleet token on write requests', async () => {
     stubFleetToken('fleet-token-123');
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
