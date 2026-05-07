@@ -35,7 +35,7 @@ vi.mock('node:child_process', () => ({
 
 // Mock node:util so that promisify() returns our async spy at module-init time
 vi.mock('node:util', async (importOriginal) => {
-  const orig = await importOriginal<typeof import('node:util')>();
+  const orig = (await importOriginal()) as typeof import('node:util');
   return {
     ...orig,
     promisify: (_fn: any) => execFileAsyncSpy,

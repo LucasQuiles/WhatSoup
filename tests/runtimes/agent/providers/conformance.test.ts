@@ -26,7 +26,7 @@ vi.mock('node:os', () => ({
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+  const actual = (await importOriginal()) as typeof import('node:fs');
   return {
     ...actual,
     readFileSync: vi.fn(actual.readFileSync),

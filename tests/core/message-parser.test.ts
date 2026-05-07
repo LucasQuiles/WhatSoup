@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // We need to control isJidGroup and jidNormalizedUser
 // ---------------------------------------------------------------------------
 vi.mock('@whiskeysockets/baileys', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@whiskeysockets/baileys')>();
+  const original = (await importOriginal()) as typeof import('@whiskeysockets/baileys');
   return {
     ...original,
     isJidGroup: (jid: string) => jid.endsWith('@g.us'),
