@@ -45,6 +45,15 @@ describe('useVirtualMessages module', () => {
     expect(options.estimateSize?.(1)).toBe(154)
   })
 
+  it('estimates safely for stale or malformed history message rows', async () => {
+    const mod = await import('../../console/src/hooks/use-virtual-messages.ts')
+
+    expect(mod.estimateMessageRowHeight(null)).toBe(76)
+    expect(mod.estimateMessageRowHeight(undefined)).toBe(76)
+    expect(mod.estimateMessageRowHeight({ pk: 'm-1', content: null, type: 'text', fromMe: true })).toBe(76)
+    expect(mod.estimateMessageRowHeight({ pk: 'm-2', content: { text: 'bad payload' }, type: 'text', fromMe: true })).toBe(76)
+  })
+
   it('passes created options to the virtualizer hook', async () => {
     const mod = await import('../../console/src/hooks/use-virtual-messages.ts')
     const messages = [{ pk: 'm-1', content: '', type: 'text', fromMe: true }]
