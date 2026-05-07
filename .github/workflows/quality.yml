@@ -36,3 +36,12 @@ jobs:
 
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
+
+      - name: Test suite
+        run: npm test -- --pool=forks
+
+      - name: Install console dependencies
+        run: npm --prefix console ci
+
+      - name: Console build
+        run: npm --prefix console run build
