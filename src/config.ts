@@ -43,6 +43,19 @@ export interface KnowledgeProfileConfig {
 }
 
 export interface MemoryConfig {
+  adminJid: string;
+  vaultPath: string;
+  observationConfidenceMin: number;
+  sweep: {
+    beadProposeMin: number;
+    beadUpdateMin: number;
+    lookbackHours: number;
+    reviewByDays: number;
+  };
+  watchTtl: {
+    defaultHours: number;
+    maxHours: number;
+  };
   conversation: {
     recent: number;
     extended: number;
@@ -139,6 +152,14 @@ function numberProp(source: Record<string, unknown> | undefined, key: string, fa
 function booleanProp(source: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
   const value = source?.[key];
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function expandTilde(p: string): string {
+  if (p.startsWith('~/')) {
+    return join(process.env.HOME ?? homedir(), p.slice(2));
+  }
+  if (p === '~') return process.env.HOME ?? homedir();
+  return p;
 }
 
 function stringArrayProp(source: Record<string, unknown> | undefined, key: string): string[] {
@@ -524,6 +545,8 @@ function mergeKnowledgeProfiles(
 export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
   const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
   const memoryRoot = record(migrated.memory);
+  const sweep = record(memoryRoot?.sweep);
+  const watchTtl = record(memoryRoot?.watch_ttl);
   const conversation = record(memoryRoot?.conversation);
   const retention = record(memoryRoot?.retention);
   const enrichment = record(memoryRoot?.enrichment);
@@ -566,6 +589,21 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   }
 
   return {
+    adminJid: stringProp(memoryRoot, 'admin_jid') ?? resolvedAdminPhones[0] ?? '',
+    vaultPath: expandTilde(
+      stringProp(memoryRoot, 'vaultPath') ?? `${process.env.HOME ?? homedir()}/Documents/Obsidian/whatsoup-memory`,
+    ),
+    observationConfidenceMin: numberProp(memoryRoot, 'observation_confidence_min', 0.40),
+    sweep: {
+      beadProposeMin: numberProp(sweep, 'bead_propose_min', 0.55),
+      beadUpdateMin: numberProp(sweep, 'bead_update_min', 0.80),
+      lookbackHours: numberProp(sweep, 'lookback_hours', 48),
+      reviewByDays: numberProp(sweep, 'review_by_days', 7),
+    },
+    watchTtl: {
+      defaultHours: numberProp(watchTtl, 'default_hours', 24),
+      maxHours: numberProp(watchTtl, 'max_hours', 72),
+    },
     conversation: {
       recent: numberProp(conversation, 'recent', 50),
       extended: numberProp(conversation, 'extended', 100),
@@ -607,7 +645,6 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
 }
 
 const resolvedMemory = resolveMemoryConfig(instance);
-
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',

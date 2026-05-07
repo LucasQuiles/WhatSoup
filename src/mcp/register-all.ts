@@ -27,6 +27,7 @@ import { registerRetentionTools } from './tools/retention.ts';
 import { registerStatusTools } from './tools/status.ts';
 import { registerSchedulingTools } from './tools/scheduling.ts';
 import { registerOutboundAuditTools } from './tools/audit.ts';
+import { registerSubstrateTools } from './tools/substrate.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
 
@@ -69,6 +70,14 @@ export function registerAllTools(
   try { registerStatusTools(registry, { db, getSock }); } catch (err) { log.error({ err }, 'registerStatusTools failed'); }
   try { registerSchedulingTools(registry, { db }); } catch (err) { log.error({ err }, 'registerSchedulingTools failed'); }
   try { registerOutboundAuditTools(registry, { writer: outboundSendsWriter }); } catch (err) { log.error({ err }, 'registerOutboundAuditTools failed'); }
+  try {
+    registerSubstrateTools(registry, {
+      db: db.raw,
+      dbWrapper: db,
+      adminPhones: config.adminPhones,
+      memory: config.memory,
+    });
+  } catch (err) { log.error({ err }, 'registerSubstrateTools failed'); }
 
   // Pattern 2 — DB-dependent
   try { registerChatManagementTools(db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }

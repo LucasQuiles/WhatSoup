@@ -41,6 +41,8 @@ import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
+import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
+import { createBead } from '../../core/substrate/beads.ts';
 import { writeFileSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
@@ -1028,7 +1030,7 @@ export class AgentRuntime implements Runtime {
         log.info({ mapKey, imageCount: count, coalescedSeqs: inboundSeqs.length - 1 }, 'flushing coalesced image batch as single turn');
       }
 
-      await this.sendTurnPerChat(chatJid, combinedText, mapKey);
+      await this.sendTurnPerChat(chatJid, combinedText, mapKey, msg.senderJid);
     } catch (err) {
       if (representativeSeq !== undefined) {
         if (queuedRepresentativeSeq) {
@@ -1761,6 +1763,78 @@ export class AgentRuntime implements Runtime {
       }
       return;
     }
+
+    // Substrate slice 1: inline imperative extractor.
+    // Gate on sender identity (admin-only), not deliveryJid. For any admin-authored
+    // message containing an explicit imperative (remind/schedule/watch/track/...),
+    // persist a proposed task bead immediately so the intent survives even if the
+    // agent turn fails downstream. The bead lands as status='proposed' so a
+    // drowsy or misfired match doesn't silently commit real work to the task list.
+    try {
+      const senderPhone = resolvePhoneFromJid(msg.senderJid, this.db);
+      if (isAdminPhone(senderPhone, config.adminPhones)) {
+        const hit = matchImperative(content);
+        if (hit) {
+          const target = extractImperativeTarget(content);
+          const title = target && target.length > 0 ? target.slice(0, 200) : content.slice(0, 120);
+          // review_by_at ensures proposals don't accumulate forever; the slice-4
+          // sweep (or an operator) converts unreviewed rows to cancelled past this
+          // horizon. Default is config.memory.sweep.reviewByDays * 86400 seconds.
+          const reviewByAt = Math.floor(Date.now() / 1000) + config.memory.sweep.reviewByDays * 86400;
+          createBead(this.db.raw, {
+            kind: 'task',
+            title,
+            body: content,
+            ownerJid: config.memory.adminJid || (senderPhone ?? msg.senderJid),
+            chatJid: msg.chatJid,
+            sourceMessagePk: null,
+            status: 'proposed',
+            confidence: 0.7,
+            proposalReason: `inline imperative: ${hit.verb}`,
+            reviewByAt,
+            actor: 'inline',
+          });
+          log.info(
+            { verb: hit.verb, messageId: msg.messageId, chatJid: msg.chatJid, reviewByAt },
+            'inline imperative persisted as proposed bead',
+          );
+        }
+      }
+    } catch (err) {
+      // Classify DB errors: unrecoverable ones (disk full, readonly, corrupt)
+      // indicate infrastructure failure — surface them to the operator by
+      // emitting alert and marking the inbound failed. Everything else
+      // (extractor bugs, constraint errors on malformed extraction output)
+      // is swallowed with a warn so a substrate bug doesn't drop the user's
+      // message. Per spec §8.4 / INV-7: observability is a product surface.
+      const msgText = err instanceof Error ? err.message : String(err);
+      const code = (err as { code?: unknown })?.code;
+      const codeStr = typeof code === 'string' ? code : '';
+      const isUnrecoverable =
+        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.test(msgText) ||
+        /SQLITE_(FULL|READONLY|CORRUPT|IOERR|CANTOPEN|NOTADB)/i.test(codeStr);
+      if (isUnrecoverable) {
+        log.error(
+          { err, messageId: msg.messageId, code: codeStr || 'unknown' },
+          'inline extractor hook hit unrecoverable DB error — surfacing to operator',
+        );
+        emitAlert(
+          this.instanceName,
+          'substrate-inline-hook',
+          `Unrecoverable DB error in inline extractor: ${msgText}`,
+          `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
+        );
+        if (this.durability && msg.inboundSeq !== undefined) {
+          this.durability.markInboundFailed(msg.inboundSeq);
+        }
+        // Propagate so the outer turn-chain handler notifies the user and
+        // the fleet supervisor sees the PID enter recovery rather than
+        // silently continuing past disk-full conditions.
+        throw err;
+      }
+      log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
+    }
+
     this.turnChain = this.turnChain
       .then(() => this._handleMessageInner(msg))
       .catch((err) => {
@@ -1783,8 +1857,26 @@ export class AgentRuntime implements Runtime {
     const perChatMapKey = this.sessionScope === 'per_chat'
       ? this.resolvePerChatMapKey(chatJid)
       : undefined;
+
+    // Substrate slice 1: propagate sender identity to every MCP session so
+    // admin-gated substrate tools can distinguish the caller from the target
+    // chat. In groups, msg.chatJid IS the group JID; without this propagation
+    // admin gating would compare against the group JID and always reject.
+    //
+    // Two cases to cover:
+    //   1. Global socket (single / shared / non-sandbox per_chat modes) —
+    //      always active when !sandboxPerChat; update unconditionally.
+    //   2. Per-chat sockets — only populated in workspaceResources when
+    //      sandboxPerChat=true (async ensureSessionAndQueue path). The
+    //      synchronous per_chat-without-sandbox path uses the global socket
+    //      above and never allocates a per-chat socket, so the `workspaceResources`
+    //      lookup here is only reachable under sandboxPerChat=true.
+    this.globalSocketServer?.updateActorJid(msg.senderJid);
     if (this.sandboxPerChat) {
-      await this.ensureSessionAndQueue(chatJid);
+      await this.ensureSessionAndQueue(chatJid, msg.senderJid);
+      const key = perChatMapKey ?? this.resolvePerChatMapKey(chatJid);
+      const res = this.workspaceResources.get(key);
+      res?.socketServer?.updateActorJid(msg.senderJid);
       // Relocate media files from global temp dir into user's workspace
       // so the agent can read them within its sandbox-allowed paths.
       if (content) {
@@ -1793,9 +1885,9 @@ export class AgentRuntime implements Runtime {
         msg.content = content;
       }
     } else if (this.sessionScope === 'per_chat') {
-      this.ensureSessionAndQueueSync(chatJid, perChatMapKey!);
+      this.ensureSessionAndQueueSync(chatJid, perChatMapKey!, msg.senderJid);
     } else {
-      this.ensureSessionAndQueueSync(chatJid);
+      this.ensureSessionAndQueueSync(chatJid, undefined, msg.senderJid);
     }
     const classified = classifyInput(content as string);
 
@@ -2035,7 +2127,7 @@ export class AgentRuntime implements Runtime {
         this.perChatTurnContentType.set(mapKey, msg.contentType);
         this.perChatTurnText.set(mapKey, '');
         this.perChatAssistantItemText.delete(mapKey);
-        await this.sendTurnPerChat(chatJid, text, mapKey);
+        await this.sendTurnPerChat(chatJid, text, mapKey, msg.senderJid);
       }
     } else {
       // single mode: store inbound seq on runtime + queue
@@ -2045,7 +2137,7 @@ export class AgentRuntime implements Runtime {
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
       this.currentTurnAssistantItemText.clear();
-      await this.sendTurnNonShared(chatJid, text);
+      await this.sendTurnNonShared(chatJid, text, msg.senderJid);
     }
   }
 
@@ -2082,6 +2174,7 @@ export class AgentRuntime implements Runtime {
     this.getActiveQueue()?.setInboundSeq(turn.inboundSeq);
 
     try {
+      this.updateSessionActorJid(this.session!, senderJid);
       await this.session!.sendTurn(prefixedText);
     } catch (err) {
       const errMsg = (err as Error).message ?? '';
@@ -2109,7 +2202,9 @@ export class AgentRuntime implements Runtime {
     chatJid: string,
     text: string,
     mapKey?: string,
+    actorJid?: string,
   ): Promise<void> {
+    this.updateSessionActorJid(session, actorJid);
     // Derive mapKey for sandboxPerChat coordination (used to suppress duplicate
     // context injection when handleResumeFailed is already handling recovery).
     const mapKeyForChat = this.sandboxPerChat
@@ -2185,17 +2280,22 @@ export class AgentRuntime implements Runtime {
   /**
    * Send a turn in non-shared (legacy) mode.
    */
-  private async sendTurnNonShared(chatJid: string, text: string): Promise<void> {
+  private async sendTurnNonShared(chatJid: string, text: string, actorJid: string): Promise<void> {
     this.currentTurnChatJid = chatJid;
     this.turnHadVisibleOutput = false;
-    await this.sendTurnToSession(this.session!, chatJid, text);
+    await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid);
   }
 
   /**
    * Send a turn in per_chat mode — each chat has its own session.
    * Serializes within a chat but runs concurrently across chats.
    */
-  private async sendTurnPerChat(chatJid: string, text: string, mapKey: string = this.resolvePerChatMapKey(chatJid)): Promise<void> {
+  private async sendTurnPerChat(
+    chatJid: string,
+    text: string,
+    mapKey: string = this.resolvePerChatMapKey(chatJid),
+    actorJid?: string,
+  ): Promise<void> {
     // When sandboxPerChat=true maps are keyed by workspaceKey, not raw chatJid
     // Store the turn text so it can be replayed if a session resume fails
     // before the agent can process it.
@@ -2206,9 +2306,9 @@ export class AgentRuntime implements Runtime {
       log.warn({ chatJid, mapKey }, 'no active session for chat — spawning new session');
       // Instead of silently dropping, initialize session and queue so message is handled
       if (this.sandboxPerChat) {
-        await this.ensureSessionAndQueue(chatJid);
+        await this.ensureSessionAndQueue(chatJid, actorJid);
       } else {
-        this.ensureSessionAndQueueSync(chatJid, mapKey);
+        this.ensureSessionAndQueueSync(chatJid, mapKey, actorJid);
       }
       const retrySession = this.chatSessions.get(mapKey);
       if (!retrySession) {
@@ -2220,10 +2320,16 @@ export class AgentRuntime implements Runtime {
         this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
         return;
       }
-      await this.sendTurnToSession(retrySession, chatJid, text, mapKey);
+      await this.sendTurnToSession(retrySession, chatJid, text, mapKey, actorJid);
       return;
     }
-    await this.sendTurnToSession(session, chatJid, text, mapKey);
+    await this.sendTurnToSession(session, chatJid, text, mapKey, actorJid);
+  }
+
+  private updateSessionActorJid(session: SessionManager, actorJid: string | undefined): void {
+    if (!actorJid) return;
+    const maybeSession = session as SessionManager & { updateMcpActorJid?: (actorJid: string) => void };
+    maybeSession.updateMcpActorJid?.(actorJid);
   }
 
   /**
@@ -3034,6 +3140,7 @@ export class AgentRuntime implements Runtime {
   private createSessionManager(opts: {
     chatJid: string;
     cwd: string | undefined;
+    actorJid?: string;
     onEvent: (event: AgentEvent) => void;
     onCrash: (info: SessionCrashInfo) => void;
     notifyUser: (msg: string) => void;
@@ -3046,10 +3153,12 @@ export class AgentRuntime implements Runtime {
             tier: 'chat-scoped',
             conversationKey,
             deliveryJid: opts.chatJid,
+            ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(opts.cwd ? { allowedRoot: opts.cwd } : {}),
           }
         : {
             tier: 'global',
+            ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(!this.shared ? { conversationKey } : {}),
           };
 
@@ -3069,6 +3178,7 @@ export class AgentRuntime implements Runtime {
       provider: this.agentProvider,
       providerConfig: this.agentProviderConfig,
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
+      mcpSessionContext: providerToolSession,
     });
     if (this.durability) {
       session.setDurability(this.durability);
@@ -3116,7 +3226,7 @@ export class AgentRuntime implements Runtime {
    * Called only when sandboxPerChat=true so the async/await overhead doesn't
    * affect the microtask ordering of existing non-sandboxPerChat tests.
    */
-  private async ensureSessionAndQueue(chatJid: string): Promise<void> {
+  private async ensureSessionAndQueue(chatJid: string, actorJid?: string): Promise<void> {
     // sandboxPerChat: each chat gets an isolated workspace; map keyed by workspaceKey
     const { workspaceKey, workspacePath } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
 
@@ -3146,6 +3256,7 @@ export class AgentRuntime implements Runtime {
               tier: 'chat-scoped',
               conversationKey: workspaceKey,
               deliveryJid: chatJid,
+              ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
             };
             socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
@@ -3183,6 +3294,7 @@ export class AgentRuntime implements Runtime {
         const session = this.createSessionManager({
           chatJid,
           cwd: workspacePath,  // scoped cwd instead of this.cwd
+          actorJid,
           onEvent: (event) => this.handleEventPerChat(workspaceKey, event, toolScopeKey),
           onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
           notifyUser: (msg) => {
@@ -3252,7 +3364,11 @@ export class AgentRuntime implements Runtime {
    * Synchronous session/queue initialization for non-sandboxPerChat mode.
    * Kept synchronous to preserve microtask ordering in existing code paths.
    */
-  private ensureSessionAndQueueSync(chatJid: string, initialMapKey: string = this.resolvePerChatMapKey(chatJid)): void {
+  private ensureSessionAndQueueSync(
+    chatJid: string,
+    initialMapKey: string = this.resolvePerChatMapKey(chatJid),
+    actorJid?: string,
+  ): void {
     if (this.sessionScope === 'per_chat') {
       // per_chat: independent session + queue per canonical chat key
       if (!this.chatSessions.has(initialMapKey)) {
@@ -3262,6 +3378,7 @@ export class AgentRuntime implements Runtime {
         session = this.createSessionManager({
           chatJid,
           cwd: this.cwd,
+          actorJid,
           onEvent: (event) => {
             const mapKey = resolveSessionMapKey();
             if (!mapKey) {
@@ -3312,6 +3429,7 @@ export class AgentRuntime implements Runtime {
       this.session = this.createSessionManager({
         chatJid,
         cwd: this.cwd,
+        actorJid,
         onEvent: (event) => this.handleEvent(event),
         onCrash: (info) => {
           this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);

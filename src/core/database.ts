@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { WhatSoupError } from '../errors.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { MIGRATION_23 as SUBSTRATE_MIGRATION } from './substrate/schema.ts';
 
 const log = createChildLogger('database');
 
@@ -600,10 +601,15 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [20, runMigration20],
   [21, (db: DatabaseSync) => { db.exec(MIGRATION_21); }],
   [22, (db: DatabaseSync) => { db.exec(MIGRATION_22); }],
+  [23, runMigration23],
 ]);
 
 function runMigration20(db: DatabaseSync): void {
   db.exec(MIGRATION_20);
+}
+
+function runMigration23(db: DatabaseSync): void {
+  db.exec(SUBSTRATE_MIGRATION);
 }
 
 // ─── Database class ──────────────────────────────────────────────────────────

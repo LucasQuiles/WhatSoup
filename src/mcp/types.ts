@@ -27,6 +27,13 @@ export interface SessionContext {
   conversationKey?: string;
   /** Current raw JID alias — for sends, replies, reactions */
   deliveryJid?: string;
+  /**
+   * Caller identity (sender JID) for admin-gated tools. In groups, `deliveryJid`
+   * is the group JID — NOT the person who sent the message — so admin checks
+   * MUST gate on `actorJid`. Populated by the runtime when dispatching tools in
+   * response to an inbound message. Absent in synthetic/global contexts.
+   */
+  actorJid?: string;
   /** Filesystem boundary for file-access tools. Set to workspacePath for sandboxed sessions. */
   allowedRoot?: string;
 }
