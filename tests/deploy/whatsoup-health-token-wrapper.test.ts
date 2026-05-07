@@ -38,6 +38,7 @@ function runKeyringLookupProbe(
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
   writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup-health-token" ] && [ "$5" = "mwlab" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
+  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nshift\nexec "$@"\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "mwlab" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
@@ -72,6 +73,7 @@ describe('health token shell wrappers', () => {
     const { stdout, log } = runKeyringLookupProbe('Linux');
 
     expect(stdout).toBe('canonical-secret');
+    expect(log).toContain('timeout 3s secret-tool lookup service whatsoup-health-token user mwlab');
     expect(log).toContain('secret-tool lookup service whatsoup-health-token user mwlab');
     expect(stdout).not.toBe('shared-env-token');
   });
@@ -80,9 +82,46 @@ describe('health token shell wrappers', () => {
     const { stdout, log } = runKeyringLookupProbe('Linux', 'canonical-miss-legacy-hit');
 
     expect(stdout).toBe('legacy-keyring-token');
+    expect(log).toContain('timeout 3s secret-tool lookup service whatsoup-health-token user mwlab');
+    expect(log).toContain('timeout 3s secret-tool lookup service whatsoup_health');
     expect(log).toContain('secret-tool lookup service whatsoup-health-token user mwlab');
     expect(log).toContain('secret-tool lookup service whatsoup_health');
     expect(stdout).not.toBe('shared-env-token');
+  });
+
+  it('deploy/whatsoup prefers an already-loaded WHATSOUP_HEALTH_TOKEN over keyring lookups', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-env-first-'));
+    tmpDirs.push(tmpDir);
+    const binDir = path.join(tmpDir, 'bin');
+    fs.mkdirSync(binDir);
+    const logPath = path.join(tmpDir, 'calls.log');
+    const source = fs.readFileSync('deploy/whatsoup', 'utf8');
+
+    writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' 'Linux'\n`);
+    writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nexit 1\n`);
+    writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nexit 1\n`);
+    writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nshift\nexec "$@"\n`);
+
+    const start = source.indexOf('# Health server auth token');
+    const end = source.indexOf('exec "$NODE"', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = source.slice(start, end);
+
+    const scriptPath = path.join(tmpDir, 'probe-env-first.sh');
+    fs.writeFileSync(
+      scriptPath,
+      `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nINSTANCE=mwlab\nWHATSOUP_HEALTH_TOKEN=preloaded-token\n${extractKeyringLookup(source)}\n${block}\nprintf '%s\\n' "$WHATSOUP_HEALTH_TOKEN"\n`,
+      'utf8',
+    );
+    fs.chmodSync(scriptPath, 0o700);
+
+    const stdout = execFileSync('bash', [scriptPath], { encoding: 'utf8' }).trim();
+    const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+
+    expect(stdout).toBe('preloaded-token');
+    expect(log).not.toContain('secret-tool lookup');
+    expect(log).not.toContain('security find-generic-password');
   });
 
   it('heal-notify checks canonical health token before legacy fallback', () => {
