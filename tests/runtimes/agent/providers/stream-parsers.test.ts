@@ -63,6 +63,98 @@ describe('Codex stream parser', () => {
     });
   });
 
+  describe('codex-output2.jsonl (sandbox-blocked transcript with MCP probes)', () => {
+    const lines = readFixtureLines('codex-output2.jsonl').filter((l) => l.trim() !== '');
+    const events = lines.map((line) => parseCodexEvent(line));
+
+    it('parses the full real capture into the expected event sequence', () => {
+      expect(lines).toHaveLength(15);
+      expect(events.map((event) => event?.type)).toEqual([
+        'init',
+        'ignored',
+        'assistant_text',
+        'assistant_text',
+        'assistant_text',
+        'tool_use',
+        'tool_use',
+        'tool_result',
+        'tool_result',
+        'assistant_text',
+        'ignored',
+        'ignored',
+        'assistant_text',
+        'assistant_text',
+        'result',
+      ]);
+    });
+
+    it('preserves assistant text from the sandbox failure transcript', () => {
+      expect(events[2]).toMatchObject({
+        type: 'assistant_text',
+        itemId: 'item_0',
+        complete: true,
+      });
+      expect((events[2] as { type: 'assistant_text'; text: string }).text).toContain('create `output.txt`');
+
+      expect((events[12] as { type: 'assistant_text'; text: string }).text).toContain(
+        'bwrap: loopback: Failed RTM_NEWADDR',
+      );
+      expect((events[13] as { type: 'assistant_text'; text: string }).text).toContain(
+        'because every local command is being blocked',
+      );
+    });
+
+    it('parses MCP resource probes as tool use/results with structured content', () => {
+      expect(events[5]).toEqual({
+        type: 'tool_use',
+        toolName: 'mcp_tool_call',
+        toolId: 'item_3',
+        toolInput: {
+          server: 'codex',
+          tool: 'list_mcp_resources',
+          arguments: {},
+          result: null,
+          error: null,
+        },
+      });
+      expect(events[6]).toEqual({
+        type: 'tool_use',
+        toolName: 'mcp_tool_call',
+        toolId: 'item_4',
+        toolInput: {
+          server: 'codex',
+          tool: 'list_mcp_resource_templates',
+          arguments: {},
+          result: null,
+          error: null,
+        },
+      });
+      expect(events[7]).toMatchObject({
+        type: 'tool_result',
+        toolId: 'item_3',
+        isError: false,
+        content: '{"resources":[]}',
+      });
+      expect(events[8]).toMatchObject({
+        type: 'tool_result',
+        toolId: 'item_4',
+        isError: false,
+        content: '{"resourceTemplates":[]}',
+      });
+    });
+
+    it('ignores unsupported web_search transcript items and parses final token usage', () => {
+      expect(events[10]).toEqual({ type: 'ignored' });
+      expect(events[11]).toEqual({ type: 'ignored' });
+      expect(events[14]).toEqual({
+        type: 'result',
+        text: null,
+        inputTokens: 100392,
+        outputTokens: 2102,
+      });
+    });
+  });
+
   describe('codex-output3.jsonl (tool use: shell commands + file changes)', () => {
     const lines = readFixtureLines('codex-output3.jsonl').filter((l) => l.trim() !== '');
 
