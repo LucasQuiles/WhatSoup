@@ -326,6 +326,34 @@ function fakeTimerHandle(label: string): ReturnType<typeof setTimeout> {
   return { label } as unknown as ReturnType<typeof setTimeout>;
 }
 
+type RegisteredTool = {
+  name: string;
+  handler: (params: unknown) => Promise<unknown>;
+};
+
+function getRegisteredTool(runtime: AgentRuntime, name: string): RegisteredTool {
+  const registry = (runtime as unknown as {
+    registry: { register: ReturnType<typeof vi.fn> };
+  }).registry;
+  const tools = registry.register.mock.calls.map(([tool]) => tool as RegisteredTool);
+  const tool = tools.find((candidate) => candidate.name === name);
+  if (!tool) throw new Error(`registered tool not found: ${name}`);
+  return tool;
+}
+
+async function expectRejectsWithError(promise: Promise<unknown>, message: string): Promise<void> {
+  try {
+    await promise;
+  } catch (err) {
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe('Error');
+    expect((err as Error).message).toBe(message);
+    return;
+  }
+
+  throw new Error(`expected rejection: ${message}`);
+}
+
 /**
  * Call handleMessage and wait for the turn chain to settle.
  * handleMessage enqueues work onto turnChain without awaiting it, so tests
@@ -453,6 +481,7 @@ describe('AgentRuntime', () => {
     );
     // Reset voice reply config to default (never) between tests
     mockConfig.voiceReply = 'never';
+    mockConfig.controlPeers.clear();
     mockConfig.toolUpdateMode = 'full';
     mockConfig.toolUpdateRedirectJid = null;
     mockConfig.textAggregateDelayMs = 2_000;
@@ -1568,6 +1597,52 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
     expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
+  it('emit_heal_result rejects when no repair session is active', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.controlPeers.set('loops', '15550100002');
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    const emitHealResult = getRegisteredTool(runtime, 'emit_heal_result');
+
+    await expectRejectsWithError(emitHealResult.handler({
+      reportId: 'report-1',
+      errorClass: 'crash__boom',
+      result: 'fixed',
+      commitSha: 'abc1234',
+      diagnosis: 'fixed it',
+    }), 'No active repair session');
+  });
+
+  it('emit_heal_result rejects mismatched reports and missing control queue', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.controlPeers.set('loops', '15550100002');
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    const emitHealResult = getRegisteredTool(runtime, 'emit_heal_result');
+    const runtimeState = runtime as unknown as { activeControlReportId: string | null };
+    runtimeState.activeControlReportId = 'report-active';
+
+    await expectRejectsWithError(emitHealResult.handler({
+      reportId: 'report-other',
+      errorClass: 'crash__boom',
+      result: 'fixed',
+      commitSha: 'abc1234',
+      diagnosis: 'fixed it',
+    }), 'No active repair for reportId report-other. Active: report-active');
+
+    await expectRejectsWithError(emitHealResult.handler({
+      reportId: 'report-active',
+      errorClass: 'crash__boom',
+      result: 'fixed',
+      commitSha: 'abc1234',
+      diagnosis: 'fixed it',
+    }), 'Control queue not found');
   });
 
 
