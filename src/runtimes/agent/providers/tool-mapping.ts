@@ -134,7 +134,8 @@ export const defaultToolMapper: ToolNameMapper = {
       lower.includes('write') ||
       lower.includes('edit') ||
       lower.includes('create') ||
-      lower.includes('update')
+      lower.includes('update') ||
+      lower.includes('send')
     )
       return 'modifying';
     if (lower.includes('bash') || lower.includes('run') || lower.includes('exec')) return 'running';

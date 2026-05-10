@@ -446,6 +446,12 @@ describe('Tool name mapping', () => {
       expect(defaultToolMapper.mapToolName('readFile')).toBe('reading');
     });
 
+    it('maps MCP-prefixed tool names by fallback category heuristics', () => {
+      expect(defaultToolMapper.mapToolName('mcp__whatsoup__list_messages')).toBe('reading');
+      expect(defaultToolMapper.mapToolName('mcp__whatsoup__update_profile')).toBe('modifying');
+      expect(defaultToolMapper.mapToolName('mcp__whatsoup__send_message')).toBe('modifying');
+    });
+
     it('maps executeCommand → running (contains "exec")', () => {
       expect(defaultToolMapper.mapToolName('executeCommand')).toBe('running');
     });

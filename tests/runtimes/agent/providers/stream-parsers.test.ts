@@ -4,7 +4,11 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
 import { parseGeminiEvent } from '../../../../src/runtimes/agent/providers/gemini-parser.ts';
-import { parseOpenCodeEvent, resetParserState } from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
+import {
+  createOpenCodeParser,
+  parseOpenCodeEvent,
+  resetParserState,
+} from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
 
 const FIXTURES_DIR = resolve(
   import.meta.dirname,
@@ -474,6 +478,21 @@ describe('Gemini stream parser', () => {
       expect(result.text).toContain('quota exceeded');
     });
 
+    it('parses result with failed status and no message fields → status fallback text', () => {
+      const line = JSON.stringify({
+        type: 'result',
+        status: 'cancelled',
+        stats: { input_tokens: 7, output_tokens: 2 },
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toEqual({
+        type: 'result',
+        text: 'Gemini CLI result status: cancelled',
+        inputTokens: 7,
+        outputTokens: 2,
+      });
+    });
+
     it('parses result with no stats → result with undefined tokens', () => {
       const line = JSON.stringify({ type: 'result', status: 'success' });
       const event = parseGeminiEvent(line);
@@ -504,6 +523,18 @@ describe('Gemini stream parser', () => {
       expect(event).toMatchObject({ type: 'result' });
       const result = event as { type: 'result'; text: string | null };
       expect(result.text).toContain('rate limit hit');
+    });
+
+    it('parses sparse error event → result with serialized fallback text', () => {
+      const line = JSON.stringify({
+        type: 'error',
+        code: 'E_NO_MESSAGE',
+      });
+      const event = parseGeminiEvent(line);
+      expect(event).toEqual({
+        type: 'result',
+        text: '{"type":"error","code":"E_NO_MESSAGE"}',
+      });
     });
 
     it('parses unknown event type → unknown', () => {
@@ -644,6 +675,27 @@ describe('OpenCode stream parser', () => {
       resetParserState();
       const event = parseOpenCodeEvent(line); // after reset → init again
       expect(event).toEqual({ type: 'init', sessionId: 'ses_test123' });
+    });
+
+    it('isolates first step_start state between parser instances', () => {
+      const firstParser = createOpenCodeParser();
+      const secondParser = createOpenCodeParser();
+      const firstLine = JSON.stringify({ type: 'step_start', sessionID: 'ses_one' });
+      const secondLine = JSON.stringify({ type: 'step_start', sessionID: 'ses_two' });
+
+      expect(firstParser.parse(firstLine)).toEqual({ type: 'init', sessionId: 'ses_one' });
+      expect(firstParser.parse(firstLine)).toEqual({ type: 'ignored' });
+      expect(secondParser.parse(secondLine)).toEqual({ type: 'init', sessionId: 'ses_two' });
+    });
+
+    it('resets isolated parser state so step_start emits init again', () => {
+      const parser = createOpenCodeParser();
+      const line = JSON.stringify({ type: 'step_start', sessionID: 'ses_isolated' });
+
+      expect(parser.parse(line)).toEqual({ type: 'init', sessionId: 'ses_isolated' });
+      expect(parser.parse(line)).toEqual({ type: 'ignored' });
+      parser.reset();
+      expect(parser.parse(line)).toEqual({ type: 'init', sessionId: 'ses_isolated' });
     });
 
     it('parses tool_use with error status → tool_result isError=true', () => {
