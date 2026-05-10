@@ -2,7 +2,7 @@
 
 **Owner:** WhatSoup application/runtime
 **Discovered:** 2026-05-09 during deployment hardening
-**Status:** OPEN
+**Status:** pending
 **Severity:** medium-high
 
 This is a WhatSoup application/runtime issue, not a general host-hardening task. Host, network, and unrelated service posture should stay in their own deployment trackers.

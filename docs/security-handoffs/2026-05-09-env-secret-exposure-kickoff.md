@@ -1,7 +1,7 @@
 # WhatSoup Env-Secret Exposure — Implementation Kickoff
 
 **Companion to:** [`2026-05-09-env-secret-exposure.md`](2026-05-09-env-secret-exposure.md) (the finding)
-**Status:** OPEN — awaiting implementation
+**Status:** pending — awaiting implementation
 **Owner:** WhatSoup application/runtime
 **Discovered:** 2026-05-09
 
