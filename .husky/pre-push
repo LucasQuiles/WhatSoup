@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -e
+
+node --experimental-strip-types scripts/pre-push-guard.ts
