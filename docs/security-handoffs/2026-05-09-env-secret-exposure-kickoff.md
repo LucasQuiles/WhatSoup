@@ -22,6 +22,98 @@ These come from the originating user directive and the threat model. Violating a
 
 ---
 
+## Credential handling — non-destructive migration discipline (CRITICAL)
+
+This section is load-bearing. Skim it once. Internalize it. Re-read it before any phase that touches credential storage or any provider's auth path. The most expensive failure mode in this work is a migration that leaves the system unable to authenticate, and that failure mode is one careless deletion or one mishandled lookup away on every phase.
+
+### Threat model — how credentials get destroyed during refactors
+
+Every "clean up the old way" instinct is dangerous in this work. Patterns that have caused outages in similar migrations include:
+
+- **Premature decommission.** Migrating from env-var loading to keyring loading, then deleting the env-var setup before verifying every consumer works through the keyring. The first request that hits an unmigrated consumer fails silently and authentication breaks.
+- **Move-not-copy migration.** A script that "moves" a credential from one store to another (e.g. from `tokens.env` to a keyring entry) fails partway through — old location partially wiped, new location partially populated, neither works.
+- **Test pollution.** Unit or smoke tests that read from or write to a real keyring, real `secret-tool`, or real `tokens.env`. A single test cleanup hook can delete a production credential. Tests must mock subprocess invocations of `security` and `secret-tool`, never spawn them against real backends.
+- **Account-mismatch lookups.** Code that calls keyring lookups with the wrong account (deriving from `os.userInfo()` when the credential was stored under a different account, or omitting the account parameter and matching the first match arbitrarily). The lookup returns null, the code interprets that as "credential not configured", and either fails open or refuses to start.
+- **Format drift during transcription.** Reformatting a credential mid-migration (trimming, encoding changes, newline normalization) alters the stored bytes; the keyring stores the new bytes; the upstream service rejects the wrong-format credential.
+- **Reader race during atomic-replace.** Writing `tokens.env.new` and renaming over `tokens.env` is atomic at the filesystem level but not at the reader level — a process holding the file open during rename may have inconsistent in-process state.
+- **Lost-on-rotation.** A phase that bundles "as part of the migration we'll also rotate the keys" — old key revoked upstream while migration is mid-flight; consumers using the old key start failing before the new key has propagated.
+- **Dev environment leakage.** A developer running the migration locally against their own keyring picks up the wrong credentials and pushes a code change with the wrong account name baked in.
+
+### Required preservation guarantees
+
+Non-negotiable. Every PR in this work must satisfy ALL of them:
+
+1. **Every existing credential remains accessible at every phase boundary.** If a request flow that worked at the start of phase X stops working at the start of phase X+1, the migration has failed.
+2. **Every phase is revert-safe.** Reverting the merge commit must restore the pre-phase behavior with no manual recovery step. If a revert requires "also delete keyring entries", the phase is unsafe — re-design it.
+3. **No deletion of credentials in any committed code, ever.** No `security delete-generic-password`, no `secret-tool clear`, no `unlink(tokens.env)`. The terminal cleanup phase removes STORAGE PATHS (wrapper scripts, `EnvironmentFile=` directives, deploy-script export blocks), not the credential values themselves.
+4. **Mirror-not-move when populating a new storage location.** If a phase requires per-instance health tokens to live in the keyring, the migration READS from `tokens.env`, WRITES to the keyring, and leaves `tokens.env` untouched. The `tokens.env` removal is gated to a later, signed-off phase.
+5. **Tests do not touch real credential stores.** Vitest mocks for `node:child_process` per the existing pattern at `tests/lib/keyring.test.ts:1-12`. No test ever spawns a real `security` or `secret-tool` invocation against a developer or runtime keyring. The `_resetBackendCache()` test seam exists for this reason — use it.
+6. **Idempotent migrations.** If a phase ships a one-shot migration step (copying `tokens.env` contents into the keyring, for example), running it twice must be a no-op or safely converge to the same end state. No "running this twice corrupts X" scripts.
+7. **No manual user re-entry of any secret.** The user must never be asked to re-paste an API key as part of recovery. If a migration mishandles a credential, the recovery path must be revert-and-restore-from-snapshot, not "please type the secret again."
+
+### Mechanics of safe migration
+
+For each phase that touches credential flow:
+
+1. **Read-from-both pattern during the transition window.** Phases B, C, and D each leave the runtime in a state where every provider can read the credential from BOTH the new path AND the old path. The fallback is gated by an explicit `allowEnvFallback: true` (or equivalent) flag so a static analysis pass can prove no production code path silently uses the old path.
+2. **Mirror, don't move, when populating new storage.** Phase E populates keyring entries from `tokens.env` data via a COPY operation. `tokens.env` is not modified. Removal is a separate, gated, terminal operation in Phase F.
+3. **Snapshot before any destructive operation.** Before Phase F removes the wrapper-chain scripts on the runtime host, snapshot the existing launchd plists, deploy script, and wrapper scripts to a timestamped backup directory on the host. Document the restore command in the PR body.
+4. **Decommission with explicit signoff and soak time.** Phase F (the only phase that removes credential-adjacent storage) requires:
+   - A documented soak period on Phase E (e.g., "the new keyring path has been live for at least 7 days and has served real traffic with no fallback hits").
+   - An explicit "approved to remove old path" comment from the user on the PR.
+   - A snapshot manifest of the to-be-removed files in the PR description (paths + sizes + sha256).
+5. **Account is always explicit.** The new typed lookup API requires the `account` parameter. No call site may rely on `os.userInfo().username` being the right value — pass the per-service account explicitly even when it happens to match the OS user.
+6. **Dry-run mode for any migration script.** Any one-shot script (Phase E's keyring-population script, Phase F's wrapper-removal script) MUST have a `--dry-run` mode that prints exactly what it would do without doing it. The PR description must include the dry-run output. The actual run uses `--apply` and is run by the user, not by an agent in CI.
+
+### Verification checkpoints (PR description requirements)
+
+Before merging any phase PR, the description must include:
+
+- **Before-state credential scan.** A read-only command output proving the relevant credentials are accessible via the existing path. From Phase B onward: the same proof for the new path.
+- **After-state credential scan.** Same scan run after the change is applied locally, showing identical access.
+- **Provider-level smoke test.** One real request per affected provider through the new code path against a non-production endpoint, demonstrating successful authentication.
+- **Test-isolation proof.** A `grep` over the new tests for any unmocked spawn of `security`, `secret-tool`, or read of `tokens.env` — must return zero matches outside of mock fixtures.
+
+For Phase F specifically:
+- **Snapshot manifest.** Every file slated for removal listed with size and sha256, captured as a backup before any removal.
+- **Restore-procedure dry-run.** Verification that the documented restore command in the PR body actually reproduces the pre-removal state when applied to a scratch directory.
+
+### What "non-destructive" means concretely
+
+| Allowed | Forbidden |
+|---|---|
+| Reading credentials from any storage backend | Deleting credentials from any storage backend |
+| Adding new code paths that read credentials | Removing code paths that read credentials, until every consumer has migrated through |
+| Writing new keyring entries that mirror existing values | Modifying existing keyring entries' values during a migration |
+| Adding new launchd/systemd config alongside existing | Editing existing launchd/systemd in place during a transition phase |
+| Snapshotting credential storage before terminal cleanup | Removing snapshots before the cleanup phase has completed its soak |
+| Mocked subprocess calls in tests | Real `security` / `secret-tool` invocations against a real keyring in tests |
+| Per-phase backups in a documented host location | Reliance on git history alone for credential recovery |
+
+### Recovery if a migration breaks credentials
+
+Triage order for a credentials-broken state:
+
+1. **Stop pushing.** Do not commit any "fix" until the cause is identified.
+2. **Confirm the breakage.** Read the credential through the OLD path (the path the previous phase used). If that returns the expected value, the new code is the bug. If the OLD path also returns null, the credential storage itself was modified — escalate to the user immediately.
+3. **Revert the merge commit.** `git revert -m 1 <merge-sha>` and push. The revert must restore the previous behavior with no manual data recovery — this is the test for "revert-safe."
+4. **If revert alone is insufficient,** restore the credential from the per-phase snapshot. Snapshots live in a documented host location (per the migration script's PR body); never improvise the restore path.
+5. **If the snapshot is also corrupt or missing,** STOP. Do not run any further write commands. Coordinate with the user. Manual recovery may require re-entering a secret from a personal secret manager — that is the worst-case path and is the failure mode this entire discipline exists to prevent.
+
+### Anti-patterns to never commit
+
+- Running a migration script that does not have a `--dry-run` mode.
+- Scripts that delete credentials before verifying the new path works for every consumer in the runtime.
+- Tests that read or write a developer's real keyring or `tokens.env`.
+- Code that derives the keyring account from anything other than an explicit parameter.
+- Logging that includes credential values, even at debug level, even temporarily during development. Pino structured logs with secret-bearing fields are the most common channel for inadvertent disclosure.
+- Bundling a credential-handling change with an unrelated behavior change in the same PR. Credential-storage migrations are isolated PRs.
+- Decommission phases that don't reference a soak period or an explicit user-approval comment on the PR.
+- Treating `os.userInfo().username` as the keyring account — always pass it explicitly.
+- Replacing existing wrapper scripts or deploy paths without a documented restore command in the PR body.
+
+---
+
 ## Repo state on entry (what the next agent will land in)
 
 The next agent should expect that local development worktrees may contain unrelated work:
