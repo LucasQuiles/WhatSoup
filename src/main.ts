@@ -15,6 +15,7 @@ import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
 import { createOpenAIProvider } from './runtimes/chat/providers/openai.ts';
+import { MemoryConsolidationScheduler } from './memory/consolidation-scheduler.ts';
 import { startHealthServer } from './core/health.ts';
 import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
@@ -53,6 +54,7 @@ function resolveTilde(p: string): string {
 const log = createChildLogger('main');
 const startedAt = Date.now();
 let shutdownInProgress = false;
+let memoryConsolidationScheduler: MemoryConsolidationScheduler | null = null;
 
 // --- Lock file ---
 
@@ -267,6 +269,23 @@ if (instanceType === 'agent') {
   // index name; routing to the right index is the pipeline's concern).
   const enableEnrichment =
     typeof config.pineconeIndex === 'string' && config.pineconeIndex.length > 0;
+  if (
+    enableEnrichment &&
+    config.memory.consolidation.enabled &&
+    pineconeReadiness.state === 'ready'
+  ) {
+    memoryConsolidationScheduler = new MemoryConsolidationScheduler(pinecone, anthropic, {
+      intervalMs: config.memory.consolidation.intervalHours * 60 * 60 * 1000,
+      lookbackDays: config.memory.consolidation.lookbackDays,
+      dryRun: config.memory.consolidation.dryRun,
+    });
+    memoryConsolidationScheduler.start();
+  } else if (config.memory.consolidation.enabled) {
+    log.warn({
+      enableEnrichment,
+      pineconeReadiness: pineconeReadiness.state,
+    }, 'memory consolidation enabled but not started');
+  }
   runtime = new ChatRuntime(db, connectionManager, pinecone, anthropic, openai, {
     enableEnrichment,
     getBotJid: () => connectionManager.botJid ?? '',
@@ -773,6 +792,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(retentionInterval);
     mediaRetentionTimer.stop();
     databaseRetentionTimer.stop();
+    await memoryConsolidationScheduler?.stop();
     clearInterval(echoTimeoutInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);

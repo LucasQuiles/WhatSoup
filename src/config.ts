@@ -64,6 +64,12 @@ export interface MemoryConfig {
   retention: {
     days: number;
   };
+  consolidation: {
+    enabled: boolean;
+    intervalHours: number;
+    lookbackDays: number;
+    dryRun: boolean;
+  };
   enrichment: {
     intervalMs: number;
     batchSize: number;
@@ -147,6 +153,11 @@ function stringProp(source: Record<string, unknown> | undefined, key: string): s
 function numberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
   const value = source?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function positiveNumberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
+  const value = numberProp(source, key, fallback);
+  return value > 0 ? value : fallback;
 }
 
 function booleanProp(source: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
@@ -549,6 +560,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   const watchTtl = record(memoryRoot?.watch_ttl);
   const conversation = record(memoryRoot?.conversation);
   const retention = record(memoryRoot?.retention);
+  const consolidation = record(memoryRoot?.consolidation);
   const enrichment = record(memoryRoot?.enrichment);
   const pinecone = record(memoryRoot?.pinecone);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
@@ -611,6 +623,12 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     },
     retention: {
       days: numberProp(retention, 'days', 30),
+    },
+    consolidation: {
+      enabled: booleanProp(consolidation, 'enabled', false),
+      intervalHours: positiveNumberProp(consolidation, 'intervalHours', 24),
+      lookbackDays: positiveNumberProp(consolidation, 'lookbackDays', 14),
+      dryRun: booleanProp(consolidation, 'dryRun', true),
     },
     enrichment: {
       intervalMs: numberProp(enrichment, 'intervalMs', 60 * 1000),
