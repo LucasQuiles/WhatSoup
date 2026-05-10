@@ -405,8 +405,8 @@ From `CLAUDE.md`:
 
 ### Out-of-scope cross-references (DO NOT touch)
 
-- Companion in private host-context tracker (full routing detail, full paths) — see deployment-specific tracker outside this repo.
-- Operator-side rotation handoff — separate machine-config repo.
+- Companion deployment-context tracker (full routing detail, full paths) — maintained outside this public repository.
+- Operator-side rotation handoff — separate deployment-operations repository.
 - Originating audit trail — outside this public repository.
 - Network-policy redesign — separate fleet-policy project.
 - Host posture residuals — outside this public repository.
