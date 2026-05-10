@@ -63,37 +63,51 @@ From the finding doc, kept here for the next agent's convenience:
 
 Each phase ends in a state where the runtime works under both old and new code paths. Roll back by reverting the PR; never by deleting credentials or modifying live keychain state.
 
-### Phase A — Add typed credential resolver (no behavior change)
+### Phase A — Extend keyring.ts with a typed lookup API (no behavior change)
 
-Create `src/lib/credentials/resolver.ts` (or equivalent module location matching repo conventions) implementing:
+`src/lib/keyring.ts` already exists (~149 lines) and provides `lookupCredential(service, options)` returning `string | null`, with macOS Keychain + secret-tool + env-only backends, user-scoped lookups, and migration fallbacks. **Phase A is additive, not a rewrite.**
+
+Add a new typed function alongside the existing one:
 
 ```ts
 type LookupRequest = {
   service: string;
-  account?: string;          // required for keychain semantics on both platforms
+  account?: string;          // required for explicit per-instance semantics
   keychainPath?: string;     // dedicated deployment keychain path on macOS
-  allowEnvFallback?: boolean; // default false
+  allowEnvFallback?: boolean; // default false; gated in production by a sentinel
 };
 
-async function lookupCredential(req: LookupRequest): Promise<string>;
+export function lookupCredentialTyped(req: LookupRequest): string | null;
+// (synchronous to match existing API; an async overload is acceptable if other call sites benefit)
 ```
 
-Backends:
-- **macOS:** spawn `security find-generic-password -s <service> -a <account> -w [<keychain-path>]`. Capture stdout. Redact stderr from any logs the resolver emits. Reads work fine over SSH; do NOT design for keychain writes from the resolver — the rotation lane handles writes via a separate path.
-- **Linux:** spawn `secret-tool lookup service <service> account <account>`.
-- **Env fallback:** ONLY when `allowEnvFallback: true` AND a `WHATSOUP_ENV != production` (or equivalent) sentinel. Used by tests and dev only.
+What's new vs the existing API:
+- **`keychainPath` argument.** macOS `security find-generic-password` accepts a positional keychain-DB argument; the existing code does not pass one. Add it for the dedicated deployment keychain.
+- **`allowEnvFallback` toggle.** The existing API is env-first by default; the typed API is keyring-first and requires explicit opt-in for env fallback. A production sentinel (e.g. `WHATSOUP_ENV === 'production'`) forces `allowEnvFallback=false` regardless of caller.
+- **Account-required semantics.** The existing API derives the account from `os.userInfo().username` when `options.user` is unset. The typed API makes `account` an explicit parameter so providers can't accidentally lookup as the wrong identity.
+
+Reuse the existing infrastructure:
+- `detectKeyringBackend()` (line 37 of keyring.ts) — keep using it.
+- `_resetBackendCache()` (line 145) — the test seam.
+- `SERVICE_ENV_MAP` (line 15) — extend if new env-name conventions are needed; otherwise reuse.
+- The vitest mocking pattern at `tests/lib/keyring.test.ts:1-12` (mocking `node:child_process` for `execFileSync`) is the test-style to follow.
+
+Backends (semantics, unchanged from existing module — just extended):
+- **macOS:** invoke `security find-generic-password -s <service> -a <account> -w [<keychain-path>]`. Capture stdout. Redact stderr from any logs the resolver emits. Reads work fine over SSH; do NOT design for keychain writes from the resolver — the rotation lane handles writes via a separate path.
+- **Linux:** invoke `secret-tool lookup service <service> account <account>`.
+- **Env fallback:** only when `allowEnvFallback: true` AND the production sentinel is not set.
 
 Tests:
-- Unit tests for each backend's argv shape.
-- Negative tests: env fallback disabled by default; explicit-allow path required.
-- A static guard test that fails if any non-test, non-resolver code path reads a known-secret env name directly. Allowlist provider/test/dev call sites.
+- Unit tests in `tests/lib/keyring.test.ts` for each backend's argv shape, including the new `keychainPath` positional arg.
+- Negative tests: env fallback disabled by default; explicit-allow path required; production sentinel overrides the toggle.
+- A static guard added to `scripts/repo-hygiene-guard.ts` that fails if any non-test, non-keyring-module code path reads a known-secret env name directly. Allowlist exactly the provider/test/dev call sites that exist BEFORE Phase B starts; later phases tighten the allowlist.
 
 NOT in this PR:
 - No provider code changes.
 - No launchd/systemd changes.
-- The old `lookupCredential(service: string)` helper stays in place; the new typed API lives alongside it during migration.
+- No removal of the existing `lookupCredential(service, options)` API — it stays in place; the new typed function lives alongside.
 
-**Acceptance for Phase A:** new module exists with tests; no provider consumes it yet; production runtime behavior unchanged; build green; existing typecheck and lint hooks pass.
+**Acceptance for Phase A:** new typed function exists with tests; no provider consumes it yet; production runtime behavior unchanged; `npm run typecheck:all` green; `npm run guard:repo` green; vitest suite green (run with `--pool=forks` per repo convention).
 
 ### Phase B — Provider boundary migration (one provider per PR)
 
@@ -177,6 +191,135 @@ After Phase F (final merge):
 - GitHub issue filing. Explicit user approval required by repo hygiene rules.
 
 If the next agent finds itself drifting into any of these, stop and ask the user. Cross-cutting work blurs the seams that this handoff spent effort to keep clean.
+
+---
+
+## Reference Index
+
+A grab-bag of pointers the next agent should have on hand. Treat this as a starting bibliography, not an exhaustive list.
+
+### Relevant skills available in the agent environment
+
+These skills exist in the agent runtime and reduce the cost of doing each phase well. Invoke them via the Skill tool when the trigger fits.
+
+| Skill | When to use it |
+|---|---|
+| `superpowers:brainstorming` | Before Phase A's typed-API design — sketch the LookupRequest shape and account semantics with a quick brainstorm pass. |
+| `superpowers:writing-plans` | If you need to expand any single phase into its own implementation plan with checkpoints. |
+| `superpowers:test-driven-development` | Phase A's resolver tests; Phase B's per-provider provider tests. |
+| `superpowers:executing-plans` | Running this kickoff's phase plan in a separate session with review checkpoints. |
+| `superpowers:subagent-driven-development` | Phase B is naturally per-provider parallel; dispatch one subagent per provider for the resolver wiring. |
+| `superpowers:dispatching-parallel-agents` | Same shape as above when 2+ providers can be migrated in parallel without shared state. |
+| `superpowers:requesting-code-review` | Mandatory between phases; each phase PR should get a fresh reviewer. |
+| `superpowers:verification-before-completion` | Load-bearing — every "fixed" claim needs `ps eww` evidence on the runtime host. Never claim a phase is done without running the verification command in the same message. |
+| `superpowers:systematic-debugging` | If any phase exposes unexpected runtime behavior, before proposing fixes. |
+| `superpowers:finishing-a-development-branch` | Each phase ends in a PR; this skill guides the merge/cleanup options. |
+| `superpowers:receiving-code-review` | When the reviewer pushes back; technical rigor over performative agreement. |
+| `commit-commands:commit-push-pr` | The standard commit + push + PR workflow for each phase. |
+| `feature-dev:feature-dev` | Full feature lifecycle including architect → review → test passes. |
+| `feature-dev:code-explorer` (agent) | Pre-Phase B — trace every consumer of the secret env names and the wrapper-chain invocation graph end-to-end before committing the migration order. |
+| `feature-dev:code-architect` (agent) | If the typed-resolver API design has architectural ambiguity (e.g., should it be async? should there be a per-instance cache?). |
+| `feature-dev:code-reviewer` (agent) | At each phase PR; the agent can also audit the migration for symmetry gaps (the recurring failure mode from the originating session). |
+| `claude-project-context` | Load WhatSoup project context fresh on session entry. |
+| `pinecone:*` | Phase B Pinecone provider migration; query Pinecone docs before changing the API key handling. |
+| `test-integrity:*` | After writing new tests, scan them for assertion-free / mocked-only / vacuous patterns. |
+| `episodic-memory:remembering-conversations` | If you need history on how prior keyring/auth decisions were made. |
+| `codex-memory` | Cross-session recall — this finding originated from a peer-agent probe. |
+| `claude-api` | Not relevant unless directly calling the Anthropic SDK; provider migration uses subprocess CLI auth, not SDK calls. |
+
+### File paths with concrete line numbers
+
+Direct env reads to migrate (Phase B targets — confirmed by grep at handoff time):
+
+| File | Line(s) | Pattern |
+|---|---|---|
+| `src/core/health.ts` | 92 | reads `WHATSOUP_HEALTH_TOKEN` directly from process env |
+| `src/runtimes/chat/providers/transcription/openai-whisper.ts` | 22, 71 | reads `OPENAI_API_KEY` (existence check + isAvailable) |
+| `src/runtimes/agent/providers/openai-api.ts` | 105, 228, 229, 251 | apiKey field set from env; child env passthrough; Bearer header |
+| `src/runtimes/agent/providers/anthropic-api.ts` | 106, 231, 232, 258 | apiKey field set from env; child env passthrough; x-api-key header |
+| `src/runtimes/chat/providers/pinecone.ts` | 108, 363 | reads from env via `configuredPineconeApiKeyEnv()` indirection |
+| `src/mcp/tools/knowledge.ts` | 185 | reads from env via `memoryConfig.apiKeyEnv` indirection |
+| `src/runtimes/agent/session.ts` | 88–115 | `buildChildEnv(provider)` switch — already provider-specific; convert to resolver lookups, don't widen it |
+| `src/runtimes/agent/session.ts` | 706, 1240 | `buildChildEnv()` call sites |
+| `src/runtimes/agent/providers/claude.ts` | 16, 83, 223 | imports + uses `buildChildEnv` for the Claude CLI child |
+| `src/fleet/discovery.ts` | 98, 100, 104, 110 | reads `tokens.env` and parses `WHATSOUP_HEALTH_TOKEN=...` (Phase E target) |
+| `src/fleet/routes/ops.ts` | 949 | writes `tokens.env` with the health token line (Phase E target) |
+| `deploy/whatsoup` | 87, 88, 102, 103, 105, 111–113, 119–121, 126 | shell helper exports OPENAI/PINECONE/ANTHROPIC into env before invoking node (Phase F target on systemd) |
+| `deploy/whatsoup@.service` | 30 | `EnvironmentFile=-…/tokens.env` (Phase E + F target) |
+| `deploy/generate-health-tokens.sh` | 22, 59, 72 | writes/reads `WHATSOUP_HEALTH_TOKEN=...` to per-instance `tokens.env` (Phase E target) |
+
+Existing infrastructure to reuse (don't reinvent):
+
+| File | Line(s) | What's there |
+|---|---|---|
+| `src/lib/keyring.ts` | 15–22 | `SERVICE_ENV_MAP` — env-name lookup table; extend if needed |
+| `src/lib/keyring.ts` | 24–26 | `SERVICE_MIGRATION_FALLBACKS` — keyring service-name aliases |
+| `src/lib/keyring.ts` | 28–32 | `CredentialLookupOptions` interface — extend or define a sibling typed interface |
+| `src/lib/keyring.ts` | 37–55 | `detectKeyringBackend()` — backend detection with caching |
+| `src/lib/keyring.ts` | 70 | `lookupCredential(service, options)` — existing API; keep, don't break |
+| `src/lib/keyring.ts` | 145–148 | `_resetBackendCache()` — test-only seam |
+| `tests/lib/keyring.test.ts` | 1–12 | vitest mocking pattern for `node:child_process` (mocks `execFileSync`) |
+| `tests/lib/health-token-keyring.test.ts` | — | second example of the same test pattern |
+| `scripts/repo-hygiene-guard.ts` | — | existing pre-commit hygiene guard; add the static "no direct process-env-secret reads outside allowlist" rule here |
+| `scripts/pre-push-guard.ts` | — | pre-push test runner; the resolver tests will run through this |
+| `src/utils/execFileNoThrow.ts` | — | repo's safe-spawn wrapper — prefer this in any new resolver code over raw spawn calls |
+
+### Repo-internal documentation pointers
+
+Read for context before designing:
+
+- `CLAUDE.md` — project overview, architecture, key files index, conventions (ESM, Zod, Pino, vitest --pool=forks)
+- `docs/configuration.md` — environment variables, instance.json schema, XDG paths, per-instance plugin scoping
+- `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery — relevant for Phase F deploy changes)
+- `docs/durability.md` — durability engine design (relevant to "non-destructive" constraint)
+- `docs/tools.md` — MCP tool API reference (relevant for `src/mcp/tools/knowledge.ts` change)
+
+### External documentation
+
+For the macOS backend:
+- macOS `security` man page — `man 1 security` (locally) or Apple Open Source `security_tool` reference. Note: `find-generic-password -w` reads work fine in non-GUI sessions; writes do NOT (verified separately).
+- Apple Security framework / Keychain Services reference at `developer.apple.com/documentation/security/keychain_services` for the underlying API the CLI wraps.
+
+For the Linux backend:
+- `secret-tool` man page — `man 1 secret-tool` (locally).
+- libsecret / Secret Service API at `gnome.pages.gitlab.gnome.org/libsecret/` for the underlying D-Bus protocol; useful if `secret-tool` exit codes need disambiguation.
+- freedesktop.org Secret Service spec at `specifications.freedesktop.org/secret-service/` for the protocol-level semantics.
+
+For Node.js subprocess hygiene:
+- Node subprocess module reference under `nodejs.org/api/` — pay attention to argv escaping semantics. The repo's `src/utils/execFileNoThrow.ts` wrapper is the preferred call site for any new spawn from this work; it uses the file-with-args invocation form (not the shell-string form), so command injection is impossible by construction.
+- TypeScript types: `NodeJS.ProcessEnv`, subprocess spawn-options types — relevant to the Phase D `buildChildEnv` refactor.
+
+### Repo conventions to honor
+
+From `CLAUDE.md`:
+- ESM throughout, no CommonJS.
+- Zod for runtime validation (use it for `LookupRequest` validation if input ever crosses a boundary).
+- Pino for structured logging (the resolver should not log secret values; if you log a failure, log only the service+account+platform, never the value).
+- Real SQLite in tests; vitest with `--pool=forks` for stability.
+- Tests mirror source structure under `tests/`.
+- Node >= 23.10, native strip-types, no build step.
+
+### npm scripts you'll run frequently
+
+| Command | What it does |
+|---|---|
+| `npm run typecheck:all` | TypeScript check — must pass before push |
+| `npm run guard:repo` | Repo hygiene scan (catches absolute paths, etc.) |
+| `npm run guard:repo:staged` | Same scan against the git index — pre-commit hook calls this |
+| `npm run guard:pre-push` | Pre-push verification (16 tests at handoff time) |
+| `npm test` | Run the test suite |
+| `npx vitest run --pool=forks` | Stability-first test invocation per repo convention |
+| `npm run test:watch` | Vitest in watch mode for TDD on Phase A |
+
+### Out-of-scope cross-references (DO NOT touch)
+
+- Companion in private host-context tracker (full routing detail, full paths) — see deployment-specific tracker outside this repo.
+- Operator-side rotation handoff — separate machine-config repo.
+- Originating audit trail — outside this public repository.
+- Network-policy redesign — separate fleet-policy project.
+- Host posture residuals — outside this public repository.
+
+If you find yourself reading these to inform an editing decision in WhatSoup, you're past the boundary. Stop and ask the user.
 
 ---
 
