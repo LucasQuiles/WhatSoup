@@ -1,24 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleGetFleetMetrics } from '../../../src/fleet/routes/fleet-metrics.ts';
-
-function mockReq(url = '/'): IncomingMessage {
-  return { url, method: 'GET', headers: {} } as unknown as IncomingMessage;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number, _headers?: Record<string, string>) {
-      res._status = status;
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as any;
-}
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 describe('handleGetFleetMetrics', () => {
   it('aggregates message volume across instances', () => {
@@ -72,7 +54,7 @@ describe('handleGetFleetMetrics', () => {
     } as any;
 
     const res = mockRes();
-    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
 
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
@@ -101,7 +83,7 @@ describe('handleGetFleetMetrics', () => {
     } as any;
 
     const res = mockRes();
-    handleGetFleetMetrics(mockReq('/api/metrics?range=90d'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=90d' }), res, deps);
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({
