@@ -1,5 +1,5 @@
 // src/mcp/register-all.ts
-// Standalone function that registers all 18 tool modules onto a ToolRegistry.
+// Standalone function that registers all 20 tool modules onto a ToolRegistry.
 // Used by AgentRuntime and PassiveRuntime so both get the same tools.
 
 import { config } from '../config.ts';
@@ -38,7 +38,7 @@ export interface RegisterAllToolsOptions {
 }
 
 /**
- * Register all 18 tool modules onto the given registry.
+ * Register all 20 tool modules onto the given registry.
  *
  * Preserves the three calling conventions used by the individual modules:
  *   Pattern 1 (options-object): registerMessagingTools, registerMediaTools, registerVoiceTools
