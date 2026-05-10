@@ -98,6 +98,29 @@ function makeInstanceConfig(overrides: Record<string, unknown> = {}): Record<str
   };
 }
 
+describe('config — INSTANCE_CONFIG validation', () => {
+  it('rejects invalid INSTANCE_CONFIG JSON with parse context', async () => {
+    process.env.INSTANCE_CONFIG = '{ not valid json';
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /INSTANCE_CONFIG contains invalid JSON:/,
+    );
+  });
+
+  it('rejects INSTANCE_CONFIG without required root paths', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      paths: {
+        configRoot: path.join(tmpDir, 'inst-config'),
+        dataRoot: path.join(tmpDir, 'inst-data'),
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /INSTANCE_CONFIG.*paths object/,
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Test 1: No INSTANCE_CONFIG — built-in defaults (backward compat)
 // ---------------------------------------------------------------------------

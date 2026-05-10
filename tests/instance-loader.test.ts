@@ -464,6 +464,44 @@ describe('loadInstance — agentOptions: valid single scope + self_only', () => 
   });
 });
 
+describe('loadInstance — agentOptions: providerConfig validation', () => {
+  it('rejects non-object providerConfig', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-provider-config-agent', {
+      name: 'bad-provider-config-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: [],
+      },
+    });
+
+    expect(() => loadInstance('bad-provider-config-agent')).toThrow(
+      /agentOptions\.providerConfig.*object/,
+    );
+  });
+
+  it('rejects non-object providerConfig.budget', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-provider-budget-agent', {
+      name: 'bad-provider-budget-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        providerConfig: {
+          budget: 'daily',
+        },
+      },
+    });
+
+    expect(() => loadInstance('bad-provider-budget-agent')).toThrow(
+      /agentOptions\.providerConfig\.budget.*object/,
+    );
+  });
+});
+
 describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope', () => {
   it('rejects agent with sandboxPerChat:true and sessionScope:"shared"', () => {
     writeInstance(path.join(tmpDir, 'config'), 'sandbox-bad-scope', {
