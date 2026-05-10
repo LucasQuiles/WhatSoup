@@ -1,16 +1,15 @@
 # WhatSoup Process-Environment Secret Exposure
 
-**Owner:** WhatSoup application/runtime  
-**Discovered:** 2026-05-09 during mwlab host hardening  
-**Status:** OPEN  
-**Severity:** medium-high  
-**Canonical host-context pointer:** private MESH tracker `mwlab/aqs-2026-05-09/handoff-whatsoup-env-secrets.md`
+**Owner:** WhatSoup application/runtime
+**Discovered:** 2026-05-09 during deployment hardening
+**Status:** OPEN
+**Severity:** medium-high
 
-This is a WhatSoup bead, not a mwlab host-hardening task. Firewall, sshd, Tailscale ACL, FileVault, Ollama, Caddy, and machine reboot posture stay in the MESH and machine-config trackers.
+This is a WhatSoup application/runtime issue, not a general host-hardening task. Host, network, and unrelated service posture should stay in their own deployment trackers.
 
 ## Finding
 
-WhatSoup secrets are exposed through process environments on mwlab.
+WhatSoup secrets can be exposed through process environments on a macOS runtime host.
 
 The live launchd plists do not place `OPENAI_API_KEY`, `PINECONE_API_KEY`, or `WHATSOUP_HEALTH_TOKEN` directly in their `EnvironmentVariables` dictionaries. The exposure comes from wrapper chains that read secrets from keychain, export them, and `exec` Node:
 
@@ -24,19 +23,18 @@ Concrete attacker model: a malicious or compromised process already running as t
 
 | Object | Current behavior |
 |---|---|
-| `com.whatsoup.mw-bot.plist` on mwlab | Starts wrapper chain before Node. |
-| `com.whatsoup.personal.plist` on mwlab | Starts wrapper chain before Node. |
+| Per-instance launchd plists | Start wrapper chain before Node. |
 | `with-pinecone-env` | Exports `PINECONE_API_KEY`, then execs child. |
 | `with-openai-env` | Exports `OPENAI_API_KEY`, then execs child. |
 | `with-health-token` | Exports `WHATSOUP_HEALTH_TOKEN`, then execs child. |
-| `bootstrap.ts mw-bot` and `bootstrap.ts personal` | Parent processes expose all three named secrets through env. |
+| `bootstrap.ts <instance>` | Parent processes expose all three named secrets through env. |
 | Agent child processes | Many inherit `OPENAI_API_KEY` through `buildChildEnv()`. |
 
 ## Repo Evidence
 
 Start the bead with these files:
 
-- `src/lib/keyring.ts` - env-first credential lookup and missing mwlab keychain path/account support.
+- `src/lib/keyring.ts` - env-first credential lookup and missing deployment keychain path/account support.
 - `src/core/health.ts` - reads `process.env.WHATSOUP_HEALTH_TOKEN`.
 - `src/runtimes/chat/providers/transcription/openai-whisper.ts` - reads OpenAI credentials from env.
 - `src/runtimes/agent/providers/openai-api.ts` - reads and forwards OpenAI credentials.
@@ -55,7 +53,7 @@ Start the bead with these files:
 
 2. Support portable credential backends.
    - macOS: `security find-generic-password -s <service> -a <account> -w [keychainPath]`.
-   - mwlab macOS: support non-secret config for the dedicated mwlab secrets keychain path.
+   - macOS deployments: support non-secret config for a dedicated secrets keychain path.
    - Linux: `secret-tool lookup service <service> account <account>`.
 
 3. Move secret reads to provider/auth boundaries.
@@ -85,12 +83,12 @@ Start the bead with these files:
 - Fleet tests prove instance creation stores health tokens through the resolver and does not write `tokens.env`.
 - Static guard fails on direct reads of `process.env.OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PINECONE_API_KEY`, `ELEVENLABS_API_KEY`, or `WHATSOUP_HEALTH_TOKEN` outside resolver/test/dev allowlists.
 - Deployment tests prove generated launchd plists and systemd units contain no secret env files and no secret-injecting wrapper chain.
-- Live mwlab verification: `ps eww` over WhatSoup parent and child PIDs returns no target secret env names.
+- Live deployment verification: `ps eww` over WhatSoup parent and child PIDs returns no target secret env names.
 
 ## Boundaries
 
 This note should not absorb:
 
-- mwlab host posture, Tailscale ACL, FileVault, sshd, AirPlay, Docker, or reboot-survival work.
-- Ollama gate, Caddy, sidecar, or token-rotation work.
+- Host posture, network posture, unrelated service gates, or reboot-survival work.
+- Secret rotation work outside the WhatSoup resolver and deployment migration.
 - GitHub issue filing or external reporting. Those require explicit approval.

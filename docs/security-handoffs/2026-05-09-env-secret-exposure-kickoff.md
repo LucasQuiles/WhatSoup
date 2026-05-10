@@ -24,14 +24,13 @@ These come from the originating user directive and the threat model. Violating a
 
 ## Repo state on entry (what the next agent will land in)
 
-The next agent should expect a non-pristine working tree on `LucasQuiles/WhatSoup`:
+The next agent should expect that local development worktrees may contain unrelated work:
 
-- `main` was **42 ahead, 174 behind origin/main** at handoff time, with dirty `.gitignore` and `CLAUDE.md` and several untracked docs. **Do NOT clean this up as part of the security work** — it is pre-existing technical debt with separate ownership and a separate cleanup workstream.
+- **Do NOT clean unrelated working-tree state as part of the security work.** Treat unrelated local changes, draft docs, and branch cleanup as separate ownership.
 - The companion finding doc lives at `docs/security-handoffs/2026-05-09-env-secret-exposure.md`.
 - This kickoff and the finding ship together on branch `docs/security-handoff-env-secrets-20260509`. After that branch merges, fork the implementation work FROM `main` (post-merge), not from the security-handoff branch.
-- **42 local branches have upstream gone.** Do NOT bulk-delete; some may carry uncommitted work or evidence relevant to a separate workstream. Per the project's branch-deletion discipline, use `git range-diff` and `git cherry -v` per branch before touching any.
-- A large untracked `docs/plans/2026-05-08-whatsoup-protection-layer-implementation-plan.md` exists locally and is not in scope here.
-- `docs/specs/2026-05-08-whatsoup-protection-layer-design.md` is untracked locally but tracked upstream and differs by one event-list line — not in scope here.
+- Do NOT bulk-delete local branches as part of this work. Per the project's branch-deletion discipline, use `git range-diff` and `git cherry -v` per branch before touching any branch that might contain unmerged work or evidence.
+- Unrelated protection-layer plans/specs are not in scope here.
 
 **Pre-push hooks are working.** They WILL reject:
 - Local absolute paths in committed docs (the public-repo guard).
@@ -72,7 +71,7 @@ Create `src/lib/credentials/resolver.ts` (or equivalent module location matching
 type LookupRequest = {
   service: string;
   account?: string;          // required for keychain semantics on both platforms
-  keychainPath?: string;     // dedicated mwlab keychain path on macOS
+  keychainPath?: string;     // dedicated deployment keychain path on macOS
   allowEnvFallback?: boolean; // default false
 };
 
@@ -145,10 +144,10 @@ Live-deploy this on the runtime host as the final commit and run the acceptance 
 ## Anti-patterns to avoid
 
 - **Don't delete keychain entries during the migration.** The wrapper chain must keep working until Phase F. Deleting the keychain entries before Phase F bricks the runtime.
-- **Don't try to write to a dedicated mwlab keychain over SSH from a Node process.** Verified failure: macOS keychain writes from a non-GUI session return "User interaction is not allowed". The resolver is read-only by design; secret rotation lives in a separate operator script (already addressed by the operations-side handoff in the machine-config repo).
-- **Don't ship a phase that requires a manual mwlab restart without flagging it explicitly** in the PR body. The migration should be hot-deployable per-process; if a phase requires a runtime restart, coordinate with the user.
-- **Don't pull the runtime host's WhatSoup checkout silently.** It was 108+ commits behind origin/main at handoff time. Coordinate the pull with the user; understand which security PRs are deployed before pulling more in.
-- **Don't bulk-delete the 42 stale local branches** without per-branch evidence. Some may carry uncommitted work or recovery artifacts.
+- **Don't try to write to a dedicated deployment keychain over SSH from a Node process.** macOS keychain writes from non-GUI sessions may require user interaction. The resolver is read-only by design; secret rotation belongs in a separate operator path.
+- **Don't ship a phase that requires a manual runtime restart without flagging it explicitly** in the PR body. The migration should be hot-deployable per-process; if a phase requires a runtime restart, coordinate with the user.
+- **Don't pull or reconcile a runtime host's checkout silently.** Coordinate deployment-state changes with the user; understand which security PRs are deployed before pulling more in.
+- **Don't bulk-delete stale local branches** without per-branch evidence. Some may carry uncommitted work or recovery artifacts.
 - **Don't disable the public-repo pre-push guard** to ship docs containing absolute user paths or internal hostnames — sanitize the doc instead. The guard exists for this exact reason.
 - **Don't co-author commits as Claude or any model.** Per repo hygiene: no co-author trailers, no model names, no internal labels in commit messages or PR bodies.
 - **Don't open GitHub issues without explicit user approval.** This handoff lives as a doc, not as an issue.
@@ -165,15 +164,15 @@ After Phase F (final merge):
 - Run the acceptance scan on the runtime host.
 - The runtime host's WhatSoup checkout reconciliation (currently behind upstream) becomes the natural unblock — coordinate with the user.
 - Mark the original finding doc with a "RESOLVED" header pointing at the final merged SHA.
-- A separate, private host-context tracker exists for this work; the user owns updating it.
+- Deployment-specific host-context tracking is handled outside this public repository.
 
 ---
 
 ## Out of scope
 
-- Host posture: firewall, sshd, Tailscale ACL, FileVault, AirPlay/Continuity, Docker. Different lane.
-- Ollama bearer-token gate: rotation, sidecar, Caddy. Different lane (machine-config).
-- WhatSoup `main`-branch drift cleanup (42 ahead / 174 behind). Separate technical-debt workstream.
+- Host posture, network posture, desktop integration, container posture, and reboot-survival work. Different lane.
+- Unrelated local service gates, sidecars, and reverse-proxy posture. Different lane.
+- WhatSoup branch drift and local worktree cleanup. Separate technical-debt workstream.
 - The large untracked protection-layer plan/spec docs. Different feature, different agent.
 - GitHub issue filing. Explicit user approval required by repo hygiene rules.
 
