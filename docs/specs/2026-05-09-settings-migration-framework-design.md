@@ -43,6 +43,16 @@ Seven domains:
 
 Authority semantics align with the fleet topology spec's per-domain canonical-ownership model. Migrations on admin-owned domains run from admin context (admin issues the migration; clients apply on their next reconcile). Client-owned domain migrations run locally on each client. Per-machine domains (`deploy_artifacts`) are regenerated locally from a templated source the framework provides.
 
+### Coordination with protection-layer baselines
+
+Migrations affecting the `protection_policy` domain or any other state that protection-layer baselines have signed (per `docs/specs/2026-05-08-whatsoup-protection-layer-design.md` section 6.2) require coordinated re-signing. Without explicit re-signing, the next protection-layer cycle will emit `baseline_integrity_fail` and refuse to evaluate that probe.
+
+A migration touching protected state MUST either:
+1. Include a re-sign step after the apply phase that updates the baseline HMAC against the new state, OR
+2. Surface a `protection_baseline_resign_required` warning in the migration ledger entry so an operator can re-baseline manually.
+
+This coordination is per-domain and does not auto-fire: protection-layer ownership of baseline integrity stays with the protection layer, and the migration framework only annotates that re-signing is needed.
+
 For mixed-ownership domains, each migration declares which sections it touches; section-level ownership routing determines whether the migration runs admin-side, client-side, or both.
 
 ## 4. Versioning and ledger
