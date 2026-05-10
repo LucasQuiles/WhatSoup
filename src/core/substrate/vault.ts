@@ -1,6 +1,6 @@
 // src/core/substrate/vault.ts
 import type { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { listBeads, getBead } from './beads.ts';
 import { getProfile, listEntities } from './entities.ts';
@@ -28,6 +28,17 @@ function beadStatusFolder(status: BeadRow['status']): string | null {
     case 'completed': return 'Beads/completed';
     case 'cancelled': return 'Beads/cancelled';
     default: return null;
+  }
+}
+
+function removeStaleBeadFiles(vaultPath: string, bead: BeadRow, keepFolder: string): void {
+  for (const folder of ['Beads/active', 'Beads/proposed', 'Beads/completed', 'Beads/cancelled']) {
+    if (folder === keepFolder) continue;
+    try {
+      unlinkSync(join(vaultPath, folder, `${bead.kind}-${bead.id}.md`));
+    } catch {
+      // Missing stale projections are expected on first write.
+    }
   }
 }
 
@@ -68,10 +79,12 @@ function entityFrontMatter(entity: EntityRow): string {
 export interface ProjectBeadArgs { vaultPath: string; beadId: number; }
 
 export function projectBead(db: DatabaseSync, args: ProjectBeadArgs): string | null {
+  ensureFolders(args.vaultPath);
   const r = getBead(db, args.beadId);
   if (!r) return null;
   const folder = beadStatusFolder(r.bead.status);
   if (!folder) return null;
+  removeStaleBeadFiles(args.vaultPath, r.bead, folder);
   const entityRows = db.prepare(
     `SELECT e.canonical_name FROM bead_entity_refs r
      JOIN entities e ON e.id = r.entity_id
@@ -94,6 +107,7 @@ export function projectBead(db: DatabaseSync, args: ProjectBeadArgs): string | n
 export interface ProjectEntityArgs { vaultPath: string; entityId: number; }
 
 export function projectEntity(db: DatabaseSync, args: ProjectEntityArgs): string | null {
+  ensureFolders(args.vaultPath);
   const profile = getProfile(db, { entityId: args.entityId });
   if (!profile) return null;
   const folder = `Profiles/${profile.entity.kind}`;
