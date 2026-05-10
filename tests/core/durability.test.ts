@@ -301,6 +301,44 @@ describe('DurabilityEngine', () => {
       ).get(outboundId) as any;
       expect(outboundRow.is_terminal).toBe(1);
     });
+
+    it('rolls back and rethrows when a turn-completion write fails', () => {
+      const sessionInsert = db.raw.prepare(
+        `INSERT INTO agent_sessions (claude_pid, started_in_directory, started_at, status)
+         VALUES (?, ?, datetime('now'), 'active')`,
+      ).run(456, '/tmp/session');
+      const sessionRowId = Number(sessionInsert.lastInsertRowid);
+
+      db.raw.exec(`
+        CREATE TRIGGER fail_agent_token_events_insert
+        BEFORE INSERT ON agent_token_events
+        BEGIN
+          SELECT RAISE(ABORT, 'token event denied');
+        END
+      `);
+      const execSpy = vi.spyOn(db.raw, 'exec');
+
+      expect(() => engine.completeTurn({
+        sessionTokens: {
+          dbRowId: sessionRowId,
+          inputTokens: 11,
+          outputTokens: 7,
+        },
+      })).toThrow(/token event denied/);
+
+      expect(execSpy.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN IMMEDIATE', 'ROLLBACK']);
+
+      const sessionRow = db.raw.prepare(
+        'SELECT total_input_tokens, total_output_tokens FROM agent_sessions WHERE id = ?',
+      ).get(sessionRowId) as any;
+      expect(sessionRow.total_input_tokens).toBe(0);
+      expect(sessionRow.total_output_tokens).toBe(0);
+
+      const tokenEvents = db.raw.prepare(
+        'SELECT COUNT(*) as count FROM agent_token_events WHERE agent_session_id = ?',
+      ).get(sessionRowId) as any;
+      expect(tokenEvents.count).toBe(0);
+    });
   });
 
   describe('sendTracked', () => {
