@@ -344,6 +344,46 @@ describe('ConnectionManager — phase transitions', () => {
 
     await manager.shutdown();
   });
+
+  it('restartRequired flapping uses backoff instead of immediate reconnect', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    for (let i = 0; i < 9; i++) {
+      sockets[i]!.emit(closeEvent(515));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(i + 2);
+    }
+
+    sockets[9]!.emit(closeEvent(515));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(10);
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      reconnectAttempts: 1,
+      reconnectPhase: 'backoff',
+    });
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(10);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(11);
+
+    await manager.shutdown();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -710,6 +750,173 @@ describe('ConnectionManager — keepalive', () => {
     await Promise.resolve();
 
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+});
+
+describe('ConnectionManager — lifecycle edge coverage', () => {
+  it('getConnectionState returns connection, keepalive, and reconnect metadata', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'disconnected',
+      connected: false,
+      reconnectAttempts: 0,
+      reconnectPhase: 'backoff',
+      firstFailureAt: null,
+      lastPingAt: null,
+      lastPongAt: null,
+    });
+
+    await manager.connect();
+    await vi.advanceTimersByTimeAsync(100);
+    emit(openEvent());
+
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'connected',
+      connected: true,
+      reconnectAttempts: 0,
+      reconnectPhase: null,
+      stateChangedAt: '2026-05-10T12:00:00.100Z',
+      firstFailureAt: null,
+    });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(manager.getConnectionState()).toMatchObject({
+      lastPingAt: '2026-05-10T12:00:30.100Z',
+      lastPongAt: '2026-05-10T12:00:30.100Z',
+    });
+
+    await vi.advanceTimersByTimeAsync(50);
+    emit(closeEvent(428));
+
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      reconnectAttempts: 1,
+      reconnectPhase: 'backoff',
+      stateChangedAt: '2026-05-10T12:00:30.150Z',
+      firstFailureAt: '2026-05-10T12:00:30.150Z',
+    });
+
+    await manager.shutdown();
+  });
+
+  it('shutdown transitions to shutting_down and closes the current socket', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:10:00.000Z'));
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+
+    await manager.shutdown();
+
+    expect(mockSock.end).toHaveBeenCalledWith(undefined);
+    expect(manager.getSocket()).toBeNull();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'shutting_down',
+      connected: false,
+      reconnectPhase: 'backoff',
+      stateChangedAt: '2026-05-10T12:10:00.000Z',
+    });
+  });
+
+  it('QR updates do not replace the active connection or schedule reconnect', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit({ 'connection.update': { qr: 'pair-me' } });
+    await Promise.resolve();
+
+    expect(manager.getSocket()).toBe(mockSock);
+    expect(mockSock.end).not.toHaveBeenCalled();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'connecting',
+      connected: false,
+      reconnectAttempts: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
+  it('send paths reject clearly when no socket is connected', async () => {
+    const manager = new ConnectionManager();
+
+    await expect(manager.sendMessage('111@s.whatsapp.net', 'hello')).rejects.toMatchObject({
+      name: 'WhatSoupError',
+      code: 'CONNECTION_UNAVAILABLE',
+      message: 'WhatsApp is not connected',
+    });
+    await expect(manager.sendRaw('111@s.whatsapp.net', { text: 'hello' })).rejects.toMatchObject({
+      name: 'WhatSoupError',
+      code: 'CONNECTION_UNAVAILABLE',
+      message: 'WhatsApp is not connected',
+    });
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'image',
+        buffer: Buffer.from('image'),
+        mimetype: 'image/png',
+      }),
+    ).rejects.toMatchObject({
+      name: 'WhatSoupError',
+      code: 'CONNECTION_UNAVAILABLE',
+      message: 'WhatsApp is not connected',
+    });
+  });
+
+  it('ignores events emitted by stale sockets after reconnect', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    const contactsUpsertSpy = vi.fn();
+    manager.on('contactsUpsert', contactsUpsertSpy);
+
+    await manager.connect();
+    sockets[0]!.emit(closeEvent(515));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    sockets[0]!.emit({
+      'connection.update': { connection: 'open' },
+      'contacts.upsert': [{ id: 'stale@s.whatsapp.net', name: 'Stale' }],
+    });
+
+    expect(contactsUpsertSpy).not.toHaveBeenCalled();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'connecting',
+      connected: false,
+    });
+
+    sockets[1]!.emit({
+      'connection.update': { connection: 'open' },
+      'contacts.upsert': [{ id: 'fresh@s.whatsapp.net', name: 'Fresh' }],
+    });
+
+    expect(contactsUpsertSpy).toHaveBeenCalledWith([
+      { id: 'fresh@s.whatsapp.net', name: 'Fresh' },
+    ]);
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'connected',
+      connected: true,
+    });
 
     await manager.shutdown();
   });
