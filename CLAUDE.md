@@ -57,3 +57,4 @@ Key files:
 - `docs/tools.md` — complete MCP tool API reference (127 tools, 13 modules)
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms
+- `docs/security-handoffs/` — open security handoffs that belong to the WhatSoup application lifecycle
