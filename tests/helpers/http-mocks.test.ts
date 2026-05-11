@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { makeDeps, mockReq, mockRes } from './http-mocks.ts';
+import type { FeedDeps } from '../../src/fleet/routes/feed.ts';
 
 describe('http test helpers', () => {
   it('creates an IncomingMessage-like request with async body delivery', async () => {
@@ -37,5 +38,20 @@ describe('http test helpers', () => {
     expect(Array.from(deps.discovery.getInstances().keys())).toEqual(['line-a']);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
     expect(deps.serviceManager.restart).not.toHaveBeenCalled();
+  });
+
+  it('keeps base helpers available when typed with a route dependency shape', () => {
+    const deps = makeDeps<FeedDeps>({
+      healthPoller: { getStatus: vi.fn(() => undefined) } as unknown as FeedDeps['healthPoller'],
+      dbReader: {
+        getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+        getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+      } as unknown as FeedDeps['dbReader'],
+    });
+
+    expect(deps.discovery.getInstance('missing')).toBeUndefined();
+    expect(deps.healthPoller.getStatus('line-a')).toBeUndefined();
+    expect(deps.dbReader.getMessagesByIds('line-a', '/tmp/test.db', [])).toEqual({ ok: true, data: [] });
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 });

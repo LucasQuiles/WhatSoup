@@ -15,6 +15,21 @@ export type MockRes = ServerResponse & {
   _body: string;
 };
 
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends Record<string, unknown> ? DeepPartial<T[K]> : T[K];
+};
+
+export interface CommonRouteDeps {
+  discovery: {
+    getInstance: ReturnType<typeof vi.fn>;
+    getInstances: ReturnType<typeof vi.fn>;
+  };
+  realtime: {
+    publish: ReturnType<typeof vi.fn>;
+  };
+  serviceManager: ReturnType<typeof mockServiceManager>;
+}
+
 export function mockReq({
   body = '',
   headers = {},
@@ -66,8 +81,10 @@ function mockServiceManager() {
   };
 }
 
-export function makeDeps<T extends Record<string, unknown> = Record<string, unknown>>(overrides: Partial<T> = {}): T {
-  const base = {
+export function makeDeps(): CommonRouteDeps;
+export function makeDeps<T extends object>(overrides: DeepPartial<T>): CommonRouteDeps & T;
+export function makeDeps<T extends object>(overrides: DeepPartial<T> = {}): CommonRouteDeps & T {
+  const base: CommonRouteDeps = {
     discovery: {
       getInstance: vi.fn(() => undefined),
       getInstances: vi.fn(() => new Map()),
@@ -75,11 +92,7 @@ export function makeDeps<T extends Record<string, unknown> = Record<string, unkn
     realtime: { publish: vi.fn() },
     serviceManager: mockServiceManager(),
   };
-  const typedOverrides = overrides as {
-    discovery?: Record<string, unknown>;
-    realtime?: Record<string, unknown>;
-    serviceManager?: Record<string, unknown>;
-  };
+  const typedOverrides = overrides as DeepPartial<CommonRouteDeps>;
 
   return {
     ...base,
@@ -87,5 +100,5 @@ export function makeDeps<T extends Record<string, unknown> = Record<string, unkn
     discovery: { ...base.discovery, ...typedOverrides.discovery },
     realtime: { ...base.realtime, ...typedOverrides.realtime },
     serviceManager: { ...base.serviceManager, ...typedOverrides.serviceManager },
-  } as T;
+  } as unknown as CommonRouteDeps & T;
 }

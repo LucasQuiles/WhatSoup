@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { waitForMessage, waitForSocket } from './wait-for.ts';
+import { waitForExit, waitForMessage, waitForSocket } from './wait-for.ts';
 
 const cleanupPaths: string[] = [];
 
@@ -52,5 +52,38 @@ describe('wait-for test helpers', () => {
     ws.emit('message', Buffer.from('{"ok":true}'));
 
     await expect(promise).resolves.toEqual({ ok: true });
+  });
+
+  it('removes the message listener when the wait times out', async () => {
+    vi.useFakeTimers();
+    const ws = new EventEmitter();
+    const promise = waitForMessage(ws, 5);
+    const expectation = expect(promise).rejects.toThrow('message timeout');
+
+    await vi.advanceTimersByTimeAsync(5);
+
+    await expectation;
+    expect(ws.listenerCount('message')).toBe(0);
+  });
+
+  it('resolves with the child process exit code and signal', async () => {
+    const child = new EventEmitter();
+    const promise = waitForExit(child);
+
+    child.emit('exit', 0, null);
+
+    await expect(promise).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it('removes the exit listener when the wait times out', async () => {
+    vi.useFakeTimers();
+    const child = new EventEmitter();
+    const promise = waitForExit(child, 5);
+    const expectation = expect(promise).rejects.toThrow('exit timeout');
+
+    await vi.advanceTimersByTimeAsync(5);
+
+    await expectation;
+    expect(child.listenerCount('exit')).toBe(0);
   });
 });
