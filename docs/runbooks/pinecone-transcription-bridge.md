@@ -19,14 +19,15 @@ they are explicitly allowed to use; review
 `docs/security-review-provider-permission-inheritance-2026-04-04.md` before
 reusing wrapper-exported secrets across providers or instances.
 
-Example macOS keychain write:
+For macOS Keychain, prefer the Keychain Access app or a deployment-owned helper
+that accepts the secret through a private prompt or stdin. Avoid examples that
+place real keys in command arguments, because process listings and shell history
+can expose them. The stored item should use these attributes:
 
-```bash
-security add-generic-password -U \
-  -k ~/.config/<deployment>-secrets.keychain-db \
-  -a <account> \
-  -s pinecone \
-  -w '<pinecone-key>'
+```text
+keychain: ~/.config/<deployment>-secrets.keychain-db
+account: <account>
+service: pinecone
 ```
 
 Verify wrapper injection without printing the secret:
@@ -98,9 +99,9 @@ queries then call the resolved profile `embedUrl` from `src/mcp/tools/knowledge.
 
 Keep `memory.pinecone.allowedIndexes` empty until the agent should expose
 `knowledge_search`. If an index is added later, the agent still needs either
-`agentOptions.sandboxPerChat: true` or
-`memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true`; the default is
-fail-closed for non-sandboxed global sessions.
+`agentOptions.sessionScope: "per_chat"` with `agentOptions.sandboxPerChat: true`,
+or `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true`; the default
+is fail-closed for non-sandboxed global sessions.
 
 Legacy fields such as `pineconeIndex` and `pineconeAllowedIndexes` are still
 read at runtime, but new writes should be canonical. Migrate without touching
@@ -166,7 +167,7 @@ Operator-invoked retroactive enrichment of messages with
 `enrichment_processed_at IS NULL`:
 
 ```bash
-npx tsx scripts/backfill-enrichment.ts --strict --provider {anthropic|openai} --instance <instance> --run-id <id>
+npm run backfill-enrichment -- --strict --provider {anthropic|openai} --instance <instance> --run-id <id>
 ```
 
 `--strict` is fail-closed. If extraction or validation raises a structured
@@ -194,12 +195,12 @@ and `WHATSOUP_API_TIMEOUT_MS`.
 ## Local Model Recipe
 
 ```bash
-OPENAI_API_KEY="ollama-placeholder"
-OPENAI_BASE_URL="http://localhost:11434/v1"
-EXTRACTION_MODEL=<local-extraction-model>
-VALIDATION_MODEL=<local-validation-model>
+OPENAI_API_KEY="ollama-placeholder" \
+OPENAI_BASE_URL="http://localhost:11434/v1" \
+EXTRACTION_MODEL=<local-extraction-model> \
+VALIDATION_MODEL=<local-validation-model> \
 WHATSOUP_API_TIMEOUT_MS=60000 \
-  npx tsx scripts/backfill-enrichment.ts --strict --provider openai --instance <instance>
+  npm run backfill-enrichment -- --strict --provider openai --instance <instance>
 ```
 
 The OpenAI-compatible SDK path requires a non-empty API key value, so use a

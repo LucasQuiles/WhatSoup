@@ -134,9 +134,10 @@ Recommended Pinecone guard shape:
 ```
 
 Keep `allowedIndexes` empty unless the agent should expose `knowledge_search`.
-When enabled, prefer `agentOptions.sandboxPerChat: true`; otherwise explicitly
-set `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true` after
-reviewing the blast radius.
+When enabled, prefer `agentOptions.sessionScope: "per_chat"` with
+`agentOptions.sandboxPerChat: true`; otherwise explicitly set
+`memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true` after reviewing
+the blast radius.
 
 ## Data Paths
 
