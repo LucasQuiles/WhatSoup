@@ -14,6 +14,8 @@ export interface MemoryConsolidationSchedulerConfig {
 export class MemoryConsolidationScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private stopped = true;
+  private activeRun: Promise<void> | null = null;
   private pinecone: Pick<PineconeMemory, 'search' | 'upsert'>;
   private provider: LLMProvider;
   private config: MemoryConsolidationSchedulerConfig;
@@ -30,17 +32,40 @@ export class MemoryConsolidationScheduler {
 
   start(): void {
     if (this.timer) return;
-    this.runOnce().catch((err) => log.error({ err }, 'memory consolidation: immediate run failed'));
+    this.stopped = false;
+    this.runScheduled('immediate');
     this.timer = setInterval(() => {
-      this.runOnce().catch((err) => log.error({ err }, 'memory consolidation: periodic run failed'));
+      this.runScheduled('periodic');
     }, this.config.intervalMs);
     (this.timer as { unref?: () => void }).unref?.();
   }
 
-  stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
+  async stop(timeoutMs = 5_000): Promise<void> {
+    this.stopped = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+
+    const activeRun = this.activeRun;
+    if (!activeRun) return;
+
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const drained = Symbol('drained');
+    const timedOut = Symbol('timedOut');
+    const result = await Promise.race([
+      activeRun.then(() => drained),
+      new Promise<typeof timedOut>((resolve) => {
+        timeout = setTimeout(() => resolve(timedOut), timeoutMs);
+        timeout.unref?.();
+      }),
+    ]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
+
+    if (result === timedOut) {
+      log.warn({ timeoutMs }, 'memory consolidation: active run still draining after stop timeout');
+    }
   }
 
   async runOnce(): Promise<void> {
@@ -58,5 +83,21 @@ export class MemoryConsolidationScheduler {
     } finally {
       this.running = false;
     }
+  }
+
+  private runScheduled(kind: 'immediate' | 'periodic'): void {
+    if (this.stopped) return;
+    if (this.running) {
+      log.warn('memory consolidation: previous run still active; skipping');
+      return;
+    }
+
+    const activeRun = this.runOnce().catch((err) => {
+      log.error({ err }, `memory consolidation: ${kind} run failed`);
+    });
+    this.activeRun = activeRun;
+    activeRun.finally(() => {
+      if (this.activeRun === activeRun) this.activeRun = null;
+    });
   }
 }

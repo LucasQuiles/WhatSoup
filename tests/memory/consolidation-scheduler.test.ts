@@ -47,4 +47,59 @@ describe('MemoryConsolidationScheduler', () => {
     scheduler.stop();
     scheduler.stop();
   });
+
+  it('drains the active run before stop resolves', async () => {
+    let resolveSearch: ((results: []) => void) | undefined;
+    pinecone.search.mockReturnValue(new Promise<[]>((resolve) => {
+      resolveSearch = resolve;
+    }));
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+
+    scheduler.start();
+
+    let stopResolved = false;
+    const stopPromise = scheduler.stop().then(() => {
+      stopResolved = true;
+    });
+    await Promise.resolve();
+
+    expect(stopResolved).toBe(false);
+    resolveSearch?.([]);
+    await stopPromise;
+    expect(stopResolved).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pinecone.search).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps tracking the active run when an interval tick is skipped', async () => {
+    let resolveSearch: ((results: []) => void) | undefined;
+    pinecone.search.mockReturnValue(new Promise<[]>((resolve) => {
+      resolveSearch = resolve;
+    }));
+    const scheduler = new MemoryConsolidationScheduler(pinecone, provider as any, {
+      intervalMs: 60_000,
+      lookbackDays: 7,
+      dryRun: true,
+    });
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pinecone.search).toHaveBeenCalledTimes(1);
+
+    let stopResolved = false;
+    const stopPromise = scheduler.stop().then(() => {
+      stopResolved = true;
+    });
+    await Promise.resolve();
+
+    expect(stopResolved).toBe(false);
+    resolveSearch?.([]);
+    await stopPromise;
+    expect(stopResolved).toBe(true);
+  });
 });

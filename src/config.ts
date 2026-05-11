@@ -155,14 +155,36 @@ function numberProp(source: Record<string, unknown> | undefined, key: string, fa
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function positiveNumberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
-  const value = numberProp(source, key, fallback);
-  return value > 0 ? value : fallback;
+function boundedIntProp(
+  source: Record<string, unknown> | undefined,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const value = source?.[key];
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= min &&
+    value <= max
+    ? value
+    : fallback;
 }
 
-function hasNonPositiveNumberProp(source: Record<string, unknown> | undefined, key: string): boolean {
+function hasInvalidBoundedIntProp(
+  source: Record<string, unknown> | undefined,
+  key: string,
+  min: number,
+  max: number,
+): boolean {
+  if (!source || !(key in source)) return false;
   const value = source?.[key];
-  return typeof value === 'number' && Number.isFinite(value) && value <= 0;
+  return typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max;
 }
 
 function booleanProp(source: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
@@ -567,8 +589,8 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   const retention = record(memoryRoot?.retention);
   const consolidation = record(memoryRoot?.consolidation);
   const invalidConsolidationSchedule =
-    hasNonPositiveNumberProp(consolidation, 'intervalHours') ||
-    hasNonPositiveNumberProp(consolidation, 'lookbackDays');
+    hasInvalidBoundedIntProp(consolidation, 'intervalHours', 1, 168) ||
+    hasInvalidBoundedIntProp(consolidation, 'lookbackDays', 1, 90);
   const enrichment = record(memoryRoot?.enrichment);
   const pinecone = record(memoryRoot?.pinecone);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
@@ -634,8 +656,8 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     },
     consolidation: {
       enabled: booleanProp(consolidation, 'enabled', false) && !invalidConsolidationSchedule,
-      intervalHours: positiveNumberProp(consolidation, 'intervalHours', 24),
-      lookbackDays: positiveNumberProp(consolidation, 'lookbackDays', 14),
+      intervalHours: boundedIntProp(consolidation, 'intervalHours', 24, 1, 168),
+      lookbackDays: boundedIntProp(consolidation, 'lookbackDays', 14, 1, 90),
       dryRun: booleanProp(consolidation, 'dryRun', true),
     },
     enrichment: {

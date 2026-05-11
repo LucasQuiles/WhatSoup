@@ -431,6 +431,26 @@ describe('config — memory section (substrate slice 1)', () => {
     });
   });
 
+  it('disables memory consolidation when schedule values are out of bounds', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        consolidation: {
+          enabled: true,
+          intervalHours: 0.000001,
+          lookbackDays: 3650,
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.consolidation).toEqual({
+      enabled: false,
+      intervalHours: 24,
+      lookbackDays: 14,
+      dryRun: true,
+    });
+  });
+
   it('accepts absolute vaultPath unchanged', async () => {
     const instancePaths = {
       configRoot: path.join(tmpDir, 'inst-config'),
