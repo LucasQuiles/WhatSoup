@@ -2,7 +2,7 @@
 
 ## What's in the substrate
 
-Per-instance durable memory: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs`. MCP tools live in `src/mcp/tools/substrate.ts` (18 tools). Obsidian vault defaults to `~/Documents/Obsidian/whatsoup-memory`, config key `memory.vaultPath`.
+Per-instance durable memory: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs`. MCP tools live in `src/mcp/tools/substrate.ts` (19 tools). Obsidian vault defaults to `~/Documents/Obsidian/whatsoup-memory`, config key `memory.vaultPath`.
 
 ## Migration rollback
 
@@ -29,9 +29,14 @@ Greenfield migration — no data is lost on rollback unless substrate rows were 
 
 ## Vault regen
 
-The projector is library code; no CLI wrapper in slice 1. WhatSoup has no
-build step (source `.ts` files are loaded via Node's native strip-types), so
-the regen snippet imports the `.ts` modules directly. From the repo root:
+Admins can rebuild the projection through the global MCP tool
+`regenerate_vault`. The tool is admin-gated and rewrites the Obsidian
+projection from current substrate state.
+
+For offline maintenance without MCP, the projector is also library code.
+WhatSoup has no build step (source `.ts` files are loaded via Node's native
+strip-types), so the regen snippet imports the `.ts` modules directly. From
+the repo root:
 
 ```
 node --experimental-strip-types --input-type=module -e "
@@ -43,8 +48,6 @@ node --experimental-strip-types --input-type=module -e "
   db.close();
 "
 ```
-
-Slice 3 will add a proper CLI wrapper.
 
 ## Common operations
 

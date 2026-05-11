@@ -24,7 +24,7 @@ import {
 } from '../../core/substrate/entities.ts';
 import { nowUnixSec } from '../../core/substrate/time.ts';
 import type { EntityRef, TriggerKind } from '../../core/substrate/types.ts';
-import { regenerateVault, projectBead, projectEntity } from '../../core/substrate/vault.ts';
+import { regenerateVault, projectBead, projectEntity, removeEntityProjection } from '../../core/substrate/vault.ts';
 
 const log = createChildLogger('mcp:substrate');
 
@@ -90,6 +90,14 @@ function projectEntityQuietly(deps: SubstrateDeps, entityId: number): void {
     projectEntity(deps.db, { vaultPath: deps.memory.vaultPath, entityId });
   } catch (err) {
     log.warn({ err, entityId }, 'substrate vault projection failed for entity');
+  }
+}
+
+function removeEntityProjectionQuietly(deps: SubstrateDeps, entityId: number): void {
+  try {
+    removeEntityProjection(deps.db, { vaultPath: deps.memory.vaultPath, entityId });
+  } catch (err) {
+    log.warn({ err, entityId }, 'substrate vault projection cleanup failed for entity');
   }
 }
 
@@ -510,6 +518,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { from_id: number; into_id: number };
       mergeEntities(deps.db, { fromId: p.from_id, intoId: p.into_id });
+      removeEntityProjectionQuietly(deps, p.from_id);
       projectEntityQuietly(deps, p.into_id);
       return { ok: true };
     },

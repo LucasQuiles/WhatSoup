@@ -287,4 +287,17 @@ describe('substrate MCP tools', () => {
 
     expect(readFileSync(file, 'utf8')).not.toContain('temporary profile note');
   });
+
+  it('merge_entities removes stale loser profile projection', async () => {
+    const from = upsertEntity(db.raw, { canonicalName: 'Old Name', kind: 'person' });
+    const into = upsertEntity(db.raw, { canonicalName: 'New Name', kind: 'person' });
+    await registry.call('regenerate_vault', {}, adminSession);
+    const staleFile = join(vaultPath, 'Profiles/person', 'Old-Name.md');
+    expect(existsSync(staleFile)).toBe(true);
+
+    await registry.call('merge_entities', { from_id: from.id, into_id: into.id }, adminSession);
+
+    expect(existsSync(staleFile)).toBe(false);
+    expect(existsSync(join(vaultPath, 'Profiles/person', 'New-Name.md'))).toBe(true);
+  });
 });

@@ -106,6 +106,16 @@ export function projectBead(db: DatabaseSync, args: ProjectBeadArgs): string | n
 
 export interface ProjectEntityArgs { vaultPath: string; entityId: number; }
 
+export function removeEntityProjection(db: DatabaseSync, args: ProjectEntityArgs): void {
+  const entity = db.prepare(`SELECT kind, canonical_name FROM entities WHERE id = ?`).get(args.entityId) as Pick<EntityRow, 'kind' | 'canonical_name'> | undefined;
+  if (!entity) return;
+  try {
+    unlinkSync(join(args.vaultPath, `Profiles/${entity.kind}`, `${safeSlug(entity.canonical_name)}.md`));
+  } catch {
+    // Missing stale projections are expected when the vault has not been generated.
+  }
+}
+
 export function projectEntity(db: DatabaseSync, args: ProjectEntityArgs): string | null {
   ensureFolders(args.vaultPath);
   const profile = getProfile(db, { entityId: args.entityId });
