@@ -988,6 +988,80 @@ describe('handleConfigUpdate', () => {
     expect(fileMode(settingsPath)).toBe(0o600);
   });
 
+  it('returns 500 and preserves config when settingsJson cannot be written during config update', async () => {
+    const originalConfig = {
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+    };
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify(originalConfig));
+    const claudeDir = path.join(agentCwd, '.claude');
+    fs.mkdirSync(path.join(claudeDir, 'settings.json'), { recursive: true });
+
+    const inst = fakeInstance({ type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        accessMode: 'allowlist',
+        settingsJson: {
+          permissions: {
+            allow: ['Bash'],
+            deny: [],
+            defaultMode: 'bypassPermissions',
+          },
+        },
+      })),
+      res,
+      deps,
+      { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/failed to write settings\.json/);
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
+    expect(fs.existsSync(configPath + '.tmp')).toBe(false);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 and preserves config when enabledPlugins cannot be written during config update', async () => {
+    const originalConfig = {
+      type: 'agent',
+      healthPort: 3010,
+      accessMode: 'self_only',
+      agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+    };
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify(originalConfig));
+    const claudeDir = path.join(agentCwd, '.claude');
+    fs.mkdirSync(path.join(claudeDir, 'settings.json'), { recursive: true });
+
+    const inst = fakeInstance({ type: 'agent', configPath });
+    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        accessMode: 'allowlist',
+        agentOptions: {
+          enabledPlugins: { github: true },
+        },
+      })),
+      res,
+      deps,
+      { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/failed to write enabledPlugins/);
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
+    expect(fs.existsSync(configPath + '.tmp')).toBe(false);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+  });
+
   it('defaults an existing empty agent cwd before writing CLAUDE.md during config update', async () => {
     const homeDir = path.join(tmpDir, 'home');
     fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
