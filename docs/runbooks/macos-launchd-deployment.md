@@ -14,9 +14,26 @@ transcription, or vector embedding, see
 - The live checkout is an operator-owned path such as `~/LAB/WhatSoup`.
 - Each instance has a config directory at
   `~/.config/whatsoup/instances/<instance>/`.
-- Secrets are injected by wrapper scripts or a service manager, not stored in
-  `config.json`.
+- Secret stores or service managers are the source of truth. If a wrapper is
+  used, it only projects required values into the runtime process environment;
+  raw values are never stored in `config.json`, plist files, shell history, or
+  tracked docs.
 - Memory and search settings are canonical under `memory.pinecone`.
+
+## Security Posture
+
+This runbook describes deployment mechanics, not the end-state credential
+model. Treat environment-projection wrappers and `tokens.env` health-token
+files as compatibility paths that must remain private to the operator account.
+Before promoting a deployment pattern, review:
+
+- `docs/security-review-provider-permission-inheritance-2026-04-04.md`
+- `docs/specs/2026-05-08-whatsoup-protection-layer-design.md`
+
+Those documents define the stricter direction: per-instance/provider secret
+scope, no inherited broad environment for child providers, mode-restricted
+secret files, and posture checks that verify presence/absence without reading
+secret values.
 
 ## Shell PATH
 
@@ -51,9 +68,12 @@ Example wrapper chain:
     /opt/homebrew/bin/node /path/to/WhatSoup/src/bootstrap.ts <instance>
 ```
 
-Keep wrapper names deployment-owned. The WhatSoup config should only reference
-the environment variable names those wrappers export, for example
-`memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"` or a tenant-specific key name.
+Keep wrapper names deployment-owned and keep wrapper output silent. The WhatSoup
+config should only reference the environment variable names those wrappers
+export, for example `memory.pinecone.apiKeyEnv = "PINECONE_API_KEY"` or a
+tenant-specific key name. Do not use wrapper-based broad env inheritance for
+agent child processes unless the provider environment allowlist has been
+reviewed for that deployment.
 
 ## Instance Configs
 
@@ -61,8 +81,10 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
 
 - `config.json` - instance schema, access mode, health port, agent options,
   memory config, and `enabled`.
-- `tokens.env` - per-instance health token, read by fleet until the deployment
-  moves to keyring-backed health tokens.
+- `tokens.env` - transitional per-instance health-token file used by fleet
+  discovery. Prefer keyring-backed scoped health tokens where available; if a
+  file is required, keep it mode `0600`, owned by the instance operator, and
+  outside tracked paths.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
 

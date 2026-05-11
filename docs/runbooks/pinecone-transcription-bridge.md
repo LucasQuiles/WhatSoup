@@ -9,7 +9,15 @@ owned by each deployment.
 ## Secret Injection
 
 Store provider keys in the operator's secret store, then export them through a
-wrapper or service manager. Do not write key values into `config.json`.
+service manager or a narrow wrapper that only projects the required values into
+the runtime process environment. Do not write key values into `config.json`,
+plist files, shell history, logs, or tracked docs.
+
+This is a compatibility deployment path, not a reason to broaden process
+inheritance. Agent child processes should receive only the provider variables
+they are explicitly allowed to use; review
+`docs/security-review-provider-permission-inheritance-2026-04-04.md` before
+reusing wrapper-exported secrets across providers or instances.
 
 Example macOS keychain write:
 
@@ -31,7 +39,8 @@ PY
 ```
 
 For BYOK deployments, the wrapper may export a tenant-specific environment
-variable. Match that name in `memory.pinecone.apiKeyEnv`.
+variable. Match that name in `memory.pinecone.apiKeyEnv`, and keep the variable
+scoped to the instance process rather than a global shell profile.
 
 ## Launch Wrapper
 
@@ -42,6 +51,10 @@ Pinecone memory or `knowledge_search`:
 ~/.local/bin/with-pinecone-env \
   /opt/homebrew/bin/node /path/to/WhatSoup/src/bootstrap.ts <instance>
 ```
+
+The wrapper must not print secrets, write temporary secret files, or export
+unrelated provider credentials. If the instance starts agent subprocesses,
+validate the child-provider env allowlist before enabling `knowledge_search`.
 
 Reload launchd after plist edits:
 
@@ -103,6 +116,11 @@ The migration helper rewrites only `config.json` and creates a
 `config.json.bak-*` backup by default. It does not touch `auth/`, `tokens.env`,
 `bot.db`, keychains, or provider secret stores, so a successful config migration
 should not require a WhatsApp QR re-auth.
+
+`tokens.env` is mentioned here only as an existing health-token compatibility
+file. New deployments should prefer scoped keyring-backed health tokens where
+the platform supports them; file-backed health tokens must remain outside the
+repo, mode `0600`, and owned by the instance operator.
 
 ## Local Transcription Bootstrap
 
@@ -185,4 +203,6 @@ WHATSOUP_API_TIMEOUT_MS=60000 \
 ```
 
 The OpenAI-compatible SDK path requires a non-empty API key value, so use a
-non-secret placeholder when routing through a local endpoint.
+non-secret placeholder when routing through a local endpoint. Keep the
+assignment command-scoped as shown; do not store placeholder or real provider
+keys in persistent shell profiles unless that is an explicit local policy.
