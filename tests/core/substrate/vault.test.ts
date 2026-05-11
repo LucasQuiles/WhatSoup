@@ -46,6 +46,26 @@ describe('vault projector', () => {
     expect(content).toContain(`# call Alex`);
   });
 
+  it('projectBead removes stale files from prior status folders', () => {
+    const bead = createBead(db.raw, {
+      kind: 'task',
+      title: 'move me',
+      ownerJid: '1001@s.whatsapp.net',
+      actor: 'test',
+    });
+
+    regenerateVault(db.raw, { vaultPath });
+    const activeFile = join(vaultPath, 'Beads/active', `task-${bead.id}.md`);
+    expect(existsSync(activeFile)).toBe(true);
+
+    db.raw.prepare(`UPDATE beads SET status = 'completed' WHERE id = ?`).run(bead.id);
+    projectBead(db.raw, { vaultPath, beadId: bead.id });
+
+    const completedFile = join(vaultPath, 'Beads/completed', `task-${bead.id}.md`);
+    expect(existsSync(completedFile)).toBe(true);
+    expect(existsSync(activeFile)).toBe(false);
+  });
+
   it('projectEntity writes profile with observations', () => {
     const e = upsertEntity(db.raw, { kind: 'person', canonicalName: 'Alex' });
     captureObservation(db.raw, {

@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from '../../core/database.ts';
+import { createChildLogger } from '../../logger.ts';
 import type { ToolRegistry } from '../registry.ts';
 import type { SessionContext } from '../types.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
@@ -23,6 +24,9 @@ import {
 } from '../../core/substrate/entities.ts';
 import { nowUnixSec } from '../../core/substrate/time.ts';
 import type { EntityRef, TriggerKind } from '../../core/substrate/types.ts';
+import { regenerateVault, projectBead, projectEntity, removeEntityProjection } from '../../core/substrate/vault.ts';
+
+const log = createChildLogger('mcp:substrate');
 
 export interface SubstrateDeps {
   db: DatabaseSync;
@@ -71,6 +75,37 @@ function assertAdmin(deps: SubstrateDeps, session: SessionContext): void {
       `admin-only tool: caller phone "${phone ?? 'unresolved'}" is not on the instance admin list`,
     );
   }
+}
+
+function projectBeadQuietly(deps: SubstrateDeps, beadId: number): void {
+  try {
+    projectBead(deps.db, { vaultPath: deps.memory.vaultPath, beadId });
+  } catch (err) {
+    log.warn({ err, beadId }, 'substrate vault projection failed for bead');
+  }
+}
+
+function projectEntityQuietly(deps: SubstrateDeps, entityId: number): void {
+  try {
+    projectEntity(deps.db, { vaultPath: deps.memory.vaultPath, entityId });
+  } catch (err) {
+    log.warn({ err, entityId }, 'substrate vault projection failed for entity');
+  }
+}
+
+function removeEntityProjectionQuietly(deps: SubstrateDeps, entityId: number): void {
+  try {
+    removeEntityProjection(deps.db, { vaultPath: deps.memory.vaultPath, entityId });
+  } catch (err) {
+    log.warn({ err, entityId }, 'substrate vault projection cleanup failed for entity');
+  }
+}
+
+function projectObservationEntityQuietly(deps: SubstrateDeps, observationId: number): void {
+  const row = deps.db.prepare(
+    `SELECT entity_id FROM entity_observations WHERE id = ?`
+  ).get(observationId) as { entity_id: number } | undefined;
+  if (row) projectEntityQuietly(deps, row.entity_id);
 }
 
 const EntityRefSchema = z.object({
@@ -137,6 +172,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         actor: 'user',
       });
       const trigger = createTrigger(deps.db, { ...triggerArgs, beadId: bead.id });
+      projectBeadQuietly(deps, bead.id);
       return { bead_id: bead.id, trigger_id: trigger.id };
     },
   });
@@ -189,7 +225,21 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         actor: 'user',
       });
       const trigger = createTrigger(deps.db, { ...triggerArgs, beadId: bead.id });
+      projectBeadQuietly(deps, bead.id);
       return { bead_id: bead.id, trigger_id: trigger.id, terminal_at: trigger.terminal_at };
+    },
+  });
+
+  registry.register({
+    name: 'regenerate_vault',
+    description: 'Regenerate the Obsidian vault projection from current substrate state. Admin only.',
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    replayPolicy: 'unsafe',
+    schema: z.object({}),
+    handler: async (_raw, session) => {
+      assertAdmin(deps, session);
+      return regenerateVault(deps.db, { vaultPath: deps.memory.vaultPath });
     },
   });
 
@@ -222,6 +272,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         priority: p.priority ?? 0,
         actor: 'user',
       });
+      projectBeadQuietly(deps, bead.id);
       return { bead_id: bead.id };
     },
   });
@@ -263,6 +314,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
         supersedesObservationId: p.supersedes_observation_id ?? null,
         metadata: p.metadata,
       });
+      projectEntityQuietly(deps, o.entity_id);
       return { observation_id: o.id, entity_id: o.entity_id };
     },
   });
@@ -325,6 +377,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { id: number; fields: Record<string, unknown> };
       updateBead(deps.db, p.id, { fields: p.fields as never, actor: 'user' });
+      projectBeadQuietly(deps, p.id);
       return { ok: true };
     },
   });
@@ -338,6 +391,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { id: number; note?: string };
       completeBead(deps.db, p.id, { actor: 'user', note: p.note });
+      projectBeadQuietly(deps, p.id);
       return { ok: true };
     },
   });
@@ -351,6 +405,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { id: number; reason?: string };
       cancelBead(deps.db, p.id, { actor: 'user', reason: p.reason });
+      projectBeadQuietly(deps, p.id);
       return { ok: true };
     },
   });
@@ -366,6 +421,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       if (p.overrides) assertMutableBeadFields(p.overrides);
       approveProposal(deps.db, p.id, { actor: 'user' });
       if (p.overrides) updateBead(deps.db, p.id, { fields: p.overrides as never, actor: 'user' });
+      projectBeadQuietly(deps, p.id);
       return { ok: true };
     },
   });
@@ -379,6 +435,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { id: number; reason?: string };
       rejectProposal(deps.db, p.id, { actor: 'user', reason: p.reason });
+      projectBeadQuietly(deps, p.id);
       return { ok: true };
     },
   });
@@ -461,6 +518,8 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { from_id: number; into_id: number };
       mergeEntities(deps.db, { fromId: p.from_id, intoId: p.into_id });
+      removeEntityProjectionQuietly(deps, p.from_id);
+      projectEntityQuietly(deps, p.into_id);
       return { ok: true };
     },
   });
@@ -474,6 +533,7 @@ export function registerSubstrateTools(registry: ToolRegistry, deps: SubstrateDe
       assertAdmin(deps, session);
       const p = raw as { id: number; reason: string };
       forgetObservation(deps.db, p.id, p.reason);
+      projectObservationEntityQuietly(deps, p.id);
       return { ok: true };
     },
   });

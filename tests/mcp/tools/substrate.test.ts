@@ -2,14 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { createBead, getBead } from '../../../src/core/substrate/beads.ts';
+import { captureObservation, upsertEntity } from '../../../src/core/substrate/entities.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
+function tmpDir() { return join(tmpdir(), `sub-vault-${randomBytes(8).toString('hex')}`); }
 
 const EXPECTED_TOOLS = [
   'create_agent_job', 'create_watch', 'capture_task', 'capture_observation',
@@ -17,6 +19,7 @@ const EXPECTED_TOOLS = [
   'approve_proposal', 'reject_proposal',
   'list_triggers', 'pause_trigger', 'extend_trigger',
   'get_profile', 'list_entities', 'merge_entities', 'forget_observation',
+  'regenerate_vault',
 ];
 
 const adminPhone = '1001';
@@ -33,10 +36,11 @@ function parseResult(r: { content: Array<{ type: string; text: string }>; isErro
 }
 
 describe('substrate MCP tools', () => {
-  let dbPath: string; let db: Database; let registry: ToolRegistry;
+  let dbPath: string; let vaultPath: string; let db: Database; let registry: ToolRegistry;
 
   beforeEach(() => {
     dbPath = tmpFile();
+    vaultPath = tmpDir();
     db = new Database(dbPath); db.open();
     registry = new ToolRegistry();
     registerSubstrateTools(registry, {
@@ -44,22 +48,32 @@ describe('substrate MCP tools', () => {
       dbWrapper: db,
       adminPhones: new Set<string>([adminPhone]),
       memory: {
-        adminJid: adminPhone, vaultPath: tmpdir(),
+        adminJid: adminPhone, vaultPath,
         observationConfidenceMin: 0.4,
         sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.8, lookbackHours: 48, reviewByDays: 7 },
         watchTtl: { defaultHours: 24, maxHours: 72 },
       },
     });
   });
-  afterEach(() => { db.close(); if (existsSync(dbPath)) unlinkSync(dbPath); });
+  afterEach(() => {
+    db.close();
+    if (existsSync(dbPath)) unlinkSync(dbPath);
+    if (existsSync(vaultPath)) rmSync(vaultPath, { recursive: true, force: true });
+  });
 
-  it('registers all 18 tools', () => {
+  it('registers all 19 tools', () => {
     const names = registry.listTools(adminSession).map(t => t.name);
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
 
   it('guest (non-admin actorJid) is rejected on capture_task', async () => {
     const res = await registry.call('capture_task', { title: 'x' }, guestSession);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/admin/i);
+  });
+
+  it('regenerate_vault is admin gated', async () => {
+    const res = await registry.call('regenerate_vault', {}, guestSession);
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/admin/i);
   });
@@ -99,6 +113,68 @@ describe('substrate MCP tools', () => {
     expect(res.bead_id).toBeGreaterThan(0);
     const list = parseResult(await registry.call('list_beads', { owner_jid: adminPhone }, adminSession));
     expect(list.beads.map((b: { title: string }) => b.title)).toContain('test task');
+  });
+
+  it('regenerate_vault projects existing beads and entities', async () => {
+    const task = createBead(db.raw, {
+      kind: 'task',
+      title: 'vault task',
+      ownerJid: adminPhone,
+      actor: 'test',
+    });
+    const entity = upsertEntity(db.raw, { canonicalName: 'Alex', kind: 'person' });
+    captureObservation(db.raw, {
+      entityRef: { entityId: entity.id },
+      kind: 'fact',
+      text: 'prefers morning reviews',
+      confidence: 0.9,
+      sourceKind: 'manual',
+    });
+    expect(existsSync(join(vaultPath, 'Profiles/person', 'Alex.md'))).toBe(false);
+
+    const res = parseResult(await registry.call('regenerate_vault', {}, adminSession));
+
+    expect(res).toEqual({ beads: 1, entities: 1 });
+    expect(existsSync(join(vaultPath, 'Beads/active', `task-${task.id}.md`))).toBe(true);
+    expect(existsSync(join(vaultPath, 'Profiles/person', 'Alex.md'))).toBe(true);
+  });
+
+  it('capture_task projects the created bead', async () => {
+    const res = parseResult(await registry.call('capture_task', { title: 'project now' }, adminSession));
+    const file = join(vaultPath, 'Beads/active', `task-${res.bead_id}.md`);
+    expect(existsSync(file)).toBe(true);
+    expect(readFileSync(file, 'utf8')).toContain('# project now');
+  });
+
+  it('complete_bead moves the projected bead to completed', async () => {
+    const res = parseResult(await registry.call('capture_task', { title: 'finish me' }, adminSession));
+    const activeFile = join(vaultPath, 'Beads/active', `task-${res.bead_id}.md`);
+    expect(existsSync(activeFile)).toBe(true);
+
+    await registry.call('complete_bead', { id: res.bead_id, note: 'done' }, adminSession);
+
+    expect(existsSync(join(vaultPath, 'Beads/completed', `task-${res.bead_id}.md`))).toBe(true);
+    expect(existsSync(activeFile)).toBe(false);
+  });
+
+  it('update_bead rewrites the projected bead', async () => {
+    const res = parseResult(await registry.call('capture_task', { title: 'old title' }, adminSession));
+    const file = join(vaultPath, 'Beads/active', `task-${res.bead_id}.md`);
+
+    await registry.call('update_bead', { id: res.bead_id, fields: { title: 'new title' } }, adminSession);
+
+    expect(readFileSync(file, 'utf8')).toContain('# new title');
+    expect(readFileSync(file, 'utf8')).not.toContain('# old title');
+  });
+
+  it('cancel_bead moves the projected bead to cancelled', async () => {
+    const res = parseResult(await registry.call('capture_task', { title: 'cancel me' }, adminSession));
+    const activeFile = join(vaultPath, 'Beads/active', `task-${res.bead_id}.md`);
+
+    await registry.call('cancel_bead', { id: res.bead_id, reason: 'duplicate' }, adminSession);
+
+    expect(existsSync(join(vaultPath, 'Beads/cancelled', `task-${res.bead_id}.md`))).toBe(true);
+    expect(existsSync(activeFile)).toBe(false);
   });
 
   it('create_agent_job + list_triggers + pause_trigger', async () => {
@@ -182,5 +258,46 @@ describe('substrate MCP tools', () => {
     }, adminSession));
     expect(profile.entity.canonical_name).toBe('Alex');
     expect(profile.observations.map((o: { text: string }) => o.text)).toContain('prefers mornings');
+  });
+
+  it('capture_observation projects the affected entity profile', async () => {
+    await registry.call('capture_observation', {
+      entity_ref: { canonical_name: 'Jordan', kind: 'person' },
+      kind: 'note',
+      text: 'likes precise review notes',
+      confidence: 0.8,
+    }, adminSession);
+
+    const file = join(vaultPath, 'Profiles/person', 'Jordan.md');
+    expect(existsSync(file)).toBe(true);
+    expect(readFileSync(file, 'utf8')).toContain('likes precise review notes');
+  });
+
+  it('forget_observation reprojects the affected entity profile', async () => {
+    const res = parseResult(await registry.call('capture_observation', {
+      entity_ref: { canonical_name: 'Taylor', kind: 'person' },
+      kind: 'note',
+      text: 'temporary profile note',
+      confidence: 0.8,
+    }, adminSession));
+    const file = join(vaultPath, 'Profiles/person', 'Taylor.md');
+    expect(readFileSync(file, 'utf8')).toContain('temporary profile note');
+
+    await registry.call('forget_observation', { id: res.observation_id, reason: 'stale' }, adminSession);
+
+    expect(readFileSync(file, 'utf8')).not.toContain('temporary profile note');
+  });
+
+  it('merge_entities removes stale loser profile projection', async () => {
+    const from = upsertEntity(db.raw, { canonicalName: 'Old Name', kind: 'person' });
+    const into = upsertEntity(db.raw, { canonicalName: 'New Name', kind: 'person' });
+    await registry.call('regenerate_vault', {}, adminSession);
+    const staleFile = join(vaultPath, 'Profiles/person', 'Old-Name.md');
+    expect(existsSync(staleFile)).toBe(true);
+
+    await registry.call('merge_entities', { from_id: from.id, into_id: into.id }, adminSession);
+
+    expect(existsSync(staleFile)).toBe(false);
+    expect(existsSync(join(vaultPath, 'Profiles/person', 'New-Name.md'))).toBe(true);
   });
 });
