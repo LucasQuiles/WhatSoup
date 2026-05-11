@@ -71,11 +71,16 @@ export function runDatabaseRetention(
 
 export class DatabaseRetentionTimer {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private db: Database;
+  private retention: DatabaseRetentionConfig;
 
   constructor(
-    private readonly db: Database,
-    private readonly retention: DatabaseRetentionConfig = DEFAULT_DATABASE_RETENTION,
-  ) {}
+    db: Database,
+    retention: DatabaseRetentionConfig = DEFAULT_DATABASE_RETENTION,
+  ) {
+    this.db = db;
+    this.retention = retention;
+  }
 
   start(intervalMs: number = this.retention.intervalMs): void {
     if (this.timer) return;
