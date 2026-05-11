@@ -1024,6 +1024,7 @@ describe('handleConfigUpdate', () => {
     expect(JSON.parse(res._body).error).toMatch(/failed to write settings\.json/);
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
     expect(fs.existsSync(configPath + '.tmp')).toBe(false);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   it('returns 500 and preserves config when enabledPlugins cannot be written during config update', async () => {
@@ -1058,6 +1059,7 @@ describe('handleConfigUpdate', () => {
     expect(JSON.parse(res._body).error).toMatch(/failed to write enabledPlugins/);
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(originalConfig);
     expect(fs.existsSync(configPath + '.tmp')).toBe(false);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 
   it('defaults an existing empty agent cwd before writing CLAUDE.md during config update', async () => {
