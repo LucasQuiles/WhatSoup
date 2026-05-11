@@ -34,6 +34,9 @@ jobs:
           printf 'chore(ci): guard smoke\n' > "$msg"
           npm run guard:repo:commit-msg -- "$msg"
 
+      - name: Documentation drift guard
+        run: npm run guard:doc-drift
+
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
 
