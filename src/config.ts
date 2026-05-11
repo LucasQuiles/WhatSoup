@@ -64,6 +64,12 @@ export interface MemoryConfig {
   retention: {
     days: number;
   };
+  consolidation: {
+    enabled: boolean;
+    intervalHours: number;
+    lookbackDays: number;
+    dryRun: boolean;
+  };
   enrichment: {
     intervalMs: number;
     batchSize: number;
@@ -147,6 +153,38 @@ function stringProp(source: Record<string, unknown> | undefined, key: string): s
 function numberProp(source: Record<string, unknown> | undefined, key: string, fallback: number): number {
   const value = source?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function boundedIntProp(
+  source: Record<string, unknown> | undefined,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const value = source?.[key];
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= min &&
+    value <= max
+    ? value
+    : fallback;
+}
+
+function hasInvalidBoundedIntProp(
+  source: Record<string, unknown> | undefined,
+  key: string,
+  min: number,
+  max: number,
+): boolean {
+  if (!source || !(key in source)) return false;
+  const value = source?.[key];
+  return typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max;
 }
 
 function booleanProp(source: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
@@ -549,6 +587,10 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   const watchTtl = record(memoryRoot?.watch_ttl);
   const conversation = record(memoryRoot?.conversation);
   const retention = record(memoryRoot?.retention);
+  const consolidation = record(memoryRoot?.consolidation);
+  const invalidConsolidationSchedule =
+    hasInvalidBoundedIntProp(consolidation, 'intervalHours', 1, 168) ||
+    hasInvalidBoundedIntProp(consolidation, 'lookbackDays', 1, 90);
   const enrichment = record(memoryRoot?.enrichment);
   const pinecone = record(memoryRoot?.pinecone);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
@@ -611,6 +653,12 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     },
     retention: {
       days: numberProp(retention, 'days', 30),
+    },
+    consolidation: {
+      enabled: booleanProp(consolidation, 'enabled', false) && !invalidConsolidationSchedule,
+      intervalHours: boundedIntProp(consolidation, 'intervalHours', 24, 1, 168),
+      lookbackDays: boundedIntProp(consolidation, 'lookbackDays', 14, 1, 90),
+      dryRun: booleanProp(consolidation, 'dryRun', true),
     },
     enrichment: {
       intervalMs: numberProp(enrichment, 'intervalMs', 60 * 1000),

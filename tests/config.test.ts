@@ -378,6 +378,79 @@ describe('config — memory section (substrate slice 1)', () => {
     expect(config.memory.vaultPath.startsWith('/')).toBe(true);
   });
 
+  it('defaults memory consolidation to disabled dry-run', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({}));
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.consolidation).toEqual({
+      enabled: false,
+      intervalHours: 24,
+      lookbackDays: 14,
+      dryRun: true,
+    });
+  });
+
+  it('reads memory consolidation overrides', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        consolidation: {
+          enabled: true,
+          intervalHours: 12,
+          lookbackDays: 21,
+          dryRun: false,
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.consolidation).toEqual({
+      enabled: true,
+      intervalHours: 12,
+      lookbackDays: 21,
+      dryRun: false,
+    });
+  });
+
+  it('disables memory consolidation when schedule values are non-positive', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        consolidation: {
+          enabled: true,
+          intervalHours: 0,
+          lookbackDays: -7,
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.consolidation).toEqual({
+      enabled: false,
+      intervalHours: 24,
+      lookbackDays: 14,
+      dryRun: true,
+    });
+  });
+
+  it('disables memory consolidation when schedule values are out of bounds', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      memory: {
+        consolidation: {
+          enabled: true,
+          intervalHours: 0.000001,
+          lookbackDays: 3650,
+        },
+      },
+    }));
+    const { config } = await import('../src/config.ts');
+
+    expect(config.memory.consolidation).toEqual({
+      enabled: false,
+      intervalHours: 24,
+      lookbackDays: 14,
+      dryRun: true,
+    });
+  });
+
   it('accepts absolute vaultPath unchanged', async () => {
     const instancePaths = {
       configRoot: path.join(tmpDir, 'inst-config'),
