@@ -4,8 +4,6 @@
  * Unit tests for shared HTTP utilities using mock streams.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { PassThrough } from 'node:stream';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   readBody,
   jsonResponse,
@@ -14,32 +12,7 @@ import {
   parseQueryString,
   asyncHandler,
 } from '../../src/lib/http.ts';
-
-// ---------------------------------------------------------------------------
-// Mock helpers
-// ---------------------------------------------------------------------------
-
-function mockRequest(headers: Record<string, string> = {}): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = headers;
-  return stream;
-}
-
-function mockResponse(): ServerResponse & { _status: number; _headers: Record<string, string>; _body: string } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as any;
-}
+import { mockReq as mockRequest, mockRes as mockResponse } from '../helpers/http-mocks.ts';
 
 // ---------------------------------------------------------------------------
 // readBody
@@ -47,19 +20,15 @@ function mockResponse(): ServerResponse & { _status: number; _headers: Record<st
 
 describe('readBody', () => {
   it('reads a normal request body', async () => {
-    const req = mockRequest();
+    const req = mockRequest({ body: 'hello world' });
     const promise = readBody(req);
-    (req as unknown as PassThrough).write('hello ');
-    (req as unknown as PassThrough).write('world');
-    (req as unknown as PassThrough).end();
     const body = await promise;
     expect(body).toBe('hello world');
   });
 
   it('rejects with 413 when body exceeds maxBytes', async () => {
-    const req = mockRequest();
+    const req = mockRequest({ body: 'this is way too large for the limit' });
     const promise = readBody(req, 10);
-    (req as unknown as PassThrough).write('this is way too large for the limit');
     try {
       await promise;
       expect.fail('should have rejected');
@@ -72,7 +41,6 @@ describe('readBody', () => {
   it('resolves empty string for empty body', async () => {
     const req = mockRequest();
     const promise = readBody(req);
-    (req as unknown as PassThrough).end();
     const body = await promise;
     expect(body).toBe('');
   });
@@ -104,12 +72,12 @@ describe('jsonResponse', () => {
 
 describe('checkBearerAuth', () => {
   it('returns true for valid Bearer token', () => {
-    const req = mockRequest({ authorization: 'Bearer my-secret' });
+    const req = mockRequest({ headers: { authorization: 'Bearer my-secret' } });
     expect(checkBearerAuth(req, 'my-secret')).toBe(true);
   });
 
   it('returns false for wrong token', () => {
-    const req = mockRequest({ authorization: 'Bearer wrong' });
+    const req = mockRequest({ headers: { authorization: 'Bearer wrong' } });
     expect(checkBearerAuth(req, 'my-secret')).toBe(false);
   });
 
@@ -119,7 +87,7 @@ describe('checkBearerAuth', () => {
   });
 
   it('returns false for non-Bearer scheme', () => {
-    const req = mockRequest({ authorization: 'Basic abc123' });
+    const req = mockRequest({ headers: { authorization: 'Basic abc123' } });
     expect(checkBearerAuth(req, 'abc123')).toBe(false);
   });
 });
