@@ -411,7 +411,7 @@ describe('config — memory section (substrate slice 1)', () => {
     });
   });
 
-  it('ignores non-positive memory consolidation intervals', async () => {
+  it('disables memory consolidation when schedule values are non-positive', async () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
       memory: {
         consolidation: {
@@ -424,7 +424,7 @@ describe('config — memory section (substrate slice 1)', () => {
     const { config } = await import('../src/config.ts');
 
     expect(config.memory.consolidation).toEqual({
-      enabled: true,
+      enabled: false,
       intervalHours: 24,
       lookbackDays: 14,
       dryRun: true,

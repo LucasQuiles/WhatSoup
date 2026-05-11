@@ -160,6 +160,11 @@ function positiveNumberProp(source: Record<string, unknown> | undefined, key: st
   return value > 0 ? value : fallback;
 }
 
+function hasNonPositiveNumberProp(source: Record<string, unknown> | undefined, key: string): boolean {
+  const value = source?.[key];
+  return typeof value === 'number' && Number.isFinite(value) && value <= 0;
+}
+
 function booleanProp(source: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
   const value = source?.[key];
   return typeof value === 'boolean' ? value : fallback;
@@ -561,6 +566,9 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
   const conversation = record(memoryRoot?.conversation);
   const retention = record(memoryRoot?.retention);
   const consolidation = record(memoryRoot?.consolidation);
+  const invalidConsolidationSchedule =
+    hasNonPositiveNumberProp(consolidation, 'intervalHours') ||
+    hasNonPositiveNumberProp(consolidation, 'lookbackDays');
   const enrichment = record(memoryRoot?.enrichment);
   const pinecone = record(memoryRoot?.pinecone);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
@@ -625,7 +633,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
       days: numberProp(retention, 'days', 30),
     },
     consolidation: {
-      enabled: booleanProp(consolidation, 'enabled', false),
+      enabled: booleanProp(consolidation, 'enabled', false) && !invalidConsolidationSchedule,
       intervalHours: positiveNumberProp(consolidation, 'intervalHours', 24),
       lookbackDays: positiveNumberProp(consolidation, 'lookbackDays', 14),
       dryRun: booleanProp(consolidation, 'dryRun', true),

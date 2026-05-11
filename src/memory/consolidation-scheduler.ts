@@ -14,12 +14,19 @@ export interface MemoryConsolidationSchedulerConfig {
 export class MemoryConsolidationScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private pinecone: Pick<PineconeMemory, 'search' | 'upsert'>;
+  private provider: LLMProvider;
+  private config: MemoryConsolidationSchedulerConfig;
 
   constructor(
-    private readonly pinecone: Pick<PineconeMemory, 'search' | 'upsert'>,
-    private readonly provider: LLMProvider,
-    private readonly config: MemoryConsolidationSchedulerConfig,
-  ) {}
+    pinecone: Pick<PineconeMemory, 'search' | 'upsert'>,
+    provider: LLMProvider,
+    config: MemoryConsolidationSchedulerConfig,
+  ) {
+    this.pinecone = pinecone;
+    this.provider = provider;
+    this.config = config;
+  }
 
   start(): void {
     if (this.timer) return;
