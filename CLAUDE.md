@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, 127 MCP tools.
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, 161 MCP tools.
 
 ## Quick Reference
 
@@ -54,7 +54,7 @@ Key files:
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
-- `docs/tools.md` — complete MCP tool API reference (127 tools, 13 modules)
+- `docs/tools.md` — complete MCP tool API reference (161 tools, 20 modules)
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms
 - `docs/security-handoffs/` — open security handoffs that belong to the WhatSoup application lifecycle

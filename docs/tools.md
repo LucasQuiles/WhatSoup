@@ -1,6 +1,6 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 140 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 161 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
 ## Scope and Replay Policy Glossary
 
@@ -40,9 +40,10 @@ Complete reference for all 140 MCP tools exposed by WhatSoup. Tools are grouped 
 | [knowledge.ts](#knowledgets) | 1 |
 | [retention.ts](#retentionts) | 1 |
 | [status.ts](#statusts) | 2 |
-| [scheduling.ts](#schedulingts) | 3 |
+| [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 1 |
-| **Total** | **140** |
+| [substrate.ts](#substratets) | 19 |
+| **Total** | **161** |
 
 ---
 
@@ -277,6 +278,379 @@ Read recent outbound send audit rows without returning message text.
 Rows include `id`, `chat_jid`, `text_hash`, `text_length`, `status`, `created_at`, and optional `profile`, `transport_id`, `error_text`, and `sent_at`. Optional fields are omitted when the underlying DB value is null.
 
 **No-text invariant:** the audit table stores and returns only `text_hash` (SHA-256 of the final send text) and `text_length`. Message bodies are never returned.
+
+---
+
+## substrate.ts
+
+Durable-substrate tools for beads, triggers, entity observations, profiles, and proposal review. Mutation tools are admin-gated against the caller identity.
+
+---
+
+### create_agent_job
+
+Create an agent job bead and schedule trigger. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| prompt | string | required | Agent job prompt/body. |
+| title | string | optional | Bead title; defaults to the first 80 prompt characters. |
+| schedule | object | required | Schedule spec with `kind`, plus `expr`/`tz` for cron or `fire_at` for one-shot time. |
+| report_chat | string | required | JID that receives the trigger report. |
+| terminal_at | number | optional | Requested terminal timestamp. |
+| metadata | object | optional | Additional bead metadata. |
+
+---
+
+### create_watch
+
+Create a watch bead and poll trigger. Admin only. TTL defaults and caps come from memory watch policy.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| title | string | optional | Bead title; defaults to `watch:<source>`. |
+| source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"poll.shell"` \| `"event.message"` | required | Trigger source kind. |
+| criteria | object | required | Trigger criteria/spec payload. |
+| interval_seconds | number | optional | Poll interval. |
+| ttl_hours | number | optional | Requested TTL, clamped by policy. |
+| report_chat | string | required | JID that receives the trigger report. |
+| on_terminal | `"notify"` \| `"silent"` \| `"reopen_bead"` | optional | Terminal behavior. |
+| dedupe_key | string | optional | Trigger dedupe key. |
+
+---
+
+### regenerate_vault
+
+Regenerate the Obsidian vault projection from current substrate state. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+None.
+
+**Returns**
+
+Counts for regenerated bead and entity projections.
+
+---
+
+### capture_task
+
+Create a task bead without a trigger. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| title | string | required | Task title. |
+| body | string | optional | Task body. |
+| due_at | number | optional | Due timestamp. |
+| priority | number | optional | Priority from -2 to 2. |
+| chat_source_pk | number | optional | Source message primary key. |
+| chat_jid | string | optional | Source chat JID. |
+| owner_jid | string | optional | Owner JID; defaults to configured memory admin JID. |
+
+---
+
+### capture_observation
+
+Append an entity observation. Append/supersede semantics; existing rows are not mutated. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| entity_ref | object | required | Entity reference by id, JID, canonical name, and/or kind. |
+| kind | `"preference"` \| `"fact"` \| `"relation"` \| `"status"` \| `"contact_info"` \| `"note"` \| `"other"` | required | Observation kind. |
+| text | string | required | Observation text. |
+| confidence | number | required | Confidence from 0 to 1; values below policy are skipped. |
+| source_message_pk | number | optional | Source message primary key. |
+| supersedes_observation_id | number | optional | Observation superseded by this row. |
+| metadata | object | optional | Additional metadata. |
+
+---
+
+### list_beads
+
+List beads with optional filters.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| owner_jid | string | optional | Filter by owner JID. |
+| kind | `"task"` \| `"project"` \| `"observation"` \| `"agent_job"` \| `"watch"` | optional | Filter by bead kind. |
+| status | `"active"` \| `"proposed"` \| `"paused"` \| `"completed"` \| `"cancelled"` \| `"failed"` | optional | Filter by bead status. |
+| chat_jid | string | optional | Filter by chat JID. |
+| due_before | number | optional | Filter by due timestamp. |
+| since | number | optional | Filter by creation/update timestamp. |
+| limit | number | optional | Maximum rows, up to 500. |
+
+---
+
+### get_bead
+
+Return a bead and its recent events.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Bead id. |
+
+---
+
+### update_bead
+
+Update mutable bead fields. Cannot change kind, owner, or status. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Bead id. |
+| fields | object | required | Mutable fields: `title`, `body`, `due_at`, `priority`, and/or `metadata`. |
+
+---
+
+### complete_bead
+
+Transition a bead to completed. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Bead id. |
+| note | string | optional | Completion note. |
+
+---
+
+### cancel_bead
+
+Transition a bead to cancelled. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Bead id. |
+| reason | string | optional | Cancellation reason. |
+
+---
+
+### approve_proposal
+
+Promote a proposed bead to active. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Bead id. |
+| overrides | object | optional | Mutable field overrides applied after approval. |
+
+---
+
+### reject_proposal
+
+Cancel a proposed bead with an optional rejection reason. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Bead id. |
+| reason | string | optional | Rejection reason. |
+
+---
+
+### list_triggers
+
+List triggers with optional filters.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| bead_id | number | optional | Filter by bead id. |
+| kind | string | optional | Filter by trigger kind. |
+| status | `"active"` \| `"paused"` \| `"expired"` \| `"cancelled"` | optional | Filter by trigger status. |
+
+---
+
+### pause_trigger
+
+Pause a trigger. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Trigger id. |
+
+---
+
+### extend_trigger
+
+Push a trigger terminal timestamp forward, clamped to policy max. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Trigger id. |
+| until | number | required | New requested terminal timestamp. |
+
+---
+
+### get_profile
+
+Return entity, aliases, live observations, and linked beads.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| entity_ref | object | required | Entity reference by id, JID, canonical name, and/or kind. |
+
+---
+
+### list_entities
+
+List entities with optional kind and text-match filters.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| kind | `"person"` \| `"org"` \| `"project"` \| `"place"` \| `"topic"` \| `"other"` | optional | Entity kind filter. |
+| text_match | string | optional | Text search filter. |
+| limit | number | optional | Maximum rows, up to 500. |
+
+---
+
+### merge_entities
+
+Merge one entity into another non-destructively. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| from_id | number | required | Source entity id. |
+| into_id | number | required | Destination entity id. |
+
+---
+
+### forget_observation
+
+Tombstone an observation with a reason. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Observation id. |
+| reason | string | required | Forget reason. |
 
 ---
 
@@ -2909,3 +3283,64 @@ Cancel a pending scheduled message by ID.
 | `Error` | Scheduled message ID not found |
 | `Error` | Access denied: message belongs to a different conversation (chat-scoped sessions) |
 | `Error` | Message is not in `pending` status (already sent, cancelled, processing, or failed) |
+
+---
+
+### get_scheduled
+
+Get details for a single scheduled message by ID.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `read_only` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number (int) | required | Scheduled message ID. |
+
+**Returns:** the scheduled message row as `{ id, chatJid, chatName, contentType, payload, scheduledAt, recurrence, nextRunAt, runCount, status, createdAt, sentAt, error, retryCount }`.
+
+**Errors:**
+
+| Code | Condition |
+|------|-----------|
+| `Error` | Scheduled message ID not found |
+| `Error` | Access denied: message belongs to a different conversation (chat-scoped sessions) |
+
+---
+
+### update_scheduled
+
+Update a pending scheduled message. Can change time, text, or recurrence.
+
+| | |
+|---|---|
+| **Scope** | `chat` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `safe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number (int) | required | Scheduled message ID. |
+| scheduled_at | number (int) | optional | New UTC Unix timestamp in seconds. Must be in the future. |
+| text | string | optional | Replacement text payload; changes content type to text. |
+| recurrence | string | optional | Replacement 5-field cron expression. |
+
+**Returns:** the updated scheduled message row.
+
+**Errors:**
+
+| Code | Condition |
+|------|-----------|
+| `Error` | Scheduled message ID not found |
+| `Error` | Access denied: message belongs to a different conversation (chat-scoped sessions) |
+| `Error` | Message is not in `pending` status |
+| `Error` | `scheduled_at` is not a future timestamp |
+| `Error` | Cron expression is invalid |
+| `Error` | No fields to update |
