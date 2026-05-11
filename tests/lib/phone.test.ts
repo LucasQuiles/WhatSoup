@@ -4,8 +4,8 @@ import { isAdminPhone, normalizePhone, normalizePhoneE164 } from '../../src/lib/
 
 describe('normalizePhone', () => {
   it('removes formatting and preserves all digits', () => {
-    expect(normalizePhone('+1 (555) 588-0337')).toBe('15555880337');
-    expect(normalizePhone('555.978.0919')).toBe('5559780919');
+    expect(normalizePhone('+1 (555) 010-0101')).toBe('15550100101');
+    expect(normalizePhone('555.010.0102')).toBe('5550100102');
   });
 
   it('returns an empty string for empty runtime inputs', () => {
@@ -17,13 +17,13 @@ describe('normalizePhone', () => {
 
 describe('normalizePhoneE164', () => {
   it('prepends country code 1 for 10-digit NANP inputs', () => {
-    expect(normalizePhoneE164('5559780919')).toBe('15559780919');
-    expect(normalizePhoneE164('(555) 588-0337')).toBe('15555880337');
+    expect(normalizePhoneE164('5550100103')).toBe('15550100103');
+    expect(normalizePhoneE164('(555) 010-0104')).toBe('15550100104');
   });
 
   it('returns digits-only input unchanged when a country code is already present', () => {
-    expect(normalizePhoneE164('+1 (555) 978-0919')).toBe('15559780919');
-    expect(normalizePhoneE164('15555880337')).toBe('15555880337');
+    expect(normalizePhoneE164('+1 (555) 010-0103')).toBe('15550100103');
+    expect(normalizePhoneE164('15550100104')).toBe('15550100104');
   });
 
   it('returns non-NANP lengths as digits only without adding a country code', () => {
@@ -34,15 +34,15 @@ describe('normalizePhoneE164', () => {
 
 describe('isAdminPhone', () => {
   it('matches exact and normalized admin phones', () => {
-    const admins = new Set(['15555880337', '5559780919']);
+    const admins = new Set(['15550100101', '5550100102']);
 
-    expect(isAdminPhone('15555880337', admins)).toBe(true);
-    expect(isAdminPhone('+1 (555) 978-0919', admins)).toBe(true);
+    expect(isAdminPhone('15550100101', admins)).toBe(true);
+    expect(isAdminPhone('+1 (555) 010-0102', admins)).toBe(true);
   });
 
   it('matches when either side omits the country code', () => {
-    expect(isAdminPhone('15559780919', new Set(['5559780919']))).toBe(true);
-    expect(isAdminPhone('5559780919', new Set(['15559780919']))).toBe(true);
+    expect(isAdminPhone('15550100103', new Set(['5550100103']))).toBe(true);
+    expect(isAdminPhone('5550100103', new Set(['15550100103']))).toBe(true);
   });
 
   it('rejects short input on the normalized suffix-match path', () => {
@@ -51,10 +51,10 @@ describe('isAdminPhone', () => {
   });
 
   it('rejects empty and unrelated phones', () => {
-    const admins = new Set(['15559780919']);
+    const admins = new Set(['15550100103']);
 
     expect(isAdminPhone('', admins)).toBe(false);
     expect(isAdminPhone(null, admins)).toBe(false);
-    expect(isAdminPhone('15559991234', admins)).toBe(false);
+    expect(isAdminPhone('1555010199', admins)).toBe(false);
   });
 });
