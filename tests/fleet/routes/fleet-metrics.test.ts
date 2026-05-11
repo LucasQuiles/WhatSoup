@@ -1,25 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleGetFleetMetrics } from '../../../src/fleet/routes/fleet-metrics.ts';
 import type { FleetMetricsDeps } from '../../../src/fleet/routes/fleet-metrics.ts';
-
-function mockReq(url = '/'): IncomingMessage {
-  return { url, method: 'GET', headers: {} } as unknown as IncomingMessage;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) {
-      res._status = status;
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as any;
-}
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function emptyData() {
   return {
@@ -53,7 +35,7 @@ describe('handleGetFleetMetrics', () => {
     const deps = makeDeps();
     const res = mockRes();
 
-    handleGetFleetMetrics(mockReq('/api/metrics?range=bad'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=bad' }), res, deps);
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({
@@ -112,7 +94,7 @@ describe('handleGetFleetMetrics', () => {
     });
     const res = mockRes();
 
-    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
 
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
@@ -167,7 +149,7 @@ describe('handleGetFleetMetrics', () => {
     });
     const res = mockRes();
 
-    handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+    handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
 
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
@@ -245,7 +227,7 @@ describe('handleGetFleetMetrics', () => {
     const res = mockRes();
 
     try {
-      handleGetFleetMetrics(mockReq('/api/metrics?range=24h'), res, deps);
+      handleGetFleetMetrics(mockReq({ url: '/api/metrics?range=24h' }), res, deps);
     } finally {
       localeSpy.mockRestore();
     }
