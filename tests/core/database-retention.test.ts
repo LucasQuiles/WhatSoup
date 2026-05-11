@@ -29,19 +29,19 @@ describe('database retention', () => {
     `).run();
     db.raw.prepare(`
       INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, status, created_at)
-      VALUES ('c1', 'chat@g.us', 'send_message', '{}', 'echoed', datetime('now', '-40 days'))
+      VALUES ('old-out', 'chat@g.us', 'send_message', '{}', 'echoed', datetime('now', '-40 days'))
     `).run();
     db.raw.prepare(`
       INSERT INTO outbound_ops (conversation_key, chat_jid, op_type, payload, status, created_at)
-      VALUES ('c1', 'chat@g.us', 'send_message', '{}', 'echoed', datetime('now', '-5 days'))
+      VALUES ('young-out', 'chat@g.us', 'send_message', '{}', 'echoed', datetime('now', '-5 days'))
     `).run();
     db.raw.prepare(`
       INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
-      VALUES ('c1', 'search_messages', '{}', 'complete', 'safe', datetime('now', '-40 days'))
+      VALUES ('old-tool', 'search_messages', '{}', 'complete', 'safe', datetime('now', '-40 days'))
     `).run();
     db.raw.prepare(`
       INSERT INTO tool_calls (conversation_key, tool_name, tool_input, status, replay_policy, completed_at)
-      VALUES ('c1', 'search_messages', '{}', 'complete', 'safe', datetime('now', '-5 days'))
+      VALUES ('young-tool', 'search_messages', '{}', 'complete', 'safe', datetime('now', '-5 days'))
     `).run();
     db.raw.prepare(`
       INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json, status, created_at, exported_at)
@@ -68,6 +68,10 @@ describe('database retention', () => {
     expect(rowCount('outbound_ops')).toBe(1);
     expect(rowCount('tool_calls')).toBe(1);
     expect(rowCount('fact_export_queue')).toBe(1);
+    expect(columnValues('inbound_events', 'message_id')).toEqual(['young-in']);
+    expect(columnValues('outbound_ops', 'conversation_key')).toEqual(['young-out']);
+    expect(columnValues('tool_calls', 'conversation_key')).toEqual(['young-tool']);
+    expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-young']);
   });
 
   it('preserves recoverable and unexported rows regardless of age', () => {
@@ -112,6 +116,10 @@ describe('database retention', () => {
     expect(rowCount('outbound_ops')).toBe(2);
     expect(rowCount('tool_calls')).toBe(2);
     expect(rowCount('fact_export_queue')).toBe(1);
+    expect(columnValues('inbound_events', 'message_id')).toEqual(['pending-in', 'turn-done-in']);
+    expect(columnValues('outbound_ops', 'status')).toEqual(['maybe_sent', 'submitted']);
+    expect(columnValues('tool_calls', 'status')).toEqual(['executing', 'pending']);
+    expect(columnValues('fact_export_queue', 'fact_id')).toEqual(['fact-pending']);
   });
 
   it('timer runs immediate and periodic cleanup, then stops idempotently', async () => {
@@ -146,6 +154,15 @@ describe('database retention', () => {
   function rowCount(tableName: string): number {
     const row = db.raw.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get() as { count: number };
     return row.count;
+  }
+
+  function columnValues(tableName: string, columnName: string): string[] {
+    const rows = db.raw.prepare(`
+      SELECT ${columnName} AS value
+        FROM ${tableName}
+       ORDER BY ${columnName}
+    `).all() as Array<{ value: string }>;
+    return rows.map((row) => row.value);
   }
 
   function insertOldCompleteInbound(messageId: string): void {
