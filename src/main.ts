@@ -41,6 +41,7 @@ import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
+import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 
@@ -626,6 +627,9 @@ const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
 });
 mediaRetentionTimer.start(config.mediaRetention.intervalHours * 60 * 60 * 1000);
 
+const databaseRetentionTimer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
+databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
+
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
 const echoTimeoutInterval = setInterval(() => {
   try {
@@ -768,6 +772,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(metricsInterval);
     clearInterval(retentionInterval);
     mediaRetentionTimer.stop();
+    databaseRetentionTimer.stop();
     clearInterval(echoTimeoutInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
