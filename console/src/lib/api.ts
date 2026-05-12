@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 /**
  * Fleet API client with mock data fallback.
  *
@@ -325,7 +327,7 @@ export const api = {
   getTyping: () => withFallback(
     () => apiFetch<{ instance: string; jid: string; since: number }[]>('/api/typing'),
     async () => (await loadMockData()).getTyping(),
-  ).catch(() => []),
+  ),
 
   // ── Write operations ──
 

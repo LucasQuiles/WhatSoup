@@ -255,6 +255,23 @@ describe('api production mock-fallback gating (#420)', () => {
     expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
   });
 
+  it('getTyping surfaces production API failures instead of returning an empty list', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '');
+    stubFleetToken(null);
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+      text: async () => 'service unavailable',
+    } as Response);
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getTyping()).rejects.toThrow(/API 503/);
+  });
+
   it('honors VITE_MOCK_MODE=1 opt-in to restore mock fallback in PROD', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_MOCK_MODE', '1');

@@ -294,6 +294,15 @@ describe('SoupKitchen error state handling', () => {
     const source = read('console/src/pages/SoupKitchen.tsx');
     expect(source).toContain('<AlertBanner alerts={alerts}');
   });
+
+  it('renders API query failures as an error state instead of an empty filtered table', () => {
+    const source = read('console/src/pages/SoupKitchen.tsx');
+    expect(source).toContain('isError: linesError');
+    expect(source).toContain('isError: feedError');
+    expect(source).toContain('fleetLoadError');
+    expect(source).toContain('Unable to load fleet data');
+    expect(source).toContain('!fleetLoadError && filtered.length === 0');
+  });
 });
 
 // ---------------------------------------------------------------------------
