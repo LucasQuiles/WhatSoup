@@ -92,7 +92,7 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 # 1. Clone and install
 git clone https://github.com/LucasQuiles/WhatSoup.git
 cd WhatSoup
-npm install
+npm ci --legacy-peer-deps
 
 # 2. Run setup (installs systemd unit, wrapper scripts, builds console)
 npm run setup
