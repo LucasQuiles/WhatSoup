@@ -20,16 +20,15 @@ errors=0
 if command -v node &>/dev/null; then
   node_version="$(node -v | sed 's/^v//')"
   node_major="${node_version%%.*}"
-  node_minor="${node_version#*.}"; node_minor="${node_minor%%.*}"
-  if [ "$node_major" -gt 23 ] || { [ "$node_major" -eq 23 ] && [ "$node_minor" -ge 10 ]; }; then
-    echo "  ✓ Node.js $node_version (>= 23.10 required)"
+  if [ "$node_major" -ge 24 ]; then
+    echo "  ✓ Node.js $node_version (>= 24.0 required)"
   else
-    echo "  ✗ Node.js $node_version found — version 23.10+ required"
+    echo "  ✗ Node.js $node_version found — version 24.0+ required"
     echo "    Install: https://nodejs.org/ or use nvm/fnm"
     errors=$((errors + 1))
   fi
 else
-  echo "  ✗ Node.js not found — version 23.10+ required"
+  echo "  ✗ Node.js not found — version 24.0+ required"
   echo "    Install: https://nodejs.org/ or use nvm/fnm"
   errors=$((errors + 1))
 fi
