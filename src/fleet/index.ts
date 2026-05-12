@@ -722,6 +722,13 @@ export function createFleetServer(deps: FleetDeps) {
     return apiTicketStore.redeem(candidate, audience, validKeys);
   }
 
+  // Deprecation warning state for legacy `?token=<root>` HTTP API auth.
+  // Mirrors `ws_legacy_token_path` on the WebSocket path (#393): one-shot
+  // per server lifetime so a misbehaving caller hitting many endpoints does
+  // not spam logs. The legacy path itself remains functional; removal-date
+  // policy is tracked separately.
+  let httpLegacyTokenWarningEmitted = false;
+
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
@@ -779,7 +786,17 @@ export function createFleetServer(deps: FleetDeps) {
       // ticket via ?ticket=. Bearer header may also carry a ticket so
       // browsers don't have to special-case the HTTP API client; we try
       // both interpretations and accept the first success.
-      const rootOk = verifyToken(bearer) || verifyToken(queryToken);
+      const bearerRootOk = verifyToken(bearer);
+      const queryRootOk = !bearerRootOk && verifyToken(queryToken);
+      const rootOk = bearerRootOk || queryRootOk;
+      // Deprecation warning for legacy `?token=<root>` HTTP API auth (#393).
+      // Emit only when authentication actually succeeded via the query path,
+      // never on Bearer. One-shot per server lifetime — mirrors the WebSocket
+      // `ws_legacy_token_path` warning shape.
+      if (queryRootOk && !httpLegacyTokenWarningEmitted) {
+        httpLegacyTokenWarningEmitted = true;
+        log.warn({ legacy: 'http-token-in-url', path: pathname }, 'http_legacy_token_path');
+      }
       const ticketCandidates: string[] = [];
       if (queryTicket) ticketCandidates.push(queryTicket);
       if (bearer && !rootOk) ticketCandidates.push(bearer);
