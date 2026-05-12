@@ -97,13 +97,13 @@ The header shows the instance name, mode badge, phone number, uptime, port, mess
 Four charts render when data is available:
 
 - **Message Volume** — Bar chart of inbound, outbound, and media counts per time bucket.
-- **Active Hours Heatmap** — Day-of-week × hour-of-day grid showing when the instance is busiest.
+- **Active Hours Heatmap** — Range-aware activity view: 24h renders a collapsed hourly bar chart, 7d renders a day-by-hour heatmap, and 30d renders a date-by-hour heatmap when daily data is available or a weekly pattern heatmap otherwise.
 - **Tokens** — LLM input/output token usage over time, broken down by provider (toggle in the Tokens/Sessions tab strip).
 - **Sessions** — Active and newly started agent sessions over time, broken down by provider.
 
-Below the charts, the tab also shows static cards for cumulative **Token Usage** (input/output totals with a proportion bar) and **Model Configuration** (configured conversation, extraction, and validation models).
+Below the charts, the tab also shows static cards for cumulative **Token Usage** (input/output totals with a proportion bar) and **Model Configuration** (each configured model role returned for the line, such as conversation, extraction, validation, and fallback when present).
 
-The CSV export button (top-right of the range selector) downloads the current Message Volume series as `<line>-<range>.csv`.
+The CSV export button (top-right of the range selector) downloads Message Volume buckets as `<line>-<range>.csv` with `bucket`, `inbound`, and `outbound` columns. Media counts are charted but not included in the CSV export.
 
 Empty, loading, and error states each render an `EmptyState` panel: a loading panel while the request is in flight, an error panel with a Retry action when the request fails, and a "No metrics data" panel when the instance has not yet processed any messages.
 
