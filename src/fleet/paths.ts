@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Absolute path to the WhatSoup repository root.
@@ -11,7 +12,7 @@ import * as os from 'node:os';
  * relative `src/bootstrap*.ts` paths ENOENT (#419).
  */
 export const repoRoot: string = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname),
+  path.dirname(fileURLToPath(import.meta.url)),
   '..',
   '..',
 );

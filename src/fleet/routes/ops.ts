@@ -1144,7 +1144,7 @@ export async function handleAuth(
   // Resolve bootstrap-auth against the repo root, not `process.cwd()`.
   // Under systemd the fleet unit ships with no `WorkingDirectory=`, so cwd
   // is the service user's `$HOME` and a relative script path ENOENTs (#419).
-  const child = spawn('node', [
+  const child = spawn(process.execPath, [
     '--experimental-strip-types',
     path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
     params.name,
