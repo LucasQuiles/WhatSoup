@@ -141,7 +141,7 @@ When the fleet server is unreachable, the console automatically falls back to bu
 - **Demos** — Show the console to others without exposing real data
 - **Development** — Test components with predictable, consistent data
 
-Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds. When active, most read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. A few endpoints intentionally still hit the live API: `searchMessages`, `checkExists`, `checkDirectory`, and `getVersion`. Write operations (send message, restart, delete) require a live fleet server.
+Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds. When active, most read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. A few read endpoints intentionally still hit the live API: `searchMessages`, `getScheduledById`, `checkExists`, `checkDirectory`, and `getVersion`. Write operations require a live fleet server.
 
 ## Development
 
