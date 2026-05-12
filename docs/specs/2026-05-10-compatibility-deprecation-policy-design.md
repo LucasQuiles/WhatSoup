@@ -166,9 +166,11 @@ The boolean fields enable downstream tooling (CI, release dashboards, deprecatio
 
 ## 9. Public-surface registry
 
-> **Registry:** [`docs/public-surface.md`](../public-surface.md). The bootstrap (advisory)
-> baseline is in place per §9.3; the v1.0.0 cut promotes it to source-of-truth and switches
-> §9.4 CI linting from advisory to required.
+> **Registry:** [`docs/public-surface.md`](../public-surface.md). The bootstrap baseline
+> is in place per §9.3 and CI drift enforcement per §9.4 is already wired in
+> (`guard:public-surface-drift` in `verify:push:branch` and `verify:release`
+> (`package.json:23,36-37`) and `.github/workflows/quality.yml:52`, exiting non-zero on
+> drift). The v1.0.0 cut promotes the registry to sole source-of-truth status.
 
 The registry is the source of truth for "what's public." It lives at `docs/public-surface.md` and is the manifest of every documented public artifact.
 
@@ -207,12 +209,14 @@ are **presumed public** and inherit deprecation policy protection. After the v1 
 
 ### 9.4 Registry CI linting
 
-CI checks for drift between documentation and registry. Two modes:
-
-- **Pre-baseline mode (advisory, until v1 registry baseline is cut):** CI warns when documentation references a surface not in the registry, or registry references a surface not in documentation. Reports drift; doesn't fail the build.
-- **Post-baseline mode (required, after baseline):** CI fails the build on documented-but-not-in-registry or registry-without-documentation drift. The registry becomes a hard contract.
-
-The transition from advisory to required mode is gated on an explicit "registry complete for v1" milestone tracked in this spec's changelog.
+CI checks for drift between documentation and registry. The `guard:public-surface-drift`
+check (`scripts/public-surface-drift-check.ts`) is enforcing today: it runs in
+`verify:push:branch` and `verify:release` (`package.json:23,36-37`) and in the CI
+quality workflow (`.github/workflows/quality.yml:52`), and exits non-zero (failing the
+build) on documented-but-not-in-registry or registry-without-documentation drift. The
+v1.0.0 baseline cut does not change CI enforcement; it tightens the registry to sole
+source-of-truth status (no more pre-baseline presumption-of-public for surfaces not
+migrated into the registry per §9.3).
 
 Release-notes generation reads the registry to populate the deprecations section automatically. Updates to the registry require a release-notes entry under "Public surface additions" or "Deprecations" as appropriate.
 

@@ -33,8 +33,12 @@ the relevant reference (`docs/configuration.md`, `docs/tools.md`, README API tab
 Every deprecation requires: status change here, runtime/operator warning where feasible,
 and a release-notes entry under "Deprecations" naming the removal-target version per §5.
 
-**Maintainer:** WhatSoup core team. Pre-baseline (advisory) registry drift is reported by
-CI but does not fail the build (§9.4); this transitions to hard-fail at the v1.0.0 baseline cut.
+**Maintainer:** WhatSoup core team. Registry drift is enforced: the
+`guard:public-surface-drift` check runs in `verify:push:branch` and `verify:release`
+(`package.json:23,36-37`) and in the CI quality workflow
+(`.github/workflows/quality.yml:52`), exiting non-zero on documented-but-not-in-registry
+or registry-without-documentation drift. The v1.0.0 baseline cut tightens the registry
+to source-of-truth status per §9.4; CI enforcement is already in place.
 
 ---
 

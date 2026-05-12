@@ -3,8 +3,12 @@
 ## Summary
 
 This release note bootstraps the public-surface registry at `docs/public-surface.md`.
-The registry is advisory until the v1.0.0 baseline cut, then becomes the source of truth
-for compatibility and deprecation checks.
+Drift between documentation and the registry is enforced by
+`guard:public-surface-drift` in `verify:push:branch` and `verify:release`
+(`package.json:23,36-37`) and the CI quality workflow
+(`.github/workflows/quality.yml:52`); the check exits non-zero on drift. The v1.0.0
+baseline cut promotes the registry to the sole source of truth for compatibility and
+deprecation checks.
 
 ## Public Surface Additions
 
