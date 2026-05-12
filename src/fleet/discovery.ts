@@ -1,7 +1,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { VALID_ACCESS_MODES, VALID_SESSION_SCOPES, VALID_TYPES } from '../instance-loader.ts';
+import { VALID_TYPES } from '../instance-loader.ts';
+import { validateInstanceConfig } from '../core/agent-config-validator.ts';
 import { expandHomePath } from '../lib/home-path.ts';
 import { createChildLogger } from '../logger.ts';
 import { configRoot as defaultConfigRoot, dataRoot, stateRoot } from './paths.ts';
@@ -184,91 +185,11 @@ export class FleetDiscovery {
 }
 
 function validateConfig(raw: Record<string, unknown>, name: string): string | null {
-  if (raw.type !== undefined && !VALID_TYPES.has(String(raw.type))) {
-    return `Invalid type "${String(raw.type)}": must be one of ${[...VALID_TYPES].join(', ')}`;
-  }
-
-  if (raw.accessMode !== undefined && !VALID_ACCESS_MODES.has(String(raw.accessMode))) {
-    return `Invalid accessMode "${String(raw.accessMode)}": must be one of ${[...VALID_ACCESS_MODES].join(', ')}`;
-  }
-
-  if (raw.healthPort !== undefined && raw.healthPort !== null && (typeof raw.healthPort !== 'number' || raw.healthPort < 1 || raw.healthPort > 65535)) {
-    return `Invalid healthPort "${String(raw.healthPort)}": must be a number between 1 and 65535`;
-  }
-
-  if (raw.chatAliases !== undefined) {
-    if (typeof raw.chatAliases !== 'object' || raw.chatAliases === null || Array.isArray(raw.chatAliases)) {
-      return 'chatAliases must be an object of alias -> chatJid strings';
-    }
-    const normalizedAliases = new Set<string>();
-    for (const [alias, chatJid] of Object.entries(raw.chatAliases as Record<string, unknown>)) {
-      const normalizedAlias = alias.trim();
-      if (normalizedAlias === '' || typeof chatJid !== 'string' || chatJid.trim() === '') {
-        return 'chatAliases must contain only non-empty alias -> chatJid strings';
-      }
-      if (normalizedAliases.has(normalizedAlias)) {
-        return `chatAliases contains duplicate alias after trimming: ${normalizedAlias}`;
-      }
-      normalizedAliases.add(normalizedAlias);
-    }
-  }
-
-  if (raw.type === 'agent') {
-    const agentOpts = raw.agentOptions;
-    if (agentOpts !== undefined && agentOpts !== null) {
-      if (typeof agentOpts !== 'object' || Array.isArray(agentOpts)) {
-        return 'agentOptions must be an object';
-      }
-      const opts = agentOpts as Record<string, unknown>;
-      if (!VALID_SESSION_SCOPES.has(String(opts.sessionScope ?? ''))) {
-        return `agentOptions.sessionScope is required and must be one of ${[...VALID_SESSION_SCOPES].join(', ')}`;
-      }
-      if (opts.cwd !== undefined && typeof opts.cwd !== 'string') {
-        return 'agentOptions.cwd must be a string when provided';
-      }
-      if (opts.instructionsPath !== undefined && typeof opts.instructionsPath !== 'string') {
-        return 'agentOptions.instructionsPath must be a string';
-      }
-      if (opts.pluginDirs !== undefined) {
-        if (!Array.isArray(opts.pluginDirs) || !opts.pluginDirs.every((d: unknown) => typeof d === 'string')) {
-          return 'agentOptions.pluginDirs must be an array of strings';
-        }
-      }
-      if (opts.sandboxPerChat === true && opts.sessionScope !== 'per_chat') {
-        return 'agentOptions.sandboxPerChat requires sessionScope "per_chat"';
-      }
-      if (opts.provider !== undefined) {
-        if (typeof opts.provider !== 'string' || (opts.provider as string).trim() === '') {
-          return 'agentOptions.provider must be a non-empty string when provided';
-        }
-      }
-      if (opts.providerConfig !== undefined) {
-        if (typeof opts.providerConfig !== 'object' || Array.isArray(opts.providerConfig) || opts.providerConfig === null) {
-          return 'agentOptions.providerConfig must be an object when provided';
-        }
-        const pc = opts.providerConfig as Record<string, unknown>;
-        if (pc.budget !== undefined) {
-          if (typeof pc.budget !== 'object' || Array.isArray(pc.budget) || pc.budget === null) {
-            return 'agentOptions.providerConfig.budget must be an object when provided';
-          }
-        }
-      }
-      if (opts.sessionScope !== 'shared' && opts.sessionScope !== 'per_chat' && raw.accessMode !== 'self_only') {
-        return `Agent instances require accessMode "self_only", got "${String(raw.accessMode)}"`;
-      }
-    } else if (raw.accessMode !== undefined && raw.accessMode !== 'self_only') {
-      return `Agent instances require accessMode "self_only", got "${String(raw.accessMode)}"`;
-    }
-  }
-
-  if (raw.type === 'passive') {
-    if (raw.systemPrompt) {
-      return 'Passive instances must not have a systemPrompt';
-    }
-    if (raw.accessMode !== undefined && raw.accessMode !== 'self_only') {
-      return `Passive instances require accessMode "self_only", got "${String(raw.accessMode)}"`;
-    }
-  }
-
-  return null;
+  // Thin wrapper around the shared validator. 'discovery' mode preserves the
+  // legacy looser healthPort range (1..65535) so a pre-existing on-disk config
+  // with a low port still scans (operators see configError in the UI) instead
+  // of being silently dropped. Writes (CREATE/PATCH) use the stricter
+  // 1024..65535 range to prevent the operator-bricking bug (#244).
+  const error = validateInstanceConfig(raw, { name, mode: 'discovery' });
+  return error ? error.message : null;
 }

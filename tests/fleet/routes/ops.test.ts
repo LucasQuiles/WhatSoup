@@ -826,7 +826,9 @@ describe('handleCreateLine', () => {
       mockReq(JSON.stringify({
         name,
         type: 'chat',
-        adminPhones: ['test-admin-id'],
+        // Real-shaped phone — the shared validator (added for #244/#249)
+        // now rejects unparseable strings that normalize to empty.
+        adminPhones: ['18459780919'],
         healthPort: 3201,
       })),
       res,
