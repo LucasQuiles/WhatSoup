@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 161 MCP tools. No build step. Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 161 MCP tools (160 always-registered + `knowledge_search` registered only when Pinecone is configured). No build step. Probably too many MCP tools.
 
 ## What It Does
 
@@ -329,7 +329,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 |----------|-------------|
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 161 tools with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 161 tools (160 always-registered + 1 conditionally-registered) with scopes, parameters, replay policies |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
 
