@@ -157,7 +157,10 @@ describe('handleSend', () => {
 
     expect(mcpCall).toHaveBeenCalledWith('/state/test-line/whatsoup.sock', 'send_message', { chatJid: '123@s.whatsapp.net', text: 'hi' });
     expect(res._status).toBe(200);
-    expect(JSON.parse(res._body).success).toBe(true);
+    // After issue #257 parity fix, the response is the unwrapped MCP tool
+    // result (the `result` payload), not the raw McpCallResult wrapper, so
+    // the body now exposes the tool's own shape (`{ sent: true }`).
+    expect(JSON.parse(res._body).sent).toBe(true);
   });
 
   it('routes agent instances through proxyToInstance', async () => {
