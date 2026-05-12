@@ -1,6 +1,6 @@
 # Spec: Instance-Loader Fixture Fix
 
-**Status:** Draft (no implementation plan)
+**Status:** completed — fixture fix landed; covered by `tests/instance-loader.test.ts` regression suite.
 **Date:** 2026-04-25
 
 Fix the one failing instance-loader test that reads a real, gitignored `instances/loops/instance.json` instead of a sanitized fixture.

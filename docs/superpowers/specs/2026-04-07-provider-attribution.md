@@ -1,8 +1,9 @@
 # Provider Attribution — Token & Session Charts + Instances Table
 
 > **Date:** 2026-04-07
-> **Status:** Draft
+> **Status:** completed
 > **Scope:** Backend metric collection by provider, frontend chart breakdown, instances table provider column
+> **Implementation:** Backend classifier at `src/runtimes/chat/providers/api-error-classifier.ts`; provider KPI on agent summary tab shipped via PR #361.
 
 ---
 

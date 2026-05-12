@@ -1,5 +1,7 @@
 # Operation Tracker — Progress Reporting & Stall Detection
 
+**Status:** completed — design realized in `src/runtimes/agent/operation-tracker.ts` and consumers.
+
 ## Problem
 
 When the agent provider (Claude, Codex, Gemini, etc.) spends extended time thinking (30-60s between tool calls) or running long operations like subagents (2-5 min), the user receives no visible feedback beyond a typing indicator. The existing 3-tier watchdog (10/20/30 min) is too coarse to detect stuck operations and too slow to inform the user.

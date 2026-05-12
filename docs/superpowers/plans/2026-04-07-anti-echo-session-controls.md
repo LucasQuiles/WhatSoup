@@ -1,5 +1,7 @@
 # Anti-Echo Protocol & Session Management Controls — Implementation Plan
 
+**Status:** completed — echo guard shipped as `src/core/echo-guard.ts`, wired through `src/runtimes/agent/outbound-queue.ts` and `runtime.ts`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop agents from producing unsolicited messages to shared groups on restart, and give admins WhatsApp-based session visibility and kill controls.
