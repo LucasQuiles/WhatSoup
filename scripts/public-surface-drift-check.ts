@@ -465,6 +465,7 @@ export function findPublicSurfaceDrift(
   const documentedMcpModules = loadDocumentedMcpModules(cwd);
   const registeredMcpModules = registryMcpModules(tables);
   const registeredNpmScripts = new Set<string>();
+  const hasNpmRegistrySection = /^##\s+NPM scripts\b/m.test(text);
   const issues: PublicSurfaceDriftIssue[] = [];
 
   // Per-file caches so we don't re-parse `src/fleet/index.ts` for every HTTP row.
@@ -658,12 +659,11 @@ export function findPublicSurfaceDrift(
   // direction (registry -> package.json) is handled inside the table loop
   // above; this pass closes the asymmetry called out in #497.
   //
-  // Gate on registeredNpmScripts.size > 0 so partial registries (e.g.
-  // fixtures that exercise only HTTP/MCP rows) don't trigger drift for the
-  // npm scripts they intentionally omit. A registry that drops the entire
-  // npm section is already an obviously-broken state that humans will
-  // notice on review.
-  if (registeredNpmScripts.size > 0) {
+  // Gate on either an NPM section or existing script rows so partial registries
+  // (e.g. fixtures that exercise only HTTP/MCP rows) don't trigger drift for
+  // npm scripts they intentionally omit, while an emptied NPM table still
+  // fails closed.
+  if (hasNpmRegistrySection || registeredNpmScripts.size > 0) {
     for (const scriptName of [...packageScripts].sort()) {
       if (!isOperatorFacingScript(scriptName)) continue;
       if (registeredNpmScripts.has(scriptName)) continue;

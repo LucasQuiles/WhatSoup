@@ -476,6 +476,17 @@ const ROUTES = [
     ]);
   });
 
+  it('flags operator-facing scripts when the npm registry table has no script rows', () => {
+    const { root, registryPath } = makeFakeRepo();
+    const registry = happyRegistry.replace(/^\| `cli:npm\.[^\n]*\n/gm, '');
+    writeFileSync(registryPath, registry, 'utf8');
+
+    const issues = findPublicSurfaceDrift({ cwd: root });
+    const missingRows = issues.filter((issue) => issue.kind === 'missing-registry-row');
+
+    expect(missingRows.map((issue) => issue.scriptName).sort()).toEqual(['fleet', 'start']);
+  });
+
   it('does not flag denylisted internal scripts (test/typecheck/build/lint)', () => {
     const { root, registryPath } = makeFakeRepo();
     writeFileSync(
