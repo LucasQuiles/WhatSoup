@@ -226,7 +226,7 @@ describe('useStickyScroll — scroll-up then return to bottom', () => {
     const el = makeScrollEl({ scrollHeight: 2000, clientHeight: 500, scrollTop: 0 })
     const { result, rerender } = renderHook(
       ({ items }: { items: string[] }) => useStickyScroll(items, 'chat-1'),
-      { initialProps: { items: [] } },
+      { initialProps: { items: [] as string[] } },
     )
     attachRef(result.current.scrollRef, el)
 
@@ -325,7 +325,7 @@ describe('useStickyScroll — useLayoutEffect auto-scroll on items', () => {
 
     const { result, rerender } = renderHook(
       ({ items }: { items: string[] }) => useStickyScroll(items, 'chat-1'),
-      { initialProps: { items: [] } },
+      { initialProps: { items: [] as string[] } },
     )
     attachRef(result.current.scrollRef, el)
 
@@ -370,7 +370,7 @@ describe('useStickyScroll — useLayoutEffect auto-scroll on items', () => {
     const el = makeScrollEl({ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 })
     const { result, rerender } = renderHook(
       ({ items }: { items: string[] }) => useStickyScroll(items, 'chat-1'),
-      { initialProps: { items: [] } },
+      { initialProps: { items: [] as string[] } },
     )
     attachRef(result.current.scrollRef, el)
 
@@ -393,7 +393,7 @@ describe('useStickyScroll — useLayoutEffect auto-scroll on items', () => {
     const el = makeScrollEl({ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 })
     const { result, rerender } = renderHook(
       ({ items }: { items: string[] }) => useStickyScroll(items, 'chat-1'),
-      { initialProps: { items: [] } },
+      { initialProps: { items: [] as string[] } },
     )
     attachRef(result.current.scrollRef, el)
 
