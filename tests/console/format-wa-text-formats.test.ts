@@ -1,42 +1,64 @@
 /**
+ * @vitest-environment jsdom
+ *
  * Format-pattern coverage for console/src/lib/format-wa-text.tsx.
  *
  * Existing tests/console/search-highlight.test.ts covers the empty-state
  * fallback + bold-with-highlight integration. This file pins each of the
- * remaining WhatsApp format patterns to a specific ReactElement shape:
+ * remaining WhatsApp format patterns to the helper's React-node contract:
  *
  *   - inline backtick code         ->  <code>
- *   - triple-backtick code block   ->  <code> (block class)
+ *   - single-line triple backticks ->  <code> (block class)
  *   - *bold*                       ->  <strong>
  *   - **bold**                     ->  <strong>
  *   - _italic_                     ->  <em>
  *   - ~strikethrough~              ->  <s>
  *   - https URL                    ->  <a target=_blank rel=noopener noreferrer>
- *   - long URL (>50 chars)         ->  href = full, child = truncated…
+ *   - long URL (>50 chars)         ->  href = full, child = truncated with ...
  *   - multi-line text              ->  <br /> between lines
  *   - plain text                   ->  string children
  *
- * The function returns ReactNode[]; we walk the tree without rendering
- * (no DOM/jsdom). Each ReactElement exposes { type, props }.
+ * The function returns ReactNode[], so most assertions inspect that tree
+ * directly. A rendered assertion below checks the user-visible text/link path.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { createElement, isValidElement } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { formatWhatsAppText } from '../../console/src/lib/format-wa-text.tsx';
 
-function asElement(node: ReactNode): ReactElement {
-  if (typeof node === 'object' && node !== null && 'type' in node) {
-    return node as ReactElement;
+type FormatElementProps = {
+  children?: ReactNode;
+  className?: string;
+  href?: string;
+  rel?: string;
+  target?: string;
+};
+
+afterEach(() => cleanup());
+
+function asElement<P extends FormatElementProps = FormatElementProps>(node: ReactNode): ReactElement<P> {
+  if (isValidElement<P>(node)) {
+    return node;
   }
   throw new Error(`expected ReactElement, got ${typeof node}: ${String(node)}`);
 }
 
-function plainText(children: unknown): string {
+function plainText(children: ReactNode): string {
   if (typeof children === 'string') return children;
   if (Array.isArray(children)) return children.map(plainText).join('');
-  if (typeof children === 'object' && children !== null && 'props' in children) {
-    return plainText((children as ReactElement).props.children);
+  if (isValidElement<{ children?: ReactNode }>(children)) {
+    return plainText(children.props.children);
   }
   return '';
+}
+
+function isFormatElement(node: ReactNode): node is ReactElement<FormatElementProps> {
+  return isValidElement<FormatElementProps>(node);
+}
+
+function isElementType(node: ReactNode, type: string): node is ReactElement<FormatElementProps> {
+  return isFormatElement(node) && node.type === type;
 }
 
 describe('formatWhatsAppText — single-pattern formats', () => {
@@ -79,10 +101,7 @@ describe('formatWhatsAppText — single-pattern formats', () => {
     expect(plainText(code.props.children)).toBe('x');
   });
 
-  it('wraps ```triple-backtick``` in <code> (block variant)', () => {
-    // Note: text is split by \n before the regex runs, so multi-line
-    // triple-backtick blocks degrade gracefully — this test exercises the
-    // single-line block path.
+  it('wraps single-line triple-backtick text in <code> (block variant)', () => {
     const parts = formatWhatsAppText('```code-block```');
     const code = asElement(parts[0]);
     expect(code.type).toBe('code');
@@ -133,6 +152,15 @@ describe('formatWhatsAppText — line breaks and plain text', () => {
     expect(parts[2]).toBe('two');
   });
 
+  it('renders visible formatted text and links', () => {
+    render(createElement('div', null, formatWhatsAppText('go *now* https://example.com')));
+
+    expect(screen.getByText('now').tagName).toBe('STRONG');
+    const link = screen.getByRole('link', { name: 'https://example.com' });
+    expect(link.getAttribute('href')).toBe('https://example.com');
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
+
   it('returns plain string when no patterns match', () => {
     const parts = formatWhatsAppText('hello world');
     expect(parts).toEqual(['hello world']);
@@ -149,12 +177,11 @@ describe('formatWhatsAppText — combined patterns', () => {
 
   it('renders adjacent formats independently', () => {
     const parts = formatWhatsAppText('*a* _b_');
-    // ['', <strong>a</strong>, ' ', <em>b</em>] — leading slice between matches is ' '
-    const strong = parts.find((p) => typeof p === 'object' && p !== null && 'type' in p && (p as ReactElement).type === 'strong');
-    const em = parts.find((p) => typeof p === 'object' && p !== null && 'type' in p && (p as ReactElement).type === 'em');
+    const strong = parts.find((p): p is ReactElement<FormatElementProps> => isElementType(p, 'strong'));
+    const em = parts.find((p): p is ReactElement<FormatElementProps> => isElementType(p, 'em'));
     expect(strong).toBeDefined();
     expect(em).toBeDefined();
-    expect(plainText((strong as ReactElement).props.children)).toBe('a');
-    expect(plainText((em as ReactElement).props.children)).toBe('b');
+    expect(plainText(strong?.props.children)).toBe('a');
+    expect(plainText(em?.props.children)).toBe('b');
   });
 });
