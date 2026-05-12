@@ -9,17 +9,21 @@
  * Source surprises pinned in §SURPRISES below.
  *
  * §SURPRISES
- * 1. The component's local `slugify` does NOT collapse consecutive dashes or
- *    strip leading/trailing dashes in its regex — however jsdom normalizes
- *    HTML input values so multiple spaces collapse to a single space before
- *    the onChange event fires. Net effect: 'my  line' → 'my-line' (one dash),
- *    and leading/trailing spaces are stripped by jsdom before slugify runs.
- *    This differs from the raw regex: `'my  line'.replace(/\s+/g, '-')` would
- *    give 'my--line', but the browser input element trims whitespace in the
- *    composed event value.
- * 2. The name <input> calls `onChange({ name: slugify(e.target.value) })` on
- *    every change event — the component stores the already-slugified value, not
- *    the raw display string. Emoji and punctuation are stripped immediately.
+ * 1. The component uses `slugAgentWorkspaceName` from `lib/agent-cwd.ts`, NOT a
+ *    local `slugify`. That function applies four transforms in order:
+ *      .toLowerCase()
+ *      .replace(/\s+/g, '-')       — spaces → dashes
+ *      .replace(/[^a-z0-9-]/g, '') — strip non-slug chars
+ *      .replace(/-+/g, '-')        — collapse consecutive dashes
+ *      .replace(/^-|-$/g, '')      — strip leading/trailing dashes
+ *    The "jsdom collapses whitespace" explanation is therefore wrong: 'my  line'
+ *    yields 'my-line' because slugAgentWorkspaceName collapses '--' itself, not
+ *    because jsdom pre-trims the value. Similarly, leading/trailing spaces
+ *    produce no leading/trailing dashes because slugAgentWorkspaceName strips
+ *    them, not because jsdom trims the input value.
+ * 2. The name <input> calls `onChange({ name: slugAgentWorkspaceName(e.target.value) })`
+ *    on every change event — the component stores the already-slugified value,
+ *    not the raw display string. Emoji and punctuation are stripped immediately.
  * 3. There is NO "Next" button inside IdentityStep itself — Next-button gating
  *    lives in the parent Wizard. The component only forwards onChange/errors.
  * 4. adminPhones strips non-digits via `values.map(v => v.replace(/\D/g, ''))`.
@@ -31,8 +35,9 @@
  * 5. The `showConfirmed` state delays check-mark indicators by 300 ms on mount.
  *    In tests we use `act` + fake timers to advance past that gate.
  * 6. The uniqueness-check debounce fires after 500 ms for non-empty slugs and
- *    0 ms for empty slugs. Tests use `vi.runAllTimersAsync()` wrapped in `act`
- *    to avoid `waitFor` + fake-timer deadlocks (waitFor uses real intervals).
+ *    0 ms for empty slugs. Tests use `vi.advanceTimersByTime(500)` inside `act`
+ *    to drive the debounce without `waitFor`, which polls real setInterval and
+ *    deadlocks under fake timers.
  * 7. The Check icon appears for `nameStatus === 'available' || nameLocked`
  *    regardless of showConfirmed. The description/adminPhones Check icons DO
  *    depend on showConfirmed.
@@ -303,21 +308,32 @@ describe('name uniqueness check', () => {
   })
 
   it('resets to idle and does not call api.checkExists when name is cleared', async () => {
-    renderStep({ data: { name: 'some-name' } })
-    const input = screen.getByPlaceholderText('my-line')
-    // Clear the name field
-    fireEvent.change(input, { target: { value: '' } })
-    // Empty slug → debounce timeout 0ms → status reset to 'idle', no API call
+    // Component is controlled: name comes from data prop, not DOM state.
+    // Simulate the parent clearing the name by rerendering with empty data.
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <IdentityStep data={{ name: 'some-name' }} onChange={onChange} errors={{}} />,
+    )
+    // Let initial debounce fire so we have a clean baseline
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    expect(mockCheckExists).toHaveBeenCalledWith('some-name')
+    mockCheckExists.mockClear()
+
+    // Parent clears the name — rerender with empty string
+    rerender(
+      <IdentityStep data={{ name: '' }} onChange={onChange} errors={{}} />,
+    )
+    // Empty slug triggers 0ms debounce that sets status→idle without calling checkExists
     await act(async () => {
       vi.advanceTimersByTime(0)
       await Promise.resolve()
     })
-    // api.checkExists should NOT be called for an empty slug
-    // (it may have been called once from mount with original 'some-name')
-    const callsAfterClear = mockCheckExists.mock.calls.filter(
-      ([name]) => name === '',
-    )
-    expect(callsAfterClear).toHaveLength(0)
+    expect(mockCheckExists).not.toHaveBeenCalled()
+    // "Name already exists" must not be showing (idle state)
+    expect(screen.queryByText('Name already exists')).toBeNull()
   })
 
   it('does not show "Name already exists" for an idle state (empty name)', () => {
