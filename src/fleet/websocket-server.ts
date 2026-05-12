@@ -19,6 +19,23 @@ import type { TicketStore } from './ws-ticket.ts';
 
 const log = createChildLogger('fleet:ws');
 
+function describeAuthRejectUrl(rawUrl: string | undefined): {
+  path: string;
+  hasTicket: boolean;
+  hasLegacyToken: boolean;
+} {
+  try {
+    const url = new URL(rawUrl ?? '', 'http://localhost');
+    return {
+      path: url.pathname,
+      hasTicket: url.searchParams.has('ticket'),
+      hasLegacyToken: url.searchParams.has('token'),
+    };
+  } catch {
+    return { path: '<invalid>', hasTicket: false, hasLegacyToken: false };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Event types — matches Phase 4 spec consensus
 // ---------------------------------------------------------------------------
@@ -79,7 +96,7 @@ export class FleetWebSocketServer {
     // Handle upgrade requests with auth
     httpServer.on('upgrade', (req: IncomingMessage, socket, head) => {
       if (!this.authenticate(req)) {
-        log.warn({ url: req.url }, 'ws_auth_rejected');
+        log.warn(describeAuthRejectUrl(req.url), 'ws_auth_rejected');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;

@@ -1,6 +1,22 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { WebSocket } from 'ws';
+
+type WarnCall = { obj: Record<string, unknown> | undefined; msg: unknown };
+const warnCalls = vi.hoisted((): WarnCall[] => []);
+
+vi.mock('../../src/logger.ts', () => {
+  const noop = vi.fn();
+  const warn = (obj: unknown, msg?: unknown) => {
+    warnCalls.push({
+      obj: obj && typeof obj === 'object' ? obj as Record<string, unknown> : undefined,
+      msg,
+    });
+  };
+  const fakeLogger = { info: noop, warn, error: noop, debug: noop, trace: noop, fatal: noop };
+  return { default: fakeLogger, createChildLogger: () => fakeLogger, flushLogger: async () => {} };
+});
+
 import { FleetWebSocketServer } from '../../src/fleet/websocket-server.ts';
 import type { WsEvent } from '../../src/fleet/websocket-server.ts';
 import { createTicketStore, type TicketStore } from '../../src/fleet/ws-ticket.ts';
@@ -74,6 +90,7 @@ afterEach(() => {
   wsServer?.close();
   httpServer?.close();
   ticketStore?.stop();
+  warnCalls.length = 0;
 });
 
 describe('FleetWebSocketServer', () => {
@@ -90,6 +107,21 @@ describe('FleetWebSocketServer', () => {
   it('rejects connections with a wrong legacy token', async () => {
     await startServer();
     await expect(connect('token=wrong-token')).rejects.toThrow();
+  });
+
+  it('does not log raw URL credentials on rejected auth', async () => {
+    await startServer();
+    await expect(connect('ticket=expired-secret&token=wrong-token')).rejects.toThrow();
+
+    const rejected = warnCalls.find((call) => call.msg === 'ws_auth_rejected');
+    expect(rejected?.obj).toMatchObject({
+      path: '/',
+      hasTicket: true,
+      hasLegacyToken: true,
+    });
+    expect(rejected?.obj).not.toHaveProperty('url');
+    expect(JSON.stringify(rejected?.obj)).not.toContain('expired-secret');
+    expect(JSON.stringify(rejected?.obj)).not.toContain('wrong-token');
   });
 
   it('accepts connections with a valid ticket and sends hello', async () => {
