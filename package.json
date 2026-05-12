@@ -4,7 +4,7 @@
   "description": "WhatSoup — consolidated WhatsApp platform with embedded MCP tools",
   "type": "module",
   "engines": {
-    "node": ">=23.10.0 <26"
+    "node": ">=24.0.0 <26"
   },
   "volta": {
     "node": "24.15.0"

@@ -9,14 +9,20 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.x', '25.x']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # Local dev uses .nvmrc (single version for fast iteration);
+      # CI runs a matrix to validate the engines range declared in package.json.
+      - name: Setup Node ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version-file: '.nvmrc'
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies
