@@ -60,7 +60,9 @@ Unified message inbox with chat list, message bubbles, send/reply, contact manag
 
 ### WebSocket Realtime
 
-The fleet server broadcasts invalidation events over WebSocket. The console subscribes and automatically refetches stale data — no polling delay for messages, chat updates, log changes, access changes, or typing indicators. Falls back to polling when WebSocket is disconnected.
+The fleet server broadcasts invalidation events over WebSocket. The console subscribes and automatically refetches stale data — no polling delay for messages, chat updates, log changes, access changes, LID-mapping conflicts, or typing indicators. Falls back to polling when WebSocket is disconnected.
+
+The invalidation event types are `instance_status`, `message_received`, `chat_updated`, `log_entry`, `feed_event`, `access_changed`, and `lid_conflict`. `lid_conflict` is emitted when fleet sync detects two instances disagree on a `lid → phone_jid` mapping; the conflicting LID is carried in the event's `lid` field, and console clients refetch the `/api/lid-mappings` panel. The latency-sensitive `typing_update` event ships full state instead of triggering a refetch.
 
 ```bash
 # Development
