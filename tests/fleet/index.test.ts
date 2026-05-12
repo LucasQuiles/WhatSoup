@@ -123,6 +123,7 @@ let dataRoot: string;
 let stateRoot: string;
 let distDir: string;
 let createdIndexHtml = false;
+let distExisted = false;
 let selfDb: DatabaseSync;
 let fleet: ReturnType<typeof createFleetServer>;
 let baseUrl: string;
@@ -158,9 +159,15 @@ beforeAll(async () => {
   // The real factory resolves distDir relative to src/fleet/index.ts. Make sure
   // an index.html exists so the static handler can serve the SPA fallback.
   distDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');
+  distExisted = fs.existsSync(distDir);
   fs.mkdirSync(distDir, { recursive: true });
   if (!fs.existsSync(path.join(distDir, 'index.html'))) {
-    fs.writeFileSync(path.join(distDir, 'index.html'), '<html><body>fleet</body></html>');
+    // Include <head></head> so the static handler's meta-tag injection
+    // (which uses `html.replace('</head>', ...)`) actually fires.
+    fs.writeFileSync(
+      path.join(distDir, 'index.html'),
+      '<html><head></head><body>fleet</body></html>',
+    );
     createdIndexHtml = true;
   }
 
@@ -200,6 +207,9 @@ afterAll(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
   if (createdIndexHtml) {
     try { fs.unlinkSync(path.join(distDir, 'index.html')); } catch { /* fine */ }
+  }
+  if (!distExisted) {
+    try { fs.rmdirSync(distDir); } catch { /* fine — dir may be non-empty if vite build ran during test */ }
   }
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];
@@ -394,16 +404,26 @@ describe('fleet server -- API route dispatch (real factory)', () => {
 // ---------------------------------------------------------------------------
 
 describe('fleet server -- static file serving', () => {
-  it('serves index.html for root path', async () => {
+  it('serves index.html for root path with token+version meta injected', async () => {
     const res = await fetch(`${baseUrl}/`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
+    const body = await res.text();
+    // Locks in the createStaticHandler(distDir, fleetToken, getVersion) wiring:
+    // a server constructed with only distDir would still pass status+content-type
+    // but would skip meta injection entirely.
+    expect(body).toContain(`<meta name="fleet-token" content="${FLEET_TOKEN}">`);
+    // execFileSync is mocked to return 'abc1234' — pin to the exact version tag.
+    expect(body).toContain('<meta name="fleet-version" content="abc1234">');
   });
 
   it('SPA fallback: extensionless non-API paths serve index.html', async () => {
     const res = await fetch(`${baseUrl}/dashboard`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
+    const body = await res.text();
+    expect(body).toContain(`<meta name="fleet-token" content="${FLEET_TOKEN}">`);
+    expect(body).toContain('<meta name="fleet-version" content="abc1234">');
   });
 });
 
