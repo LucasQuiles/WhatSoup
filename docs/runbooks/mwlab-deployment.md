@@ -173,8 +173,9 @@ polled instance is unreachable. If that name is not expected, add
 
 - Always `export PATH=/opt/homebrew/bin:$PATH` before `npm`/`npx`/`node`
   commands over SSH so the pre-commit hook can resolve `npx lint-staged`.
-- Untracked `scripts/p36-*` probes are Phase 3 investigation artifacts —
-  do not delete. See `mwlab-transcription-pinecone.md`.
+- The legacy `scripts/p36-*` evidence probes have been removed; the
+  productionized path is `npm run backfill-enrichment -- --strict`. See
+  `mwlab-transcription-pinecone.md`.
 - `artifacts/plan-hardening/…` is the run-scoped evidence root for this
   plan family. Covered by `.gitignore`.
 
