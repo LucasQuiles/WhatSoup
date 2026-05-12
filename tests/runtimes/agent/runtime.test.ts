@@ -200,6 +200,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
   provisionWorkspace: mockProvisionWorkspace,
   writeSandboxArtifacts: vi.fn(),
   ensurePermissionsSettings: vi.fn(),
+  writePrivateFileSync: vi.fn(),
 }));
 
 // Mock WhatSoupSocketServer so tests don't bind real Unix sockets.
