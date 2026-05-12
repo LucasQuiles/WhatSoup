@@ -118,13 +118,24 @@ describe('public surface drift check', () => {
 
     const issues = findPublicSurfaceDrift({ cwd: root });
 
-    expect(issues).toEqual([
-      expect.objectContaining({
-        kind: 'missing-npm-script',
-        identifier: 'cli:npm.start',
-        scriptName: 'start',
-      }),
-    ]);
+    // Forward direction: registry still names `start`, package.json no longer
+    // does -> missing-npm-script. Reverse direction (added in #497): the new
+    // `start-renamed` script has no registry row -> missing-registry-row.
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'missing-npm-script',
+          identifier: 'cli:npm.start',
+          scriptName: 'start',
+        }),
+        expect.objectContaining({
+          kind: 'missing-registry-row',
+          identifier: 'cli:npm.start-renamed',
+          scriptName: 'start-renamed',
+        }),
+      ]),
+    );
+    expect(issues).toHaveLength(2);
   });
 
   it('flags a docs/tools.md MCP module that is missing from the registry', () => {
@@ -428,6 +439,121 @@ const ROUTES = [
     expect(findPublicSurfaceDrift({ cwd: root })).toEqual([]);
   });
 
+
+  it('flags an operator-facing package.json script with no matching registry row', () => {
+    const { root, registryPath } = makeFakeRepo();
+    // package.json now declares an extra operator-facing script `auth` that the
+    // registry never lists. Internal scripts (`test`, `typecheck`, etc.) are
+    // omitted from the registry by policy and must NOT trigger drift.
+    writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify(
+        {
+          scripts: {
+            start: 'node x',
+            fleet: 'node y',
+            auth: 'node z',
+            test: 'vitest run',
+            typecheck: 'tsc --noEmit',
+            'test:watch': 'vitest',
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    writeFileSync(registryPath, happyRegistry, 'utf8');
+
+    const issues = findPublicSurfaceDrift({ cwd: root });
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        kind: 'missing-registry-row',
+        identifier: 'cli:npm.auth',
+        scriptName: 'auth',
+      }),
+    ]);
+  });
+
+  it('flags operator-facing scripts when the npm registry table has no script rows', () => {
+    const { root, registryPath } = makeFakeRepo();
+    const registry = happyRegistry.replace(/^\| `cli:npm\.[^\n]*\n/gm, '');
+    writeFileSync(registryPath, registry, 'utf8');
+
+    const issues = findPublicSurfaceDrift({ cwd: root });
+    const missingRows = issues.filter((issue) => issue.kind === 'missing-registry-row');
+
+    expect(missingRows.map((issue) => issue.scriptName).sort()).toEqual(['fleet', 'start']);
+  });
+
+  it('does not flag denylisted internal scripts (test/typecheck/build/lint)', () => {
+    const { root, registryPath } = makeFakeRepo();
+    writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify(
+        {
+          scripts: {
+            start: 'node x',
+            fleet: 'node y',
+            test: 'vitest run',
+            'test:watch': 'vitest',
+            coverage: 'vitest run --coverage',
+            typecheck: 'tsc --noEmit',
+            'typecheck:all': 'tsc --noEmit -p tsconfig.test.json',
+            'typecheck:scripts': 'tsc --noEmit -p tsconfig.scripts.json',
+            pretest: 'npm run strip-types-compat',
+            'strip-types-compat': 'bash scripts/strip-types-compat.sh',
+            build: 'tsc',
+            'build:console': 'npm --prefix console run build',
+            lint: 'eslint .',
+            format: 'prettier --write .',
+            dev: 'node x --dev',
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    writeFileSync(registryPath, happyRegistry, 'utf8');
+
+    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([]);
+  });
+
+  it('flags multiple missing operator-facing scripts deterministically', () => {
+    const { root, registryPath } = makeFakeRepo();
+    writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify(
+        {
+          scripts: {
+            start: 'node x',
+            fleet: 'node y',
+            'guard:doc-drift': 'node a',
+            'work-index:regen': 'node b',
+            test: 'vitest run',
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    writeFileSync(registryPath, happyRegistry, 'utf8');
+
+    const issues = findPublicSurfaceDrift({ cwd: root });
+    const missingRows = issues.filter((i) => i.kind === 'missing-registry-row');
+    expect(missingRows.map((i) => i.scriptName).sort()).toEqual([
+      'guard:doc-drift',
+      'work-index:regen',
+    ]);
+    // Identifier follows the colon-to-hyphen convention seen on existing rows.
+    expect(missingRows.map((i) => i.identifier).sort()).toEqual([
+      'cli:npm.guard-doc-drift',
+      'cli:npm.work-index-regen',
+    ]);
+  });
   it('allows an explicit environment bypass for emergency pushes', () => {
     const { root, registryPath } = makeFakeRepo();
     const registry = happyRegistry.replace(
