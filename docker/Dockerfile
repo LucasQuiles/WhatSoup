@@ -1,5 +1,6 @@
 # ── Stage 1: Install production dependencies ──────────────────────────────────
-FROM node:24-slim AS deps
+# Node version pinned to match .nvmrc and package.json#volta.node.
+FROM node:24.15.0-slim AS deps
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -14,11 +15,17 @@ FROM deps AS console-build
 
 WORKDIR /app/console
 COPY console/ .
-RUN npx vite build
+# 'npm run build' runs 'tsc -b && vite build' — matches the CI Console
+# build step and the verify:release gate, so the stricter
+# tsconfig.app.json flags (noUnusedLocals/Parameters, verbatimModuleSyntax,
+# erasableSyntaxOnly, noUncheckedSideEffectImports) are enforced in the
+# image build instead of being silently dropped by a bare vite invocation.
+RUN npm run build
 # Output lands at /app/dist (vite.config.ts: outDir: '../dist')
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-FROM node:24-slim AS runtime
+# Node version pinned to match .nvmrc and package.json#volta.node.
+FROM node:24.15.0-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tini \
