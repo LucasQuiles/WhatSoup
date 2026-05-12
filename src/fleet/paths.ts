@@ -1,5 +1,21 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * Absolute path to the WhatSoup repository root.
+ *
+ * Resolved from this module's own location so it is stable regardless of
+ * `process.cwd()`. Child processes spawned by the fleet server (auth bootstrap,
+ * docker supervisor) must use this anchor — under systemd the unit has no
+ * `WorkingDirectory=` and `process.cwd()` falls back to `$HOME`, which makes
+ * relative `src/bootstrap*.ts` paths ENOENT (#419).
+ */
+export const repoRoot: string = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+);
 
 export function xdgDir(envKey: string, fallbackSuffix: string): string {
   const value = process.env[envKey];

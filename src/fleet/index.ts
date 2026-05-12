@@ -43,8 +43,7 @@ import {
   type TicketStore as AuthTicketStore,
   type TicketAudience,
 } from './auth-ticket.ts';
-
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+import { repoRoot } from './paths.ts';
 
 const log = createChildLogger('fleet');
 

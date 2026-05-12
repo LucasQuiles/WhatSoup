@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { repoRoot } from './paths.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -275,13 +276,16 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
   async start(name: string): Promise<void> {
     if (this.processes.has(name)) return; // already running
 
+    // Resolve bootstrap script against the repo root, not `process.cwd()`.
+    // Under systemd the unit ships with no `WorkingDirectory=`, so cwd is
+    // the service user's `$HOME` and a relative script path ENOENTs (#419).
     const child = spawn(process.execPath, [
       '--experimental-strip-types',
       '--disable-warning=ExperimentalWarning',
-      'src/bootstrap.ts',
+      path.join(repoRoot, 'src', 'bootstrap.ts'),
       name,
     ], {
-      cwd: process.cwd(),
+      cwd: repoRoot,
       stdio: 'inherit',
     });
 
