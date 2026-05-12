@@ -34,6 +34,7 @@ import { renderHook, act, cleanup, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement, type ReactNode } from 'react'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
+import type { useUpdateCheck } from '../../console/src/hooks/use-update-check'
 
 // ---------------------------------------------------------------------------
 // Module mocks — declared before any dynamic imports of the hook.
@@ -167,10 +168,11 @@ describe('useUpdateCheck — initial state', () => {
     const { useUpdateCheck } = await import('../../console/src/hooks/use-update-check.js')
     const { wrapper } = makeWrapper(makeToastContext())
 
-    const { result } = renderHook(() => useUpdateCheck(), { wrapper })
+    const { result } = renderHook<ReturnType<typeof useUpdateCheck>, unknown>(() => useUpdateCheck(), { wrapper })
     expect(result.current.data).toBeUndefined()
     // isPending (or isLoading) should be true while the query is in-flight
-    expect(result.current.isPending ?? result.current.isLoading).toBe(true)
+    // Use || instead of ?? because isPending is boolean (never nullish); ?? would narrow the rhs to never.
+    expect(result.current.isPending || result.current.isLoading).toBe(true)
   })
 })
 
