@@ -15,10 +15,10 @@ import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
 // Mock external deps used by ops.ts
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], cb: Function) => cb(null, '')),
-  spawn: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 // ---------------------------------------------------------------------------
 // Test helpers
