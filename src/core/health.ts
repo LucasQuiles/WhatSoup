@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { config } from '../config.ts';
+import { safeStringEqual } from '../fleet/safe-compare.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
@@ -29,12 +30,17 @@ import { readBody } from '../lib/http.ts';
 
 const log = createChildLogger('health');
 
-/** Timing-safe bearer token comparison to prevent timing attacks. */
+/**
+ * Timing-safe bearer token comparison to prevent timing attacks.
+ *
+ * Uses the shared `safeStringEqual` helper so a multibyte / malformed
+ * `Authorization` header — e.g. `'Bearer ' + 'é'.repeat(N)` — returns
+ * `false` instead of throwing a `RangeError` up the HTTP handler stack
+ * (see #405). Pre-fix this could crash the request before the 401 reply.
+ */
 function verifyBearer(header: string | undefined, expectedToken: string | undefined): boolean {
   if (!expectedToken || !header) return false;
-  const expected = `Bearer ${expectedToken}`;
-  if (header.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+  return safeStringEqual(header, `Bearer ${expectedToken}`);
 }
 
 export interface HealthDeps {

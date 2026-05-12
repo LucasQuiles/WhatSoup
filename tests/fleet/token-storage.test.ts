@@ -172,6 +172,20 @@ describe('verifyFleetToken', () => {
     expect(verifyFleetToken(tokens.active.slice(0, 63), tokens)).toBe(false);
   });
 
+  it('rejects multibyte candidates without throwing (regression: #405)', () => {
+    // Pre-fix: `verifyFleetToken` gated on `.length`, then called
+    // `timingSafeEqual` on UTF-8 Buffers. A candidate of 64 multibyte chars
+    // had Buffer.byteLength > 64, mismatching the known token's byteLength
+    // and throwing RangeError up the stack. Caller then surfaced 500 instead
+    // of 401. Comparison MUST return false silently.
+    const tokens = loadOrCreateFleetTokens();
+    expect(() => verifyFleetToken('é'.repeat(64), tokens)).not.toThrow();
+    expect(verifyFleetToken('é'.repeat(64), tokens)).toBe(false);
+    // Lone surrogate also must not throw.
+    expect(() => verifyFleetToken('\uD800'.repeat(64), tokens)).not.toThrow();
+    expect(verifyFleetToken('\uD800'.repeat(64), tokens)).toBe(false);
+  });
+
   it('rejects rotated-out tokens once they fall off accept[]', () => {
     let tokens = loadOrCreateFleetTokens();
     const oldest = tokens.active;

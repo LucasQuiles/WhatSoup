@@ -20,6 +20,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { xdgDir } from './paths.ts';
+import { safeStringEqual } from './safe-compare.ts';
 
 /** Maximum number of rotated-out tokens that remain valid. */
 export const MAX_ACCEPT_ENTRIES = 4;
@@ -72,13 +73,14 @@ export function generateFleetToken(): string {
  */
 export function verifyFleetToken(candidate: string, tokens: { active: string; accept: readonly string[] }): boolean {
   if (typeof candidate !== 'string' || candidate.length === 0) return false;
-  const candidateBuf = Buffer.from(candidate);
   const all = [tokens.active, ...tokens.accept];
   let matched = false;
   for (const known of all) {
-    if (typeof known !== 'string' || known.length === 0) continue;
-    if (known.length !== candidate.length) continue;
-    if (crypto.timingSafeEqual(candidateBuf, Buffer.from(known))) {
+    // `safeStringEqual` is shape-agnostic and never throws — malformed
+    // multibyte candidates (see #405) return false instead of bubbling a
+    // RangeError up to the HTTP layer. The loop still visits every entry so
+    // total work stays flat across accept[] regardless of which slot hits.
+    if (safeStringEqual(candidate, known)) {
       matched = true;
     }
   }
