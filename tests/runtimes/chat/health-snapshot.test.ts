@@ -70,7 +70,10 @@ vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({ processMedia: 
 vi.mock('../../../src/core/durability.ts', () => ({ sendTracked: vi.fn() }));
 vi.mock('../../../src/core/conversation-key.ts', () => ({ toConversationKey: vi.fn() }));
 vi.mock('../../../src/core/retry.ts', () => ({ jitteredDelay: vi.fn().mockReturnValue(0) }));
-vi.mock('@whiskeysockets/baileys', () => ({ downloadMediaMessage: vi.fn() }));
+vi.mock('@whiskeysockets/baileys', async () => {
+  const { baileysMediaMock } = await import('../../helpers/baileys-mock.ts');
+  return baileysMediaMock();
+});
 
 // ── Imports ──────────────────────────────────────────────────────────────────
 
