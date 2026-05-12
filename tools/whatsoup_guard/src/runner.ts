@@ -17,6 +17,7 @@ import { checkTokenAge } from './self/token-age.ts';
 import type { Domain, Event, Severity } from './types.ts';
 import { runChannelChain } from './transport/chain.ts';
 import { formatAlert } from './transport/format.ts';
+import { resolveFixCommand } from './transport/fix-commands.ts';
 import type { DeliveryResult, Sink } from './transport/types.ts';
 
 export interface RunCycleArgs {
@@ -390,6 +391,9 @@ async function deliverAlert(
   const scopeId = alertScopeId(event);
   const probeId = alertProbeId(event);
   const fingerprint = alertFingerprint(event);
+  const fixCommand = actionLabel === 'propose_fix'
+    ? resolveFixCommandForEvent(event, scopeId, probeId)
+    : undefined;
   const chain = await runChannelChain(sinks, {
     body: formatAlert({
       eventId: persisted?.id ?? 0,
@@ -400,6 +404,7 @@ async function deliverAlert(
       ts: event.ts,
       diff: readDiff(event),
       actionLabel,
+      ...(fixCommand !== undefined ? { fixCommand } : {}),
       fingerprint,
     }),
     severity: event.severity,
@@ -612,6 +617,21 @@ function assertSupportedPolicyAction(action: string): void {
 function sinksForAction(args: RunCycleArgs, action: string): Sink[] {
   if (action === 'meta_alert') return [...(args.metaAlertSinks ?? [])];
   return [...(args.sinks ?? [])];
+}
+
+function resolveFixCommandForEvent(
+  event: AlertableEvent,
+  scopeId: string,
+  probeId: string,
+): string | undefined {
+  const actionKey = actionKeyForEvent(event);
+  if (!actionKey) return undefined;
+  const payload: Record<string, unknown> = {
+    ...event.payload,
+    scope_id: event.payload.scope_id ?? scopeId,
+    probe_id: event.payload.probe_id ?? probeId,
+  };
+  return resolveFixCommand(actionKey, payload);
 }
 
 function alertFingerprint(event: AlertableEvent): string {

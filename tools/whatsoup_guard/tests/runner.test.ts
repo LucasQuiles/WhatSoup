@@ -1095,7 +1095,7 @@ describe('runCycle', () => {
     ]);
   });
 
-  it('honors credential.token_aging propose_fix with a non-shell proposed action label', async () => {
+  it('honors credential.token_aging propose_fix with a copy-pasteable fix command in the action line', async () => {
     const { baselines, events, mutes } = setup();
     const tokenPath = tempFile('guard-alert-token');
     const oldTimestampSeconds = (NOW.getTime() - 31 * DAY_MS) / 1000;
@@ -1121,7 +1121,14 @@ describe('runCycle', () => {
 
     expect(sink.deliver).toHaveBeenCalledOnce();
     const body = vi.mocked(sink.deliver).mock.calls[0]?.[0].body ?? '';
-    expect(body).toMatch(/action:\s+propose_fix/u);
+    // propose_fix action MUST carry an inline copy-pasteable command per spec §7.4
+    // (docs/specs/2026-05-08-whatsoup-protection-layer-design.md:205,245).
+    const actionLine = body.split('\n').find((line) => line.startsWith('action:'));
+    expect(actionLine).toBeDefined();
+    expect(actionLine!).toMatch(/^action:\s+propose_fix:\S/u);
+    // The command must reference the actual token path detected by the probe,
+    // not a stub placeholder, so the operator can run it as-is.
+    expect(actionLine!).toContain(tokenPath);
     expect(body).not.toMatch(/action:\s+(?:remediate|block)/u);
   });
 
