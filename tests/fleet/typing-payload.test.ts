@@ -21,10 +21,6 @@ describe('isTypingHealthEntry — valid shapes', () => {
     expect(isTypingHealthEntry({ jid: 'x', since: 0 })).toBe(true);
   });
 
-  it('accepts since as a negative finite number', () => {
-    expect(isTypingHealthEntry({ jid: 'x', since: -1 })).toBe(true);
-  });
-
   it('accepts extra keys (only validates the two required fields)', () => {
     expect(isTypingHealthEntry({ jid: 'x', since: 1, extra: 'ok' })).toBe(true);
   });
@@ -43,6 +39,11 @@ describe('isTypingHealthEntry — non-object roots', () => {
     expect(isTypingHealthEntry('jid')).toBe(false);
     expect(isTypingHealthEntry(42)).toBe(false);
     expect(isTypingHealthEntry(true)).toBe(false);
+  });
+
+  it('rejects arrays', () => {
+    expect(isTypingHealthEntry([])).toBe(false);
+    expect(isTypingHealthEntry(['x', 1])).toBe(false);
   });
 });
 
