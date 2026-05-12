@@ -349,7 +349,7 @@ describe('RealtimeProvider — message handling', () => {
 
   it('invalidates lines and lines/instance on instance_status events', async () => {
     const qc = buildQueryClient();
-    vi.spyOn(qc, 'invalidateQueries');
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
 
     await renderProvider(qc);
     await flush();
@@ -359,7 +359,7 @@ describe('RealtimeProvider — message handling', () => {
       wsRegistry[0].simulateMessage(JSON.stringify({ type: 'instance_status', instance: 'alpha' }));
     });
 
-    const keys = (qc.invalidateQueries as ReturnType<typeof vi.spyOn>).mock.calls
+    const keys = invalidateSpy.mock.calls
       .map((c) => (c[0] as { queryKey: unknown[] }).queryKey);
     expect(keys).toContainEqual(['lines']);
     expect(keys).toContainEqual(['lines', 'alpha']);
@@ -367,7 +367,7 @@ describe('RealtimeProvider — message handling', () => {
 
   it('invalidates messages/chats/search on message_received events', async () => {
     const qc = buildQueryClient();
-    vi.spyOn(qc, 'invalidateQueries');
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
 
     await renderProvider(qc);
     await flush();
@@ -377,7 +377,7 @@ describe('RealtimeProvider — message handling', () => {
       wsRegistry[0].simulateMessage(JSON.stringify({ type: 'message_received', instance: 'beta' }));
     });
 
-    const keys = (qc.invalidateQueries as ReturnType<typeof vi.spyOn>).mock.calls
+    const keys = invalidateSpy.mock.calls
       .map((c) => (c[0] as { queryKey: unknown[] }).queryKey);
     expect(keys).toContainEqual(['messages', 'beta']);
     expect(keys).toContainEqual(['chats', 'beta']);
@@ -386,7 +386,7 @@ describe('RealtimeProvider — message handling', () => {
 
   it('invalidates feed on feed_event', async () => {
     const qc = buildQueryClient();
-    vi.spyOn(qc, 'invalidateQueries');
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
 
     await renderProvider(qc);
     await flush();
@@ -396,7 +396,7 @@ describe('RealtimeProvider — message handling', () => {
       wsRegistry[0].simulateMessage(JSON.stringify({ type: 'feed_event', instance: 'gamma' }));
     });
 
-    const keys = (qc.invalidateQueries as ReturnType<typeof vi.spyOn>).mock.calls
+    const keys = invalidateSpy.mock.calls
       .map((c) => (c[0] as { queryKey: unknown[] }).queryKey);
     expect(keys).toContainEqual(['feed']);
   });
@@ -438,16 +438,16 @@ describe('RealtimeProvider — disconnect and reconnect', () => {
 
   it('invalidates lines/feed/typing queries on disconnect', async () => {
     const qc = buildQueryClient();
-    vi.spyOn(qc, 'invalidateQueries');
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
 
     await renderProvider(qc);
     await flush();
     act(() => { wsRegistry[0].simulateOpen(); });
 
-    (qc.invalidateQueries as ReturnType<typeof vi.spyOn>).mockClear();
+    invalidateSpy.mockClear();
     act(() => { wsRegistry[0].simulateClose(); });
 
-    const keys = (qc.invalidateQueries as ReturnType<typeof vi.spyOn>).mock.calls
+    const keys = invalidateSpy.mock.calls
       .map((c) => (c[0] as { queryKey: unknown[] }).queryKey);
     expect(keys).toContainEqual(['lines']);
     expect(keys).toContainEqual(['feed']);
