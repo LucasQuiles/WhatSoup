@@ -116,6 +116,7 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 | `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
 | `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
 | `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:506` | stable | active | Currently-composing JIDs from presence cache |
 | `http:health.heal` | `POST /heal` | `src/core/health.ts:283` | stable | active | Inject Type-3 repair report |
 | `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:194` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
@@ -130,11 +131,15 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 161 tools (160 always-registered + 1 (`knowledge_search`) conditionally-registered when
-Pinecone is configured; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the
-full gating conditions). Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/);
-each file exports a factory that registers tools with the names listed below. Tool counts
-and module groupings come from the [docs/tools.md table of contents](tools.md#table-of-contents).
+all 162 tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when
+Pinecone is configured, and `emit_heal_result` when the runtime has at least one configured
+control-plane peer and is not in any sandbox mode; see
+[docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
+Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each file exports a
+factory that registers tools with the names listed below — except for `emit_heal_result`,
+which is registered inline from [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts).
+Tool counts and module groupings come from the
+[docs/tools.md table of contents](tools.md#table-of-contents).
 
 The registry entries here are at the **module** level (a tool group is a public unit; the
 individual tool inventory is `docs/tools.md`). Tool-level entries follow on promotion.
@@ -161,6 +166,12 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.scheduling` | 5 | [`src/mcp/tools/scheduling.ts`](../src/mcp/tools/scheduling.ts) | stable | active | `schedule_message`, `list_scheduled`, `get_scheduled`, `update_scheduled`, `cancel_scheduled` |
 | `mcp:tools.audit` | 1 | [`src/mcp/tools/audit.ts`](../src/mcp/tools/audit.ts) | stable | active | `read_outbound_sends` |
 | `mcp:tools.substrate` | 19 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities. Schema still settling. |
+
+> The 162nd canonical tool (`emit_heal_result`) is registered inline from
+> [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts) rather than under
+> `src/mcp/tools/`, so it is intentionally absent from the per-module registry above.
+> See the [`runtime.ts (inline)` section of docs/tools.md](tools.md#runtimets-inline) for
+> the full schema and the conditional-registration gate.
 
 Sock-tool factory infrastructure: [`src/mcp/tools/sock-tool-factory.ts`](../src/mcp/tools/sock-tool-factory.ts) — internal.
 
@@ -308,7 +319,7 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:instance.db` | `<dataRoot>/instances/<name>/bot.db` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Per-instance SQLite; migration chain canonical |
 | `artifact:fleet.tokens` | `<configRoot>/fleet-tokens.json` | [README §Fleet API](../README.md#fleet-api) | stable | active | Active root token + rotated accept-list |
 | `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
-| `artifact:tokens.env` | `<configRoot>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
+| `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
 | `artifact:mcp.config` | `.mcp.json` (repo root) | [`.mcp.json`](../.mcp.json) | stable | active | MCP server registration for MCP-aware clients |
 | `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
