@@ -159,7 +159,7 @@ export class EnrichmentPoller {
         }
 
         // Enqueue validated facts for the standalone mw-mind Pinecone
-        // exporter (Track A of Phase 3). Source messages are marked
+        // exporter. Source messages are marked
         // processed after successful queueing, NOT after Pinecone write —
         // the exporter is responsible for the remote upsert and for
         // calling markFactsExported once Pinecone confirms.

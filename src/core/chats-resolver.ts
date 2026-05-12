@@ -2,7 +2,7 @@
 // Chat alias resolver — maps a chat reference to a raw chatJid via a
 // per-instance SQLite alias table.
 //
-// Per phase1-design.md (Phase 1 of WhatSoup transport completion):
+// Per the transport-completion design:
 //   - Aliases live in a per-instance chat_aliases table; line identity is
 //     implicit-per-DB (a given line's resolver consults only its own DB).
 //   - resolve() takes a target object that must contain exactly one of
@@ -11,7 +11,7 @@
 //     -> AliasNotFoundError.
 //   - Naming follows lid-resolver.ts peer convention.
 //
-// Contract tests at tests/core/chats-resolver.test.ts (P1-B locked the surface).
+// Contract tests at tests/core/chats-resolver.test.ts lock the surface.
 
 import type { DatabaseSync } from 'node:sqlite';
 

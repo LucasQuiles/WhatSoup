@@ -37,7 +37,7 @@ function describeAuthRejectUrl(rawUrl: string | undefined): {
 }
 
 // ---------------------------------------------------------------------------
-// Event types — matches Phase 4 spec consensus
+// Event types — matches the realtime/WebSocket spec consensus
 // ---------------------------------------------------------------------------
 
 /** Invalidation events — trigger React Query refetch on the client. */

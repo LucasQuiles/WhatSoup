@@ -52,7 +52,7 @@ export interface HealthDeps {
   runtime?: Runtime;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
-  // Phase 1: instance identity for control-plane fleet discovery
+  // Instance identity for control-plane fleet discovery
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
   accessMode: string;

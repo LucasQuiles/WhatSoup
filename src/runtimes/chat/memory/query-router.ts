@@ -1,7 +1,7 @@
 // src/runtimes/chat/memory/query-router.ts
 // Deterministic query-dependent routing for WhatsApp memory retrieval.
 //
-// Implements the Phase 3 retrieval policy: WhatsApp queries fan out to the
+// Implements the namespace-fanout retrieval policy: WhatsApp queries route to the
 // right namespace(s) first based on user intent — facts-first for identity
 // and preference questions, raw-first for quote/summarize/catch-up questions,
 // hybrid for mixed/ambiguous "what have I discussed" questions.

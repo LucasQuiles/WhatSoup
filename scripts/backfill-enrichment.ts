@@ -1,5 +1,5 @@
 /**
- * One-shot retroactive backfill for Phase 3 closure.
+ * One-shot retroactive backfill for the enrichment exporter rollout.
  *
  * Reads messages from bot.db where `enrichment_processed_at IS NULL AND
  * is_from_me = 0`, runs them through the same extract/validate/enqueue
@@ -10,8 +10,8 @@
  * Constraints:
  *   - Does NOT widen the `is_from_me = 0` filter; skips messages where
  *     `enrichment_processed_at IS NOT NULL` (those were processed under the
- *     pre-Phase-3 architecture; their facts live in the frozen `whatsapp`
- *     namespace and are out of scope per plan §21).
+ *     pre-exporter-rollout architecture; their facts live in the frozen
+ *     `whatsapp` namespace and are out of scope per plan §21).
  *   - Does NOT instantiate PineconeMemory (queue-only path).
  *   - Emits no outbound WhatsApp traffic.
  *   - Preserves the T1 accounting gate: source messages are marked

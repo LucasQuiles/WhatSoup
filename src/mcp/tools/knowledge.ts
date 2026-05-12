@@ -351,7 +351,7 @@ export function registerKnowledgeTools(
         // Sort merged results by score descending
         hits.sort((a, b) => b.score - a.score);
 
-        // Phase 2: client-side rerank if configured
+        // Client-side rerank if configured
         if (profile.rerank && hits.length > 0) {
           try {
             const rerankResult = await pc.inference.rerank({
