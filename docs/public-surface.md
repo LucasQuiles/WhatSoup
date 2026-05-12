@@ -56,7 +56,7 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:286` | stable | active | Instance detail + config |
 | `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:285` | stable | active | Stop + cleanup |
 | `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:284` | stable | active | Registration probe |
-| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:300` | stable | active | Update `instance.json` |
+| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:300` | stable | active | Update `config.json` |
 | `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:301` | stable | active | QR-code SSE stream |
 | `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:298` | stable | active | Restart unit |
 | `http:fleet.lines.stop` | `POST /api/lines/:name/stop` | `src/fleet/index.ts:299` | stable | active | Stop unit |
@@ -216,7 +216,7 @@ The registry tracks env-var groups at the section level.
 | `env:api-keys` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY` | [docs/configuration.md §API Keys](configuration.md#api-keys-required-for-chat-and-audio-transcription) | stable | active | Loaded from GNOME Keyring by wrapper; required for `chat` instances, soft-optional for `agent`, unused for `passive` |
 | `env:models` | `CONVERSATION_MODEL`, `EXTRACTION_MODEL`, `VALIDATION_MODEL`, `FALLBACK_MODEL` | [docs/configuration.md §Models](configuration.md#models) | stable | active | Overridable per instance via `models` |
 | `env:conversation` | `MAX_TOKENS`, `RATE_LIMIT_PER_HOUR` | [docs/configuration.md §Conversation](configuration.md#conversation) | stable | active | Per-instance overrides available |
-| `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Single-instance only; `instance.json:adminPhones` is the canonical form in multi-instance mode |
+| `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Single-instance only; `config.json:adminPhones` is the canonical form in multi-instance mode |
 | `env:storage-paths` | `WHATSOUP_CONFIG_DIR`, `WHATSOUP_DATA_DIR`, `WHATSOUP_STATE_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | [docs/configuration.md §Storage Paths](configuration.md#storage-paths-single-instance-legacy-mode-only) | stable | active | Legacy / single-instance mode only |
 | `env:pinecone` | `PINECONE_INDEX`, `PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`, `MW_MIND_EMBED_URL`, `RECENCY_HALF_LIFE_DAYS`, `MAX_AGE_DAYS` | [docs/configuration.md §Pinecone](configuration.md#pinecone) | stable | active | Defaults that per-instance `memory.pinecone.*` can override |
 | `env:health-server` | `HEALTH_PORT`, `HEALTH_BIND_ADDRESS`, `WHATSOUP_HEALTH_TOKEN` | [docs/configuration.md §Health Server](configuration.md#health-server) | stable | active | Mutation endpoints fail closed `401` without token |
@@ -314,7 +314,7 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:xdg.config-root` | `$XDG_CONFIG_HOME/whatsoup` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Config root; per-instance subdirs under `instances/` |
 | `artifact:xdg.data-root` | `$XDG_DATA_HOME/whatsoup` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Data root: databases, logs, media cache |
 | `artifact:xdg.state-root` | `$XDG_STATE_HOME/whatsoup` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Ephemeral state: lock files |
-| `artifact:instance.config` | `<configRoot>/instances/<name>/config.json` | [docs/configuration.md §Instance Configuration](configuration.md#instance-configuration-instancejson) | stable | active | Per-instance `instance.json` |
+| `artifact:instance.config` | `<configRoot>/instances/<name>/config.json` | [docs/configuration.md §Instance Configuration](configuration.md#instance-configuration-configjson) | stable | active | Per-instance `config.json` |
 | `artifact:instance.auth` | `<configRoot>/instances/<name>/auth/` | [docs/configuration.md](configuration.md) | stable | active | WhatsApp session credentials; never copy across machines |
 | `artifact:instance.db` | `<dataRoot>/instances/<name>/bot.db` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Per-instance SQLite; migration chain canonical |
 | `artifact:fleet.tokens` | `<configRoot>/fleet-tokens.json` | [README §Fleet API](../README.md#fleet-api) | stable | active | Active root token + rotated accept-list |
