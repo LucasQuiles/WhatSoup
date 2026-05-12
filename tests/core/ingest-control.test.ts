@@ -80,7 +80,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
 // ---------------------------------------------------------------------------
 
 import { Database } from '../../src/core/database.ts';
-import { createIngestHandler } from '../../src/core/ingest.ts';
+import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { drainIngest } from './_helpers/ingest-drain.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
@@ -339,5 +339,54 @@ describe('Control message interception', () => {
     );
     expect(skipSpy).toHaveBeenCalledWith(42, 'control_message');
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Load-bearing drainIngest proof.
+  //
+  // The other tests in this file dispatch through synchronous mocks; the
+  // entire ingest IIFE collapses into a microtask chain that drains during
+  // `await handler(msg)` even when `await drainIngest()` is removed. That
+  // means those tests do NOT exercise the drain helper.
+  //
+  // This test holds the ingest slot across a real macrotask boundary by
+  // returning a Promise from `runtime.handleMessage` that resolves via
+  // setImmediate. A single-await yield in `runIngest` cannot bridge that
+  // boundary, so without `await drainIngest()` the post-call assertions
+  // fail: the deferred body never ran and the slot is still active.
+  // ---------------------------------------------------------------------------
+  it('drainIngest is load-bearing: waits for runtime.handleMessage across a macrotask boundary', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    let handleMessageCompleted = false;
+    vi.mocked(runtime.handleMessage).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          // setImmediate is a real macrotask — a single `await` in runIngest
+          // cannot observe the transition; only drainIngest's vi.waitFor can.
+          setImmediate(() => {
+            handleMessageCompleted = true;
+            resolve();
+          });
+        }),
+    );
+
+    const handler = makeIngest(db, messenger, runtime);
+    const msg = makeMsg({
+      messageId: 'drain-load-bearing-001',
+      senderJid: '15551112222@s.whatsapp.net',
+      content: 'load bearing check',
+    });
+
+    await runIngest(handler, msg);
+
+    // If `await drainIngest()` is removed from runIngest, all four of these
+    // assertions fail because the IIFE is parked on runtime.handleMessage.
+    expect(handleMessageCompleted).toBe(true);
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+    const stats = getIngestStats();
+    expect(stats.active).toBe(0);
+    expect(stats.queued).toBe(0);
   });
 });
