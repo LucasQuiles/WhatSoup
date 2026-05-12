@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { writeFileSync } from 'node:fs';
 import { jsonResponse } from '../../lib/http.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -12,12 +13,113 @@ const log = createChildLogger('fleet:update');
 
 let updateInProgress = false;
 
-/** Attempt to rollback to a previous SHA after a failed update step. Best-effort — logs but doesn't throw. */
+/**
+ * Parse `git status --porcelain` output, filtering out untracked entries (`??`).
+ * Returns the list of tracked-file paths with pending modifications.
+ */
+function parseTrackedChanges(porcelain: string): string[] {
+  return porcelain
+    .split('\n')
+    .filter((l) => l.trim() && !l.startsWith('??'))
+    // porcelain format: "XY <path>" — XY are status codes, path starts at col 3
+    .map((l) => l.slice(3).trim())
+    .filter(Boolean);
+}
+
+/**
+ * Attempt to rollback to a previous SHA after a failed update step. Before resetting,
+ * captures any post-pull tracked modifications (typically `package-lock.json` after
+ * `npm install` runs) into a patch file on disk plus a `git stash` entry, so the
+ * destructive `git reset --hard` does not silently lose work. Best-effort — logs but
+ * doesn't throw. Surfaces preserved files / patch path / stash ref via SSE.
+ */
 async function rollback(repoRoot: string, sha: string, writeSSE: (event: string, data: unknown) => void): Promise<void> {
   try {
+    // 1. Capture tracked changes that appeared post-pull.
+    let preservedFiles: string[] = [];
+    let patchPath: string | undefined;
+    let stashRef: string | undefined;
+
+    try {
+      const { stdout: porcelain } = await execFileAsync(
+        'git', ['status', '--porcelain'],
+        { cwd: repoRoot, timeout: 5_000 },
+      );
+      preservedFiles = parseTrackedChanges(porcelain);
+    } catch (statusErr) {
+      // git status itself failed — log but proceed with the reset; this preserves
+      // existing behaviour for the empty/no-dirt case.
+      log.warn({ err: statusErr, sha }, 'rollback: git status failed, proceeding without preservation');
+    }
+
+    if (preservedFiles.length > 0) {
+      // 2a. Capture diff to a patch file on disk.
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const shortSha = sha.slice(0, 7);
+      const candidatePath = `/tmp/whatsoup-update-rollback-${timestamp}-${shortSha}.patch`;
+
+      let diffOut = '';
+      try {
+        const { stdout } = await execFileAsync(
+          'git', ['diff', 'HEAD'],
+          { cwd: repoRoot, timeout: 10_000 },
+        );
+        diffOut = stdout;
+      } catch (diffErr) {
+        log.warn({ err: diffErr, sha }, 'rollback: git diff HEAD failed, skipping reset to avoid silent loss');
+        writeSSE('progress', {
+          step: 'rollback',
+          status: 'skipped',
+          reason: 'patch-write-failed',
+          files: preservedFiles,
+        });
+        return;
+      }
+
+      try {
+        writeFileSync(candidatePath, diffOut, { encoding: 'utf8' });
+        patchPath = candidatePath;
+      } catch (writeErr) {
+        // ENOSPC / EACCES / read-only fs — do NOT reset; leave the working tree intact
+        // so the operator can recover manually.
+        log.error({ err: writeErr, sha, candidatePath }, 'rollback: patch write failed, skipping reset');
+        writeSSE('progress', {
+          step: 'rollback',
+          status: 'skipped',
+          reason: 'patch-write-failed',
+          files: preservedFiles,
+        });
+        return;
+      }
+
+      // 2b. Stash as a secondary recovery surface. Failure here is non-fatal — the
+      // patch file is already on disk.
+      try {
+        await execFileAsync(
+          'git',
+          ['stash', 'push', '--include-untracked', '--message', `whatsoup-update-rollback ${timestamp}`],
+          { cwd: repoRoot, timeout: 15_000 },
+        );
+        stashRef = 'stash@{0}';
+      } catch (stashErr) {
+        log.warn({ err: stashErr, sha }, 'rollback: git stash push failed, patch artifact still on disk');
+      }
+    }
+
+    // 3. Destructive reset (unchanged behaviour).
     await execFileAsync('git', ['reset', '--hard', sha], { cwd: repoRoot, timeout: 15_000 });
-    writeSSE('progress', { step: 'rollback', status: 'done', message: `Rolled back to ${sha.slice(0, 7)}` });
-    log.info({ sha }, 'update rollback succeeded');
+
+    // 4. Report.
+    writeSSE('progress', {
+      step: 'rollback',
+      status: 'done',
+      sha,
+      message: `Rolled back to ${sha.slice(0, 7)}`,
+      preservedFiles,
+      ...(patchPath ? { patchPath } : {}),
+      ...(stashRef ? { stashRef } : {}),
+    });
+    log.info({ sha, preservedFiles, patchPath, stashRef }, 'update rollback succeeded');
   } catch (err) {
     writeSSE('error', { step: 'rollback', message: `Rollback failed: ${(err as Error).message}` });
     log.error({ err, sha }, 'update rollback failed');
