@@ -25,6 +25,7 @@ import {
   handleGetGroupRequests, handleGroupRequestsUpdate,
 } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
+import { importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
@@ -354,48 +355,64 @@ function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: 
 async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
   try {
     const instances = [...deps.discovery.getInstances().values()];
-    const allMappings = new Map<string, string>(); // lid → phone_jid
 
-    // Phase 1: Collect union of all mappings from every instance
+    // Step 1: collect every instance's (lid, phone_jid, updated_at) so the
+    // freshness gate in writeLidMapping can compare cross-instance observation
+    // times correctly. The pre-#251 path used a Map<lid,phone> which silently
+    // dropped staleness signal.
+    const observations: FleetMappingInput[] = [];
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+        return db
+          .prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings')
+          .all() as Array<{ lid: string; phone_jid: string; updated_at: string }>;
       });
       if (result.ok) {
         for (const m of result.data) {
-          allMappings.set(m.lid, m.phone_jid);
+          observations.push({
+            lid: m.lid,
+            phone_jid: m.phone_jid,
+            updated_at: m.updated_at,
+            source_instance: inst.name,
+          });
         }
       }
     }
 
-    // Phase 2: Write the union set into every instance's DB (needs writable access)
-    const results: Record<string, number> = {};
+    // Step 2: write into every instance via the unified seam (strict freshness
+    // gate on L5). Per-instance results expose imported/flipped/noop/conflicts.
+    const results: Record<
+      string,
+      { imported: number; flipped: number; noop: number; conflicts: number; error?: string }
+    > = {};
     for (const inst of instances) {
-      const insertResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        // Wrap in a transaction — without this, each INSERT is a separate WAL write
-        // which is both slow and creates contention with the running instance.
-        db.prepare('BEGIN').run();
-        try {
-          const stmt = db.prepare(
-            `INSERT OR IGNORE INTO lid_mappings (lid, phone_jid, updated_at)
-             VALUES (?, ?, datetime('now'))`,
-          );
-          let imported = 0;
-          for (const [lid, phoneJid] of allMappings) {
-            const r = stmt.run(lid, phoneJid);
-            if ((r as any).changes > 0) imported++;
-          }
-          db.prepare('COMMIT').run();
-          return imported;
-        } catch (err) {
-          db.prepare('ROLLBACK').run();
-          throw err;
-        }
+      const writeResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (rawDb: DatabaseSync) => {
+        // Build a minimal Database-shaped facade so importLidMappings can
+        // operate on the underlying raw handle without us instantiating a
+        // full Database instance against a path we don't own here.
+        const dbFacade = { raw: rawDb } as unknown as import('../core/database.ts').Database;
+        return importLidMappings(dbFacade, observations);
       });
-      results[inst.name] = insertResult.ok ? insertResult.data : -1;
+      if (writeResult.ok) {
+        const r = writeResult.data;
+        results[inst.name] = {
+          imported: r.imported,
+          flipped: r.flipped,
+          noop: r.noop,
+          conflicts: r.conflicts.length,
+        };
+      } else {
+        results[inst.name] = {
+          imported: 0,
+          flipped: 0,
+          noop: 0,
+          conflicts: 0,
+          error: writeResult.error,
+        };
+      }
     }
 
-    const totalMappings = allMappings.size;
+    const totalMappings = observations.length;
     log.info({ totalMappings, results }, 'L5: cross-instance LID sync completed');
     jsonResponse(res, 200, { totalMappings, results });
   } catch (err) {

@@ -19,11 +19,186 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
 import { DOMAIN_PERSONAL, DOMAIN_GROUP, DOMAIN_LID, bareNumber, normalizeLid, isLidJid, isPnJid, isGroupJid } from './jid-constants.ts';
 import type { Database } from './database.ts';
 
 const log = createChildLogger('lid-resolver');
+
+// ── Unified write seam (PR-1 for #251) ──────────────────────────────────────
+
+/**
+ * Provenance label for every LID write. Mirrors the layered defense model:
+ *   L1   = startup hydration
+ *   L1.5 = lazy disk fallback
+ *   L2   = real-time jidAliasChanged event
+ *   L3   = message-key mining
+ *   L4   = group-metadata mining
+ *   L5   = cross-instance fleet sync
+ *   L6   = periodic reconciliation
+ */
+export type LidWriteSource = 'L1' | 'L1.5' | 'L2' | 'L3' | 'L4' | 'L5' | 'L6';
+
+/**
+ * Conflict-resolution mode for writeLidMapping.
+ *   - 'skip-if-exists':  INSERT OR IGNORE. Used by L1 hydration.
+ *   - 'overwrite':       ON CONFLICT DO UPDATE unconditionally. L1.5/L2/L3/L4
+ *                        (local observation is always considered current).
+ *   - 'freshness-gated': ON CONFLICT DO UPDATE only when the incoming
+ *                        observed_updated_at strictly exceeds the existing
+ *                        row's updated_at. Used by L5 to prevent stale
+ *                        cross-instance imports from clobbering newer data.
+ */
+export type LidWriteMode = 'skip-if-exists' | 'overwrite' | 'freshness-gated';
+
+export interface LidWriteOptions {
+  /** Required for 'freshness-gated' mode; ignored otherwise. */
+  observedUpdatedAt?: string;
+  /** Source-instance name for cross-instance audit (L5). */
+  sourceInstance?: string;
+}
+
+export interface LidWriteResult {
+  /** True if the row was inserted or its phone_jid was changed. */
+  written: boolean;
+  /**
+   * True if an existing row's phone_jid was changed (a real flip — distinct
+   * from first-seen which is `written: true, flipped: false`).
+   */
+  flipped: boolean;
+  /**
+   * Populated when freshness-gated mode rejected the write because the
+   * existing row is at least as fresh as the incoming observation.
+   */
+  conflict?: {
+    prevPhoneJid: string;
+    prevUpdatedAt: string;
+  };
+}
+
+/** Retention bounds enforced after every flip: keep newest 1000 OR last 90 days, whichever first. */
+const HISTORY_MAX_ROWS_PER_LID = 1000;
+const HISTORY_MAX_AGE_SQL = "-90 days";
+
+/**
+ * Unified LID-mapping write seam. All seven write paths converge here.
+ *
+ * Behavior summary:
+ *   - On insert (no prior row): writes lid_mappings; history row with
+ *     prev_phone_jid=NULL.
+ *   - On unchanged phone: no-op (no DB write, no history row).
+ *   - On flip (different phone): updates lid_mappings; appends history row;
+ *     runs retention cleanup for this LID.
+ *   - Freshness-gated mode: write only if incoming observed_updated_at is
+ *     strictly greater than the existing row's updated_at. Otherwise returns
+ *     written=false with a populated `conflict` field for caller diagnostics.
+ *
+ * Transaction policy: this function performs multiple SQL statements but does
+ * NOT issue BEGIN/COMMIT. Callers that need cross-row atomicity must wrap
+ * their batch in a transaction themselves (see importLidMappings,
+ * upsertLidMapping). Callers operating inside an existing transaction (e.g.
+ * lookupLidFromDisk) can call this safely.
+ */
+export function writeLidMapping(
+  rawDb: DatabaseSync,
+  lid: string,
+  phoneJid: string,
+  source: LidWriteSource,
+  mode: LidWriteMode = 'overwrite',
+  opts: LidWriteOptions = {},
+): LidWriteResult {
+  // Look up current row to determine flip vs first-seen vs no-op.
+  const existing = rawDb
+    .prepare('SELECT phone_jid, updated_at FROM lid_mappings WHERE lid = ?')
+    .get(lid) as { phone_jid: string; updated_at: string } | undefined;
+
+  if (existing && existing.phone_jid === phoneJid) {
+    // No-op: same phone. No history row written.
+    return { written: false, flipped: false };
+  }
+
+  if (existing && mode === 'skip-if-exists') {
+    return { written: false, flipped: false };
+  }
+
+  if (existing && mode === 'freshness-gated') {
+    const incoming = opts.observedUpdatedAt;
+    if (!incoming || incoming <= existing.updated_at) {
+      return {
+        written: false,
+        flipped: false,
+        conflict: {
+          prevPhoneJid: existing.phone_jid,
+          prevUpdatedAt: existing.updated_at,
+        },
+      };
+    }
+  }
+
+  // For freshness-gated writes, persist the source instance's observation time
+  // so future cross-instance comparisons remain meaningful. For overwrite/local
+  // writes, we mint datetime('now') from the local clock.
+  const newUpdatedAt =
+    mode === 'freshness-gated' && opts.observedUpdatedAt
+      ? opts.observedUpdatedAt
+      : null; // null means "use datetime('now')" below
+
+  if (existing) {
+    if (newUpdatedAt !== null) {
+      rawDb
+        .prepare('UPDATE lid_mappings SET phone_jid = ?, updated_at = ? WHERE lid = ?')
+        .run(phoneJid, newUpdatedAt, lid);
+    } else {
+      rawDb
+        .prepare("UPDATE lid_mappings SET phone_jid = ?, updated_at = datetime('now') WHERE lid = ?")
+        .run(phoneJid, lid);
+    }
+  } else {
+    if (newUpdatedAt !== null) {
+      rawDb
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(lid, phoneJid, newUpdatedAt);
+    } else {
+      rawDb
+        .prepare("INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))")
+        .run(lid, phoneJid);
+    }
+  }
+
+  // Append history row.
+  rawDb
+    .prepare(
+      `INSERT INTO lid_mappings_history
+         (lid, prev_phone_jid, new_phone_jid, source, source_instance, observed_updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      lid,
+      existing ? existing.phone_jid : null,
+      phoneJid,
+      source,
+      opts.sourceInstance ?? null,
+      opts.observedUpdatedAt ?? null,
+    );
+
+  // Retention cleanup: per-LID, keep newest 1000 AND only rows newer than 90 days.
+  rawDb
+    .prepare(
+      `DELETE FROM lid_mappings_history
+         WHERE lid = ?
+           AND id NOT IN (
+             SELECT id FROM lid_mappings_history
+              WHERE lid = ?
+                AND changed_at > datetime('now', ?)
+              ORDER BY id DESC
+              LIMIT ?
+           )`,
+    )
+    .run(lid, lid, HISTORY_MAX_AGE_SQL, HISTORY_MAX_ROWS_PER_LID);
+
+  return { written: true, flipped: existing !== undefined };
+}
 
 // ── L1: Startup hydration ───────────────────────────────────────────────────
 
@@ -41,11 +216,6 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
     return 0; // auth dir doesn't exist yet
   }
 
-  const stmt = db.raw.prepare(
-    `INSERT OR IGNORE INTO lid_mappings (lid, phone_jid, updated_at)
-     VALUES (?, ?, datetime('now'))`,
-  );
-
   for (const entry of entries) {
     // Only process reverse mapping files: lid-mapping-{lid}_reverse.json
     const match = entry.match(/^lid-mapping-(\d+)_reverse\.json$/);
@@ -55,8 +225,15 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
       const raw = readFileSync(join(authDir, entry), 'utf8').trim();
       const phone = JSON.parse(raw);
       if (typeof phone === 'string' && phone.length > 0) {
-        stmt.run(lid, `${phone}@${DOMAIN_PERSONAL}`);
-        count++;
+        // Preserve historic semantics: skip if existing row (INSERT OR IGNORE).
+        const result = writeLidMapping(
+          db.raw,
+          lid,
+          `${phone}@${DOMAIN_PERSONAL}`,
+          'L1',
+          'skip-if-exists',
+        );
+        if (result.written) count++;
       }
     } catch {
       // Malformed file — skip
@@ -80,14 +257,21 @@ export function hydrateLidMappings(db: Database, authDir: string): number {
  * "cannot start a transaction within a transaction". If you need to batch
  * multiple upserts, use importLidMappings() or call the prepared statements directly.
  */
-export function upsertLidMapping(db: Database, lid: string, phoneJid: string): void {
+export function upsertLidMapping(
+  db: Database,
+  lid: string,
+  phoneJid: string,
+  source: LidWriteSource = 'L2',
+): void {
   // Atomic: mapping upsert + orphan migration must succeed or fail together.
   db.raw.exec('BEGIN');
   try {
-    db.raw.prepare(
-      `INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))
-       ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, updated_at = datetime('now')`,
-    ).run(lid, phoneJid);
+    // Route the actual write through the unified seam so history rows are
+    // captured. Default source 'L2' (jidAliasChanged) keeps overwrite
+    // semantics — Baileys is authoritative for this instance at write time.
+    // L3 (message mining) and L4 (group metadata) callers pass their own
+    // source label for accurate audit provenance.
+    writeLidMapping(db.raw, lid, phoneJid, source, 'overwrite');
 
     // Migrate orphaned access_list entries: if the LID number was stored as a
     // phone entry (because resolution wasn't available when the sender was
@@ -203,7 +387,7 @@ export function mineGroupParticipants(
     if (existing === bareNumber(pnJid)) continue;
 
     try {
-      upsertLidMapping(db, lid, pnJid);
+      upsertLidMapping(db, lid, pnJid, 'L4');
       log.info({ lid, phoneJid: pnJid, source: 'group-metadata' }, 'L4: new LID mapping from group participant');
       discovered++;
     } catch (err) {
@@ -217,31 +401,102 @@ export function mineGroupParticipants(
 // ── L5: Cross-instance sync ─────────────────────────────────────────────────
 
 /**
- * Import LID mappings from another instance (used by fleet sync endpoint).
- * Uses INSERT OR IGNORE — existing mappings are preserved (newest wins via L2).
- * Returns count of new mappings imported.
+ * Cross-instance LID-mapping import (fleet sync endpoint).
+ *
+ * Strict freshness gate (#251): a mapping from another instance is only
+ * written when `observedUpdatedAt > existing.updated_at`. Same-or-older
+ * observations are reported as conflicts via the return value; the caller
+ * (fleet route or operator) decides what to do with them.
+ *
+ * Each row may carry the source-instance `updated_at` (its own observation
+ * time). When provided, that value is persisted into the target row's
+ * `updated_at` so future cross-instance comparisons remain meaningful.
+ *
+ * Returns per-row outcomes plus aggregate counts.
  */
+export interface FleetMappingInput {
+  lid: string;
+  phone_jid: string;
+  updated_at?: string;
+  source_instance?: string;
+}
+
+export interface FleetMappingConflict {
+  lid: string;
+  incoming_phone_jid: string;
+  incoming_updated_at: string | null;
+  existing_phone_jid: string;
+  existing_updated_at: string;
+  source_instance: string | null;
+}
+
+export interface ImportLidMappingsResult {
+  imported: number;
+  flipped: number;
+  noop: number;
+  conflicts: FleetMappingConflict[];
+}
+
 export function importLidMappings(
   db: Database,
-  mappings: Array<{ lid: string; phone_jid: string }>,
-): number {
-  const stmt = db.raw.prepare(
-    `INSERT OR IGNORE INTO lid_mappings (lid, phone_jid, updated_at)
-     VALUES (?, ?, datetime('now'))`,
-  );
+  mappings: ReadonlyArray<FleetMappingInput>,
+): ImportLidMappingsResult {
+  const out: ImportLidMappingsResult = {
+    imported: 0,
+    flipped: 0,
+    noop: 0,
+    conflicts: [],
+  };
 
-  let imported = 0;
-  for (const { lid, phone_jid } of mappings) {
-    // Validate before inserting
-    if (!lid || !phone_jid || !phone_jid.endsWith(`@${DOMAIN_PERSONAL}`)) continue;
-    const result = stmt.run(normalizeLid(lid), phone_jid);
-    if ((result as any).changes > 0) imported++;
+  // Wrap the batch in a transaction so partial failures don't leave the
+  // history table inconsistent with lid_mappings.
+  db.raw.exec('BEGIN');
+  try {
+    for (const m of mappings) {
+      // Validate before writing.
+      if (!m.lid || !m.phone_jid || !m.phone_jid.endsWith(`@${DOMAIN_PERSONAL}`)) continue;
+
+      const res = writeLidMapping(
+        db.raw,
+        normalizeLid(m.lid),
+        m.phone_jid,
+        'L5',
+        'freshness-gated',
+        {
+          observedUpdatedAt: m.updated_at,
+          sourceInstance: m.source_instance,
+        },
+      );
+
+      if (res.written) {
+        out.imported++;
+        if (res.flipped) out.flipped++;
+      } else if (res.conflict) {
+        out.conflicts.push({
+          lid: normalizeLid(m.lid),
+          incoming_phone_jid: m.phone_jid,
+          incoming_updated_at: m.updated_at ?? null,
+          existing_phone_jid: res.conflict.prevPhoneJid,
+          existing_updated_at: res.conflict.prevUpdatedAt,
+          source_instance: m.source_instance ?? null,
+        });
+      } else {
+        out.noop++;
+      }
+    }
+    db.raw.exec('COMMIT');
+  } catch (err) {
+    db.raw.exec('ROLLBACK');
+    throw err;
   }
 
-  if (imported > 0) {
-    log.info({ imported, total: mappings.length }, 'L5: cross-instance LID sync completed');
+  if (out.imported > 0 || out.conflicts.length > 0) {
+    log.info(
+      { imported: out.imported, flipped: out.flipped, conflicts: out.conflicts.length, total: mappings.length },
+      'L5: cross-instance LID sync completed',
+    );
   }
-  return imported;
+  return out;
 }
 
 
@@ -363,13 +618,11 @@ function lookupLidFromDisk(db: Database, lid: string): string | null {
   }
   if (typeof phone !== 'string' || phone.length === 0) return null;
 
-  // Single-statement upsert — safe inside a caller's transaction.
+  // Route through the unified seam. Safe inside a caller's transaction — the
+  // seam itself does not BEGIN/COMMIT. Mode is 'overwrite' to preserve the
+  // pre-existing single-statement INSERT...ON CONFLICT DO UPDATE semantics.
   try {
-    db.raw.prepare(
-      `INSERT INTO lid_mappings (lid, phone_jid, updated_at)
-       VALUES (?, ?, datetime('now'))
-       ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, updated_at = datetime('now')`,
-    ).run(lid, `${phone}@${DOMAIN_PERSONAL}`);
+    writeLidMapping(db.raw, lid, `${phone}@${DOMAIN_PERSONAL}`, 'L1.5', 'overwrite');
     log.info({ lid, phone }, 'L1.5 disk fallback resolved LID from reverse file');
   } catch (err) {
     log.warn({ err, lid, phone }, 'L1.5 disk fallback upsert failed');
