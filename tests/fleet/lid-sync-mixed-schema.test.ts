@@ -182,6 +182,38 @@ CREATE TABLE lid_mappings (
 );
 `;
 
+const SCHEMA_SQL_BAD_MIGRATIONS = `
+CREATE TABLE schema_migrations (applied_at TEXT NOT NULL);
+
+CREATE TABLE messages (
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_key TEXT NOT NULL,
+  sender_jid TEXT,
+  sender_name TEXT,
+  content TEXT,
+  content_type TEXT DEFAULT 'text',
+  timestamp INTEGER NOT NULL,
+  is_from_me INTEGER DEFAULT 0,
+  deleted_at TEXT,
+  enrichment_processed_at TEXT
+);
+
+CREATE TABLE access_list (
+  subject_type TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  display_name TEXT,
+  requested_at TEXT,
+  decided_at TEXT
+);
+
+CREATE TABLE lid_mappings (
+  lid TEXT PRIMARY KEY,
+  phone_jid TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 function writeInstanceConfig(configRoot: string, name: string): void {
   const instanceDir = path.join(configRoot, name);
   fs.mkdirSync(instanceDir, { recursive: true });
@@ -207,6 +239,7 @@ const SELF_NAME = '__mixed_self__';
 const INST_V25 = 'line-v25';
 const INST_V24 = 'line-v24';
 const INST_NO_MIG = 'line-no-migrations';
+const INST_BAD_MIG = 'line-bad-migrations';
 
 let tmpDir: string;
 let dataRoot: string;
@@ -238,9 +271,11 @@ beforeAll(async () => {
   writeInstanceConfig(configRoot, INST_V25);
   writeInstanceConfig(configRoot, INST_V24);
   writeInstanceConfig(configRoot, INST_NO_MIG);
+  writeInstanceConfig(configRoot, INST_BAD_MIG);
   seedDb(path.join(dataRoot, INST_V25, 'bot.db'), SCHEMA_SQL_V25);
   seedDb(path.join(dataRoot, INST_V24, 'bot.db'), SCHEMA_SQL_V24);
   seedDb(path.join(dataRoot, INST_NO_MIG, 'bot.db'), SCHEMA_SQL_NO_MIGRATIONS);
+  seedDb(path.join(dataRoot, INST_BAD_MIG, 'bot.db'), SCHEMA_SQL_BAD_MIGRATIONS);
 
   // Self DB on v25 (the orchestrator must be current; that's the realistic case).
   const selfDataDir = path.join(dataRoot, SELF_NAME);
@@ -349,6 +384,23 @@ describe('fleet LID sync -- mixed-version peers (#321)', () => {
     });
     expect(body.details[INST_NO_MIG].schemaVersion === null || body.details[INST_NO_MIG].schemaVersion === 0).toBe(true);
 
+    expect(body.skippedInstances).toEqual(
+      expect.arrayContaining([
+        {
+          instance: INST_V24,
+          schemaVersion: 24,
+          required: 25,
+          reason: 'schema_migration_below_25',
+        },
+        {
+          instance: INST_NO_MIG,
+          schemaVersion: 0,
+          required: 25,
+          reason: 'schema_migration_below_25',
+        },
+      ]),
+    );
+
     // v25 peer: schema is current -> written normally, not skipped.
     expect(body.details[INST_V25]).toBeDefined();
     expect(body.details[INST_V25].skipped).not.toBe(true);
@@ -393,5 +445,28 @@ describe('fleet LID sync -- mixed-version peers (#321)', () => {
     } finally {
       peerDb.close();
     }
+  });
+
+  it('reports malformed schema_migrations probes as errors, not rollout skips', async () => {
+    const res = await fetch(`${baseUrl}/api/lid-mappings/sync`, {
+      method: 'POST', headers: auth,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.results[INST_BAD_MIG]).toBe(-1);
+    expect(body.details[INST_BAD_MIG]).toMatchObject({
+      imported: 0,
+      flipped: 0,
+      noop: 0,
+      conflicts: 0,
+    });
+    expect(body.details[INST_BAD_MIG].skipped).not.toBe(true);
+    expect(body.details[INST_BAD_MIG].error).toContain('version');
+    expect(body.skippedInstances).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ instance: INST_BAD_MIG }),
+      ]),
+    );
   });
 });
