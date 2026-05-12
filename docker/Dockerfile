@@ -1,5 +1,6 @@
 # ── Stage 1: Install production dependencies ──────────────────────────────────
-FROM node:24-slim AS deps
+# Node version pinned to match .nvmrc and package.json#volta.node.
+FROM node:24.15.0-slim AS deps
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -18,7 +19,8 @@ RUN npx vite build
 # Output lands at /app/dist (vite.config.ts: outDir: '../dist')
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-FROM node:24-slim AS runtime
+# Node version pinned to match .nvmrc and package.json#volta.node.
+FROM node:24.15.0-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tini \

@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=23.10.0 <26"
   },
+  "volta": {
+    "node": "24.15.0"
+  },
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
     "start:instance": "node --experimental-strip-types src/bootstrap.ts",
