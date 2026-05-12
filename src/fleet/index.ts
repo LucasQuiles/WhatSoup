@@ -478,9 +478,18 @@ export function createFleetServer(deps: FleetDeps) {
 
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err) => {
-      log.error({ err }, 'unhandled fleet request error');
+      const raw = (err as { statusCode?: unknown })?.statusCode;
+      const status =
+        typeof raw === 'number' && raw >= 400 && raw < 600 ? raw : 500;
+      const message =
+        status === 500 ? 'internal error' : (err as Error)?.message ?? 'error';
+      if (status === 500) {
+        log.error({ err }, 'unhandled fleet request error');
+      } else {
+        log.warn({ err, status }, 'fleet request rejected');
+      }
       try {
-        jsonResponse(res, 500, { error: 'internal error' });
+        jsonResponse(res, status, { error: message });
       } catch { /* response already started */ }
     });
   });
