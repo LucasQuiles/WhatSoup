@@ -81,6 +81,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
 
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler } from '../../src/core/ingest.ts';
+import { drainIngest } from './_helpers/ingest-drain.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
 
@@ -132,7 +133,8 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
   handler(msg);
-  await new Promise((resolve) => setImmediate(resolve));
+  // Real completion signal — see tests/core/_helpers/ingest-drain.ts.
+  await drainIngest();
 }
 
 const BOT_JID = '18455943112@s.whatsapp.net';
