@@ -87,6 +87,67 @@ describe('doc drift check', () => {
     ]);
   });
 
+  it('flags stale database migration history rows', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'configuration.md');
+    const currentConfigDoc = readFileSync(path.join(repoRoot, 'docs/configuration.md'), 'utf8');
+    writeFileSync(
+      staleDoc,
+      currentConfigDoc
+        .replace('`contacts`', 'contacts')
+        .replace(
+          '`inbound_events`, `outbound_ops`, `tool_calls`, `session_checkpoints`, `recovery_runs`',
+          '`durability_queue`, `recovery_log`',
+        ),
+      'utf8',
+    );
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toMatchObject([
+      {
+        filePath: staleDoc,
+        kind: 'migration-history',
+        claimed: 1,
+        actual: 1,
+        expected: 'migration 1 row to mention `contacts`',
+      },
+      {
+        filePath: staleDoc,
+        kind: 'migration-history',
+        claimed: 2,
+        actual: 2,
+        expected: 'migration 2 row to mention `inbound_events`',
+      },
+      {
+        filePath: staleDoc,
+        kind: 'migration-history',
+        claimed: 2,
+        actual: 2,
+        expected: 'migration 2 row to mention `outbound_ops`',
+      },
+      {
+        filePath: staleDoc,
+        kind: 'migration-history',
+        claimed: 2,
+        actual: 2,
+        expected: 'migration 2 row to mention `tool_calls`',
+      },
+      {
+        filePath: staleDoc,
+        kind: 'migration-history',
+        claimed: 2,
+        actual: 2,
+        expected: 'migration 2 row to mention `session_checkpoints`',
+      },
+      {
+        filePath: staleDoc,
+        kind: 'migration-history',
+        claimed: 2,
+        actual: 2,
+        expected: 'migration 2 row to mention `recovery_runs`',
+      },
+    ]);
+  });
+
   it('allows an explicit environment bypass for emergency pushes', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
     const staleDoc = path.join(dir, 'stale.md');
