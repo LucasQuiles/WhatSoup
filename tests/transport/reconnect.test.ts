@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Readable } from 'node:stream';
 
 // ---------------------------------------------------------------------------
 // Module mocks — must be hoisted before imports
@@ -875,6 +876,34 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       code: 'CONNECTION_UNAVAILABLE',
       message: 'WhatsApp is not connected',
     });
+  });
+
+  it('sendMedia passes stream sources through to Baileys media upload payloads', async () => {
+    const { mockSock } = makeMockSocket();
+    mockSock.sendMessage.mockResolvedValue({ key: { id: 'media-1' } });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    const stream = Readable.from(['image']);
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'image',
+        stream,
+        mimetype: 'image/png',
+      }),
+    ).resolves.toEqual({ waMessageId: 'media-1' });
+
+    expect(mockSock.sendMessage).toHaveBeenCalledWith(
+      '111@s.whatsapp.net',
+      expect.objectContaining({
+        image: { stream },
+        mimetype: 'image/png',
+      }),
+    );
+
+    await manager.shutdown();
   });
 
   it('ignores events emitted by stale sockets after reconnect', async () => {

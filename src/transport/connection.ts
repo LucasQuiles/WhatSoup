@@ -4,6 +4,7 @@
 import { EventEmitter } from 'node:events';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Readable } from 'node:stream';
 
 import {
   makeWASocket,
@@ -73,6 +74,12 @@ function resolveTypingState(state: TypingState): 'composing' | 'recording' | 'pa
   if (state === true) return 'composing';
   if (state === false) return 'paused';
   return state;
+}
+
+function mediaUpload(media: OutboundMedia): Buffer | { stream: Readable } | { url: string } {
+  if (media.stream !== undefined) return { stream: media.stream };
+  if (media.url !== undefined) return { url: media.url };
+  return media.buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,12 +380,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
     this.log.info({ chatJid, mediaType: media.type }, 'Sending media');
+    const upload = mediaUpload(media);
 
     let result;
     switch (media.type) {
       case 'image':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          image: media.buffer,
+          image: upload,
           caption: media.caption,
           mimetype: media.mimetype,
           viewOnce: media.viewOnce,
@@ -386,7 +394,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'document':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          document: media.buffer,
+          document: upload,
           fileName: media.filename,
           mimetype: media.mimetype,
           caption: media.caption,
@@ -394,7 +402,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'audio':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          audio: media.buffer,
+          audio: upload,
           mimetype: media.mimetype,
           ptt: media.ptt,
           seconds: media.seconds,
@@ -402,7 +410,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'video':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          video: media.buffer,
+          video: upload,
           caption: media.caption,
           mimetype: media.mimetype,
           ptv: media.ptv,
@@ -412,7 +420,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'sticker':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          sticker: media.buffer,
+          sticker: upload,
           mimetype: media.mimetype ?? 'image/webp',
           isAnimated: media.isAnimated,
         }), 'sendMedia:sticker');
@@ -1251,4 +1259,3 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 // ---------------------------------------------------------------------------
 import { unwrapMessage, MEDIA_CONTENT_TYPES, parseIncomingMessage } from '../core/message-parser.ts';
 export { unwrapMessage, MEDIA_CONTENT_TYPES, parseIncomingMessage };
-
