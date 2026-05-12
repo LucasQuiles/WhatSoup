@@ -4,7 +4,7 @@ FROM node:24.15.0-slim AS deps
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --legacy-peer-deps
+RUN npm ci --omit=dev
 
 # Console has its own dependency tree (React, Vite, Tailwind)
 COPY console/package.json console/package-lock.json ./console/
