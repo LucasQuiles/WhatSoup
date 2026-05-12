@@ -199,8 +199,16 @@ function topicInfo(relativePath: string): { topicRaw: string; topic: string } {
   return { topicRaw: stem, topic: topicFromSuperpowersStem(stem) };
 }
 
+function cleanGitEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_')) delete env[key];
+  }
+  return env;
+}
+
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
 }
 
 function gitHead(cwd: string): string {

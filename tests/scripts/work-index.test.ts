@@ -15,6 +15,18 @@ import {
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
+function cleanGitEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_')) delete env[key];
+  }
+  return env;
+}
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
+}
+
 describe('work index scanner', () => {
   it('scans the current tree and includes the newly added superpowers files', () => {
     const index = buildWorkIndex(repoRoot);
@@ -59,11 +71,11 @@ describe('work index scanner', () => {
 
     mkdirSync(path.dirname(planFile), { recursive: true });
     writeFileSync(planFile, '# Example\n', 'utf8');
-    execFileSync('git', ['init'], { cwd: root });
-    execFileSync('git', ['config', 'user.name', 'Work Index Test'], { cwd: root });
-    execFileSync('git', ['config', 'user.email', 'work-index-test@users.noreply.github.com'], { cwd: root });
-    execFileSync('git', ['add', '.'], { cwd: root });
-    execFileSync('git', ['commit', '-m', 'seed docs'], { cwd: root });
+    git(root, ['init']);
+    git(root, ['config', 'user.name', 'Work Index Test']);
+    git(root, ['config', 'user.email', 'work-index-test@users.noreply.github.com']);
+    git(root, ['add', '.']);
+    git(root, ['commit', '-m', 'seed docs']);
 
     writeWorkIndex(root);
     expect(findWorkIndexCheckIssues(root)).toEqual({ missing: [], stale: [], drift: [] });
