@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -39,6 +41,9 @@ jobs:
 
       - name: Documentation drift guard
         run: npm run guard:doc-drift
+
+      - name: Work index coverage guard
+        run: npm run guard:work-index
 
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
