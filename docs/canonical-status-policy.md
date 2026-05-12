@@ -22,6 +22,13 @@ This policy applies to the surfaces indexed by `docs/work-index`:
 - `docs/superpowers/handoffs/`
 - `docs/superpowers/reviews/`
 
+The dedup side surfaces `docs/duplicates-report.md` and
+`.tmup-artifacts/dedup-triage-021.md` are deliberately outside this index.
+They are historical evidence and issue-conversion input, not live backlog
+truth. A dedup item becomes active work only after it is promoted to a GitHub
+issue or to an indexed `docs/sdlc` / `docs/superpowers` artifact with authored
+status metadata.
+
 It governs:
 - epic-level state resolution
 - child artifact status inheritance

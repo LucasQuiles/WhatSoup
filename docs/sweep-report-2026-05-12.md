@@ -4,6 +4,8 @@
 
 **Scope:** artifact sweep, feature sweep, central tracking audit, GitHub issue/PR reconciliation, and targeted registry repair.
 
+**Live queue note:** GitHub issue/PR tables in this report are a dated reconciliation snapshot from the sweep, not a current queue. Run `gh issue list` and `gh pr list --state open` for live state.
+
 **Method:** three independent specialist reviews plus controller verification against the codebase. Findings below are recorded only when they were verified against current files, generated indexes, or GitHub state. Masked or environment-only failures are treated as inconclusive.
 
 ## Central Tracking Surfaces
@@ -14,8 +16,8 @@
 | `docs/current-program.md` | Human narrative over the generated work index | Useful but manually maintained; static counts can drift. | Added this sweep report as the latest refresh reference. |
 | `docs/canonical-status-policy.md` | Status vocabulary and policy | Still authoritative for status meanings. | No change needed. |
 | `docs/work-index-repair-matrix.md` | Historical normalization repair matrix | Historical/supporting surface, not current queue truth. | No change needed. |
-| `docs/duplicates-report.md` | Duplicate-code backlog from the dedup sweep | Still contains actionable and already-completed items; not integrated into the generated work index. | Listed as a secondary backlog requiring owner triage. |
-| `.tmup-artifacts/dedup-triage-021.md` | Prior dedup triage artifact | Classifies duplicate-report items as done, partial, or pending, but lives outside the generated registry. | Listed as a secondary evidence surface requiring owner triage. |
+| `docs/duplicates-report.md` | Duplicate-code backlog from the dedup sweep | Still contains actionable and already-completed items; not integrated into the generated work index. | Keep as historical evidence and issue-conversion input; live items must be promoted before execution. |
+| `.tmup-artifacts/dedup-triage-021.md` | Prior dedup triage artifact | Classifies duplicate-report items as done, partial, or pending, but lives outside the generated registry. | Keep as historical evidence and issue-conversion input; live items must be promoted before execution. |
 | GitHub issues / PRs | Current externally visible queue | Open issues and PRs remain the live execution queue. | Reconciled below. |
 
 ## Artifact Sweep
@@ -38,7 +40,7 @@ The dry-run result confirms there is enough historical material to justify a sep
 
 ## GitHub Reconciliation
 
-Open issue state as of 2026-05-12 09:13Z:
+Open issue state as of 2026-05-12 09:13Z, preserved as historical sweep evidence:
 
 | Issue | State | Coverage |
 |---|---|---|
@@ -72,9 +74,7 @@ Recently closed or covered workstreams:
 | Tailwind warning cleanup | `#360` merged into current baseline. |
 | Provider KPI direct coverage | `#361` merged into current baseline. |
 
-Ready-for-review PRs: none as of 2026-05-12 09:13Z.
-
-Draft PRs still open: `#256`, `#271`, `#272`, `#281`, `#286`, `#293`, `#297`, `#369`, `#372`, `#375`, `#379`, `#380`, `#386`, `#394`, `#398`, and `#400`.
+Ready-for-review PRs: none as of 2026-05-12 09:13Z. Draft PR details from that sweep are intentionally not maintained here; use `gh pr list --state open --draft` for the live draft queue.
 
 ## Verified Findings
 
@@ -118,6 +118,6 @@ Recently merged PRs `#360`, `#361`, `#365`, `#368`, `#370`, `#371`, `#374`, `#38
 
 ## Follow-Up Registry Work
 
-- Decide whether `docs/duplicates-report.md` plus `.tmup-artifacts/dedup-triage-021.md` should become live work-index rows or remain historical evidence.
+- Treat `docs/duplicates-report.md` plus `.tmup-artifacts/dedup-triage-021.md` as historical evidence and issue-conversion input. Promote any still-actionable dedup item to a GitHub issue or indexed `docs/sdlc` / `docs/superpowers` artifact before treating it as active work.
 - Consider a generated GitHub issue/PR reconciliation section in `docs/current-program.md`; manual tables drift quickly.
 - Run artifact sweep apply mode only after an operator-approved retention policy for session logs, task bundles, memories, and historical plans.
