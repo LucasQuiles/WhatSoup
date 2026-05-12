@@ -84,24 +84,38 @@ describe('api write operations', () => {
 });
 
 describe('api auth headers', () => {
-  it('sends the fleet token on availability probes and fallback-backed reads', async () => {
+  it('mints an api-audience ticket and threads it on availability probes and fallback-backed reads (#313)', async () => {
     stubFleetToken('fleet-token-123');
-    const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
+    // Sequence: mint -> probe -> read. Mint consumes the root token; every
+    // subsequent call sees only the api-audience ticket.
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-abc', audience: 'api', expiresIn: 60 }))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetch);
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
 
     await expect(freshApi.getLines()).resolves.toEqual([]);
 
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines');
+    // 3 calls total: 1 mint + 1 probe + 1 read.
+    expect(fetch).toHaveBeenCalledTimes(3);
+
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
     expect(headersFor(fetchInit(fetch, 0))).toEqual({
-      Authorization: 'Bearer fleet-token-123',
-    });
-    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
-    expect(headersFor(fetchInit(fetch, 1))).toEqual({
       'Content-Type': 'application/json',
       Authorization: 'Bearer fleet-token-123',
+    });
+
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 1))).toEqual({
+      Authorization: 'Bearer api-ticket-abc',
+    });
+
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 2))).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer api-ticket-abc',
     });
   });
 
@@ -137,21 +151,24 @@ describe('api auth headers', () => {
     expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('sends the fleet token on write requests', async () => {
+  it('threads the api-audience ticket (not the root token) on write requests (#313)', async () => {
     stubFleetToken('fleet-token-123');
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-xyz', audience: 'api', expiresIn: 60 }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'ok', instance: 'line-a' }));
     vi.stubGlobal('fetch', fetch);
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
 
     await expect(freshApi.restart('line-a')).resolves.toEqual({ status: 'ok', instance: 'line-a' });
 
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines/line-a/restart');
-    expect(fetchInit(fetch, 0).method).toBe('POST');
-    expect(headersFor(fetchInit(fetch, 0))).toEqual({
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines/line-a/restart');
+    expect(fetchInit(fetch, 1).method).toBe('POST');
+    expect(headersFor(fetchInit(fetch, 1))).toEqual({
       'Content-Type': 'application/json',
-      Authorization: 'Bearer fleet-token-123',
+      Authorization: 'Bearer api-ticket-xyz',
     });
   });
 

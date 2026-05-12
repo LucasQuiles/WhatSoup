@@ -2,6 +2,7 @@ import { type FC, useState, useEffect, useCallback, useRef } from 'react'
 import { CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
 import QrDisplay from '../QrDisplay'
 import { parseAuthErrorMessage, parseQrPayload } from './link-step-events'
+import { getApiTicket, getFleetToken } from '../../lib/api'
 
 interface LinkStepProps {
   lineName: string
@@ -20,68 +21,83 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
   const retryCountRef = useRef(0)
 
   useEffect(() => {
-    let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
+    let es: EventSource | null = null
+    let cancelled = false
 
-    // In production the fleet server injects the token into a meta tag at serve time
-    const tokenMeta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]')
-    if (tokenMeta?.content) {
-      url += `?token=${encodeURIComponent(tokenMeta.content)}`
-    }
-
-    const es = new EventSource(url)
-
-    es.addEventListener('qr', (e: MessageEvent) => {
-      const nextQr = parseQrPayload(e.data)
-      if (!nextQr) {
-        setStatus('error')
-        setErrorMsg('Received an invalid QR code from the authentication server.')
+    function wireEventSource(source: EventSource): void {
+      source.addEventListener('qr', (e: MessageEvent) => {
+        const nextQr = parseQrPayload(e.data)
+        if (!nextQr) {
+          setStatus('error')
+          setErrorMsg('Received an invalid QR code from the authentication server.')
+          if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+          source.close()
+          return
+        }
+        setQrValue(nextQr)
+        setStatus('waiting')
+        setErrorMsg('')
+        setQrAge(0)
         if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-        es.close()
-        return
-      }
-      setQrValue(nextQr)
-      setStatus('waiting')
-      setErrorMsg('')
-      // Reset QR age countdown on each new QR code
-      setQrAge(0)
-      if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-      qrTimerRef.current = setInterval(() => setQrAge((a) => a + 1), 1000)
-    })
+        qrTimerRef.current = setInterval(() => setQrAge((a) => a + 1), 1000)
+      })
 
-    es.addEventListener('connected', () => {
-      setStatus('connected')
-      if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-      es.close()
-    })
-
-    // Server-sent named 'error' events (event: error\ndata: ...)
-    es.addEventListener('error', (e: MessageEvent) => {
-      setStatus('error')
-      setErrorMsg(parseAuthErrorMessage(e.data))
-      if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-      es.close()
-    })
-
-    // Native connection errors (non-MessageEvent) — fires on 401, network failure, etc.
-    es.onerror = () => {
-      if (es.readyState === EventSource.CLOSED) {
-        setStatus('error')
-        setErrorMsg('Connection to server lost. Check that the fleet server is running.')
+      source.addEventListener('connected', () => {
+        setStatus('connected')
         if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-      }
-      // EventSource.CONNECTING means it's retrying — don't show error yet,
-      // but track retry count to eventually give up
-      retryCountRef.current++
-      if (retryCountRef.current >= 5) {
+        source.close()
+      })
+
+      // Server-sent named 'error' events (event: error\ndata: ...)
+      source.addEventListener('error', (e: MessageEvent) => {
         setStatus('error')
-        setErrorMsg('Unable to connect to the authentication server after multiple attempts.')
+        setErrorMsg(parseAuthErrorMessage(e.data))
         if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-        es.close()
+        source.close()
+      })
+
+      // Native connection errors — fires on 401, network failure, etc.
+      source.onerror = () => {
+        if (source.readyState === EventSource.CLOSED) {
+          setStatus('error')
+          setErrorMsg('Connection to server lost. Check that the fleet server is running.')
+          if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+        }
+        retryCountRef.current++
+        if (retryCountRef.current >= 5) {
+          setStatus('error')
+          setErrorMsg('Unable to connect to the authentication server after multiple attempts.')
+          if (qrTimerRef.current) clearInterval(qrTimerRef.current)
+          source.close()
+        }
       }
     }
+
+    // Audience-scoped ticket (#313): mint an sse-audience ticket via
+    // POST /api/auth-ticket so the root fleet token never appears in the
+    // EventSource URL. In dev (no meta-tag) we open without a ticket and
+    // let the Vite proxy handle auth.
+    void (async () => {
+      let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
+      if (getFleetToken()) {
+        try {
+          const ticket = await getApiTicket('sse')
+          url += `?ticket=${encodeURIComponent(ticket)}`
+        } catch {
+          if (cancelled) return
+          setStatus('error')
+          setErrorMsg('Unable to authenticate with the fleet server.')
+          return
+        }
+      }
+      if (cancelled) return
+      es = new EventSource(url)
+      wireEventSource(es)
+    })()
 
     return () => {
-      es.close()
+      cancelled = true
+      if (es) es.close()
       if (qrTimerRef.current) clearInterval(qrTimerRef.current)
     }
   }, [lineName, retryKey])

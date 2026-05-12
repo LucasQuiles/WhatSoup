@@ -25,24 +25,123 @@ import type {
 
 const API_BASE = '';
 
-/** Read the fleet token from the meta tag injected by the production server. */
+/** Read the root fleet token from the meta tag injected by the production server. */
 export function getFleetToken(): string | null {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]');
   return meta?.content || null;
 }
 
-/** Build auth headers — Bearer token in production, empty in dev (proxy handles it). */
-function authHeaders(): Record<string, string> {
+// ---------------------------------------------------------------------------
+// Audience-scoped tickets (#313)
+//
+// The root meta-tag token is the bootstrap credential and is used ONLY to
+// mint short-lived tickets via POST /api/auth-ticket. Every other call --
+// HTTP API or EventSource -- threads a ticket of the matching audience so
+// the root token never leaves the bootstrap path.
+// ---------------------------------------------------------------------------
+
+type TicketAudience = 'api' | 'sse';
+
+interface CachedTicket {
+  ticket: string;
+  /** Epoch ms when the cached ticket is no longer safe to reuse. */
+  refreshAt: number;
+  /** In-flight mint promise so concurrent callers share one request. */
+  pending?: Promise<string>;
+}
+
+const ticketCache: Map<TicketAudience, CachedTicket> = new Map();
+
+/** Refresh tickets this many ms before their server-side expiry. */
+const TICKET_REFRESH_MARGIN_MS = 10_000;
+
+function rootAuthHeaders(): Record<string, string> {
   const token = getFleetToken();
   return token ? { 'Authorization': `Bearer ${token}` } : {};
 }
 
+async function mintTicket(audience: TicketAudience): Promise<string> {
+  // Bootstrap: present the root token to the dedicated mint endpoint and
+  // immediately discard it from the request shape. The browser still has
+  // the meta-tag (a v1 limitation called out in the issue), but it never
+  // travels anywhere except this one path.
+  const res = await fetch(`${API_BASE}/api/auth-ticket`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...rootAuthHeaders(),
+    },
+    body: JSON.stringify({ audience }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) {
+    throw new Error(`auth-ticket ${audience} ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json() as { ticket?: unknown; expiresIn?: unknown };
+  if (typeof data.ticket !== 'string' || data.ticket.length === 0) {
+    throw new Error(`auth-ticket ${audience}: malformed server response`);
+  }
+  const expiresInSec = typeof data.expiresIn === 'number' && Number.isFinite(data.expiresIn)
+    ? data.expiresIn : 60;
+  const refreshAt = Date.now() + Math.max(1000, expiresInSec * 1000 - TICKET_REFRESH_MARGIN_MS);
+  ticketCache.set(audience, { ticket: data.ticket, refreshAt });
+  return data.ticket;
+}
+
+/**
+ * Mint or reuse a cached audience-scoped ticket. Tickets are refreshed
+ * eagerly ~10s before the server-side expiry so the page doesn't see a
+ * mid-flight 401 on slow networks.
+ *
+ * Exported for callers (e.g. EventSource bootstrap in `LinkStep`) that
+ * need the raw ticket string.
+ */
+export async function getApiTicket(audience: TicketAudience = 'api'): Promise<string> {
+  const cached = ticketCache.get(audience);
+  const now = Date.now();
+  if (cached && now < cached.refreshAt) return cached.ticket;
+  if (cached?.pending) return cached.pending;
+  const pending = mintTicket(audience).finally(() => {
+    const entry = ticketCache.get(audience);
+    if (entry) entry.pending = undefined;
+  });
+  // Stash the in-flight promise so concurrent callers don't all mint.
+  ticketCache.set(audience, { ticket: cached?.ticket ?? '', refreshAt: cached?.refreshAt ?? 0, pending });
+  return pending;
+}
+
+/** Drop any cached tickets -- used by tests and on auth failure recovery. */
+export function clearTicketCache(): void {
+  ticketCache.clear();
+}
+
+/**
+ * Build auth headers for the HTTP API.
+ *
+ * In production we mint and thread an `api`-audience ticket. In dev or when
+ * no root token is available (the SPA is being served standalone), we omit
+ * the header and let the Vite proxy / mock fallback handle the request.
+ */
+async function authHeaders(): Promise<Record<string, string>> {
+  if (!getFleetToken()) return {};
+  try {
+    const ticket = await getApiTicket('api');
+    return { 'Authorization': `Bearer ${ticket}` };
+  } catch {
+    // Mint failed (network, 401, server down). Clear the cache so the next
+    // call retries; let the surrounding fetch surface the underlying error.
+    clearTicketCache();
+    return {};
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const auth = await authHeaders();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders(),
+      ...auth,
       ...init?.headers,
     },
     signal: init?.signal ?? AbortSignal.timeout(5000),
@@ -72,9 +171,10 @@ async function checkFleetAvailable(): Promise<boolean> {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
       try {
+        const auth = await authHeaders();
         const res = await fetch(`${API_BASE}/api/lines`, {
           signal: controller.signal,
-          headers: authHeaders(),
+          headers: auth,
         });
         fleetAvailable = res.ok;
       } finally {
