@@ -43,6 +43,7 @@ import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
+import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 
@@ -741,9 +742,7 @@ async function start(): Promise<void> {
       try {
         const cfgPath = join(config.configRoot, 'config.json');
         if (existsSync(cfgPath)) {
-          const raw = JSON.parse(readFileSync(cfgPath, 'utf-8'));
-          raw.introSent = true;
-          writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+          persistIntroSentFlag(cfgPath, true);
         }
       } catch (e) { log.warn({ err: e }, 'failed to persist introSent flag'); }
 
