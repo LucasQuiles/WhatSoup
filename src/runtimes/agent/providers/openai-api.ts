@@ -3,9 +3,8 @@
 // Works with OpenAI, Ollama, vLLM, Azure OpenAI, LM Studio, and any
 // endpoint that implements the OpenAI chat completions SSE streaming API.
 //
-// NOTE: HTTP providers read API keys from process.env directly in each callApi()
-// invocation (not through buildEnv) because they don't spawn subprocesses.
-// This ensures key rotations or late-set env vars are always picked up fresh.
+// NOTE: HTTP providers resolve API keys inside each callApi() invocation
+// because they don't spawn subprocesses. This keeps key rotations visible.
 
 import type {
   ProviderCheckpoint,
@@ -18,6 +17,7 @@ import type {
 } from './types.ts';
 import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
+import { lookupCredential } from '../../../lib/keyring.ts';
 import { createChildLogger } from '../../../logger.ts';
 
 const log = createChildLogger('openai-api-provider');
@@ -80,6 +80,7 @@ export class OpenAIApiProvider implements ProviderSession {
   private active = false;
   private baseUrl: string;
   private model: string;
+  private apiKeyService: string;
   private apiKey: string = '';
   private abortController: AbortController | null = null;
 
@@ -90,6 +91,9 @@ export class OpenAIApiProvider implements ProviderSession {
   constructor(config?: ProviderConfig['providerConfig']) {
     this.baseUrl = config?.baseUrl ?? 'https://api.openai.com/v1';
     this.model = config?.model ?? 'gpt-4o';
+    this.apiKeyService = typeof config?.apiKeyService === 'string' && config.apiKeyService.trim()
+      ? config.apiKeyService.trim()
+      : 'openai';
   }
 
   // ── ProviderSession interface ─────────────────────────────────────────────
@@ -101,8 +105,7 @@ export class OpenAIApiProvider implements ProviderSession {
     this.opts = opts;
     this.active = true;
 
-    // API key from environment (populated by buildEnv or the host process)
-    this.apiKey = process.env.OPENAI_API_KEY ?? '';
+    this.apiKey = this.resolveApiKey();
 
     // Per-turn model override takes lowest precedence; opts.model wins over
     // the constructor default when explicitly set.
@@ -225,13 +228,19 @@ export class OpenAIApiProvider implements ProviderSession {
     // HTTP providers don't spawn subprocesses, but the interface requires this.
     // Return only what this provider actually needs.
     const env: NodeJS.ProcessEnv = {};
-    if (process.env.OPENAI_API_KEY) {
-      env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const apiKey = this.resolveApiKey();
+    if (apiKey) {
+      env.OPENAI_API_KEY = apiKey;
     }
     return env;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
+
+  private resolveApiKey(): string {
+    this.apiKey = lookupCredential(this.apiKeyService) ?? '';
+    return this.apiKey;
+  }
 
   private async callApi(model: string, selfHealAttempt = false): Promise<CallApiResult> {
     if (!this.opts) throw new Error('Provider not initialized.');
@@ -242,13 +251,14 @@ export class OpenAIApiProvider implements ProviderSession {
     // Defense layer: sanitize message history before serialization
     sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
 
+    const apiKey = this.resolveApiKey();
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(process.env.OPENAI_API_KEY ? { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } : {}),
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         },
         body: JSON.stringify({
           model,

@@ -15,6 +15,10 @@ vi.mock('../../../../src/logger.ts', () => ({
   }),
 }));
 
+vi.mock('../../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => 'test-api-key'),
+}));
+
 function makeSseResponse(events: Array<Record<string, unknown> | string>): Response {
   const body = events
     .map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`)

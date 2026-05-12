@@ -67,6 +67,10 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
 }));
 
+vi.mock('../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => 'test-api-key'),
+}));
+
 // Import after mocks are registered
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
