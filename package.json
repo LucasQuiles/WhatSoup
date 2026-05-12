@@ -33,7 +33,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
-    "verify:push:branch": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT && npm run guard:repo:staged && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run typecheck && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/doc-drift-check.test.ts tests/scripts/public-surface-drift-check.test.ts tests/scripts/work-index.test.ts --pool=forks",
+    "verify:push:branch": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT && npm run guard:repo:staged && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run typecheck && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/doc-drift-check.test.ts tests/scripts/public-surface-drift-check.test.ts tests/scripts/drift-skip-ci-gating.test.ts tests/scripts/work-index.test.ts --pool=forks",
     "verify:release": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT && npm run guard:doc-drift && npm run guard:public-surface-drift && npm --prefix console ci && npm run typecheck:all && npm test -- --pool=forks && npm --prefix console run build",
     "test": "vitest run",
     "coverage": "vitest run --coverage",

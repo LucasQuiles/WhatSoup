@@ -20,12 +20,14 @@ function makeStalePublicSurfaceRoot(): string {
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-pub-ci-gate-'));
   const docsDir = path.join(root, 'docs');
   mkdirSync(docsDir, { recursive: true });
-  // Empty registry + no source — guaranteed to produce some issue or nothing,
-  // but the key signal is whether `run` returned [] (skipped) or executed.
-  // We only assert on console warn shape + run completion.
   writeFileSync(
     path.join(docsDir, 'public-surface.md'),
-    '| Identifier | Source | Script |\n| --- | --- | --- |\n',
+    `# Public surface
+
+| Identifier | Method + Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| \`http:fleet.lines.list\` | \`GET /api/lines\` | \`src/fleet/missing-route.ts:42\` | stable | active | Missing source fixture |
+`,
     'utf8',
   );
   return root;
@@ -117,18 +119,21 @@ describe('drift skip env flags — CI gating (issue #472)', () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      runPublicSurfaceDrift(
+      const issues = runPublicSurfaceDrift(
         [],
         root,
         { WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT: '1', CI: 'true' },
       );
 
-      // Whether issues are produced depends on synthetic fixtures, but the
-      // loud "ignored in CI" warning must fire — proving the gate works.
+      expect(issues.length).toBeGreaterThan(0);
+      expect(issues[0]).toMatchObject({
+        kind: 'missing-source',
+        sourcePath: 'src/fleet/missing-route.ts',
+      });
+      expect(process.exitCode).toBe(1);
       const warnMessages = warn.mock.calls.map((c) => c.join(' ')).join('\n');
       expect(warnMessages).toMatch(/WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT/);
       expect(warnMessages).toMatch(/ignor|refus|CI/i);
-      // And it must NOT short-circuit with the plain "skipped" message.
       expect(warnMessages).not.toMatch(
         /^public surface drift check skipped via WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT=1$/m,
       );
@@ -140,12 +145,18 @@ describe('drift skip env flags — CI gating (issue #472)', () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      runPublicSurfaceDrift(
+      const issues = runPublicSurfaceDrift(
         [],
         root,
         { WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT: '1', GITHUB_ACTIONS: 'true' },
       );
 
+      expect(issues.length).toBeGreaterThan(0);
+      expect(issues[0]).toMatchObject({
+        kind: 'missing-source',
+        sourcePath: 'src/fleet/missing-route.ts',
+      });
+      expect(process.exitCode).toBe(1);
       const warnMessages = warn.mock.calls.map((c) => c.join(' ')).join('\n');
       expect(warnMessages).toMatch(/WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT/);
       expect(warnMessages).toMatch(/ignor|refus|CI/i);
