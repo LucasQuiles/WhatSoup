@@ -159,4 +159,131 @@ describe('capabilityRoleRule', () => {
       deploymentRole: undefined,
     })).toEqual([]);
   });
+
+  describe('enabled_plugins_max enforcement', () => {
+    it('emits no event when observed plugin count is within the declared maximum', () => {
+      const events = capabilityRoleRule({
+        observed: observed({ runtime_type: 'agent', role: 'support', enabled_plugins: ['a', 'b'] }),
+        deploymentRole: { enabled_plugins_max: 3 },
+      });
+      expect(events).toEqual([]);
+    });
+
+    it('emits capability.role_violation when observed plugin count exceeds the declared maximum', () => {
+      const events = capabilityRoleRule({
+        observed: observed({ runtime_type: 'agent', role: 'support', enabled_plugins: ['a', 'b', 'c', 'd'] }),
+        deploymentRole: { enabled_plugins_max: 2 },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: 'drift',
+        domain: 'capability',
+        severity: 'high',
+        payload: expect.objectContaining({
+          reason_code: 'capability.role_violation',
+          reason: 'enabled_plugins_max_exceeded',
+          expected_max: 2,
+          actual_count: 4,
+        }),
+      });
+    });
+  });
+
+  describe('enabled_plugins enforcement', () => {
+    it('emits no event when observed plugins are a subset of the role allowlist', () => {
+      const events = capabilityRoleRule({
+        observed: observed({ runtime_type: 'agent', role: 'support', enabled_plugins: ['a', 'b'] }),
+        deploymentRole: { enabled_plugins: ['a', 'b', 'c'] },
+      });
+      expect(events).toEqual([]);
+    });
+
+    it('emits capability.role_violation when observed plugins include entries outside the allowlist', () => {
+      const events = capabilityRoleRule({
+        observed: observed({ runtime_type: 'agent', role: 'support', enabled_plugins: ['a', 'rogue'] }),
+        deploymentRole: { enabled_plugins: ['a', 'b'] },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: 'drift',
+        domain: 'capability',
+        severity: 'high',
+        payload: expect.objectContaining({
+          reason_code: 'capability.role_violation',
+          reason: 'enabled_plugins_outside_allowlist',
+          disallowed: ['rogue'],
+        }),
+      });
+    });
+  });
+
+  describe('access_mode enforcement', () => {
+    it('emits no event when observed access_mode entries match the role spec', () => {
+      const events = capabilityRoleRule({
+        observed: observed({
+          runtime_type: 'agent',
+          role: 'support',
+          access_mode: { read: true, write: 'restricted' },
+        }),
+        deploymentRole: { access_mode: { read: true, write: 'restricted' } },
+      });
+      expect(events).toEqual([]);
+    });
+
+    it('emits capability.role_violation when an observed access_mode value diverges from the role spec', () => {
+      const events = capabilityRoleRule({
+        observed: observed({
+          runtime_type: 'agent',
+          role: 'support',
+          access_mode: { read: true, write: 'open' },
+        }),
+        deploymentRole: { access_mode: { read: true, write: 'restricted' } },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: 'drift',
+        domain: 'capability',
+        severity: 'high',
+        payload: expect.objectContaining({
+          reason_code: 'capability.role_violation',
+          reason: 'access_mode_mismatch',
+          access_key: 'write',
+          expected_value: 'restricted',
+          actual_value: 'open',
+        }),
+      });
+    });
+  });
+
+  describe('mcp_tool_set enforcement', () => {
+    it('emits no event when observed mcp tools are a subset of the role allowlist', () => {
+      const events = capabilityRoleRule({
+        observed: observed({ runtime_type: 'agent', role: 'support', mcp_tool_set: ['tool.read'] }),
+        deploymentRole: { mcp_tool_set: ['tool.read', 'tool.write'] },
+      });
+      expect(events).toEqual([]);
+    });
+
+    it('emits capability.role_violation when observed mcp tools include entries outside the allowlist', () => {
+      const events = capabilityRoleRule({
+        observed: observed({
+          runtime_type: 'agent',
+          role: 'support',
+          mcp_tool_set: ['tool.read', 'tool.exec'],
+        }),
+        deploymentRole: { mcp_tool_set: ['tool.read', 'tool.write'] },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: 'drift',
+        domain: 'capability',
+        severity: 'high',
+        payload: expect.objectContaining({
+          reason_code: 'capability.role_violation',
+          reason: 'mcp_tool_set_outside_allowlist',
+          disallowed: ['tool.exec'],
+        }),
+      });
+    });
+  });
 });
