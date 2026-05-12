@@ -3,6 +3,11 @@ import { createServer, type Server } from 'node:http';
 import { WebSocket } from 'ws';
 import { FleetWebSocketServer } from '../../src/fleet/websocket-server.ts';
 import type { WsEvent } from '../../src/fleet/websocket-server.ts';
+import { waitForMessage as waitForMessageHelper } from '../helpers/wait-for.ts';
+
+function waitForMessage(ws: WebSocket): Promise<WsEvent> {
+  return waitForMessageHelper<WsEvent>(ws);
+}
 
 const TEST_TOKEN = 'test-token-abc123';
 let httpServer: Server;
@@ -37,15 +42,7 @@ function connect(token?: string): Promise<{ ws: WebSocket; firstMessage: Promise
   });
 }
 
-function waitForMessage(ws: WebSocket): Promise<WsEvent> {
-  return new Promise((resolve, reject) => {
-    ws.once('message', (data) => {
-      try { resolve(JSON.parse(data.toString())); }
-      catch (err) { reject(err); }
-    });
-    setTimeout(() => reject(new Error('message timeout')), 3000);
-  });
-}
+
 
 function closeAndWait(ws: WebSocket): Promise<void> {
   if (ws.readyState === WebSocket.CLOSED) return Promise.resolve();
