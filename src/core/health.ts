@@ -499,6 +499,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── GET /typing — return JIDs currently composing from presence cache ──
     if (req.url === '/typing' && req.method === 'GET') {
+      if (!requireAuth(req, res)) return;
       const cache = deps.connectionManager.presenceCache;
       const composing: { jid: string; since: number }[] = [];
       // presenceCache.entries is private — expose via a method
