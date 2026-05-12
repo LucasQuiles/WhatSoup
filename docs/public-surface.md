@@ -1,0 +1,332 @@
+# WhatSoup Public-Surface Registry
+
+This file is the manifest of WhatSoup's external compatibility contract. It lives at the
+location named by [docs/specs/2026-05-10-compatibility-deprecation-policy-design.md §9](specs/2026-05-10-compatibility-deprecation-policy-design.md#9-public-surface-registry)
+and is what the deprecation policy enforces against. The policy's bootstrap caveat (§9.3)
+is currently in effect: until the v1.0.0 baseline cut, surfaces documented in
+`docs/configuration.md`, `docs/tools.md`, `docs/runbook.md`, the README, and the live specs
+are presumed public. This file makes that presumption explicit.
+
+**How to read this file**
+
+- **Identifier** — stable dotted namespace; what release notes and migration domains refer to.
+- **Type** — `http-api`, `mcp-tool`, `config-key`, `npm-script`, `deploy-artifact`,
+  `runtime-mode`, `on-disk-artifact`, `env-var`.
+- **Source of truth** — repository path (with line range when the source is monolithic).
+  The registry does not duplicate schema; follow the link to the canonical definition.
+- **Schema version** — current schema version for surfaces tied to a migration domain.
+  Blank when not applicable (e.g., HTTP routes).
+- **Stability** — `stable` (full deprecation policy), `beta` (public but reserves the right
+  to break with one minor of notice), `experimental` (public for experimentation, may change
+  without a deprecation window), `internal` (not in the contract — listed here only when an
+  artifact path is publicly visible but the surface inside it is not).
+- **Status** — `active`, `deprecated`, `removed-in:vN`. Deprecated entries link to the
+  release-notes anchor where the deprecation was announced and name the removal-target
+  version per §9.1.
+- **Notes** — operator-facing context: scope, replay policy, deprecation removal date, etc.
+
+**How to update this file**
+
+Every promotion (internal → public) requires: registry entry here, documentation entry in
+the relevant reference (`docs/configuration.md`, `docs/tools.md`, README API table, or
+`docs/runbook.md`), and a release-notes entry under "Public surface additions" per §10.2.
+Every deprecation requires: status change here, runtime/operator warning where feasible,
+and a release-notes entry under "Deprecations" naming the removal-target version per §5.
+
+**Maintainer:** WhatSoup core team. Pre-baseline (advisory) registry drift is reported by
+CI but does not fail the build (§9.4); this transitions to hard-fail at the v1.0.0 baseline cut.
+
+---
+
+## HTTP API — Fleet server
+
+Canonical route table: [`src/fleet/index.ts:279-329`](../src/fleet/index.ts) (`ROUTES`
+array). Operator-facing description: [README §Fleet API](../README.md#fleet-api). The fleet
+server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
+(`Authorization: Bearer`), an audience-scoped ticket, or the legacy `?token=` query string
+(deprecated — see entry below).
+
+| Identifier | Method + Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `http:fleet.lines.list` | `GET /api/lines` | `src/fleet/index.ts:281` | stable | active | List instances + health |
+| `http:fleet.lines.create` | `POST /api/lines` | `src/fleet/index.ts:284` | stable | active | Create instance |
+| `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:287` | stable | active | Instance detail + config |
+| `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:286` | stable | active | Stop + cleanup |
+| `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:285` | stable | active | Registration probe |
+| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:301` | stable | active | Update `instance.json` |
+| `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:302` | stable | active | QR-code SSE stream |
+| `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:299` | stable | active | Restart unit |
+| `http:fleet.lines.stop` | `POST /api/lines/:name/stop` | `src/fleet/index.ts:300` | stable | active | Stop unit |
+| `http:fleet.lines.send` | `POST /api/lines/:name/send` | `src/fleet/index.ts:295` | stable | active | Send message; accepts `chatJid` or alias `to` + optional `profile` |
+| `http:fleet.lines.access-update` | `POST /api/lines/:name/access` | `src/fleet/index.ts:297` | stable | active | Update access control |
+| `http:fleet.lines.access-view` | `GET /api/lines/:name/access` | `src/fleet/index.ts:293` | stable | active | View access list |
+| `http:fleet.lines.mark-read` | `POST /api/lines/:name/mark-read` | `src/fleet/index.ts:298` | stable | active | Zero unread + chatModify |
+| `http:fleet.lines.contacts-save` | `POST /api/lines/:name/contacts` | `src/fleet/index.ts:296` | stable | active | Save contact |
+| `http:fleet.lines.contacts-search` | `GET /api/lines/:name/contacts/search` | `src/fleet/index.ts:324` | stable | active | Search saved contacts |
+| `http:fleet.lines.chats` | `GET /api/lines/:name/chats` | `src/fleet/index.ts:288` | stable | active | List chats |
+| `http:fleet.lines.messages` | `GET /api/lines/:name/messages` | `src/fleet/index.ts:289` | stable | active | Fetch messages |
+| `http:fleet.lines.messages-search` | `GET /api/lines/:name/messages/search` | `src/fleet/index.ts:290` | stable | active | Full-text search |
+| `http:fleet.lines.metrics` | `GET /api/lines/:name/metrics` | `src/fleet/index.ts:292` | stable | active | 24h / 7d / 30d |
+| `http:fleet.lines.logs` | `GET /api/lines/:name/logs` | `src/fleet/index.ts:294` | stable | active | Instance logs |
+| `http:fleet.lines.scheduled.list` | `GET /api/lines/:name/scheduled` | `src/fleet/index.ts:303` | stable | active | List scheduled; filter `?status=` |
+| `http:fleet.lines.scheduled.create` | `POST /api/lines/:name/scheduled` | `src/fleet/index.ts:304` | stable | active | Schedule a new message |
+| `http:fleet.lines.scheduled.cancel-query` | `DELETE /api/lines/:name/scheduled` | `src/fleet/index.ts:305` | stable | active | Cancel by `?id=` |
+| `http:fleet.lines.scheduled.get` | `GET /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:306` | stable | active | Single scheduled |
+| `http:fleet.lines.scheduled.update` | `PUT /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:307` | stable | active | Update scheduled |
+| `http:fleet.lines.scheduled.cancel` | `DELETE /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:308` | stable | active | Cancel scheduled |
+| `http:fleet.lines.groups.list` | `GET /api/lines/:name/groups` | `src/fleet/index.ts:309` | stable | active | List groups |
+| `http:fleet.lines.groups.create` | `POST /api/lines/:name/groups` | `src/fleet/index.ts:310` | stable | active | Create group |
+| `http:fleet.lines.groups.detail` | `GET /api/lines/:name/groups/:jid` | `src/fleet/index.ts:322` | stable | active | Group detail |
+| `http:fleet.lines.groups.leave` | `DELETE /api/lines/:name/groups/:jid` | `src/fleet/index.ts:323` | stable | active | Leave group |
+| `http:fleet.lines.groups.subject` | `PUT /api/lines/:name/groups/:jid/subject` | `src/fleet/index.ts:311` | stable | active | Update subject |
+| `http:fleet.lines.groups.description` | `PUT /api/lines/:name/groups/:jid/description` | `src/fleet/index.ts:312` | stable | active | Update description |
+| `http:fleet.lines.groups.participants` | `POST /api/lines/:name/groups/:jid/participants` | `src/fleet/index.ts:313` | stable | active | Add/remove/promote/demote |
+| `http:fleet.lines.groups.settings` | `PUT /api/lines/:name/groups/:jid/settings` | `src/fleet/index.ts:314` | stable | active | Announce / locked |
+| `http:fleet.lines.groups.invite` | `GET /api/lines/:name/groups/:jid/invite` | `src/fleet/index.ts:315` | stable | active | Fetch invite code |
+| `http:fleet.lines.groups.invite-revoke` | `POST /api/lines/:name/groups/:jid/invite/revoke` | `src/fleet/index.ts:316` | stable | active | Revoke + rotate |
+| `http:fleet.lines.groups.ephemeral` | `PUT /api/lines/:name/groups/:jid/ephemeral` | `src/fleet/index.ts:317` | stable | active | Disappearing-message duration |
+| `http:fleet.lines.groups.member-add-mode` | `PUT /api/lines/:name/groups/:jid/member-add-mode` | `src/fleet/index.ts:318` | stable | active | Toggle who can add members |
+| `http:fleet.lines.groups.join-approval` | `PUT /api/lines/:name/groups/:jid/join-approval` | `src/fleet/index.ts:319` | stable | active | Toggle join-approval requirement |
+| `http:fleet.lines.groups.requests.list` | `GET /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:320` | stable | active | List pending join requests |
+| `http:fleet.lines.groups.requests.update` | `POST /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:321` | stable | active | Approve / reject |
+| `http:fleet.feed` | `GET /api/feed` | `src/fleet/index.ts:280` | stable | active | Activity feed across instances |
+| `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:279` | stable | active | Currently-typing indicators |
+| `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:282` | stable | active | Path writable probe |
+| `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:291` | stable | active | Fleet-wide metrics |
+| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:325` | stable | active | Build version |
+| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:326` | stable | active | Self-update trigger |
+| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:327` | stable | active | List cross-instance LID mappings |
+| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:328` | stable | active | Sync mappings between instances |
+| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:749`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer required) |
+| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:775`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer required) |
+| `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
+
+### Health server (per-instance)
+
+Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_PORT` /
+`HEALTH_BIND_ADDRESS` env vars (default `127.0.0.1:9090`). Mutation endpoints require
+`Authorization: Bearer $WHATSOUP_HEALTH_TOKEN`; missing token fails closed `401`.
+
+| Identifier | Method + Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `http:health.status` | `GET /health` | `src/core/health.ts:522` | stable | active | Liveness probe |
+| `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
+| `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:283` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:194` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+
+### WebSocket
+
+| Identifier | Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `ws:fleet.realtime` | `wss://fleet/ws` | [`src/fleet/websocket-server.ts`](../src/fleet/websocket-server.ts) | stable | active | Realtime event stream. Auth via `/api/ws-ticket` ticket; legacy `?token=` deprecated (same window as the HTTP legacy entry). |
+
+---
+
+## MCP tools
+
+Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
+all 161 tools. Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/);
+each file exports a factory that registers tools with the names listed below. Tool counts
+and module groupings come from the [docs/tools.md table of contents](tools.md#table-of-contents).
+
+The registry entries here are at the **module** level (a tool group is a public unit; the
+individual tool inventory is `docs/tools.md`). Tool-level entries follow on promotion.
+
+| Identifier | Tools | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `mcp:tools.messaging` | 9 | [`src/mcp/tools/messaging.ts`](../src/mcp/tools/messaging.ts) | stable | active | `send_message`, `reply_message`, `react_message`, `edit_message`, `delete_message`, `send_location`, `send_contact`, `send_poll`, `pin_message` |
+| `mcp:tools.media` | 3 | [`src/mcp/tools/media.ts`](../src/mcp/tools/media.ts) | stable | active | `send_media`, `download_media`, `transcribe_audio` |
+| `mcp:tools.chat-management` | 10 | [`src/mcp/tools/chat-management.ts`](../src/mcp/tools/chat-management.ts) | stable | active | `list_messages`, `get_message_context`, `list_chats`, `get_chat`, `forward_message`, `archive_chat`, `pin_chat`, `mute_chat`, `mark_messages_read`, `star_message` |
+| `mcp:tools.chat-operations` | 11 | [`src/mcp/tools/chat-operations.ts`](../src/mcp/tools/chat-operations.ts) | stable | active | `clear_chat`, `delete_chat`, `delete_message_for_me`, `set_disappearing_messages`, `send_event_message`, `mark_chat_read`, `update_push_name`, `fetch_message_history`, `request_placeholder_resend`, `get_reactions`, `get_message_receipts` |
+| `mcp:tools.search` | 4 | [`src/mcp/tools/search.ts`](../src/mcp/tools/search.ts) | stable | active | `search_messages`, `search_messages_advanced`, `search_chat_messages`, `search_contacts` |
+| `mcp:tools.groups` | 19 | [`src/mcp/tools/groups.ts`](../src/mcp/tools/groups.ts) | stable | active | Group lifecycle, invites, participants, ephemeral, join-approval |
+| `mcp:tools.community` | 12 | [`src/mcp/tools/community.ts`](../src/mcp/tools/community.ts) | stable | active | Community create / link / unlink / participants / metadata |
+| `mcp:tools.newsletter` | 19 | [`src/mcp/tools/newsletter.ts`](../src/mcp/tools/newsletter.ts) | stable | active | Newsletter lifecycle + admin |
+| `mcp:tools.business` | 13 | [`src/mcp/tools/business.ts`](../src/mcp/tools/business.ts) | stable | active | Catalog, product, orders, quick-reply, contact mgmt |
+| `mcp:tools.profile` | 14 | [`src/mcp/tools/profile.ts`](../src/mcp/tools/profile.ts) | stable | active | Profile / privacy / blocklist / push-name |
+| `mcp:tools.advanced` | 13 | [`src/mcp/tools/advanced.ts`](../src/mcp/tools/advanced.ts) | stable | active | Phone-number registration, pairing, app-state resync, placeholder resend, relay |
+| `mcp:tools.calls` | 1 | [`src/mcp/tools/calls.ts`](../src/mcp/tools/calls.ts) | stable | active | `reject_call` |
+| `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
+| `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
+| `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone) |
+| `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
+| `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
+| `mcp:tools.scheduling` | 5 | [`src/mcp/tools/scheduling.ts`](../src/mcp/tools/scheduling.ts) | stable | active | `schedule_message`, `list_scheduled`, `get_scheduled`, `update_scheduled`, `cancel_scheduled` |
+| `mcp:tools.audit` | 1 | [`src/mcp/tools/audit.ts`](../src/mcp/tools/audit.ts) | stable | active | `read_outbound_sends` |
+| `mcp:tools.substrate` | 19 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities. Schema still settling. |
+
+Sock-tool factory infrastructure: [`src/mcp/tools/sock-tool-factory.ts`](../src/mcp/tools/sock-tool-factory.ts) — internal.
+
+---
+
+## Configuration
+
+Canonical reference: [docs/configuration.md](configuration.md). The registry tracks
+config-key groups at the section level; individual field shape lives in the reference.
+Each instance config file is at `$XDG_CONFIG_HOME/whatsoup/instances/<name>/config.json`.
+
+| Identifier | Type | Source | Schema | Stability | Status | Notes |
+|---|---|---|---|---|---|---|
+| `config:instance_config.top-level` | config-key | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | v1 (bootstrap) | stable | active | `name`, `type`, `adminPhones`, `accessMode`, `systemPrompt`, `models`, `memory`, `maxTokens`, `tokenBudget`, `rateLimitPerHour`, `healthPort`, `siblingPhones`, `chatAliases`, `profiles`, `toolUpdateMode`, `operationTracker`, `agentOptions` |
+| `config:instance_config.access-modes` | config-key | [docs/configuration.md §Access Modes](configuration.md#access-modes) | v1 (bootstrap) | stable | active | `self_only`, `allowlist`, `open_dm`, `groups_only` |
+| `config:instance_config.models` | config-key | [docs/configuration.md §models Object](configuration.md#models-object) | v1 (bootstrap) | stable | active | `conversation`, `extraction`, `validation`, `fallback` |
+| `config:instance_config.memory` | config-key | [docs/configuration.md §memory](configuration.md#memory) | v1 (bootstrap) | stable | active | Canonical BYOK memory/search config; supersedes legacy `pinecone*` flat fields |
+| `config:instance_config.memory.pinecone` | config-key | [docs/configuration.md §Pinecone BYOK Fields](configuration.md#pinecone-byok-fields) | v1 (bootstrap) | stable | active | `index`, `searchMode`, `rerank`, `topK`, `rerankTopN`, `allowedIndexes`, `apiKeyEnv` |
+| `config:instance_config.memory.legacy-aliases` | config-key | [docs/configuration.md §Legacy Migration](configuration.md#legacy-migration) | v1 (bootstrap) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Flat `pineconeIndex`, `pineconeSearchMode`, `pineconeRerank`, `pineconeTopK`, `pineconeRerankTopN`, `pineconeAllowedIndexes` are auto-migrated to `memory.pinecone.*`; new configs use canonical form. |
+| `config:instance_config.chatAliases` | config-key | [docs/configuration.md §chatAliases](configuration.md#chataliases) | v1 (bootstrap) | stable | active | Per-instance alias map for outbound sends |
+| `config:instance_config.profiles` | config-key | [docs/configuration.md §profiles](configuration.md#profiles) | v1 (bootstrap) | stable | active | Named send-decoration policies (`prefix`, `tag`, `linkPreview`) |
+| `config:instance_config.operationTracker` | config-key | [docs/configuration.md §operationTracker](configuration.md#operationtracker) | v1 (bootstrap) | stable | active | Per-tool progress + stall detection |
+| `config:instance_config.agentOptions` | config-key | [docs/configuration.md §agentOptions](configuration.md#agentoptions) | v1 (bootstrap) | stable | active | Agent runtime settings; required fields vary by `sessionScope` |
+| `config:instance_config.agentOptions.sandbox` | config-key | [docs/configuration.md §agentOptions.sandbox](configuration.md#agentoptionssandbox) | v1 (bootstrap) | stable | active | Sandbox enforcement policy |
+| `config:instance_config.agentOptions.enabledPlugins` | config-key | [docs/configuration.md §agentOptions.enabledPlugins](configuration.md#agentoptionsenabledplugins) | v1 (bootstrap) | stable | active | Plugin allowlist for agent instances |
+| `config:instance_config.session-scopes` | config-key | [docs/configuration.md §Session Scopes](configuration.md#session-scopes) | v1 (bootstrap) | stable | active | `single`, `per-chat`, `shared` |
+| `config:instance_config.outbound-send-audit` | config-key | [docs/configuration.md §Outbound Send Audit](configuration.md#outbound-send-audit) | v1 (bootstrap) | stable | active | Audit-log shape for fleet send pipeline |
+
+Fleet, agent, and protection policy artifacts (`fleet.json`, `agent.json`,
+`protection.policy.yaml`) are reserved by the migration framework and compatibility specs
+but are not yet on disk; entries will be added once those artifacts land.
+
+---
+
+## Environment variables
+
+Canonical reference: [docs/configuration.md §Environment Variables](configuration.md#environment-variables).
+The registry tracks env-var groups at the section level.
+
+| Identifier | Vars | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `env:api-keys` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY` | [docs/configuration.md §API Keys](configuration.md#api-keys-required-for-chat-and-audio-transcription) | stable | active | Loaded from GNOME Keyring by wrapper; required for `chat` instances, soft-optional for `agent`, unused for `passive` |
+| `env:models` | `CONVERSATION_MODEL`, `EXTRACTION_MODEL`, `VALIDATION_MODEL`, `FALLBACK_MODEL` | [docs/configuration.md §Models](configuration.md#models) | stable | active | Overridable per instance via `models` |
+| `env:conversation` | `MAX_TOKENS`, `RATE_LIMIT_PER_HOUR` | [docs/configuration.md §Conversation](configuration.md#conversation) | stable | active | Per-instance overrides available |
+| `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Single-instance only; `instance.json:adminPhones` is the canonical form in multi-instance mode |
+| `env:storage-paths` | `WHATSOUP_CONFIG_DIR`, `WHATSOUP_DATA_DIR`, `WHATSOUP_STATE_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | [docs/configuration.md §Storage Paths](configuration.md#storage-paths-single-instance-legacy-mode-only) | stable | active | Legacy / single-instance mode only |
+| `env:pinecone` | `PINECONE_INDEX`, `PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`, `MW_MIND_EMBED_URL`, `RECENCY_HALF_LIFE_DAYS`, `MAX_AGE_DAYS` | [docs/configuration.md §Pinecone](configuration.md#pinecone) | stable | active | Defaults that per-instance `memory.pinecone.*` can override |
+| `env:health-server` | `HEALTH_PORT`, `HEALTH_BIND_ADDRESS`, `WHATSOUP_HEALTH_TOKEN` | [docs/configuration.md §Health Server](configuration.md#health-server) | stable | active | Mutation endpoints fail closed `401` without token |
+| `env:logging` | `LOG_LEVEL`, `LOG_DIR` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino log level + rotation directory |
+| `env:docker` | `WHATSOUP_DOCKER`, `WHATSOUP_MODE`, `WHATSOUP_INSTANCES`, `FLEET_BIND_ADDRESS` | [docs/configuration.md §Docker](configuration.md#docker) | stable | active | Container entrypoint controls |
+| `env:internal` | `INSTANCE_CONFIG` | [docs/configuration.md §Internal / Bootstrap](configuration.md#internal-bootstrap) | internal | active | Set by bootstrap process — operators must not set manually |
+
+---
+
+## NPM scripts (operator-facing)
+
+Canonical source: [`package.json` `scripts`](../package.json). Only the operator-facing
+scripts are public; build/test scripts are internal.
+
+| Identifier | Script | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `cli:npm.start` | `npm run start` | `package.json` | stable | active | Start the supervisor (fleet + instances) |
+| `cli:npm.start-instance` | `npm run start:instance` | `package.json` | stable | active | Start a single instance by name |
+| `cli:npm.fleet` | `npm run fleet` | `package.json` | stable | active | Start the fleet server only |
+| `cli:npm.setup` | `npm run setup` | `package.json` | stable | active | First-run setup wizard |
+| `cli:npm.auth` | `npm run auth` | `package.json` | stable | active | QR-code authentication flow (supervisor) |
+| `cli:npm.auth-instance` | `npm run auth:instance` | `package.json` | stable | active | QR-code authentication for a specific instance |
+| `cli:npm.audit-instance-plugins` | `npm run audit:instance-plugins` | `package.json` | stable | active | Audit plugin allowlists across instances |
+| `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
+| `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
+| `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
+| `cli:npm.guard-pre-push` | `npm run guard:pre-push` | `package.json` | internal | active | Pre-push hook; not part of operator surface but exposed for CI |
+| `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
+
+Test, typecheck, work-index, and remaining `guard:*` scripts are internal.
+
+---
+
+## Runtime modes
+
+Canonical reference: [docs/specs/2026-05-09-fleet-topology-control-plane-design.md](specs/2026-05-09-fleet-topology-control-plane-design.md).
+
+| Identifier | Mode | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `runtime:mode.supervisor` | `WHATSOUP_MODE=supervisor` | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Default; fleet + instances |
+| `runtime:mode.fleet` | `WHATSOUP_MODE=fleet` | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only |
+| `runtime:mode.instance` | `WHATSOUP_MODE=instance` | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Single-instance entrypoint |
+| `runtime:mode.auth` | `WHATSOUP_MODE=auth` | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | QR-pairing flow |
+| `runtime:type.chat` | instance `type: chat` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Chat-runtime instance |
+| `runtime:type.agent` | instance `type: agent` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Agent-runtime instance |
+| `runtime:type.passive` | instance `type: passive` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Read-only ingest |
+| `runtime:role.admin` | fleet topology admin | [fleet-topology spec](specs/2026-05-09-fleet-topology-control-plane-design.md) | beta | active | Multi-machine admin role; spec live, runtime still landing |
+| `runtime:role.client` | fleet topology client | [fleet-topology spec](specs/2026-05-09-fleet-topology-control-plane-design.md) | beta | active | Multi-machine client role |
+| `runtime:role.standalone` | fleet topology standalone | [fleet-topology spec](specs/2026-05-09-fleet-topology-control-plane-design.md) | stable | active | Single-machine deployment (current production shape) |
+
+---
+
+## Deploy artifacts
+
+Canonical source: [`deploy/`](../deploy). These are the install-time artifacts the
+compatibility policy commits to. Behavior-preserving auto-regeneration by the migration
+framework is non-breaking (§4); operator-edited changes plus post-regen behavior changes
+are breaking.
+
+| Identifier | Artifact | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Loads keychain secrets, exports env, dispatches by `WHATSOUP_MODE` |
+| `deploy:wrapper.whatsoup-fleet` | `whatsoup-fleet` launcher | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only entrypoint |
+| `deploy:wrapper.whatsoup-auth` | `whatsoup-auth` launcher | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | Auth-flow entrypoint |
+| `deploy:systemd.instance` | `whatsoup@.service` template | [`deploy/whatsoup@.service`](../deploy/whatsoup@.service) | stable | active | systemd template; per-instance unit |
+| `deploy:systemd.fleet` | `whatsoup-fleet.service` | [`deploy/whatsoup-fleet.service`](../deploy/whatsoup-fleet.service) | stable | active | systemd fleet service |
+| `deploy:systemd.heal-notify` | `whatsoup-heal-notify@.service` | [`deploy/whatsoup-heal-notify@.service`](../deploy/whatsoup-heal-notify@.service) | stable | active | systemd heal-notification template |
+| `deploy:setup.sh` | `setup.sh` | [`deploy/setup.sh`](../deploy/setup.sh) | stable | active | Operator setup script |
+| `deploy:generate-health-tokens` | `generate-health-tokens.sh` | [`deploy/generate-health-tokens.sh`](../deploy/generate-health-tokens.sh) | stable | active | Generates per-instance health tokens |
+| `deploy:tokens.env-template` | `whatsoup-tokens.env.example` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Template for `tokens.env` populated at deploy time |
+| `deploy:mcp` | MCP wrapper templates | [`deploy/mcp/`](../deploy/mcp) | stable | active | MCP integration entrypoints |
+| `deploy:hooks` | Agent sandbox hooks | [`deploy/hooks/`](../deploy/hooks) | beta | active | Sandbox enforcement; behavior contract still settling |
+| `deploy:loops` | Background loop runners | [`deploy/loops/`](../deploy/loops) | beta | active | Long-running maintenance loops |
+| `deploy:scripts` | Operator helper scripts | [`deploy/scripts/`](../deploy/scripts) | beta | active | Helpers that operators may reference from docs |
+| `deploy:launchd.generated` | macOS plist generation behavior | [docs/runbook.md](runbook.md) | stable | active | Generated launchd plists; per §4, regen non-destructively is non-breaking |
+
+---
+
+## On-disk artifacts
+
+These are paths and files the compatibility policy commits to. Operators rely on layout
+stability for backup, migration, and disaster-recovery procedures.
+
+| Identifier | Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `artifact:xdg.config-root` | `$XDG_CONFIG_HOME/whatsoup` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Config root; per-instance subdirs under `instances/` |
+| `artifact:xdg.data-root` | `$XDG_DATA_HOME/whatsoup` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Data root: databases, logs, media cache |
+| `artifact:xdg.state-root` | `$XDG_STATE_HOME/whatsoup` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Ephemeral state: lock files |
+| `artifact:instance.config` | `<configRoot>/instances/<name>/config.json` | [docs/configuration.md §Instance Configuration](configuration.md#instance-configuration-instancejson) | stable | active | Per-instance `instance.json` |
+| `artifact:instance.auth` | `<configRoot>/instances/<name>/auth/` | [docs/configuration.md](configuration.md) | stable | active | WhatsApp session credentials; never copy across machines |
+| `artifact:instance.db` | `<dataRoot>/instances/<name>/bot.db` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Per-instance SQLite; migration chain canonical |
+| `artifact:fleet.tokens` | `<configRoot>/fleet-tokens.json` | [README §Fleet API](../README.md#fleet-api) | stable | active | Active root token + rotated accept-list |
+| `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
+| `artifact:tokens.env` | `<configRoot>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
+| `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
+| `artifact:mcp.config` | `.mcp.json` (repo root) | [`.mcp.json`](../.mcp.json) | stable | active | MCP server registration for MCP-aware clients |
+| `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
+
+---
+
+## Console workflows
+
+Per §2.1, console workflows are public at the **behavior** level — what an operator can
+accomplish — not the internal component structure (which is private per §2.2). The
+behavioral contract is documented at [docs/console-guide.md](console-guide.md) and the
+[README Fleet Console section](../README.md#fleet-console).
+
+| Identifier | Workflow | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| `console:fleet-overview` | Fleet overview + line list | [README §Fleet Overview](../README.md#fleet-overview), [docs/console-guide.md](console-guide.md) | stable | active | Behavior contract — internal React component layout is private |
+| `console:line-detail.metrics` | Per-line metrics view | [README §Line Detail — Metrics](../README.md#line-detail-metrics) | stable | active | 24h / 7d / 30d windows |
+| `console:operations` | Operations panel | [README §Operations](../README.md#operations) | stable | active | Restart / stop / access / send |
+| `console:inbox` | Inbox / conversation list | [README §Inbox](../README.md#inbox) | stable | active | Operator inbox view |
+| `console:instance-lifecycle` | Create / pair / delete instance | [README §Instance Lifecycle](../README.md#instance-lifecycle) | stable | active | Pair-via-QR flow |
+| `console:websocket-realtime` | Realtime updates | [README §WebSocket Realtime](../README.md#websocket-realtime) | stable | active | Pushes feed / typing / metrics deltas |
+
+---
+
+## Cross-references
+
+- [docs/specs/2026-05-10-compatibility-deprecation-policy-design.md](specs/2026-05-10-compatibility-deprecation-policy-design.md) — owning spec; defines §9.1 row shape, §9.3 bootstrap caveat, §9.4 CI linting, §10 promotion path
+- [docs/specs/2026-05-09-settings-migration-framework-design.md](specs/2026-05-09-settings-migration-framework-design.md) — `public_surface_registry` is the eighth migration domain
+- [docs/specs/2026-05-09-fleet-topology-control-plane-design.md](specs/2026-05-09-fleet-topology-control-plane-design.md) — admin / client / standalone modes
+- [docs/specs/2026-05-08-whatsoup-protection-layer-design.md](specs/2026-05-08-whatsoup-protection-layer-design.md) — protection-policy surface
+- [docs/releases/2026-05-12-public-surface-baseline.md](releases/2026-05-12-public-surface-baseline.md) — bootstrap release note for public-surface additions and deprecations
+- [docs/configuration.md](configuration.md) — canonical config / env-var reference
+- [docs/tools.md](tools.md) — canonical MCP tool reference (per-tool schemas)
+- [docs/runbook.md](runbook.md) — operator runbook
+- [README.md](../README.md) — README API table mirrors the HTTP routes here
