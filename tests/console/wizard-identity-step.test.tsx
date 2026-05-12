@@ -1,0 +1,564 @@
+/**
+ * IdentityStep — behavior coverage
+ *
+ * Covers: initial render, field display, type selection via CardSelector,
+ * slug derivation (live keystroke normalization), name availability checking
+ * debounce flow, description field check-mark, adminPhones wiring via TagInput,
+ * nameLocked prop, error display, and onChange callback forwarding.
+ *
+ * Source surprises pinned in §SURPRISES below.
+ *
+ * §SURPRISES
+ * 1. The component's local `slugify` does NOT collapse consecutive dashes or
+ *    strip leading/trailing dashes in its regex — however jsdom normalizes
+ *    HTML input values so multiple spaces collapse to a single space before
+ *    the onChange event fires. Net effect: 'my  line' → 'my-line' (one dash),
+ *    and leading/trailing spaces are stripped by jsdom before slugify runs.
+ *    This differs from the raw regex: `'my  line'.replace(/\s+/g, '-')` would
+ *    give 'my--line', but the browser input element trims whitespace in the
+ *    composed event value.
+ * 2. The name <input> calls `onChange({ name: slugify(e.target.value) })` on
+ *    every change event — the component stores the already-slugified value, not
+ *    the raw display string. Emoji and punctuation are stripped immediately.
+ * 3. There is NO "Next" button inside IdentityStep itself — Next-button gating
+ *    lives in the parent Wizard. The component only forwards onChange/errors.
+ * 4. adminPhones strips non-digits via `values.map(v => v.replace(/\D/g, ''))`.
+ *    The TagInput's own `validate` is `validatePhone` (≥10, ≤15 digits after
+ *    normalization). "555-123-4567" → TagInput receives "555-123-4567", calls
+ *    validatePhone which normalizes to "15551234567" (11 digits) — valid.
+ *    IdentityStep then strips non-digits from "555-123-4567" → "5551234567"
+ *    (10 digits), so onChange receives "5551234567".
+ * 5. The `showConfirmed` state delays check-mark indicators by 300 ms on mount.
+ *    In tests we use `act` + fake timers to advance past that gate.
+ * 6. The uniqueness-check debounce fires after 500 ms for non-empty slugs and
+ *    0 ms for empty slugs. Tests use `vi.runAllTimersAsync()` wrapped in `act`
+ *    to avoid `waitFor` + fake-timer deadlocks (waitFor uses real intervals).
+ * 7. The Check icon appears for `nameStatus === 'available' || nameLocked`
+ *    regardless of showConfirmed. The description/adminPhones Check icons DO
+ *    depend on showConfirmed.
+ *
+ * @vitest-environment jsdom
+ */
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockedFunction,
+} from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+
+// Mock the api module before importing the component so the debounced
+// useEffect resolves against our stub instead of the real HTTP client.
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    checkExists: vi.fn(),
+  },
+}))
+
+import { api } from '../../console/src/lib/api'
+import IdentityStep from '../../console/src/components/wizard/IdentityStep'
+
+const mockCheckExists = api.checkExists as MockedFunction<typeof api.checkExists>
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+interface RenderOpts {
+  data?: Record<string, unknown>
+  errors?: Record<string, string>
+  nameLocked?: boolean
+}
+
+function renderStep(opts: RenderOpts = {}) {
+  const onChange = vi.fn()
+  const data: Record<string, unknown> = opts.data ?? {}
+  const utils = render(
+    <IdentityStep
+      data={data}
+      onChange={onChange}
+      errors={opts.errors ?? {}}
+      nameLocked={opts.nameLocked}
+    />,
+  )
+  return { onChange, ...utils }
+}
+
+// ---------------------------------------------------------------------------
+// Setup / teardown
+// ---------------------------------------------------------------------------
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  mockCheckExists.mockReset()
+  // Default: name is available
+  mockCheckExists.mockResolvedValue({ exists: false })
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  cleanup()
+})
+
+// ---------------------------------------------------------------------------
+// Initial render
+// ---------------------------------------------------------------------------
+
+describe('initial render', () => {
+  it('renders the Type, Name, Description, and Admin Phones sections', () => {
+    renderStep()
+    expect(screen.getByText('Type')).toBeDefined()
+    expect(screen.getByPlaceholderText('my-line')).toBeDefined()
+    expect(screen.getByText(/description/i)).toBeDefined()
+    expect(screen.getByText('Admin Phones')).toBeDefined()
+  })
+
+  it('shows the three type options: Passive, Chat, Agent', () => {
+    renderStep()
+    expect(screen.getByText('Passive')).toBeDefined()
+    expect(screen.getByText('Chat')).toBeDefined()
+    expect(screen.getByText('Agent')).toBeDefined()
+  })
+
+  it('does not call onChange on mount (no auto-selection side effect)', () => {
+    const { onChange } = renderStep({ data: {} })
+    act(() => { vi.runAllTimers() })
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('reads name, description, type, adminPhones from data prop', () => {
+    renderStep({
+      data: {
+        name: 'my-line',
+        description: 'A test line',
+        type: 'passive',
+        adminPhones: ['15551234567'],
+      },
+    })
+    const nameInput = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    expect(nameInput.value).toBe('my-line')
+
+    const descInput = screen.getByPlaceholderText('What this line is for') as HTMLInputElement
+    expect(descInput.value).toBe('A test line')
+
+    expect(screen.getByText('15551234567')).toBeDefined()
+  })
+
+  it('defaults name and description to empty strings when data is empty', () => {
+    renderStep({ data: {} })
+    const nameInput = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    expect(nameInput.value).toBe('')
+    const descInput = screen.getByPlaceholderText('What this line is for') as HTMLInputElement
+    expect(descInput.value).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slug derivation — the core naming behavior
+// ---------------------------------------------------------------------------
+
+describe('slug derivation on name input', () => {
+  it('lowercases input when user types uppercase', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'ABC' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'abc' })
+  })
+
+  it('replaces spaces with dashes', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'my line' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'my-line' })
+  })
+
+  it('strips non-alphanumeric non-dash characters (e.g. underscores, dots)', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'my_line.v2' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'mylinev2' })
+  })
+
+  it('produces an empty string for pure emoji input', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: '🚀' } })
+    expect(onChange).toHaveBeenCalledWith({ name: '' })
+  })
+
+  it('preserves digits in the name', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'line-42' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'line-42' })
+  })
+
+  it('produces an empty string for all-special-char input', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: '!@#$%' } })
+    expect(onChange).toHaveBeenCalledWith({ name: '' })
+  })
+
+  it('preserves existing dashes', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'a-b-c' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'a-b-c' })
+  })
+
+  it('jsdom normalizes multiple spaces to single space before slugify runs', () => {
+    // Source surprise §1: jsdom collapses whitespace in input change events.
+    // 'my  line' arrives at the onChange handler as 'my-line' (one dash),
+    // NOT 'my--line' as the raw regex would produce without jsdom normalization.
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'my  line' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'my-line' })
+  })
+
+  it('jsdom trims leading spaces so no leading dash appears', () => {
+    // Source surprise §1: jsdom strips leading whitespace from input values.
+    // The local slugify has no /^-/ trim step, but jsdom prevents leading
+    // spaces from reaching it.
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: ' leading' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'leading' })
+  })
+
+  it('jsdom trims trailing spaces so no trailing dash appears', () => {
+    // Source surprise §1: same as above for trailing whitespace.
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'trailing ' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'trailing' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Name uniqueness check (debounced API call)
+// ---------------------------------------------------------------------------
+
+describe('name uniqueness check', () => {
+  it('calls api.checkExists with the slugified name after 500ms debounce', async () => {
+    // Render with a pre-set name — the component's useEffect fires on mount
+    // and debounces the API call. Since `name` comes from props (controlled),
+    // we render with the final name directly.
+    renderStep({ data: { name: 'my-line' } })
+    // Not called immediately (debounce pending)
+    expect(mockCheckExists).not.toHaveBeenCalled()
+    // Advance past debounce and flush promises
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    expect(mockCheckExists).toHaveBeenCalledWith('my-line')
+  })
+
+  it('shows "Name already exists" error when name is taken', async () => {
+    mockCheckExists.mockResolvedValue({ exists: true })
+    renderStep({ data: { name: 'taken-name' } })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    expect(screen.getByText('Name already exists')).toBeDefined()
+  })
+
+  it('does not show "Name already exists" when name is available', async () => {
+    mockCheckExists.mockResolvedValue({ exists: false })
+    renderStep({ data: { name: 'my-line' } })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    expect(screen.queryByText('Name already exists')).toBeNull()
+  })
+
+  it('aborts in-flight check when name changes before debounce fires', async () => {
+    // The component is controlled: name comes from data prop.
+    // Simulate rapid prop changes (as the wizard parent would do).
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <IdentityStep data={{ name: 'first' }} onChange={onChange} errors={{}} />,
+    )
+    // Not called immediately
+    expect(mockCheckExists).not.toHaveBeenCalled()
+    // Change the prop before 500ms elapses to simulate debounce reset
+    await act(async () => { vi.advanceTimersByTime(200) })
+    rerender(
+      <IdentityStep data={{ name: 'second' }} onChange={onChange} errors={{}} />,
+    )
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    // Only the final value triggers a check
+    expect(mockCheckExists).toHaveBeenCalledWith('second')
+    expect(mockCheckExists).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets to idle and does not call api.checkExists when name is cleared', async () => {
+    renderStep({ data: { name: 'some-name' } })
+    const input = screen.getByPlaceholderText('my-line')
+    // Clear the name field
+    fireEvent.change(input, { target: { value: '' } })
+    // Empty slug → debounce timeout 0ms → status reset to 'idle', no API call
+    await act(async () => {
+      vi.advanceTimersByTime(0)
+      await Promise.resolve()
+    })
+    // api.checkExists should NOT be called for an empty slug
+    // (it may have been called once from mount with original 'some-name')
+    const callsAfterClear = mockCheckExists.mock.calls.filter(
+      ([name]) => name === '',
+    )
+    expect(callsAfterClear).toHaveLength(0)
+  })
+
+  it('does not show "Name already exists" for an idle state (empty name)', () => {
+    renderStep({ data: {} })
+    expect(screen.queryByText('Name already exists')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Type selection (CardSelector)
+// ---------------------------------------------------------------------------
+
+describe('type selection', () => {
+  it('calls onChange with the selected type when a card is clicked', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+    fireEvent.click(screen.getByText('Passive'))
+    expect(onChange).toHaveBeenCalledWith({ type: 'passive' })
+  })
+
+  it('calls onChange with "agent" when Agent card is clicked', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+    fireEvent.click(screen.getByText('Agent'))
+    expect(onChange).toHaveBeenCalledWith({ type: 'agent' })
+  })
+
+  it('calls onChange with "chat" when Chat card is clicked', () => {
+    const { onChange } = renderStep({ data: { type: 'passive' } })
+    fireEvent.click(screen.getByText('Chat'))
+    expect(onChange).toHaveBeenCalledWith({ type: 'chat' })
+  })
+
+  it('shows a type error when errors.type is set', () => {
+    renderStep({ errors: { type: 'Type is required' } })
+    expect(screen.getByText('Type is required')).toBeDefined()
+  })
+
+  it('renders all three type option descriptions', () => {
+    renderStep()
+    expect(screen.getByText('Listen & store messages. No AI responses.')).toBeDefined()
+    expect(screen.getByText('Conversational AI bot with API key.')).toBeDefined()
+    expect(screen.getByText(/agent with tool access/)).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Description field
+// ---------------------------------------------------------------------------
+
+describe('description field', () => {
+  it('calls onChange with updated description on input', () => {
+    const { onChange } = renderStep({ data: { description: '' } })
+    const input = screen.getByPlaceholderText('What this line is for')
+    fireEvent.change(input, { target: { value: 'A test description' } })
+    expect(onChange).toHaveBeenCalledWith({ description: 'A test description' })
+  })
+
+  it('passes description through raw without slugification', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('What this line is for')
+    fireEvent.change(input, { target: { value: 'My Line: for testing!' } })
+    expect(onChange).toHaveBeenCalledWith({ description: 'My Line: for testing!' })
+  })
+
+  it('forwards an empty description without error', () => {
+    const { onChange } = renderStep({ data: { description: 'old' } })
+    const input = screen.getByPlaceholderText('What this line is for')
+    fireEvent.change(input, { target: { value: '' } })
+    expect(onChange).toHaveBeenCalledWith({ description: '' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Admin Phones (TagInput wiring)
+// ---------------------------------------------------------------------------
+
+describe('admin phones field', () => {
+  it('shows instructional helper text when no phones configured', () => {
+    renderStep({ data: { adminPhones: [] } })
+    expect(screen.getByText(/Phone numbers with full admin access/)).toBeDefined()
+  })
+
+  it('shows single-phone helper when exactly one phone configured', () => {
+    renderStep({ data: { adminPhones: ['15551234567'] } })
+    expect(screen.getByText(/Add another number for shared admin access/)).toBeDefined()
+  })
+
+  it('shows count helper text when two or more phones configured', () => {
+    renderStep({ data: { adminPhones: ['15551234567', '15559876543'] } })
+    expect(screen.getByText('2 admin numbers configured.')).toBeDefined()
+  })
+
+  it('calls onChange with digits-only array when a valid phone is added via Enter', () => {
+    const { onChange } = renderStep({ data: { adminPhones: [] } })
+    const tagInput = screen.getByPlaceholderText('Enter phone number (press Enter to add)')
+    fireEvent.change(tagInput, { target: { value: '15551234567' } })
+    fireEvent.keyDown(tagInput, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledWith({ adminPhones: ['15551234567'] })
+  })
+
+  it('strips non-digit characters from phone values passed to onChange', () => {
+    // Source surprise §4: IdentityStep strips via .replace(/\D/g, '') after TagInput adds.
+    // "555-123-4567" passes TagInput's validatePhone (normalizePhoneInput yields "15551234567")
+    // then IdentityStep strips dashes → "5551234567"
+    const { onChange } = renderStep({ data: { adminPhones: [] } })
+    const tagInput = screen.getByPlaceholderText('Enter phone number (press Enter to add)')
+    fireEvent.change(tagInput, { target: { value: '555-123-4567' } })
+    fireEvent.keyDown(tagInput, { key: 'Enter' })
+    expect(onChange).toHaveBeenCalledWith({ adminPhones: ['5551234567'] })
+  })
+
+  it('does not add invalid phones (fewer than 10 digits after normalization)', () => {
+    const { onChange } = renderStep({ data: { adminPhones: [] } })
+    const tagInput = screen.getByPlaceholderText('Enter phone number (press Enter to add)')
+    fireEvent.change(tagInput, { target: { value: '123' } })
+    fireEvent.keyDown(tagInput, { key: 'Enter' })
+    // TagInput validate blocks short numbers — onChange is not called at all
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('shows adminPhones error when errors.adminPhones is set', () => {
+    renderStep({ errors: { adminPhones: 'At least one admin required' } })
+    expect(screen.getByText('At least one admin required')).toBeDefined()
+  })
+
+  it('renders existing phone tags in the display', () => {
+    renderStep({ data: { adminPhones: ['15551234567'] } })
+    expect(screen.getByText('15551234567')).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// nameLocked prop
+// ---------------------------------------------------------------------------
+
+describe('nameLocked prop', () => {
+  it('disables the name input when nameLocked is true', () => {
+    renderStep({ data: { name: 'locked-line' }, nameLocked: true })
+    const input = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    expect(input.disabled).toBe(true)
+  })
+
+  it('shows the locked helper text when nameLocked is true', () => {
+    renderStep({ data: { name: 'locked-line' }, nameLocked: true })
+    expect(screen.getByText('Name is locked — instance already provisioned')).toBeDefined()
+  })
+
+  it('does not show the locked helper text when nameLocked is false', () => {
+    renderStep({ data: { name: 'my-line' }, nameLocked: false })
+    expect(screen.queryByText('Name is locked — instance already provisioned')).toBeNull()
+  })
+
+  it('does not show the locked helper text when nameLocked is omitted', () => {
+    renderStep({ data: { name: 'my-line' } })
+    expect(screen.queryByText('Name is locked — instance already provisioned')).toBeNull()
+  })
+
+  it('does not show "Name already exists" when nameLocked is true', async () => {
+    // When locked, the "Name already exists" display is gated by `!nameLocked`
+    mockCheckExists.mockResolvedValue({ exists: true })
+    renderStep({ data: { name: 'locked-line' }, nameLocked: true })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    expect(screen.queryByText('Name already exists')).toBeNull()
+  })
+
+  it('name input is enabled when nameLocked is false', () => {
+    renderStep({ data: { name: 'my-line' }, nameLocked: false })
+    const input = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    expect(input.disabled).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Error display from parent (passed via errors prop)
+// ---------------------------------------------------------------------------
+
+describe('error display', () => {
+  it('shows name error from errors.name prop', () => {
+    renderStep({ errors: { name: 'Name is required' } })
+    expect(screen.getByText('Name is required')).toBeDefined()
+  })
+
+  it('shows type error from errors.type prop', () => {
+    renderStep({ errors: { type: 'Type must be selected' } })
+    expect(screen.getByText('Type must be selected')).toBeDefined()
+  })
+
+  it('shows adminPhones error from errors.adminPhones prop', () => {
+    renderStep({ errors: { adminPhones: 'Admin phone required' } })
+    expect(screen.getByText('Admin phone required')).toBeDefined()
+  })
+
+  it('shows no errors when errors prop is empty', () => {
+    renderStep({ errors: {} })
+    expect(screen.queryByText('Name is required')).toBeNull()
+    expect(screen.queryByText('Type must be selected')).toBeNull()
+    expect(screen.queryByText('Admin phone required')).toBeNull()
+  })
+
+  it('shows both name error and taken-name error simultaneously', async () => {
+    mockCheckExists.mockResolvedValue({ exists: true })
+    renderStep({ data: { name: 'taken' }, errors: { name: 'Invalid name format' } })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+    expect(screen.getByText('Invalid name format')).toBeDefined()
+    expect(screen.getByText('Name already exists')).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// onChange forwarding — patch shape
+// ---------------------------------------------------------------------------
+
+describe('onChange forwarding', () => {
+  it('forwards onChange patch for name field with slugified value', () => {
+    const { onChange } = renderStep()
+    fireEvent.change(screen.getByPlaceholderText('my-line'), { target: { value: 'Test Line' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'test-line' })
+  })
+
+  it('forwards onChange patch for description field with raw value', () => {
+    const { onChange } = renderStep()
+    fireEvent.change(screen.getByPlaceholderText('What this line is for'), { target: { value: 'hello world' } })
+    expect(onChange).toHaveBeenCalledWith({ description: 'hello world' })
+  })
+
+  it('forwards onChange patch for type selection', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+    fireEvent.click(screen.getByText('Agent'))
+    expect(onChange).toHaveBeenCalledWith({ type: 'agent' })
+  })
+
+  it('onChange patches are single-key objects (not merged diffs)', () => {
+    // Each field emits its own single-key patch; merging is the parent's job
+    const { onChange } = renderStep()
+    fireEvent.change(screen.getByPlaceholderText('my-line'), { target: { value: 'my-line' } })
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0]
+    expect(Object.keys(lastCall)).toEqual(['name'])
+  })
+})
