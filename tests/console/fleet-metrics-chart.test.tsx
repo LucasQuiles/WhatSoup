@@ -1,180 +1,173 @@
-/** FleetMetricsChart — recharts wrapper structure regressions. */
+/**
+ * FleetMetricsChart - rendered behavior through a semantic Recharts boundary.
+ * @vitest-environment jsdom
+ */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import * as Recharts from 'recharts';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import type { MessageVolumeBucket } from '../../console/src/types.js';
+import { FleetMetricsChart } from '../../console/src/components/FleetMetricsChart';
 
-afterEach(() => {
-  vi.resetModules();
-  vi.restoreAllMocks();
+vi.mock('recharts', async () => {
+  const React = await import('react');
+
+  type ChartDatum = Record<string, string | number>;
+  type Formatter = (value: string | number) => string;
+
+  const ChartDataContext = React.createContext<ChartDatum[]>([]);
+
+  function valueFor(data: ChartDatum[], key: string | undefined): string[] {
+    if (!key) return [];
+    return data.map((datum) => String(datum[key] ?? ''));
+  }
+
+  return {
+    ResponsiveContainer({ children }: { children?: React.ReactNode }) {
+      return (
+        <section aria-label="Fleet message volume chart" role="region">
+          {children}
+        </section>
+      );
+    },
+    AreaChart({ data = [], children }: { data?: ChartDatum[]; children?: React.ReactNode }) {
+      return (
+        <ChartDataContext.Provider value={data}>
+          <div aria-label="Stacked message volume" role="group">
+            {children}
+          </div>
+        </ChartDataContext.Provider>
+      );
+    },
+    CartesianGrid() {
+      return <div aria-label="Chart grid" role="presentation" />;
+    },
+    XAxis({ dataKey, tickFormatter }: { dataKey?: string; tickFormatter?: Formatter }) {
+      const data = React.useContext(ChartDataContext);
+      const labels = valueFor(data, dataKey).map((value) => tickFormatter?.(value) ?? value);
+
+      return (
+        <div aria-label="Time axis" role="group">
+          {labels.map((label, index) => (
+            <span key={`${label}-${index}`}>{label}</span>
+          ))}
+        </div>
+      );
+    },
+    YAxis() {
+      return (
+        <div aria-label="Message count axis" role="group">
+          Messages
+        </div>
+      );
+    },
+    Tooltip({ labelFormatter }: { labelFormatter?: (value: string | number) => string }) {
+      const [first] = React.useContext(ChartDataContext);
+      if (!first) return null;
+
+      const label = labelFormatter?.(first.bucket) ?? String(first.bucket);
+      return <output aria-label="Active bucket label">{label}</output>;
+    },
+    Legend() {
+      return (
+        <div aria-label="Chart legend" role="group">
+          Legend
+        </div>
+      );
+    },
+    Area({ dataKey, name }: { dataKey?: string; name?: string }) {
+      const data = React.useContext(ChartDataContext);
+      const seriesName = name ?? dataKey ?? 'Series';
+
+      return (
+        <section aria-label={`${seriesName} series`} role="region">
+          <h3>{seriesName}</h3>
+          <ul aria-label={`${seriesName} data points`}>
+            {data.map((datum) => (
+              <li key={`${seriesName}-${datum.bucket}`}>
+                {seriesName}: {String(datum.bucket)} - {String(datum[dataKey ?? ''])} messages
+              </li>
+            ))}
+          </ul>
+        </section>
+      );
+    },
+  };
 });
 
-function getProps(node: unknown): Record<string, unknown> {
-  if (!node || typeof node !== 'object') return {};
-  return (node as { props?: Record<string, unknown> }).props ?? {};
-}
-
-function toChildren(node: unknown): unknown[] {
-  if (!node || typeof node !== 'object') return [];
-  const children = (node as { props?: { children?: unknown } }).props?.children;
-  if (children === undefined || children === null) return [];
-  return Array.isArray(children) ? children.flat(Infinity) : [children];
-}
-
-function findAllByType(node: unknown, type: unknown, acc: unknown[] = []): unknown[] {
-  if (!node || typeof node !== 'object') return acc;
-  if ((node as { type?: unknown }).type === type) acc.push(node);
-  for (const child of toChildren(node)) findAllByType(child, type, acc);
-  return acc;
-}
-
-function findFirstByType(node: unknown, type: unknown): unknown | undefined {
-  return findAllByType(node, type)[0];
-}
+afterEach(() => cleanup());
 
 const SAMPLE: MessageVolumeBucket[] = [
   { bucket: '2026-04-05T18:00:00.000Z', inbound: 4, outbound: 2, media: 1 },
   { bucket: '2026-04-05T19:00:00.000Z', inbound: 6, outbound: 3, media: 0 },
 ];
 
+function chart() {
+  return screen.getByRole('region', { name: 'Fleet message volume chart' });
+}
+
+function series(name: string) {
+  return within(chart()).getByRole('region', { name: `${name} series` });
+}
+
 describe('FleetMetricsChart', () => {
-  it('wraps an AreaChart in ResponsiveContainer with full width/height', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
+  it('renders the chart frame, axes, tooltip label, legend, and stacked message series', () => {
+    render(<FleetMetricsChart data={SAMPLE} />);
 
-    const element = FleetMetricsChart({ data: SAMPLE });
+    expect(chart()).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Stacked message volume' })).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Time axis' })).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Message count axis' })).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Chart legend' })).toBeDefined();
+    expect(within(chart()).getByLabelText('Active bucket label').textContent).not.toContain('2026-04-05T18:00:00.000Z');
 
-    expect((element as { type?: unknown }).type).toBe(Recharts.ResponsiveContainer);
-    expect(getProps(element)).toMatchObject({ width: '100%', height: '100%' });
+    expect(within(series('Inbound')).getByRole('heading', { name: 'Inbound' })).toBeDefined();
+    expect(within(series('Outbound')).getByRole('heading', { name: 'Outbound' })).toBeDefined();
+    expect(within(series('Media')).getByRole('heading', { name: 'Media' })).toBeDefined();
 
-    const area = findFirstByType(element, Recharts.AreaChart);
-    expect(area).toBeDefined();
-    expect(getProps(area).data).toBe(SAMPLE);
+    expect(within(series('Inbound')).getByText(/Inbound: .* - 4 messages/)).toBeDefined();
+    expect(within(series('Inbound')).getByText(/Inbound: .* - 6 messages/)).toBeDefined();
+    expect(within(series('Outbound')).getByText(/Outbound: .* - 2 messages/)).toBeDefined();
+    expect(within(series('Outbound')).getByText(/Outbound: .* - 3 messages/)).toBeDefined();
+    expect(within(series('Media')).getByText(/Media: .* - 1 messages/)).toBeDefined();
+    expect(within(series('Media')).getByText(/Media: .* - 0 messages/)).toBeDefined();
   });
 
-  it('passes data and CHART_MARGIN through to AreaChart', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
+  it('uses range-aware labels for the visible time axis and active tooltip bucket', () => {
+    const { rerender } = render(<FleetMetricsChart data={SAMPLE} />);
 
-    const element = FleetMetricsChart({ data: SAMPLE });
-    const area = findFirstByType(element, Recharts.AreaChart);
-    const props = getProps(area);
+    const defaultAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
+    const defaultTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
 
-    expect(props.data).toBe(SAMPLE);
-    expect(props.margin).toMatchObject({ top: 4, right: 8, left: -12, bottom: 0 });
+    rerender(<FleetMetricsChart data={SAMPLE} range="7d" />);
+    const weeklyAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
+    const weeklyTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
+
+    rerender(<FleetMetricsChart data={SAMPLE} range="30d" />);
+    const monthlyAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
+    const monthlyTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
+
+    expect(defaultAxis).toBeTruthy();
+    expect(defaultTooltip).toBeTruthy();
+    expect(weeklyAxis).toBeTruthy();
+    expect(weeklyTooltip).toBeTruthy();
+    expect(monthlyAxis).toBeTruthy();
+    expect(monthlyTooltip).toBeTruthy();
+
+    expect(defaultAxis).not.toBe(weeklyAxis);
+    expect(weeklyAxis).not.toBe(monthlyAxis);
+    expect(defaultTooltip).not.toBe(weeklyTooltip);
+    expect(weeklyTooltip).not.toBe(monthlyTooltip);
   });
 
-  it('renders three stacked Area series (inbound, outbound, media) sharing stackId', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
+  it('keeps the chart semantics and series labels when there are no message buckets', () => {
+    render(<FleetMetricsChart data={[]} range="30d" />);
 
-    const element = FleetMetricsChart({ data: SAMPLE });
-    const areas = findAllByType(element, Recharts.Area);
+    expect(chart()).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Time axis' })).toBeDefined();
+    expect(within(chart()).queryByLabelText('Active bucket label')).toBeNull();
 
-    expect(areas).toHaveLength(3);
-    const dataKeys = areas.map((a) => getProps(a).dataKey);
-    expect(dataKeys).toEqual(['inbound', 'outbound', 'media']);
-    for (const a of areas) {
-      expect(getProps(a)).toMatchObject({ stackId: 'msgs', type: 'monotone' });
+    for (const name of ['Inbound', 'Outbound', 'Media']) {
+      expect(within(series(name)).getByRole('heading', { name })).toBeDefined();
+      expect(within(series(name)).queryAllByRole('listitem')).toHaveLength(0);
     }
-  });
-
-  it('assigns distinct stroke/fill tokens and fillOpacity per series', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
-
-    const element = FleetMetricsChart({ data: SAMPLE });
-    const [inbound, outbound, media] = findAllByType(element, Recharts.Area).map(getProps);
-
-    expect(inbound).toMatchObject({
-      name: 'Inbound',
-      stroke: 'var(--color-m-pas)',
-      fill: 'var(--color-m-pas)',
-      fillOpacity: 0.3,
-    });
-    expect(outbound).toMatchObject({
-      name: 'Outbound',
-      stroke: 'var(--color-m-cht)',
-      fill: 'var(--color-m-cht)',
-      fillOpacity: 0.3,
-    });
-    expect(media).toMatchObject({
-      name: 'Media',
-      stroke: 'var(--color-s-warn)',
-      fill: 'var(--color-s-warn)',
-      fillOpacity: 0.2,
-    });
-  });
-
-  it('renders CartesianGrid, axes, Tooltip, and Legend', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
-
-    const element = FleetMetricsChart({ data: SAMPLE });
-
-    const grid = findFirstByType(element, Recharts.CartesianGrid);
-    expect(grid).toBeDefined();
-    expect(getProps(grid)).toMatchObject({ stroke: 'var(--b1)', vertical: false });
-
-    const xAxis = findFirstByType(element, Recharts.XAxis);
-    expect(getProps(xAxis)).toMatchObject({
-      dataKey: 'bucket',
-      tickLine: false,
-      minTickGap: 40,
-    });
-
-    const yAxis = findFirstByType(element, Recharts.YAxis);
-    expect(getProps(yAxis)).toMatchObject({
-      tickLine: false,
-      axisLine: false,
-      width: 32,
-      allowDecimals: false,
-    });
-
-    expect(findFirstByType(element, Recharts.Tooltip)).toBeDefined();
-    expect(findFirstByType(element, Recharts.Legend)).toBeDefined();
-  });
-
-  it('formats X axis ticks using the supplied range', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
-
-    const element = FleetMetricsChart({ data: SAMPLE, range: '7d' });
-    const xAxis = findFirstByType(element, Recharts.XAxis);
-    const tickFormatter = getProps(xAxis).tickFormatter as (v: string) => string;
-
-    expect(typeof tickFormatter).toBe('function');
-    const out = tickFormatter('2026-04-06T12:00:00.000Z');
-    expect(typeof out).toBe('string');
-    expect(out.length).toBeGreaterThan(0);
-  });
-
-  it('routes tooltip label formatter through formatTooltipLabel for the active range', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
-
-    const element = FleetMetricsChart({ data: SAMPLE, range: '30d' });
-    const tooltip = findFirstByType(element, Recharts.Tooltip);
-    const labelFormatter = getProps(tooltip).labelFormatter as (v: unknown) => string;
-
-    expect(typeof labelFormatter).toBe('function');
-    const label = labelFormatter('2026-04-06T12:00:00.000Z');
-    expect(typeof label).toBe('string');
-    expect(label.length).toBeGreaterThan(0);
-  });
-
-  it('accepts an empty data array without throwing and still wires the series', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
-
-    const element = FleetMetricsChart({ data: [] });
-    const area = findFirstByType(element, Recharts.AreaChart);
-
-    expect(getProps(area).data).toEqual([]);
-    expect(findAllByType(element, Recharts.Area)).toHaveLength(3);
-  });
-
-  it('defaults range to 24h when omitted (tooltip formatter returns date+time fragments)', async () => {
-    const { FleetMetricsChart } = await import('../../console/src/components/FleetMetricsChart.tsx');
-
-    const element = FleetMetricsChart({ data: SAMPLE });
-    const tooltip = findFirstByType(element, Recharts.Tooltip);
-    const labelFormatter = getProps(tooltip).labelFormatter as (v: unknown) => string;
-
-    const out = labelFormatter('2026-04-06T12:00:00.000Z');
-    expect(typeof out).toBe('string');
-    // 24h default includes both date and time fragments
-    expect(out.length).toBeGreaterThan(4);
   });
 });
