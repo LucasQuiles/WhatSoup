@@ -613,18 +613,35 @@ bot persona.
 
 Migrations are applied automatically at startup by `src/core/database.ts`. Each migration is recorded in the `schema_migrations` table and is never re-applied.
 
+All migration sources are in `src/core/database.ts` unless noted otherwise.
+
 | Version | Description |
 |---------|-------------|
-| 1 | Full schema DDL (messages, chats, contacts, access_list, rate_limits, etc.) |
-| 2 | Durability tables (durability_queue, recovery_log) |
-| 3 | Chat sync tables (Wave 2) |
-| 4 | Labels tables (Wave 6) |
-| 5 | `raw_message` column on messages for `forward_message` support |
-| 6 | Blocklist and LID mapping persistence |
-| 7 | `groups` table for group metadata persistence |
-| 9 | `decryption_failures` table |
-| 10 | Self-healing control plane tables |
-| 11 | Token usage tracking: `input_tokens` + `output_tokens` on `messages`; `total_input_tokens` + `total_output_tokens` on `agent_sessions`. Uses `ALTER TABLE ... ADD COLUMN` with existence checks (idempotent). Chat runtime persists tokens per LLM response; agent runtime captures them from Claude Code stream result events. |
+| 1 | Full schema DDL — messages, chats, contacts, access_list, rate_limits, etc. (`MIGRATION_1`) |
+| 2 | Durability tables: `durability_queue`, `recovery_log` (`MIGRATION_2`) |
+| 3 | Chat sync tables, Wave 2 (`MIGRATION_3`) |
+| 4 | Labels tables, Wave 6 (`MIGRATION_4`) |
+| 5 | `messages.raw_message` column for `forward_message` support (idempotent ALTER) |
+| 6 | Blocklist and LID mapping persistence (`MIGRATION_6`) |
+| 7 | `groups` table for group metadata persistence (`MIGRATION_7`) |
+| 8 | `messages.enrichment_retries` column — persist enrichment retry counters across restarts (previously in-memory only) |
+| 9 | `decryption_failures` table + unresolved / conversation indexes (`MIGRATION_9`) |
+| 10 | Self-healing control plane tables: `control_messages`, `heal_reports`, `pending_heal_reports` (`MIGRATION_10`) |
+| 11 | Token usage tracking — `input_tokens`/`output_tokens`/`model_used` on `messages`; `total_input_tokens`/`total_output_tokens` on `agent_sessions`. Idempotent ALTERs. Chat runtime persists tokens per LLM response; agent runtime captures them from agent stream result events. |
+| 12 | `messages.media_path` column + partial index `idx_messages_media_path` for media-bearing rows |
+| 13 | `messages.content_text` column + rebuilt FTS triggers (insert / update / soft-delete / delete) to index `content_text` instead of `content` |
+| 14 | `scheduled_messages` table + `idx_scheduled_pending` for the dispatcher |
+| 15 | `metrics_hourly` rollup table + bucket index |
+| 16 | `scheduled_messages.media_blob` column for inline media payloads |
+| 17 | `scheduled_messages` recurrence columns (`chat_name`, `recurrence`, `next_run_at`, `run_count`) + `idx_scheduled_next_run` |
+| 18 | `agent_token_events` table + `agent_sessions.ended_at` column + expression indexes for unixepoch queries + backfill of terminal sessions (`MIGRATION_18`) |
+| 19 | `agent_sessions.provider` column — which LLM provider drove the session |
+| 20 | `fact_export_queue` for the WhatsApp → mw-mind fact export pipeline (`MIGRATION_20`) |
+| 21 | `chat_aliases` table — operator-friendly alias → `chat_jid` lookups (`MIGRATION_21`) |
+| 22 | `outbound_sends` audit table + indexes (created_at, status, chat, alias) for the unified send pipeline (`MIGRATION_22`) |
+| 23 | Substrate schema: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs` (`MIGRATION_23` in `src/core/substrate/schema.ts`) |
+| 24 | `messages.updated_at` column + backfill + touch triggers on insert and content-changing updates |
+| 25 | `lid_mappings_history` append-only audit table + indexes — every LID → phone flip is recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
 
 ---
 
