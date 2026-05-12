@@ -228,6 +228,9 @@ export function registerKnowledgeTools(
     scope: 'chat',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
+    // Optional vendor-gated tool: Pinecone may be absent/misconfigured, in which case
+    // registerAllTools logs and continues rather than aborting boot.
+    core: false,
     handler: async (params) => {
       const parsed = KnowledgeSearchSchema.safeParse(params);
       if (!parsed.success) {

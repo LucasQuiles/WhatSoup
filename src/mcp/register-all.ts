@@ -1,33 +1,44 @@
 // src/mcp/register-all.ts
 // Standalone function that registers all 20 tool modules onto a ToolRegistry.
 // Used by AgentRuntime and PassiveRuntime so both get the same tools.
+//
+// Fail-closed contract (issue #480):
+//   - Each per-module registration is wrapped so a thrown error is observable.
+//   - Modules carrying core tools (messaging, chat-management, search, etc.) must
+//     register successfully. If any of them throws, registerAllTools re-throws
+//     after the loop completes so callers see the full failure list.
+//   - Optional/vendor-gated modules (e.g. `knowledge` for Pinecone-backed search)
+//     are tagged `core: false` — registration failure is logged and skipped, and
+//     boot continues with a reduced toolset.
+// This replaces the prior log-and-continue behaviour that allowed a half-empty
+// registry to ship with a misleading `all tools registered` success log line.
 
+import * as chatManagement from './tools/chat-management.ts';
+import * as chatOperations from './tools/chat-operations.ts';
+import * as searchTools from './tools/search.ts';
+import * as groupTools from './tools/groups.ts';
+import * as communityTools from './tools/community.ts';
+import * as newsletterTools from './tools/newsletter.ts';
+import * as businessTools from './tools/business.ts';
+import * as advancedTools from './tools/advanced.ts';
+import * as callTools from './tools/calls.ts';
+import * as presenceTools from './tools/presence.ts';
+import * as profileTools from './tools/profile.ts';
+import * as knowledgeTools from './tools/knowledge.ts';
+import * as voiceTools from './tools/voice.ts';
+import * as retentionTools from './tools/retention.ts';
+import * as statusTools from './tools/status.ts';
+import * as schedulingTools from './tools/scheduling.ts';
+import * as auditTools from './tools/audit.ts';
+import * as substrateTools from './tools/substrate.ts';
+import * as messagingTools from './tools/messaging.ts';
+import * as mediaTools from './tools/media.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
 import type { ToolDeclaration, ExtendedBaileysSocket } from './types.ts';
 import type { Database } from '../core/database.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
-import { registerMessagingTools } from './tools/messaging.ts';
-import { registerMediaTools } from './tools/media.ts';
-import { registerChatManagementTools } from './tools/chat-management.ts';
-import { registerChatOperationTools } from './tools/chat-operations.ts';
-import { registerSearchTools } from './tools/search.ts';
-import { registerGroupTools } from './tools/groups.ts';
-import { registerCommunityTools } from './tools/community.ts';
-import { registerNewsletterTools } from './tools/newsletter.ts';
-import { registerBusinessTools } from './tools/business.ts';
-import { registerAdvancedTools } from './tools/advanced.ts';
-import { registerCallTools } from './tools/calls.ts';
-import { registerPresenceTools } from './tools/presence.ts';
-import { registerProfileTools } from './tools/profile.ts';
-import { registerKnowledgeTools } from './tools/knowledge.ts';
-import { registerVoiceTools } from './tools/voice.ts';
-import { registerRetentionTools } from './tools/retention.ts';
-import { registerStatusTools } from './tools/status.ts';
-import { registerSchedulingTools } from './tools/scheduling.ts';
-import { registerOutboundAuditTools } from './tools/audit.ts';
-import { registerSubstrateTools } from './tools/substrate.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
 
@@ -45,6 +56,17 @@ export interface RegisterAllToolsOptions {
  *   Pattern 2 (DB-dependent):   registerChatManagementTools, registerChatOperationTools, registerSearchTools
  *   Pattern 3 (socket+callback): all remaining modules
  */
+/**
+ * Module registration error captured during a registerAllTools run.
+ * `core: true` entries cause registerAllTools to throw an AggregateError after
+ * the loop completes; `core: false` entries are logged and tolerated.
+ */
+interface ModuleRegistrationFailure {
+  module: string;
+  core: boolean;
+  err: unknown;
+}
+
 export function registerAllTools(
   registry: ToolRegistry,
   connection: ConnectionManager,
@@ -54,6 +76,28 @@ export function registerAllTools(
   const getSock = () => connection.getSocket() as ExtendedBaileysSocket | null;
   const profileRegistry = createProfileRegistry(config.profiles ?? {});
   const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
+
+  const failures: ModuleRegistrationFailure[] = [];
+
+  /**
+   * Run a single module's registration. If it throws, classify the failure by
+   * `core` and continue with the next module — core failures are aggregated and
+   * thrown after the loop so the caller sees every broken module, not just the
+   * first one.
+   */
+  const runModule = (name: string, core: boolean, fn: () => void): void => {
+    try {
+      fn();
+    } catch (err) {
+      failures.push({ module: name, core, err });
+      if (core) {
+        log.error({ err, module: name }, 'core tool module failed to register — boot will abort');
+      } else {
+        log.warn({ err, module: name }, 'optional tool module failed to register — continuing');
+      }
+    }
+  };
+
   const register = (tool: ToolDeclaration) => {
     try {
       registry.register(tool);
@@ -63,40 +107,39 @@ export function registerAllTools(
   };
 
   // Pattern 1 — options-object: take ToolRegistry + deps directly
-  try { registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter }); } catch (err) { log.error({ err }, 'registerMessagingTools failed'); }
-  try { registerMediaTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerMediaTools failed'); }
-  try { registerVoiceTools(registry, { connection, db }); } catch (err) { log.error({ err }, 'registerVoiceTools failed'); }
-  try { registerRetentionTools(registry, { db }); } catch (err) { log.error({ err }, 'registerRetentionTools failed'); }
-  try { registerStatusTools(registry, { db, getSock }); } catch (err) { log.error({ err }, 'registerStatusTools failed'); }
-  try { registerSchedulingTools(registry, { db }); } catch (err) { log.error({ err }, 'registerSchedulingTools failed'); }
-  try { registerOutboundAuditTools(registry, { writer: outboundSendsWriter }); } catch (err) { log.error({ err }, 'registerOutboundAuditTools failed'); }
-  try {
-    registerSubstrateTools(registry, {
-      db: db.raw,
-      dbWrapper: db,
-      adminPhones: config.adminPhones,
-      memory: config.memory,
-    });
-  } catch (err) { log.error({ err }, 'registerSubstrateTools failed'); }
+  runModule('messaging', true, () => messagingTools.registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter }));
+  runModule('media', true, () => mediaTools.registerMediaTools(registry, { connection, db }));
+  runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));
+  runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));
+  runModule('status', true, () => statusTools.registerStatusTools(registry, { db, getSock }));
+  runModule('scheduling', true, () => schedulingTools.registerSchedulingTools(registry, { db }));
+  runModule('audit', true, () => auditTools.registerOutboundAuditTools(registry, { writer: outboundSendsWriter }));
+  runModule('substrate', true, () => substrateTools.registerSubstrateTools(registry, {
+    db: db.raw,
+    dbWrapper: db,
+    adminPhones: config.adminPhones,
+    memory: config.memory,
+  }));
 
   // Pattern 2 — DB-dependent
-  try { registerChatManagementTools(db, getSock, register); } catch (err) { log.error({ err }, 'registerChatManagementTools failed'); }
-  try { registerChatOperationTools(db, getSock, register); } catch (err) { log.error({ err }, 'registerChatOperationTools failed'); }
-  try { registerSearchTools(db, register); } catch (err) { log.error({ err }, 'registerSearchTools failed'); }
+  runModule('chat-management', true, () => chatManagement.registerChatManagementTools(db, getSock, register));
+  runModule('chat-operations', true, () => chatOperations.registerChatOperationTools(db, getSock, register));
+  runModule('search', true, () => searchTools.registerSearchTools(db, register));
 
   // Pattern 3 — socket+callback
-  try { registerGroupTools(getSock, register); } catch (err) { log.error({ err }, 'registerGroupTools failed'); }
-  try { registerCommunityTools(getSock, register); } catch (err) { log.error({ err }, 'registerCommunityTools failed'); }
-  try { registerNewsletterTools(getSock, register); } catch (err) { log.error({ err }, 'registerNewsletterTools failed'); }
-  try { registerBusinessTools(getSock, register); } catch (err) { log.error({ err }, 'registerBusinessTools failed'); }
-  try { registerAdvancedTools(getSock, register, db); } catch (err) { log.error({ err }, 'registerAdvancedTools failed'); }
-  try { registerCallTools(getSock, register); } catch (err) { log.error({ err }, 'registerCallTools failed'); }
-  try { registerProfileTools(getSock, db, register); } catch (err) { log.error({ err }, 'registerProfileTools failed'); }
+  runModule('groups', true, () => groupTools.registerGroupTools(getSock, register));
+  runModule('community', true, () => communityTools.registerCommunityTools(getSock, register));
+  runModule('newsletter', true, () => newsletterTools.registerNewsletterTools(getSock, register));
+  runModule('business', true, () => businessTools.registerBusinessTools(getSock, register));
+  runModule('advanced', true, () => advancedTools.registerAdvancedTools(getSock, register, db));
+  runModule('calls', true, () => callTools.registerCallTools(getSock, register));
+  runModule('profile', true, () => profileTools.registerProfileTools(getSock, db, register));
 
   // Presence needs the shared presenceCache from ConnectionManager
-  try { registerPresenceTools(getSock, connection.presenceCache, register); } catch (err) { log.error({ err }, 'registerPresenceTools failed'); }
+  runModule('presence', true, () => presenceTools.registerPresenceTools(getSock, connection.presenceCache, register));
 
-  // Knowledge search — only when instance config specifies allowed indexes
+  // Knowledge search — only when instance config specifies allowed indexes.
+  // Vendor-gated (Pinecone): tagged core: false so failure is tolerated.
   const memoryPinecone = (config as {
     memory?: { pinecone?: { allowedIndexes?: string[]; knowledgeSearch?: { enabled?: boolean } } };
   }).memory?.pinecone;
@@ -105,8 +148,30 @@ export function registerAllTools(
     : Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
   const knowledgeEnabled = memoryPinecone?.knowledgeSearch?.enabled !== false;
   if (allowedIndexes.length > 0 && knowledgeEnabled && options.enableKnowledgeSearch !== false) {
-    try { registerKnowledgeTools(allowedIndexes, register); } catch (err) { log.error({ err }, 'registerKnowledgeTools failed'); }
+    runModule('knowledge', false, () => knowledgeTools.registerKnowledgeTools(allowedIndexes, register));
   }
 
-  log.info({ toolCount: registry.listTools({ tier: 'global' }).length }, 'all tools registered');
+  // Fail-closed: if any core module threw, abort boot with the full failure list
+  // instead of silently shipping a partial toolset.
+  const coreFailures = failures.filter((f) => f.core);
+  if (coreFailures.length > 0) {
+    const moduleNames = coreFailures.map((f) => f.module).join(', ');
+    const errs = coreFailures.map((f) => (f.err instanceof Error ? f.err : new Error(String(f.err))));
+    log.error(
+      { modules: coreFailures.map((f) => f.module), count: coreFailures.length },
+      'registerAllTools aborting — one or more core tool modules failed to register',
+    );
+    throw new AggregateError(
+      errs,
+      `registerAllTools: core tool module(s) failed to register: ${moduleNames}`,
+    );
+  }
+
+  log.info(
+    {
+      toolCount: registry.listTools({ tier: 'global' }).length,
+      optionalFailures: failures.filter((f) => !f.core).map((f) => f.module),
+    },
+    'all tools registered',
+  );
 }
