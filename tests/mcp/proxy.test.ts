@@ -155,12 +155,14 @@ describe('whatsoup-proxy', () => {
       proxy = null;
     }
     if (server) {
+      // close() callback fires after the server is fully closed and all
+      // connections have drained — deterministic teardown, no wall-clock wait.
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = null;
     }
     try { unlinkSync(socketPath); } catch { /* already gone */ }
-    // Brief pause to let OS release the socket
-    await new Promise((r) => setTimeout(r, 30));
+    // No socket-release sleep needed: server.close() has completed and each
+    // test uses its own socket path.
   });
 
   it('relays JSON-RPC from stdin to socket and response back to stdout', async () => {

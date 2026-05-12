@@ -160,8 +160,8 @@ async function runIngest(
   msg: IncomingMessage,
 ): Promise<void> {
   handler(msg);
-  // Flush the microtask/promise queue
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  // Yield one event-loop turn without a wall-clock timer.
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 // ---------------------------------------------------------------------------
