@@ -96,6 +96,53 @@ function unwrapMcpResult(raw: unknown): unknown {
   return raw;
 }
 
+/**
+ * Heuristic: classify a tool-error message as validation-shaped (caller-side
+ * fix possible — 422) versus handler/internal failure (server-side — 500).
+ *
+ * Patterns sourced from `src/mcp/registry.ts` (Zod validation, unknown tool,
+ * missing-parameter guards, cross-conversation guard) and from the sanitized
+ * handler-throw path. See issue #257 remediation.
+ */
+const VALIDATION_RE =
+  /invalid parameters|requires .* parameter|unknown tool|not available|does not match|must be|is required|not allowed|cross-conversation|not found/i;
+
+function classifyToolErrorStatus(text: string): 422 | 500 {
+  return VALIDATION_RE.test(text) ? 422 : 500;
+}
+
+/**
+ * Send a response derived from a `mcpCall` result. Centralizes the mapping
+ * for MCP tool envelopes (`isError: true`) onto HTTP status codes so every
+ * proxy handler — body-less, with-body, and the legacy custom routes — gives
+ * console callers a consistent failure channel.
+ */
+function respondMcp(
+  res: ServerResponse,
+  result: { success: boolean; result?: unknown; error?: string; toolError?: boolean },
+  successCode = 200,
+  successBody?: (unwrapped: unknown) => unknown,
+): void {
+  if (!result.success) {
+    jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    return;
+  }
+  if (result.toolError) {
+    const unwrapped = unwrapMcpResult(result.result);
+    const text = typeof unwrapped === 'string' ? unwrapped : JSON.stringify(unwrapped);
+    const status = classifyToolErrorStatus(text);
+    const envelope = isJsonObject(result.result) ? result.result : {};
+    jsonResponse(res, status, {
+      error: typeof unwrapped === 'string' ? unwrapped : 'MCP tool reported an error',
+      isError: true,
+      ...envelope,
+    });
+    return;
+  }
+  const unwrapped = unwrapMcpResult(result.result);
+  jsonResponse(res, successCode, successBody ? successBody(unwrapped) : unwrapped);
+}
+
 /** Factory for body-less handlers (GET, DELETE, POST without payload). Args derived from path params only. */
 function mcpProxy<P extends { name: string }>(
   toolName: string,
@@ -115,8 +162,7 @@ function mcpProxy<P extends { name: string }>(
     }
     const args = buildArgs ? buildArgs(params, decodedJid) : {};
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
-    if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
-    else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    respondMcp(res, result, options?.successCode ?? 200);
   };
 }
 
@@ -146,8 +192,7 @@ function mcpWithBody<P extends { name: string }>(
     }
     const args = buildArgs ? buildArgs(parsed, params, decodedJid) : parsed;
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
-    if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
-    else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    respondMcp(res, result, options?.successCode ?? 200);
   };
 }
 
@@ -171,8 +216,7 @@ export async function handleGetScheduled(
   if (qs.status) args.status = qs.status;
 
   const result = await mcpCall(instance.socketPath!, 'list_scheduled', args);
-  if (result.success) jsonResponse(res, 200, unwrapMcpResult(result.result));
-  else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+  respondMcp(res, result);
 }
 
 // POST /api/lines/:name/scheduled — create a new scheduled message.
@@ -221,8 +265,9 @@ export async function handleCancelScheduled(
   if (!socketCheck(instance, res)) return;
 
   const result = await mcpCall(instance.socketPath!, 'cancel_scheduled', { id });
-  if (result.success) jsonResponse(res, 200, { cancelled: true, id });
-  else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+  // On clean success, the legacy route fabricates { cancelled, id } for the console
+  // contract; on tool error or transport failure, respondMcp surfaces the real status.
+  respondMcp(res, result, 200, () => ({ cancelled: true, id }));
 }
 
 // ---------------------------------------------------------------------------
@@ -350,11 +395,9 @@ export async function handleSearchContacts(
   if (!socketCheck(instance, res)) return;
 
   const result = await mcpCall(instance.socketPath!, 'search_contacts', { query });
-  if (result.success) {
-    // search_contacts returns {results, total} — normalize to {contacts} for console
-    const unwrapped = unwrapMcpResult(result.result);
+  // search_contacts returns {results, total} — normalize to {contacts} for console
+  respondMcp(res, result, 200, (unwrapped) => {
     const contacts = isJsonObject(unwrapped) ? (unwrapped.results ?? unwrapped.contacts ?? unwrapped) : unwrapped;
-    jsonResponse(res, 200, { contacts: Array.isArray(contacts) ? contacts : [] });
-  }
-  else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    return { contacts: Array.isArray(contacts) ? contacts : [] };
+  });
 }
