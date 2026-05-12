@@ -358,6 +358,20 @@ export function findPublicSurfaceDrift(
       continue;
     }
 
+    const expectedIdentifier = `${mcpIdentifierPrefix}${documented.moduleName.replace(/\.ts$/, '')}`;
+    if (registered.identifier !== expectedIdentifier) {
+      issues.push({
+        filePath,
+        line: registered.line,
+        kind: 'registry-doc-mismatch',
+        identifier: registered.identifier,
+        sourcePath: `src/mcp/tools/${documented.moduleName}`,
+        expected: expectedIdentifier,
+        actual: registered.identifier,
+        text: registered.text,
+      });
+    }
+
     if (registered.tools !== documented.tools) {
       issues.push({
         filePath,

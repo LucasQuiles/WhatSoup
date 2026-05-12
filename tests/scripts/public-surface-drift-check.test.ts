@@ -151,6 +151,25 @@ describe('public surface drift check', () => {
     ]);
   });
 
+  it('flags an MCP module registry identifier mismatch against docs/tools.md', () => {
+    const { root, registryPath } = makeFakeRepo();
+    writeFileSync(
+      registryPath,
+      happyRegistry.replace('`mcp:tools.messaging`', '`mcp:tools.messaging-renamed`'),
+      'utf8',
+    );
+
+    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([
+      expect.objectContaining({
+        kind: 'registry-doc-mismatch',
+        identifier: 'mcp:tools.messaging-renamed',
+        sourcePath: 'src/mcp/tools/messaging.ts',
+        expected: 'mcp:tools.messaging',
+        actual: 'mcp:tools.messaging-renamed',
+      }),
+    ]);
+  });
+
   it('flags an MCP module registry entry that is absent from docs/tools.md', () => {
     const { root, registryPath } = makeFakeRepo();
     writeFileSync(path.join(root, 'src/mcp/tools/ghost.ts'), '// stub\n', 'utf8');
