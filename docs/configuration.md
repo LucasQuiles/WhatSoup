@@ -1,11 +1,11 @@
 # WhatSoup Configuration Reference
 
 WhatSoup is configured through two complementary mechanisms: environment variables for
-infrastructure-level settings, and per-instance `instance.json` files for runtime behavior.
-In multi-instance mode, `instance.json` values take precedence over environment variables.
+infrastructure-level settings, and per-instance `config.json` files for runtime behavior.
+In multi-instance mode, `config.json` values take precedence over environment variables.
 Both take precedence over built-in defaults.
 
-**Resolution order:** canonical `memory.*` in `instance.json` > legacy flat aliases in `instance.json` > environment variable > built-in default
+**Resolution order:** canonical `memory.*` in `config.json` > legacy flat aliases in `config.json` > environment variable > built-in default
 
 ---
 
@@ -33,7 +33,7 @@ before the process starts. They are never written to disk.
 | `VALIDATION_MODEL` | string | `claude-haiku-4-5` | Model for validation and lightweight classification. |
 | `FALLBACK_MODEL` | string | `gpt-5.4` | OpenAI fallback when the primary model is unavailable. |
 
-All four can be overridden per-instance via `instance.json` `models` object.
+All four can be overridden per-instance via `config.json` `models` object.
 
 ### Conversation
 
@@ -46,7 +46,7 @@ All four can be overridden per-instance via `instance.json` `models` object.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `instance.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
+| `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 
 ### Storage Paths (single-instance / legacy mode only)
 
@@ -125,11 +125,11 @@ The `config` volume is critical — losing it requires re-scanning the QR code f
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `instance.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
+| `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `config.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
 
 ---
 
-## Instance Configuration (instance.json)
+## Instance Configuration (config.json)
 
 Each instance is a JSON file at:
 
@@ -492,7 +492,7 @@ In multi-instance mode, each instance gets isolated directories under the standa
 
 ```
 $XDG_CONFIG_HOME/whatsoup/instances/<name>/   (default: ~/.config/...)
-  config.json       — instance.json (the file you edit)
+  config.json       — per-instance configuration (the file you edit)
   auth/             — Baileys WhatsApp auth credentials
 
 $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
@@ -658,8 +658,8 @@ The `GET /api/lines` and `GET /api/lines/:name` endpoints expose two config fiel
 
 | Field | Source | Description |
 |-------|--------|-------------|
-| `models` | `instance.json` → `models` object | Model overrides (conversation/extraction/validation/fallback), or `null` if not set in config. |
-| `sandboxPerChat` | `instance.json` → `agentOptions.sandboxPerChat` | `true` when per-chat workspace provisioning is active; `false` otherwise. |
+| `models` | `config.json` → `models` object | Model overrides (conversation/extraction/validation/fallback), or `null` if not set in config. |
+| `sandboxPerChat` | `config.json` → `agentOptions.sandboxPerChat` | `true` when per-chat workspace provisioning is active; `false` otherwise. |
 
 These are read-only in the API and used by the console (`LineTags` component) to display sandbox and fallback badges on fleet rows.
 
