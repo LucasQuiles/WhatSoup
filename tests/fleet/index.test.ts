@@ -432,14 +432,20 @@ describe('fleet server -- static file serving', () => {
 // ---------------------------------------------------------------------------
 
 describe('loadOrCreateFleetToken', () => {
+  // Back-compat shim: returns just the `active` token from the rotatable
+  // storage in `token-storage.ts`. Full rotation coverage lives in
+  // `tests/fleet/token-storage.test.ts`.
   let tokenDir: string;
-  let tokenPath: string;
+  let jsonPath: string;
+  let legacyPath: string;
   let savedXdg: string | undefined;
 
   beforeAll(() => {
     tokenDir = path.join(tmpDir, 'config-token-test');
     savedXdg = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = tokenDir;
+    jsonPath = path.join(tokenDir, 'whatsoup', 'fleet-tokens.json');
+    legacyPath = path.join(tokenDir, 'whatsoup', 'fleet-token');
   });
 
   afterAll(() => {
@@ -447,25 +453,30 @@ describe('loadOrCreateFleetToken', () => {
     else process.env.XDG_CONFIG_HOME = savedXdg;
   });
 
-  it('creates a new token when none exists', async () => {
-    tokenPath = path.join(tokenDir, 'whatsoup', 'fleet-token');
-    try { fs.unlinkSync(tokenPath); } catch { /* fine */ }
+  it('creates a new fleet-tokens.json when none exists', async () => {
+    try { fs.unlinkSync(jsonPath); } catch { /* fine */ }
+    try { fs.unlinkSync(legacyPath); } catch { /* fine */ }
     const token = await loadOrCreateFleetToken();
     expect(token).toHaveLength(64);
-    expect(fs.existsSync(tokenPath)).toBe(true);
+    expect(fs.existsSync(jsonPath)).toBe(true);
   });
 
-  it('returns the existing token on subsequent calls', async () => {
+  it('returns the existing active token on subsequent calls', async () => {
     const first = await loadOrCreateFleetToken();
     const second = await loadOrCreateFleetToken();
     expect(first).toBe(second);
   });
 
-  it('trims whitespace from stored token', async () => {
-    tokenPath = path.join(tokenDir, 'whatsoup', 'fleet-token');
+  it('migrates an existing legacy fleet-token into fleet-tokens.json', async () => {
+    // Reset state for this scenario
+    try { fs.unlinkSync(jsonPath); } catch { /* fine */ }
     const validToken = 'a'.repeat(64);
-    fs.writeFileSync(tokenPath, `  ${validToken}  \n`, { mode: 0o600 });
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, `${validToken}\n`, { mode: 0o600 });
     const token = await loadOrCreateFleetToken();
     expect(token).toBe(validToken);
+    expect(fs.existsSync(jsonPath)).toBe(true);
+    // Legacy file preserved for one rollback cycle
+    expect(fs.existsSync(legacyPath)).toBe(true);
   });
 });

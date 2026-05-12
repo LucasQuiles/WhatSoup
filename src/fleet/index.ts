@@ -1,10 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
-import { jsonResponse, checkBearerAuth, parseRoute, parseQueryString } from '../lib/http.ts';
+import { jsonResponse, parseRoute, parseQueryString, readBody, extractBearer } from '../lib/http.ts';
 import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
@@ -27,11 +25,16 @@ import {
   handleGetGroupRequests, handleGroupRequestsUpdate,
 } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
-import { xdgDir } from './paths.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
 import { FleetRealtimeEventPoller } from './realtime-event-poller.ts';
+import {
+  loadOrCreateFleetTokens as loadOrCreateFleetTokensImpl,
+  verifyFleetToken as verifyFleetTokenImpl,
+  type FleetTokensFile,
+} from './token-storage.ts';
+import { createTicketStore, TICKET_TTL_MS, type TicketStore } from './ws-ticket.ts';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
@@ -40,7 +43,16 @@ const log = createChildLogger('fleet');
 export interface FleetDeps {
   db: DatabaseSync;
   selfName: string;
+  /**
+   * Active fleet token (signs new WS tickets, accepted as Bearer).
+   *
+   * For rotation continuity, pass also `acceptTokens`: any prior tokens
+   * that should still validate. Both shapes are accepted to keep tests and
+   * callers from churning during the rollout.
+   */
   fleetToken: string;
+  /** Optional historic tokens still accepted (cap honored at storage layer). */
+  acceptTokens?: string[];
   getSelfHealth: () => Record<string, unknown>;
 }
 
@@ -230,25 +242,22 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
 // Fleet token management
 // ---------------------------------------------------------------------------
 
-/** Load or create the fleet token at ~/.config/whatsoup/fleet-token */
-export async function loadOrCreateFleetToken(): Promise<string> {
-  const tokenPath = path.join(
-    xdgDir('XDG_CONFIG_HOME', '.config'),
-    'whatsoup',
-    'fleet-token',
-  );
+/**
+ * Load (or create) the rotatable fleet-tokens file.
+ *
+ * The persistence layer lives in `./token-storage.ts`. This re-export keeps the
+ * public surface centralized so callers don't reach into the internal module.
+ */
+export async function loadOrCreateFleetTokens(): Promise<FleetTokensFile> {
+  return loadOrCreateFleetTokensImpl();
+}
 
-  try {
-    const raw = fs.readFileSync(tokenPath, 'utf-8').trim();
-    if (!/^[0-9a-f]{64}$/.test(raw)) throw new Error('fleet-token file is corrupt — regenerating');
-    return raw;
-  } catch {
-    const token = crypto.randomBytes(32).toString('hex');
-    fs.mkdirSync(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tokenPath, token, { mode: 0o600 });
-    log.info({ tokenPath }, 'generated new fleet token');
-    return token;
-  }
+/**
+ * Back-compat shim: returns just the active token. Prefer
+ * `loadOrCreateFleetTokens` to also propagate the accept list.
+ */
+export async function loadOrCreateFleetToken(): Promise<string> {
+  return (await loadOrCreateFleetTokensImpl()).active;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +438,14 @@ export function createFleetServer(deps: FleetDeps) {
   const serviceManager = createServiceManager();
   const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, serviceManager, log, updateChecker };
 
+  // ---- Auth helpers (rotation-aware) -----------------------------------
+  const tokenSet = { active: deps.fleetToken, accept: deps.acceptTokens ?? [] };
+  function verifyToken(candidate: string | null | undefined): boolean {
+    if (!candidate) return false;
+    return verifyFleetTokenImpl(candidate, tokenSet);
+  }
+  const ticketStore: TicketStore = createTicketStore();
+
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
@@ -436,12 +453,25 @@ export function createFleetServer(deps: FleetDeps) {
 
     // API routes require auth
     if (pathname.startsWith('/api/')) {
-      // Accept Bearer header or ?token= query param (EventSource can't set headers)
+      // Accept Bearer header or ?token= query param (EventSource can't set headers).
+      // Both paths walk the active+accept token set so a rotated-out token still
+      // works for the duration of its grace window.
       const queryToken = parseQueryString(url).token ?? '';
-      const tokenMatch = queryToken.length === deps.fleetToken.length &&
-        crypto.timingSafeEqual(Buffer.from(queryToken), Buffer.from(deps.fleetToken));
-      if (!checkBearerAuth(req, deps.fleetToken) && !tokenMatch) {
+      const bearer = extractBearer(req);
+      if (!verifyToken(bearer) && !verifyToken(queryToken)) {
         jsonResponse(res, 401, { error: 'unauthorized' });
+        return;
+      }
+
+      // Special-case: ticket vending. The ticket store needs `active` (the
+      // signing key) and the live ticket-issuance interface, so it sits
+      // outside the table-driven ROUTES.
+      if (method === 'POST' && pathname === '/api/ws-ticket') {
+        // Defensively drain any body so the connection stays clean even if
+        // a client posted something.
+        try { await readBody(req, 1024); } catch { /* ignore — body is optional */ }
+        const { ticket, expiresIn } = ticketStore.issue(deps.fleetToken);
+        jsonResponse(res, 200, { ticket, expiresIn });
         return;
       }
 
@@ -494,8 +524,14 @@ export function createFleetServer(deps: FleetDeps) {
     });
   });
 
-  // WebSocket server for real-time console updates
-  const wsServer = new FleetWebSocketServer(server, deps.fleetToken);
+  // WebSocket server for real-time console updates.
+  // Auth: ticket-first (HMAC tickets minted via POST /api/ws-ticket); legacy
+  // `?token=<active>` still works for one rollout cycle.
+  const wsServer = new FleetWebSocketServer(server, {
+    ticketStore,
+    ticketValidKeys: () => [tokenSet.active, ...tokenSet.accept],
+    verifyLegacyToken: (token) => verifyToken(token),
+  });
 
   // Now that wsServer exists, wire the deferred publisher
   realtimePublish = (event) => wsServer.broadcast(event);
@@ -530,6 +566,7 @@ export function createFleetServer(deps: FleetDeps) {
       healthPoller.stop();
       discovery.stop();
       updateChecker.stop();
+      ticketStore.stop();
       wsServer.close();
       server.close();
     },
