@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, Messenger } from '../../src/core/types.ts';
 import type { Runtime } from '../../src/runtimes/types.ts';
+import { drainIngest } from '../core/_helpers/ingest-drain.ts';
 
 // ---------------------------------------------------------------------------
 // Module mocks — registered before any imports of mocked modules
@@ -152,7 +153,10 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
   handler(msg);
-  await new Promise((resolve) => setImmediate(resolve));
+  // Wait for the fire-and-forget IIFE inside createIngestHandler to release
+  // its slot (active===0 && queued===0). Replaces a single setImmediate tick
+  // that gave no completion guarantee.
+  await drainIngest();
 }
 
 function makeIngest(db: Database, messenger: Messenger, runtime: Runtime) {

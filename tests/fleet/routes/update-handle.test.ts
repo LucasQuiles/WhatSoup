@@ -18,6 +18,24 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// Wait until every invocation of serviceManagerRestartSpy has settled. The
+// production code (`svcMgr.restart(...).catch(...).finally(finishUpdate)`)
+// resets the `updateInProgress` mutex only inside `.finally`, so settling the
+// spy's returned promises is the load-bearing signal these waits gate on.
+// We then poll `mock.invocationCallOrder` length stability + one Promise.resolve
+// chain to guarantee the trailing `.finally(finishUpdate)` microtask has run.
+async function settleRestartSpy(): Promise<void> {
+  const results = serviceManagerRestartSpy.mock.results;
+  if (results.length === 0) return;
+  await Promise.allSettled(
+    results.map((r) => (r.type === 'return' ? r.value : Promise.resolve())),
+  );
+  // Two microtask rounds: one for the .catch handler (if rejection), one for
+  // the trailing .finally(finishUpdate) handler attached on the same chain.
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 const { writeFileSyncSpy } = vi.hoisted(() => ({
   writeFileSyncSpy: vi.fn(),
 }));
@@ -176,9 +194,10 @@ beforeEach(() => {
 // The service manager restart runs on the next event loop tick AFTER
 // handleUpdate() resolves (see the .catch().finally() chain in update.ts),
 // which means updateInProgress is still true when the test body returns.
-// Drain the microtask queue here so mutex state does not leak across tests.
+// Settle the restart spy's pending promises here so mutex state does not leak
+// across tests (the .finally(finishUpdate) chain resets `updateInProgress`).
 afterEach(async () => {
-  await new Promise((r) => setImmediate(r));
+  await settleRestartSpy();
 });
 
 // ---------------------------------------------------------------------------
@@ -331,8 +350,10 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     await firstCall; // drain so updateInProgress resets to false
-    // Extra drain: systemctl callback runs via setImmediate-like scheduling
-    await new Promise((r) => setImmediate(r));
+    // Wait for restart() to be invoked + its .catch().finally() chain to
+    // settle. The .finally(finishUpdate) callback clears updateInProgress.
+    await vi.waitFor(() => expect(serviceManagerRestartSpy).toHaveBeenCalled());
+    await settleRestartSpy();
   });
 
   it('keeps the mutex after client disconnect while update work continues', async () => {
@@ -363,7 +384,9 @@ describe('handleUpdate — mutex (409 on concurrent request)', () => {
       .mockResolvedValueOnce({ stdout: '', stderr: '' });                      // vite build
 
     await firstCall;
-    await new Promise((r) => setImmediate(r));
+    // Wait for restart() spy to be invoked + its async chain to settle.
+    await vi.waitFor(() => expect(serviceManagerRestartSpy).toHaveBeenCalled());
+    await settleRestartSpy();
 
     expect(secondWriteHeadCall).toEqual([409, { 'Content-Type': 'application/json' }]);
     expect(JSON.parse(secondEndBody)).toEqual({ error: 'Update already in progress' });
@@ -796,8 +819,11 @@ describe('handleUpdate — service manager restart error', () => {
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
-    // .catch/.finally chain on svcMgr.restart runs on the next microtask
-    await new Promise((r) => setImmediate(r));
+    // Wait for the .catch handler on svcMgr.restart() to write the SSE
+    // 'error' chunk for step=restart — that is the load-bearing observable.
+    await vi.waitFor(() =>
+      expect(parseSSE(res.chunks).some((e) => e.event === 'error' && e.data?.step === 'restart')).toBe(true),
+    );
 
     const events = parseSSE(res.chunks);
     expectSSESequence(res.chunks, [
@@ -824,7 +850,10 @@ describe('handleUpdate — service manager restart error', () => {
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
-    await new Promise((r) => setImmediate(r));
+    // Wait for the restart .catch handler to emit its SSE error chunk.
+    await vi.waitFor(() =>
+      expect(parseSSE(res.chunks).some((e) => e.event === 'error' && e.data?.step === 'restart')).toBe(true),
+    );
 
     expectSSESequence(res.chunks, [
       { event: 'progress', step: 'pull', status: 'running' },
@@ -869,7 +898,10 @@ describe('endOnce idempotency', () => {
     setupHappyPath();
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
-    await new Promise((r) => setImmediate(r)); // drain systemctl cb
+    // Wait for restart() invocation + its .finally(finishUpdate) chain; that
+    // chain is where res.end could fire a second time if endOnce were broken.
+    await vi.waitFor(() => expect(serviceManagerRestartSpy).toHaveBeenCalled());
+    await settleRestartSpy();
 
     // Trigger close after completion
     req.triggerClose();
@@ -962,7 +994,11 @@ describe('handleUpdate — lockfile change detection', () => {
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
-    await new Promise((r) => setImmediate(r)); // drain systemctl cb
+    // Wait for the restart progress event to be emitted (load-bearing
+    // assertion below). svcMgr.restart is invoked in the same tick that emits
+    // the running event, so waiting on the spy guarantees the SSE chunk is
+    // present.
+    await vi.waitFor(() => expect(serviceManagerRestartSpy).toHaveBeenCalled());
 
     expectSSESequence(res.chunks, [
       { event: 'progress', step: 'pull', status: 'running' },
