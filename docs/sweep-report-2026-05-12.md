@@ -38,21 +38,32 @@ The dry-run result confirms there is enough historical material to justify a sep
 
 ## GitHub Reconciliation
 
-Open issue state at sweep time:
+Open issue state as of 2026-05-12 09:13Z:
 
 | Issue | State | Coverage |
 |---|---|---|
-| `#349` `mcp: stream outbound media instead of buffering whole file` | Closed after sweep | PR `#371` merged. |
-| `#353` `transport: wire isDurableEventKind into dispatch path` | Closed after sweep | PR `#365` merged. |
-| `#363` `agent: honor HTTP provider apiKeyService config` | Closed after sweep | PR `#370` merged; duplicate PR `#367` closed. |
-| `#364` `docs: clarify typing_update is not a refetch invalidation` | Closed after sweep | PR `#368` merged; duplicate PR `#366` closed. |
-| `#348` Tailwind warning cleanup | Closed | PR `#360` merged. |
-| `#352` provider KPI on summary | Closed | PR `#361` merged; provider display code and direct test are on current main. |
+| none | Closed | No open GitHub issues remain after PR `#401` closed `#393`. |
 
 Recently closed or covered workstreams:
 
 | Workstream | Evidence |
 |---|---|
+| `#349` `mcp: stream outbound media instead of buffering whole file` | Closed after sweep by merged PR `#371`. |
+| `#353` `transport: wire isDurableEventKind into dispatch path` | Closed after sweep by merged PR `#365`. |
+| `#363` `agent: honor HTTP provider apiKeyService config` | Closed after sweep by merged PR `#370`; duplicate PR `#367` closed. |
+| `#364` `docs: clarify typing_update is not a refetch invalidation` | Closed after sweep by merged PR `#368`; duplicate PR `#366` closed. |
+| `#348` Tailwind warning cleanup | Closed by merged PR `#360`. |
+| `#352` provider KPI on summary | Closed by merged PR `#361`; provider display code and direct test are on current main. |
+| `#376` dependency pinning README claim | Closed by merged PR `#381` (`cd018ce5`). |
+| `#377` README Fleet API table | Closed by merged PR `#384` (`43db13a3`). |
+| `#378` console Mock Mode fallback claim | Closed by merged PR `#383` (`10c0459f`). |
+| `#382` Line Detail scheduled/groups guide status | Closed by merged PR `#388` (`1c60ffd6`). |
+| `#385` health token mutation scope docs | Closed by merged PR `#387` (`e04ea9f`). |
+| `#389` direct typing health endpoint auth | Closed by merged PR `#395` (`703a489e`). |
+| `#390` MCP read-tool limit bounds | Closed by merged PR `#399` (`79fce765`). |
+| `#391` workspace MCP config symlink writes | Closed by merged PR `#396` (`24002d11`). |
+| `#393` root fleet token query-string removal plan | PR `#397` (`57a7c6d1`) adds one-shot `http_legacy_token_path` warnings and docs; PR `#401` (`f9427b4e`) sets removal date to 2026-06-30 and closes the issue. |
+| Private config write | PR `#374` merged at `6c18169d` (`6c18169dee0ddcb69c180d22043058d080a92f3b`). |
 | `#251` LID conflict reporting | PR series landed through `#344`; latest LID conflict docs event work also landed. |
 | `#324` work-index scanner | `#340` merged. |
 | `#331` Node matrix CI | `#338` merged. |
@@ -61,18 +72,21 @@ Recently closed or covered workstreams:
 | Tailwind warning cleanup | `#360` merged into current baseline. |
 | Provider KPI direct coverage | `#361` merged into current baseline. |
 
-Draft PRs still open at sweep time: `#256`, `#271`, `#272`, `#281`, `#286`, `#293`, `#297`.
+Ready-for-review PRs: none as of 2026-05-12 09:13Z.
+
+Draft PRs still open: `#256`, `#271`, `#272`, `#281`, `#286`, `#293`, `#297`, `#369`, `#372`, `#375`, `#379`, `#380`, `#386`, `#394`, `#398`, and `#400`.
 
 ## Verified Findings
 
 | Finding | Severity | Verdict | Evidence | Remediation path |
 |---|---|---|---|---|
 | Memory migration mappings | Critical claim, false positive | Not actionable | `src/config-memory-migration.ts` already maps `recencyHalfLifeDays` and `maxAgeDays`; `tests/scripts/migrate-memory-config.test.ts` covers the migration. | No PR. Keep closed. |
-| Private config write | High | Covered by PR `#374` | `src/main.ts` wrote an instance `config.json` update with string encoding only; private-write tests covered other paths, not this intro-sent write. | PR `#374` adds a private intro-sent config writer plus direct mode/symlink regression coverage. |
+| Private config write | High | Merged via PR `#374` | `src/main.ts` wrote an instance `config.json` update with string encoding only; private-write tests covered other paths, not this intro-sent write. | PR `#374` merged at `6c18169d` with a private intro-sent config writer plus direct mode/symlink regression coverage. |
 | Provider KPI missing | Critical claim, false positive | Not actionable | `console/src/components/line-detail/SummaryTab.tsx` already computes and displays provider; `tests/console/summary-tab-provider-card.test.ts` exists on current main. | No new feature PR. |
 | Disconnect policy consolidation | High | Covered by updated draft PR `#297` | `src/transport/auth.ts` and `src/transport/connection.ts` carried separate disconnect decision logic; connection path adds flapping behavior. | PR `#297` now routes both call sites through the shared policy and adds explicit restart-required flapping policy coverage. |
 | Access-mode constant reuse | High | Actionable | `src/config.ts` has a local `VALID_ACCESS_MODES` set while `src/core/agent-config-validator.ts` exports the canonical set through `src/instance-loader.ts`. | Import the canonical set and keep validation messages stable. |
 | Direct validator coverage | High | Actionable | `src/core/agent-config-validator.ts` has direct validation logic but no `tests/core/agent-config-validator.test.ts`; route tests cover it indirectly. | Add direct validator contract tests. |
+| Root fleet token query-string auth | Medium | Removal plan defined; issue `#393` closed | `src/fleet/index.ts` still accepts root fleet token `?token=` during the deprecation window; PR `#397` warns once per server lifetime on successful query-token HTTP auth, and PR `#401` publishes `removeAfter: "2026-06-30"`. | Execute the removal after 2026-06-30; prefer query credentials only for scoped tickets/SSE constraints. |
 
 ## Registry Repair Applied
 
@@ -95,12 +109,12 @@ The affected row is `docs/superpowers/plans/2026-04-05-phase5-analytics-observab
 
 ## Recommended PR Queue
 
-1. Private config write: covered by PR `#374`; do not duplicate while that PR is active.
-2. Disconnect policy consolidation: covered by updated draft PR `#297`; do not duplicate while that PR is active.
-3. Access-mode constant reuse: covered by draft PR `#369`; do not duplicate while that PR is active.
-4. Direct validator coverage: covered by draft PR `#372`; do not duplicate while that PR is active.
+1. Disconnect policy consolidation: covered by updated draft PR `#297`; do not duplicate while that PR is active.
+2. Access-mode constant reuse: covered by draft PR `#369`; do not duplicate while that PR is active.
+3. Direct validator coverage: covered by draft PR `#372`; do not duplicate while that PR is active.
+4. Root fleet token query-string removal execution: schedule after the documented 2026-06-30 deadline; no open issue remains today.
 
-Recently merged PRs `#360`, `#361`, `#365`, `#368`, `#370`, and `#371` should not be duplicated.
+Recently merged PRs `#360`, `#361`, `#365`, `#368`, `#370`, `#371`, `#374`, `#381`, `#383`, `#384`, `#387`, `#388`, `#392`, `#395`, `#396`, `#397`, `#399`, and `#401` should not be duplicated.
 
 ## Follow-Up Registry Work
 
