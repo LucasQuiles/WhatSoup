@@ -19,13 +19,20 @@ _resolve_symlinks() {
 
 SCRIPT_DIR="$(cd "$(dirname "$(_resolve_symlinks "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_NODE="$HOME/.nvm/versions/node/v24.13.0/bin/node"
+# Derive the default Node binary from .nvmrc so this wrapper stays aligned
+# with the repo pin (see scripts/check-node-pin-consistency.ts).
+NVMRC_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null || true)"
+if [ -z "$NVMRC_VERSION" ]; then
+  echo "FATAL: cannot read Node version from $REPO_ROOT/.nvmrc" >&2
+  exit 1
+fi
+DEFAULT_NODE="$HOME/.nvm/versions/node/v${NVMRC_VERSION}/bin/node"
 NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
 if [ ! -x "$NODE" ]; then
   NODE="$(command -v node || true)"
 fi
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
-  echo "FATAL: node not found. Set WHATSOUP_NODE or install node." >&2
+  echo "FATAL: node not found. Set WHATSOUP_NODE or install node v${NVMRC_VERSION}." >&2
   exit 1
 fi
 
