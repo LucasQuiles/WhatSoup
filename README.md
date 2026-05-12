@@ -172,7 +172,7 @@ deploy/
 
 ## Fleet API
 
-The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
+The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the root fleet token as a Bearer token, legacy `?token=`, or a short-lived API/SSE ticket; ticket-minting routes require the root fleet token as a Bearer token.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -182,6 +182,8 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `DELETE` | `/api/lines/:name` | Delete an instance (stop + cleanup) |
 | `PATCH` | `/api/lines/:name/config` | Update instance configuration |
 | `GET` | `/api/lines/:name/auth` | SSE stream for QR code authentication |
+| `POST` | `/api/auth-ticket` | Mint a short-lived API or SSE auth ticket from the root bearer token |
+| `POST` | `/api/ws-ticket` | Mint a short-lived WebSocket ticket from the root bearer token |
 | `POST` | `/api/lines/:name/restart` | Restart systemd unit |
 | `POST` | `/api/lines/:name/stop` | Stop systemd unit |
 | `POST` | `/api/lines/:name/send` | Send a message through the instance |
@@ -196,20 +198,16 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `GET` | `/api/metrics` | Fleet-wide aggregated metrics |
 | `GET` | `/api/feed` | Activity feed (all instances) |
 | `GET` | `/api/typing` | Currently typing indicators |
-<!-- Search -->
 | `GET` | `/api/lines/:name/messages/search` | Full-text search messages for an instance |
 | `GET` | `/api/lines/:name/contacts/search` | Search saved contacts for an instance |
-<!-- Directories / existence probes -->
-| `GET` | `/api/directories/check` | Check whether a configured directory path exists |
+| `GET` | `/api/directories/check?path=...` | Check whether a home-directory path exists and is writable |
 | `GET` | `/api/lines/:name/exists` | Probe whether an instance is registered |
-<!-- Scheduled messages -->
-| `GET` | `/api/lines/:name/scheduled` | List scheduled messages for an instance |
+| `GET` | `/api/lines/:name/scheduled` | List scheduled messages, optionally filtered by `?status=` |
 | `POST` | `/api/lines/:name/scheduled` | Schedule a new message |
-| `DELETE` | `/api/lines/:name/scheduled` | Cancel all scheduled messages for an instance |
+| `DELETE` | `/api/lines/:name/scheduled` | Cancel a scheduled message by `?id=` query parameter |
 | `GET` | `/api/lines/:name/scheduled/:id` | Get a single scheduled message |
 | `PUT` | `/api/lines/:name/scheduled/:id` | Update a scheduled message |
 | `DELETE` | `/api/lines/:name/scheduled/:id` | Cancel a single scheduled message |
-<!-- Groups -->
 | `GET` | `/api/lines/:name/groups` | List groups for an instance |
 | `POST` | `/api/lines/:name/groups` | Create a new group |
 | `GET` | `/api/lines/:name/groups/:jid` | Get group detail |
@@ -225,14 +223,10 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `PUT` | `/api/lines/:name/groups/:jid/join-approval` | Toggle join-approval requirement |
 | `GET` | `/api/lines/:name/groups/:jid/requests` | List pending join requests |
 | `POST` | `/api/lines/:name/groups/:jid/requests` | Approve or reject pending join requests |
-<!-- LID mappings (#251) -->
-| `GET` | `/api/lid-mappings` | List cross-instance LID -> phone JID mappings |
+| `GET` | `/api/lid-mappings` | List cross-instance LID to phone JID mappings |
 | `POST` | `/api/lid-mappings/sync` | Sync LID mappings from another instance |
-<!-- Version / update -->
 | `GET` | `/api/version` | Report fleet server build version |
 | `POST` | `/api/update` | Trigger a fleet self-update |
-
-<!-- Fleet API table reconciled against src/fleet/index.ts ROUTES; run `grep -cE "^\|.*api/" README.md` to confirm row count -->
 
 The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` plus a short accept-list for rotated tokens (auto-generated on first run). Existing `~/.config/whatsoup/fleet-token` files are migrated on first read and left in place for rollback.
 
