@@ -86,11 +86,12 @@ describe('api write operations', () => {
 describe('api auth headers', () => {
   it('mints an api-audience ticket and threads it on availability probes and fallback-backed reads (#313)', async () => {
     stubFleetToken('fleet-token-123');
-    // Sequence: mint -> probe -> read. Mint consumes the root token; every
-    // subsequent call sees only the api-audience ticket.
+    // Sequence: mint -> probe -> mint -> read. Tickets are single-use, so the
+    // fallback-backed read cannot reuse the availability probe credential.
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-abc', audience: 'api', expiresIn: 60 }))
       .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-def', audience: 'api', expiresIn: 60 }))
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetch);
 
@@ -98,8 +99,8 @@ describe('api auth headers', () => {
 
     await expect(freshApi.getLines()).resolves.toEqual([]);
 
-    // 3 calls total: 1 mint + 1 probe + 1 read.
-    expect(fetch).toHaveBeenCalledTimes(3);
+    // 4 calls total: mint + probe + mint + read.
+    expect(fetch).toHaveBeenCalledTimes(4);
 
     expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
     expect(headersFor(fetchInit(fetch, 0))).toEqual({
@@ -112,10 +113,16 @@ describe('api auth headers', () => {
       Authorization: 'Bearer api-ticket-abc',
     });
 
-    expect(fetch.mock.calls[2]?.[0]).toBe('/api/lines');
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/auth-ticket');
     expect(headersFor(fetchInit(fetch, 2))).toEqual({
       'Content-Type': 'application/json',
-      Authorization: 'Bearer api-ticket-abc',
+      Authorization: 'Bearer fleet-token-123',
+    });
+
+    expect(fetch.mock.calls[3]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 3))).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer api-ticket-def',
     });
   });
 

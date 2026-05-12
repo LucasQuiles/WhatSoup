@@ -478,8 +478,8 @@ export function createFleetServer(deps: FleetDeps) {
   }
   const ticketStore: TicketStore = createWsTicketStore();
   // Audience-scoped store for HTTP and SSE tickets (#313). The WS path keeps
-  // using `ticketStore` above so the legacy 3-part wire format remains intact
-  // for that audience.
+  // using `ticketStore` above so call sites do not need to care about the
+  // shared audience-scoped implementation.
   const apiTicketStore: AuthTicketStore = createAuthTicketStore();
 
   /**
@@ -520,11 +520,11 @@ export function createFleetServer(deps: FleetDeps) {
       const queryTicket = query.ticket ?? '';
       const bearer = extractBearer(req);
 
-      // The bootstrap mint endpoint accepts ONLY the root fleet token so
-      // a redeemed api-ticket can't be used to mint a fresh one. This is
-      // the only route the browser hits with the meta-tag credential.
+      // Bootstrap ticket endpoints accept ONLY the root fleet token via
+      // Authorization. They intentionally do not accept `?token=` because
+      // these POST routes do not have EventSource's header limitation.
       if (method === 'POST' && pathname === '/api/auth-ticket') {
-        if (!verifyToken(bearer) && !verifyToken(queryToken)) {
+        if (!verifyToken(bearer)) {
           jsonResponse(res, 401, { error: 'unauthorized' });
           return;
         }
@@ -546,6 +546,20 @@ export function createFleetServer(deps: FleetDeps) {
         return;
       }
 
+      // Legacy WS ticket vending remains a root-token bootstrap path. Do
+      // this before the generic API ticket gate so an `api`-audience ticket
+      // cannot be exchanged for WebSocket capability.
+      if (method === 'POST' && pathname === '/api/ws-ticket') {
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        try { await readBody(req, 1024); } catch { /* ignore -- body is optional */ }
+        const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
+        jsonResponse(res, 200, { ticket, expiresIn });
+        return;
+      }
+
       const audience = audienceForPath(pathname);
       // Accept (a) root token via Bearer/?token=, OR (b) audience-scoped
       // ticket via ?ticket=. Bearer header may also carry a ticket so
@@ -564,17 +578,6 @@ export function createFleetServer(deps: FleetDeps) {
       }
       if (!rootOk && !ticketOk) {
         jsonResponse(res, 401, { error: 'unauthorized' });
-        return;
-      }
-
-      // Special-case: legacy WS ticket vending. Same Bearer gate as before;
-      // the WS audience keeps the 3-part wire format for backward compat.
-      if (method === 'POST' && pathname === '/api/ws-ticket') {
-        // Defensively drain any body so the connection stays clean even if
-        // a client posted something.
-        try { await readBody(req, 1024); } catch { /* ignore -- body is optional */ }
-        const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
-        jsonResponse(res, 200, { ticket, expiresIn });
         return;
       }
 

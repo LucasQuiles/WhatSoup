@@ -4,8 +4,8 @@
 //  - `apiFetch` calls mint an api-audience ticket via POST /api/auth-ticket
 //    and thread it as `Authorization: Bearer <ticket>` instead of the root
 //    fleet token.
-//  - `getApiTicket` caches the minted ticket so back-to-back calls only mint
-//    once, and concurrent callers share one in-flight mint.
+//  - `getApiTicket` treats tickets as single-use credentials, so back-to-back
+//    callers receive separate tickets.
 //  - `getApiTicket('sse')` mints an sse-audience ticket (LinkStep path).
 //  - When no meta-tag token is present (dev / mock-only), `apiFetch` omits
 //    Authorization and never hits /api/auth-ticket.
@@ -51,7 +51,8 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
       // 1) availability probe — mint + probe call
       .mockResolvedValueOnce(mintResponse('api-ticket-A', 'api'))
       .mockResolvedValueOnce(jsonResponse([]))
-      // 2) actual read — reuses cached ticket (no mint)
+      // 2) actual read — mint + read call; tickets are single-use.
+      .mockResolvedValueOnce(mintResponse('api-ticket-B', 'api'))
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -60,9 +61,10 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
 
     // Call sequence:
     //   call 0: POST /api/auth-ticket  (mint for availability probe)
-    //   call 1: GET  /api/lines        (probe, with cached api-ticket-A)
-    //   call 2: GET  /api/lines        (actual fetch, same ticket)
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    //   call 1: GET  /api/lines        (probe, with api-ticket-A)
+    //   call 2: POST /api/auth-ticket  (mint for actual read)
+    //   call 3: GET  /api/lines        (actual fetch, with api-ticket-B)
+    expect(fetchMock).toHaveBeenCalledTimes(4);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
     const mintInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
@@ -75,9 +77,10 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
     const probeHeaders = (fetchMock.mock.calls[1]?.[1] as RequestInit).headers as Record<string, string>;
     expect(probeHeaders.Authorization).toBe('Bearer api-ticket-A');
 
-    expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/lines');
-    const readHeaders = (fetchMock.mock.calls[2]?.[1] as RequestInit).headers as Record<string, string>;
-    expect(readHeaders.Authorization).toBe('Bearer api-ticket-A');
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/auth-ticket');
+    expect(fetchMock.mock.calls[3]?.[0]).toBe('/api/lines');
+    const readHeaders = (fetchMock.mock.calls[3]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(readHeaders.Authorization).toBe('Bearer api-ticket-B');
   });
 
   it('does NOT send the root token on /api/* routes', async () => {
@@ -85,6 +88,7 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(mintResponse('api-ticket-B', 'api'))
       .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(mintResponse('api-ticket-C', 'api'))
       .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -116,22 +120,41 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
       expect(headers.Authorization).toBeUndefined();
     }
   });
+
+  it('mints WebSocket tickets with the root bootstrap token, not an api-audience ticket', async () => {
+    stubFleetToken('root-token-xyz');
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ticket: 'ws-ticket', expiresIn: 60 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+    await expect(freshApi.getWsTicket()).resolves.toEqual({ ticket: 'ws-ticket', expiresIn: 60 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/ws-ticket');
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({ Authorization: 'Bearer root-token-xyz' });
+  });
 });
 
-describe('console api-ticket -- getApiTicket caching', () => {
-  it('reuses a cached api ticket across concurrent callers', async () => {
+describe('console api-ticket -- single-use ticket minting', () => {
+  it('mints a fresh api ticket for each caller', async () => {
     stubFleetToken('root-token-xyz');
-    const fetchMock = vi.fn().mockResolvedValue(mintResponse('shared-api-ticket', 'api'));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mintResponse('api-ticket-1', 'api'))
+      .mockResolvedValueOnce(mintResponse('api-ticket-2', 'api'))
+      .mockResolvedValueOnce(mintResponse('api-ticket-3', 'api'));
     vi.stubGlobal('fetch', fetchMock);
 
     const { getApiTicket, clearTicketCache } = await import('../../console/src/lib/api.ts');
     clearTicketCache();
-    const [a, b, c] = await Promise.all([getApiTicket('api'), getApiTicket('api'), getApiTicket('api')]);
-    expect(a).toBe('shared-api-ticket');
-    expect(b).toBe('shared-api-ticket');
-    expect(c).toBe('shared-api-ticket');
-    // All three concurrent callers should have shared one mint.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const a = await getApiTicket('api');
+    const b = await getApiTicket('api');
+    const c = await getApiTicket('api');
+    expect(a).toBe('api-ticket-1');
+    expect(b).toBe('api-ticket-2');
+    expect(c).toBe('api-ticket-3');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('mints separate tickets for api and sse audiences', async () => {
@@ -155,13 +178,11 @@ describe('console api-ticket -- getApiTicket caching', () => {
     expect(secondBody.audience).toBe('sse');
   });
 
-  it('refreshes the cached ticket once the cached entry has aged past its safe-reuse window', async () => {
+  it('does not reuse an unexpired ticket because server redemption is single-use', async () => {
     stubFleetToken('root-token-xyz');
-    // First mint expires in 1s; safe-reuse window is max(1s, 1s - 10s margin) = 1s.
-    // Advance time past that window so the next call must re-mint.
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(mintResponse('expiring-ticket', 'api', 1))
-      .mockResolvedValueOnce(mintResponse('fresh-ticket', 'api', 60));
+      .mockResolvedValueOnce(mintResponse('first-ticket', 'api', 60))
+      .mockResolvedValueOnce(mintResponse('second-ticket', 'api', 60));
     vi.stubGlobal('fetch', fetchMock);
 
     vi.useFakeTimers();
@@ -170,12 +191,11 @@ describe('console api-ticket -- getApiTicket caching', () => {
       const { getApiTicket, clearTicketCache } = await import('../../console/src/lib/api.ts');
       clearTicketCache();
       const first = await getApiTicket('api');
-      expect(first).toBe('expiring-ticket');
+      expect(first).toBe('first-ticket');
 
-      // Advance well past the cached entry's refreshAt.
-      vi.setSystemTime(new Date('2026-05-12T00:00:05Z'));
+      vi.setSystemTime(new Date('2026-05-12T00:00:01Z'));
       const second = await getApiTicket('api');
-      expect(second).toBe('fresh-ticket');
+      expect(second).toBe('second-ticket');
       expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();

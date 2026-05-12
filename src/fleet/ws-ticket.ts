@@ -2,12 +2,11 @@
 //
 // Backward-compatible adapter over `auth-ticket.ts` (issue #313).
 //
-// The original ws-ticket module shipped a 3-part ticket dedicated to the
-// WebSocket upgrade path. #313 generalised that pattern to three audiences
+// #313 generalised the WebSocket ticket pattern to three audiences
 // (api, sse, ws). This module preserves the original `issue(signingKey)` /
-// `redeem(ticket, validKeys)` shape so the WS server and existing tests keep
-// working unchanged; under the hood every call binds to `audience='ws'` on
-// the shared store.
+// `redeem(ticket, validKeys)` API shape so the WS server call sites stay
+// unchanged; under the hood every call binds to `audience='ws'` on the
+// shared store.
 
 import {
   createTicketStore as createScopedTicketStore,

@@ -24,6 +24,25 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
     let es: EventSource | null = null
     let cancelled = false
 
+    async function openEventSource(): Promise<void> {
+      let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
+      if (getFleetToken()) {
+        try {
+          const ticket = await getApiTicket('sse')
+          url += `?ticket=${encodeURIComponent(ticket)}`
+        } catch {
+          if (cancelled) return
+          setStatus('error')
+          setErrorMsg('Unable to authenticate with the fleet server.')
+          return
+        }
+      }
+      if (cancelled) return
+      const source = new EventSource(url)
+      es = source
+      wireEventSource(source)
+    }
+
     function wireEventSource(source: EventSource): void {
       source.addEventListener('qr', (e: MessageEvent) => {
         const nextQr = parseQrPayload(e.data)
@@ -58,18 +77,18 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
 
       // Native connection errors — fires on 401, network failure, etc.
       source.onerror = () => {
-        if (source.readyState === EventSource.CLOSED) {
-          setStatus('error')
-          setErrorMsg('Connection to server lost. Check that the fleet server is running.')
-          if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-        }
+        if (cancelled || es !== source) return
+        source.close()
+        if (qrTimerRef.current) clearInterval(qrTimerRef.current)
         retryCountRef.current++
         if (retryCountRef.current >= 5) {
           setStatus('error')
           setErrorMsg('Unable to connect to the authentication server after multiple attempts.')
-          if (qrTimerRef.current) clearInterval(qrTimerRef.current)
-          source.close()
+          return
         }
+        // EventSource reconnects reuse the original URL. Since SSE tickets are
+        // single-use, own the retry loop here so each attempt gets a fresh one.
+        void openEventSource()
       }
     }
 
@@ -77,23 +96,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
     // POST /api/auth-ticket so the root fleet token never appears in the
     // EventSource URL. In dev (no meta-tag) we open without a ticket and
     // let the Vite proxy handle auth.
-    void (async () => {
-      let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
-      if (getFleetToken()) {
-        try {
-          const ticket = await getApiTicket('sse')
-          url += `?ticket=${encodeURIComponent(ticket)}`
-        } catch {
-          if (cancelled) return
-          setStatus('error')
-          setErrorMsg('Unable to authenticate with the fleet server.')
-          return
-        }
-      }
-      if (cancelled) return
-      es = new EventSource(url)
-      wireEventSource(es)
-    })()
+    void openEventSource()
 
     return () => {
       cancelled = true

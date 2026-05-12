@@ -567,8 +567,17 @@ describe('fleet server -- audience-scoped auth tickets (#313)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('POST /api/auth-ticket requires Bearer / ?token= root credential (401 otherwise)', async () => {
+  it('POST /api/auth-ticket requires a Bearer root credential (401 otherwise)', async () => {
     const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('POST /api/auth-ticket rejects the root credential in ?token=', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket?token=${encodeURIComponent(FLEET_TOKEN)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ audience: 'api' }),
@@ -599,6 +608,22 @@ describe('fleet server -- audience-scoped auth tickets (#313)', () => {
       headers: { Authorization: `Bearer ${ticket}` },
     });
     expect(res.status).toBe(200);
+  });
+
+  it('an api-audience ticket cannot mint a WebSocket ticket', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/ws-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ticket}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('POST /api/ws-ticket rejects the root credential in ?token=', async () => {
+    const res = await fetch(`${baseUrl}/api/ws-ticket?token=${encodeURIComponent(FLEET_TOKEN)}`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(401);
   });
 
   it('an api-audience ticket is single-use', async () => {

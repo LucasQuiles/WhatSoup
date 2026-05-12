@@ -42,19 +42,6 @@ export function getFleetToken(): string | null {
 
 type TicketAudience = 'api' | 'sse';
 
-interface CachedTicket {
-  ticket: string;
-  /** Epoch ms when the cached ticket is no longer safe to reuse. */
-  refreshAt: number;
-  /** In-flight mint promise so concurrent callers share one request. */
-  pending?: Promise<string>;
-}
-
-const ticketCache: Map<TicketAudience, CachedTicket> = new Map();
-
-/** Refresh tickets this many ms before their server-side expiry. */
-const TICKET_REFRESH_MARGIN_MS = 10_000;
-
 function rootAuthHeaders(): Record<string, string> {
   const token = getFleetToken();
   return token ? { 'Authorization': `Bearer ${token}` } : {};
@@ -81,38 +68,23 @@ async function mintTicket(audience: TicketAudience): Promise<string> {
   if (typeof data.ticket !== 'string' || data.ticket.length === 0) {
     throw new Error(`auth-ticket ${audience}: malformed server response`);
   }
-  const expiresInSec = typeof data.expiresIn === 'number' && Number.isFinite(data.expiresIn)
-    ? data.expiresIn : 60;
-  const refreshAt = Date.now() + Math.max(1000, expiresInSec * 1000 - TICKET_REFRESH_MARGIN_MS);
-  ticketCache.set(audience, { ticket: data.ticket, refreshAt });
   return data.ticket;
 }
 
 /**
- * Mint or reuse a cached audience-scoped ticket. Tickets are refreshed
- * eagerly ~10s before the server-side expiry so the page doesn't see a
- * mid-flight 401 on slow networks.
+ * Mint a fresh audience-scoped ticket. Server-side tickets are single-use:
+ * sharing a fulfilled ticket across API calls causes the second redemption
+ * to fail with 401.
  *
  * Exported for callers (e.g. EventSource bootstrap in `LinkStep`) that
  * need the raw ticket string.
  */
 export async function getApiTicket(audience: TicketAudience = 'api'): Promise<string> {
-  const cached = ticketCache.get(audience);
-  const now = Date.now();
-  if (cached && now < cached.refreshAt) return cached.ticket;
-  if (cached?.pending) return cached.pending;
-  const pending = mintTicket(audience).finally(() => {
-    const entry = ticketCache.get(audience);
-    if (entry) entry.pending = undefined;
-  });
-  // Stash the in-flight promise so concurrent callers don't all mint.
-  ticketCache.set(audience, { ticket: cached?.ticket ?? '', refreshAt: cached?.refreshAt ?? 0, pending });
-  return pending;
+  return mintTicket(audience);
 }
 
-/** Drop any cached tickets -- used by tests and on auth failure recovery. */
+/** Test helper kept stable for existing imports. */
 export function clearTicketCache(): void {
-  ticketCache.clear();
 }
 
 /**
@@ -128,9 +100,8 @@ async function authHeaders(): Promise<Record<string, string>> {
     const ticket = await getApiTicket('api');
     return { 'Authorization': `Bearer ${ticket}` };
   } catch {
-    // Mint failed (network, 401, server down). Clear the cache so the next
-    // call retries; let the surrounding fetch surface the underlying error.
-    clearTicketCache();
+    // Mint failed (network, 401, server down). Let the surrounding fetch
+    // surface the underlying API failure or dev-proxy fallback behavior.
     return {};
   }
 }
@@ -492,8 +463,15 @@ export const api = {
    * ticket with the active fleet token; the browser then opens the WS as
    * `wss://host/ws?ticket=<ticket>`. The root token never travels in the URL.
    */
-  getWsTicket: () =>
-    apiFetch<{ ticket: string; expiresIn: number }>('/api/ws-ticket', {
+  getWsTicket: async () => {
+    const res = await fetch(`${API_BASE}/api/ws-ticket`, {
       method: 'POST',
-    }),
+      headers: rootAuthHeaders(),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      throw new Error(`API ${res.status}: ${await res.text()}`);
+    }
+    return await res.json() as { ticket: string; expiresIn: number };
+  },
 };
