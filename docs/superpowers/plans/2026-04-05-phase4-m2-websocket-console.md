@@ -1,6 +1,8 @@
 # Phase 4 M2: WebSocket Console Integration
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **HISTORICAL — superseded by PR #310 (WS ticket + rotatable tokens) and PR #287 (HTTP API token auth). For current operator commands see `docs/runbook.md` and `docs/runbooks/`. Examples below referencing `~/.config/whatsoup/fleet-token` or `/ws?token=...` reflect the pre-rotation design and should not be used as guidance.**
+
+> **READ-ONLY HISTORICAL REFERENCE:** This plan predates the WS ticket + rotatable token design. Do not execute the steps below against the current codebase; they target the deprecated single-token auth model. Preserved for historical context only.
 
 **Goal:** Wire existing `FleetWebSocketServer` to emit events from fleet route mutations, and create a console `useWebSocket` hook that replaces polling with WS-driven React Query invalidation (falling back to polling on disconnect).
 
