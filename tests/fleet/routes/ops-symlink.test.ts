@@ -48,29 +48,10 @@ import { handleConfigUpdate } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 
-function mockReq(body: string): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as unknown as { headers: Record<string, string> }).headers = {};
-  (stream as unknown as { method: string }).method = 'PATCH';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
+import { mockReq as helperMockReq, mockRes } from '../../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number, _headers?: Record<string, string>) {
-      res._status = status;
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as unknown as ServerResponse & { _status: number; _body: string };
+function mockReq(body: string): IncomingMessage {
+  return helperMockReq({ body, method: 'PATCH' });
 }
 
 function makeInstance(configPath: string): DiscoveredInstance {

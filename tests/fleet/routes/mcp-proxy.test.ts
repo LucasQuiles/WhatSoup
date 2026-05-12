@@ -39,25 +39,10 @@ function makeDeps(): McpProxyDeps {
   };
 }
 
-function mockReq(body: string, url = '/api/lines/alpha/groups'): IncomingMessage {
-  const stream = new PassThrough();
-  const req = stream as unknown as IncomingMessage;
-  req.method = 'POST';
-  req.url = url;
-  process.nextTick(() => {
-    stream.end(body);
-  });
-  return req;
-}
+import { mockReq as helperMockReq, mockRes } from '../../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { res._body = data ?? ''; },
-  };
-  return res as unknown as ServerResponse & { _status: number; _body: string };
+function mockReq(body: string, url = '/api/lines/alpha/groups'): IncomingMessage {
+  return helperMockReq({ body, method: 'POST', url });
 }
 
 beforeEach(() => {
