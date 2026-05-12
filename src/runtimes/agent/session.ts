@@ -92,10 +92,22 @@ export interface SessionManagerOptions {
  * its own credentials plus the system essentials below.
  */
 export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
+  if (!isProviderId(provider)) {
+    throw new Error(
+      `[session-manager:buildChildEnv] unknown provider id: ${JSON.stringify(provider)}. ` +
+        `Valid: ${PROVIDER_IDS.join(', ')}.`,
+    );
+  }
+
   const env = buildBaseChildEnv();
 
   // Provider-specific credentials — each provider only receives the keys it needs.
   switch (provider) {
+    case 'claude-cli':
+      // OPENAI_API_KEY is allowed for this provider's auxiliary features.
+      // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
+      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      break;
     case 'codex-cli':
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       break;
@@ -108,12 +120,13 @@ export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEn
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
       break;
-    case 'claude-cli':
+    case 'openai-api':
+    case 'anthropic-api':
+      throw new Error(
+        `[session-manager:buildChildEnv] ${provider} is a managed-loop provider and does not spawn a child process`,
+      );
     default:
-      // OPENAI_API_KEY: passed because Claude Code may use it for its own features.
-      // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
-      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-      break;
+      return assertNeverProvider(provider, 'session-manager:buildChildEnv');
   }
 
   // Excluded (all providers): PINECONE_API_KEY (parent MCP only),

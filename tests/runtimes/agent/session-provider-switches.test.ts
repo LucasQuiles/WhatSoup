@@ -19,6 +19,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   __provider_switch_for_test,
+  buildChildEnv,
   PROVIDER_DISPLAY_NAMES,
 } from '../../../src/runtimes/agent/session.ts';
 import { PROVIDER_IDS } from '../../../src/runtimes/agent/providers/index.ts';
@@ -66,6 +67,15 @@ describe('SessionManager provider switches — fail-fast (#447)', () => {
 
   it('getParser throws on an unknown provider ID', () => {
     expect(() => __provider_switch_for_test.getParser('claud-cli')).toThrow(/unknown provider/i);
+  });
+
+  it('buildChildEnv throws on an unknown provider ID', () => {
+    expect(() => buildChildEnv('claud-cli')).toThrow(/unknown provider/i);
+  });
+
+  it('buildChildEnv throws for managed-loop providers that do not spawn children', () => {
+    expect(() => buildChildEnv('openai-api')).toThrow(/managed-loop provider/i);
+    expect(() => buildChildEnv('anthropic-api')).toThrow(/managed-loop provider/i);
   });
 
   it('PROVIDER_DISPLAY_NAMES covers every registry entry', () => {

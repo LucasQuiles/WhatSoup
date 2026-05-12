@@ -7,15 +7,18 @@
 import { describe, it, expect } from 'vitest';
 import { validateInstanceConfig } from '../../src/core/agent-config-validator.ts';
 import { PROVIDER_IDS } from '../../src/runtimes/agent/providers/index.ts';
+import type { ValidatorContext } from '../../src/core/agent-config-validator.ts';
 
 function agentRaw(provider: unknown): Record<string, unknown> {
   return {
     name: 'test-line',
     type: 'agent',
     accessMode: 'self_only',
+    adminPhones: ['15555550123'],
     healthPort: 9095,
     systemPrompt: 'hi',
     agentOptions: {
+      sessionScope: 'single',
       provider,
     },
   };
@@ -52,17 +55,21 @@ describe('validateInstanceConfig — agentOptions.provider (#447)', () => {
     expect(validateInstanceConfig(fullRaw, { name: 'test-line', mode: 'create' })).toBeNull();
   });
 
-  it('rejects an unknown provider ID with a registry-aware error', () => {
-    const err = validateInstanceConfig(agentRaw('claud-cli'), {
-      name: 'test-line',
-      mode: 'create',
-    });
-    expect(err).not.toBeNull();
-    expect(err?.field).toBe('agentOptions.provider');
-    expect(err?.message).toMatch(/agentOptions\.provider/);
-    // The error must enumerate the valid set so operators can self-correct.
-    expect(err?.message).toMatch(/claude-cli/);
-    expect(err?.message).toMatch(/anthropic-api/);
+  it('rejects an unknown provider ID across create/load/discovery/patch modes', () => {
+    const modes: ValidatorContext['mode'][] = ['create', 'load', 'discovery', 'patch'];
+
+    for (const mode of modes) {
+      const err = validateInstanceConfig(agentRaw('claud-cli'), {
+        name: 'test-line',
+        mode,
+      });
+      expect(err, `expected ${mode} to reject claud-cli`).not.toBeNull();
+      expect(err?.field).toBe('agentOptions.provider');
+      expect(err?.message).toMatch(/agentOptions\.provider/);
+      // The error must enumerate the valid set so operators can self-correct.
+      expect(err?.message).toMatch(/claude-cli/);
+      expect(err?.message).toMatch(/anthropic-api/);
+    }
   });
 
   it('rejects empty string', () => {
