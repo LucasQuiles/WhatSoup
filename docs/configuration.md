@@ -617,8 +617,8 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 
 | Version | Description |
 |---------|-------------|
-| 1 | Full schema DDL — messages, chats, contacts, access_list, rate_limits, etc. (`MIGRATION_1`) |
-| 2 | Durability tables: `durability_queue`, `recovery_log` (`MIGRATION_2`) |
+| 1 | Full schema DDL — `messages`, `contacts`, `access_list`, `agent_sessions`, `rate_limits`, `enrichment_runs` (`MIGRATION_1`) |
+| 2 | Durability tables: `inbound_events`, `outbound_ops`, `tool_calls`, `session_checkpoints`, `recovery_runs` (`MIGRATION_2`) |
 | 3 | Chat sync tables, Wave 2 (`MIGRATION_3`) |
 | 4 | Labels tables, Wave 6 (`MIGRATION_4`) |
 | 5 | `messages.raw_message` column for `forward_message` support (idempotent ALTER) |
@@ -641,7 +641,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 22 | `outbound_sends` audit table + indexes (created_at, status, chat, alias) for the unified send pipeline (`MIGRATION_22`) |
 | 23 | Substrate schema: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs` (`MIGRATION_23` in `src/core/substrate/schema.ts`) |
 | 24 | `messages.updated_at` column + backfill + touch triggers on insert and content-changing updates |
-| 25 | `lid_mappings_history` append-only audit table + indexes — every LID → phone flip is recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
+| 25 | `lid_mappings_history` retained audit table + indexes — first-seen rows and LID → phone flips are recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
 
 ---
 
