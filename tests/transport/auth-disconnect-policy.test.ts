@@ -17,6 +17,14 @@ describe('decideDisconnectAction', () => {
     });
   });
 
+  it('returns reconnect/restart-required-flapping when restartRequired reaches the flap threshold', () => {
+    expect(decideDisconnectAction(DisconnectReason.restartRequired, { restartRequiredCount: 10 })).toEqual({
+      type: 'reconnect',
+      reason: 'restart-required-flapping',
+      count: 10,
+    });
+  });
+
   it('returns reconnect/unknown with statusCode undefined when statusCode is undefined', () => {
     expect(decideDisconnectAction(undefined)).toEqual({
       type: 'reconnect',
