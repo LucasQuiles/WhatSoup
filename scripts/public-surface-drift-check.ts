@@ -6,6 +6,7 @@ export type PublicSurfaceDriftKind =
   | 'missing-source'
   | 'missing-npm-script'
   | 'missing-registry-entry'
+  | 'missing-registry-row'
   | 'registry-doc-mismatch'
   | 'stale-line-anchor'
   | 'missing-route';
@@ -206,6 +207,37 @@ function loadPackageScripts(cwd: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+/**
+ * Patterns identifying scripts that are internal (dev/test/build/lint hooks,
+ * underscore-prefixed). These are exempt from the reverse coverage check.
+ * The list is intentionally conservative: when in doubt, a script is treated
+ * as operator-facing and must appear in the registry.
+ */
+const NON_OPERATOR_SCRIPT_PATTERNS: RegExp[] = [
+  /^_/,
+  /^test(?:$|[:-])/,
+  /^coverage$/,
+  /^lint(?:$|[:-])/,
+  /^typecheck(?:$|[:-])/,
+  /^format(?:$|[:-])/,
+  /^build(?:$|[:-])/,
+  /^dev(?:$|[:-])/,
+  /^start:dev$/,
+  // npm lifecycle hooks
+  /^(?:pre|post)(?:install|test|publish|pack|version|start)$/,
+  /^strip-types-compat$/,
+];
+
+export function isOperatorFacingScript(scriptName: string): boolean {
+  return !NON_OPERATOR_SCRIPT_PATTERNS.some((pattern) => pattern.test(scriptName));
+}
+
+function scriptNameToIdentifier(scriptName: string): string {
+  // Registry convention: colons in script names are rewritten as hyphens in
+  // the cli:npm.* identifier (e.g. `guard:doc-drift` -> `cli:npm.guard-doc-drift`).
+  return `${cliNpmIdentifierPrefix}${scriptName.replace(/:/g, '-')}`;
 }
 
 function findSourceColumnIndex(headers: string[]): number {
@@ -432,6 +464,7 @@ export function findPublicSurfaceDrift(
   const packageScripts = loadPackageScripts(cwd);
   const documentedMcpModules = loadDocumentedMcpModules(cwd);
   const registeredMcpModules = registryMcpModules(tables);
+  const registeredNpmScripts = new Set<string>();
   const issues: PublicSurfaceDriftIssue[] = [];
 
   // Per-file caches so we don't re-parse `src/fleet/index.ts` for every HTTP row.
@@ -603,17 +636,45 @@ export function findPublicSurfaceDrift(
       if (identifier.startsWith(cliNpmIdentifierPrefix) && scriptIdx >= 0) {
         const scriptCell = row.cells[scriptIdx] ?? '';
         const scriptName = extractNpmScriptName(scriptCell);
-        if (scriptName && !packageScripts.has(scriptName)) {
-          issues.push({
-            filePath,
-            line: row.line,
-            kind: 'missing-npm-script',
-            identifier,
-            scriptName,
-            text: row.text,
-          });
+        if (scriptName) {
+          registeredNpmScripts.add(scriptName);
+          if (!packageScripts.has(scriptName)) {
+            issues.push({
+              filePath,
+              line: row.line,
+              kind: 'missing-npm-script',
+              identifier,
+              scriptName,
+              text: row.text,
+            });
+          }
         }
       }
+    }
+  }
+
+  // Reverse coverage check: every operator-facing script declared in
+  // package.json must appear as a `cli:npm.*` row in the registry. The forward
+  // direction (registry -> package.json) is handled inside the table loop
+  // above; this pass closes the asymmetry called out in #497.
+  //
+  // Gate on registeredNpmScripts.size > 0 so partial registries (e.g.
+  // fixtures that exercise only HTTP/MCP rows) don't trigger drift for the
+  // npm scripts they intentionally omit. A registry that drops the entire
+  // npm section is already an obviously-broken state that humans will
+  // notice on review.
+  if (registeredNpmScripts.size > 0) {
+    for (const scriptName of [...packageScripts].sort()) {
+      if (!isOperatorFacingScript(scriptName)) continue;
+      if (registeredNpmScripts.has(scriptName)) continue;
+      issues.push({
+        filePath,
+        line: 0,
+        kind: 'missing-registry-row',
+        identifier: scriptNameToIdentifier(scriptName),
+        scriptName,
+        text: `npm run ${scriptName}`,
+      });
     }
   }
 
@@ -711,8 +772,9 @@ function printHelp(): void {
 
 Verifies that every row in docs/public-surface.md points at a Source path that
 resolves on disk, every cli:npm.* row names a script that exists in
-package.json#scripts, and every docs/tools.md MCP module appears in the
-public-surface registry with the same tool count.
+package.json#scripts, every operator-facing script in package.json#scripts has
+a matching cli:npm.* registry row, and every docs/tools.md MCP module appears
+in the public-surface registry with the same tool count.
 
 Options:
   --registry <file>  Check an alternate registry file.

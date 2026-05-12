@@ -233,9 +233,18 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
 | `cli:npm.guard-pre-push` | `npm run guard:pre-push` | `package.json` | internal | active | Pre-push hook; not part of operator surface but exposed for CI |
+| `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
+| `cli:npm.guard-public-surface-drift` | `npm run guard:public-surface-drift` | `package.json` | stable | active | Verify `docs/public-surface.md` and package.json scripts agree |
+| `cli:npm.guard-work-index` | `npm run guard:work-index` | `package.json` | stable | active | Verify `docs/work-index.md` is up to date |
+| `cli:npm.guard-repo` | `npm run guard:repo` | `package.json` | stable | active | Repo hygiene guard (default mode) |
+| `cli:npm.guard-repo-staged` | `npm run guard:repo:staged` | `package.json` | stable | active | Repo hygiene guard over the staged diff |
+| `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
+| `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
+| `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
+| `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 
-Test, typecheck, work-index, and remaining `guard:*` scripts are internal.
+Test, typecheck, build, lint, format, and dev scripts are internal.
 
 ---
 
