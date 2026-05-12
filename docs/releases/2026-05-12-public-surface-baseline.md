@@ -31,7 +31,8 @@ for compatibility and deprecation checks.
 
 ## Validation
 
-- Registry links and MCP module entries were checked against local markdown anchors and
-  `src/mcp/tools/*.ts`.
-- `guard:doc-drift`, `guard:work-index`, and `verify:push:branch` cover the registry
-  branch gates.
+- Registry links and MCP module entries were checked against local markdown anchors,
+  `src/mcp/tools/*.ts`, and `docs/tools.md` module counts.
+- `guard:public-surface-drift` is wired into `verify:push:branch` and
+  `verify:release` for the registry branch gate; `guard:doc-drift` and
+  `guard:work-index` remain separate documentation/work-index gates.

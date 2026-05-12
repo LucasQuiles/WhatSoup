@@ -2,7 +2,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export type PublicSurfaceDriftKind = 'missing-source' | 'missing-npm-script';
+export type PublicSurfaceDriftKind =
+  | 'missing-source'
+  | 'missing-npm-script'
+  | 'missing-registry-entry'
+  | 'registry-doc-mismatch';
 
 export interface PublicSurfaceDriftIssue {
   filePath: string;
@@ -11,6 +15,8 @@ export interface PublicSurfaceDriftIssue {
   identifier: string;
   sourcePath?: string;
   scriptName?: string;
+  expected?: string | number;
+  actual?: string | number;
   text: string;
 }
 
@@ -33,6 +39,22 @@ interface ParsedTable {
 
 const defaultRegistryPath = 'docs/public-surface.md';
 const cliNpmIdentifierPrefix = 'cli:npm.';
+const mcpIdentifierPrefix = 'mcp:tools.';
+
+interface DocumentedMcpModule {
+  moduleName: string;
+  tools: number;
+  line: number;
+  text: string;
+}
+
+interface RegistryMcpModule {
+  identifier: string;
+  moduleName: string;
+  tools: number | null;
+  line: number;
+  text: string;
+}
 
 function normalizeRepoPath(filePath: string): string {
   return filePath.split(path.sep).join('/').replace(/^\.\//, '');
@@ -184,6 +206,81 @@ function findScriptColumnIndex(headers: string[]): number {
   return headers.findIndex((header) => header.trim().toLowerCase() === 'script');
 }
 
+function findToolsColumnIndex(headers: string[]): number {
+  return headers.findIndex((header) => header.trim().toLowerCase() === 'tools');
+}
+
+function parseIntegerCell(value: string): number | null {
+  const normalized = stripBackticks(value).trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  return Number.parseInt(normalized, 10);
+}
+
+function parseMarkdownLinkLabel(value: string): string | null {
+  const match = value.match(/\[([^\]]+)\]\([^)]+\)/);
+  return match?.[1]?.trim() ?? null;
+}
+
+function loadDocumentedMcpModules(cwd: string): Map<string, DocumentedMcpModule> {
+  const docsToolsPath = path.resolve(cwd, 'docs/tools.md');
+  if (!existsSync(docsToolsPath)) return new Map();
+
+  const text = readFileSync(docsToolsPath, 'utf8');
+  const modules = new Map<string, DocumentedMcpModule>();
+  for (const table of parseTables(text)) {
+    const moduleIdx = table.headers.findIndex((header) => header.trim().toLowerCase() === 'module');
+    const toolsIdx = findToolsColumnIndex(table.headers);
+    if (moduleIdx < 0 || toolsIdx < 0) continue;
+
+    for (const row of table.rows) {
+      const rawModule = row.cells[moduleIdx] ?? '';
+      const label = parseMarkdownLinkLabel(rawModule) ?? stripBackticks(rawModule).trim();
+      if (!label.endsWith('.ts')) continue;
+      const tools = parseIntegerCell(row.cells[toolsIdx] ?? '');
+      if (tools === null) continue;
+      modules.set(label, {
+        moduleName: label,
+        tools,
+        line: row.line,
+        text: row.text,
+      });
+    }
+  }
+  return modules;
+}
+
+function registryMcpModules(tables: ParsedTable[]): Map<string, RegistryMcpModule> {
+  const modules = new Map<string, RegistryMcpModule>();
+
+  for (const table of tables) {
+    const sourceIdx = findSourceColumnIndex(table.headers);
+    const idIdx = findIdentifierColumnIndex(table.headers);
+    const toolsIdx = findToolsColumnIndex(table.headers);
+    if (sourceIdx < 0 || idIdx < 0 || toolsIdx < 0) continue;
+
+    for (const row of table.rows) {
+      const identifier = identifierFromRow(row);
+      if (!identifier.startsWith(mcpIdentifierPrefix)) continue;
+
+      const sourcePaths = extractSourcePaths(row.cells[sourceIdx] ?? '');
+      const toolModule = sourcePaths
+        .map((sourcePath) => path.basename(stripLineRange(stripFragment(sourcePath))))
+        .find((sourcePath) => sourcePath.endsWith('.ts'));
+      if (!toolModule) continue;
+
+      modules.set(toolModule, {
+        identifier,
+        moduleName: toolModule,
+        tools: parseIntegerCell(row.cells[toolsIdx] ?? ''),
+        line: row.line,
+        text: row.text,
+      });
+    }
+  }
+
+  return modules;
+}
+
 export function findPublicSurfaceDrift(
   options: PublicSurfaceDriftOptions = {},
 ): PublicSurfaceDriftIssue[] {
@@ -198,6 +295,8 @@ export function findPublicSurfaceDrift(
   const text = readFileSync(registryAbs, 'utf8');
   const tables = parseTables(text);
   const packageScripts = loadPackageScripts(cwd);
+  const documentedMcpModules = loadDocumentedMcpModules(cwd);
+  const registeredMcpModules = registryMcpModules(tables);
   const issues: PublicSurfaceDriftIssue[] = [];
 
   for (const table of tables) {
@@ -244,6 +343,48 @@ export function findPublicSurfaceDrift(
     }
   }
 
+  for (const documented of [...documentedMcpModules.values()].sort((a, b) => a.moduleName.localeCompare(b.moduleName))) {
+    const registered = registeredMcpModules.get(documented.moduleName);
+    if (!registered) {
+      issues.push({
+        filePath: 'docs/tools.md',
+        line: documented.line,
+        kind: 'missing-registry-entry',
+        identifier: `${mcpIdentifierPrefix}${documented.moduleName.replace(/\.ts$/, '')}`,
+        sourcePath: `src/mcp/tools/${documented.moduleName}`,
+        expected: documented.tools,
+        text: documented.text,
+      });
+      continue;
+    }
+
+    if (registered.tools !== documented.tools) {
+      issues.push({
+        filePath,
+        line: registered.line,
+        kind: 'registry-doc-mismatch',
+        identifier: registered.identifier,
+        sourcePath: `src/mcp/tools/${documented.moduleName}`,
+        expected: documented.tools,
+        actual: registered.tools ?? 'unparseable',
+        text: registered.text,
+      });
+    }
+  }
+
+  for (const registered of [...registeredMcpModules.values()].sort((a, b) => a.moduleName.localeCompare(b.moduleName))) {
+    if (documentedMcpModules.has(registered.moduleName)) continue;
+    issues.push({
+      filePath,
+      line: registered.line,
+      kind: 'registry-doc-mismatch',
+      identifier: registered.identifier,
+      sourcePath: `src/mcp/tools/${registered.moduleName}`,
+      actual: registered.tools ?? 'unparseable',
+      text: registered.text,
+    });
+  }
+
   return issues;
 }
 
@@ -281,8 +422,9 @@ function printHelp(): void {
        npm run guard:public-surface-drift -- --registry <file>
 
 Verifies that every row in docs/public-surface.md points at a Source path that
-resolves on disk, and that every cli:npm.* row names a script that exists in
-package.json#scripts.
+resolves on disk, every cli:npm.* row names a script that exists in
+package.json#scripts, and every docs/tools.md MCP module appears in the
+public-surface registry with the same tool count.
 
 Options:
   --registry <file>  Check an alternate registry file.
@@ -291,11 +433,13 @@ Options:
 
 function printIssues(issues: PublicSurfaceDriftIssue[]): void {
   for (const issue of issues) {
-    const detail = issue.kind === 'missing-source'
-      ? `source="${issue.sourcePath ?? ''}"`
-      : `script="${issue.scriptName ?? ''}"`;
+    const details: string[] = [];
+    if (issue.sourcePath) details.push(`source="${issue.sourcePath}"`);
+    if (issue.scriptName) details.push(`script="${issue.scriptName}"`);
+    if (issue.expected !== undefined) details.push(`expected="${issue.expected}"`);
+    if (issue.actual !== undefined) details.push(`actual="${issue.actual}"`);
     console.error(
-      `${issue.filePath}:${issue.line} ${issue.kind} drift: identifier=${issue.identifier} ${detail} row="${issue.text}"`,
+      `${issue.filePath}:${issue.line} ${issue.kind} drift: identifier=${issue.identifier} ${details.join(' ')} row="${issue.text}"`,
     );
   }
 }

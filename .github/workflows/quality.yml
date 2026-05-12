@@ -48,6 +48,9 @@ jobs:
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
+      - name: Public surface drift guard
+        run: npm run guard:public-surface-drift
+
       - name: Work index coverage guard
         run: npm run guard:work-index
 

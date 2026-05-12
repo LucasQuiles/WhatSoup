@@ -19,6 +19,16 @@ function makeFakeRepo(): { root: string; registryPath: string } {
   writeFileSync(path.join(root, 'src/fleet/index.ts'), '// stub\n', 'utf8');
   writeFileSync(path.join(root, 'src/mcp/tools/messaging.ts'), '// stub\n', 'utf8');
   writeFileSync(
+    path.join(root, 'docs/tools.md'),
+    `# Tools
+
+| Module | Tools |
+|--------|------:|
+| [messaging.ts](#messagingts) | 9 |
+`,
+    'utf8',
+  );
+  writeFileSync(
     path.join(root, 'package.json'),
     JSON.stringify({ scripts: { start: 'node x', fleet: 'node y' } }, null, 2),
     'utf8',
@@ -104,7 +114,7 @@ describe('public surface drift check', () => {
     ]);
   });
 
-  it('passes when the registry has tables but no data rows', () => {
+  it('flags a docs/tools.md MCP module that is missing from the registry', () => {
     const { root, registryPath } = makeFakeRepo();
     writeFileSync(
       registryPath,
@@ -116,7 +126,51 @@ describe('public surface drift check', () => {
       'utf8',
     );
 
-    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([]);
+    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([
+      expect.objectContaining({
+        filePath: 'docs/tools.md',
+        kind: 'missing-registry-entry',
+        identifier: 'mcp:tools.messaging',
+        sourcePath: 'src/mcp/tools/messaging.ts',
+        expected: 9,
+      }),
+    ]);
+  });
+
+  it('flags an MCP module tool-count mismatch against docs/tools.md', () => {
+    const { root, registryPath } = makeFakeRepo();
+    writeFileSync(registryPath, happyRegistry.replace('| `mcp:tools.messaging` | 9 |', '| `mcp:tools.messaging` | 8 |'), 'utf8');
+
+    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([
+      expect.objectContaining({
+        kind: 'registry-doc-mismatch',
+        identifier: 'mcp:tools.messaging',
+        expected: 9,
+        actual: 8,
+      }),
+    ]);
+  });
+
+  it('flags an MCP module registry entry that is absent from docs/tools.md', () => {
+    const { root, registryPath } = makeFakeRepo();
+    writeFileSync(path.join(root, 'src/mcp/tools/ghost.ts'), '// stub\n', 'utf8');
+    writeFileSync(
+      registryPath,
+      happyRegistry.replace(
+        '| `mcp:tools.messaging` | 9 | [`src/mcp/tools/messaging.ts`](../src/mcp/tools/messaging.ts) | stable | active | x |',
+        '| `mcp:tools.messaging` | 9 | [`src/mcp/tools/messaging.ts`](../src/mcp/tools/messaging.ts) | stable | active | x |\n| `mcp:tools.ghost` | 1 | [`src/mcp/tools/ghost.ts`](../src/mcp/tools/ghost.ts) | stable | active | x |',
+      ),
+      'utf8',
+    );
+
+    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([
+      expect.objectContaining({
+        kind: 'registry-doc-mismatch',
+        identifier: 'mcp:tools.ghost',
+        sourcePath: 'src/mcp/tools/ghost.ts',
+        actual: 1,
+      }),
+    ]);
   });
 
   it('sets a failing CLI status and prints structured drift output', () => {
