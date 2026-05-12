@@ -364,8 +364,15 @@ export function run(
   env: NodeJS.ProcessEnv = process.env,
 ): DocDriftIssue[] {
   if (env.WHATSOUP_SKIP_DOC_DRIFT === '1') {
-    console.warn('doc drift check skipped via WHATSOUP_SKIP_DOC_DRIFT=1');
-    return [];
+    const inCi = env.CI === 'true' || Boolean(env.GITHUB_ACTIONS);
+    if (inCi) {
+      console.warn(
+        'WHATSOUP_SKIP_DOC_DRIFT=1 ignored: CI/GITHUB_ACTIONS detected; doc drift check will run (this skip is for local dev only)',
+      );
+    } else {
+      console.warn('doc drift check skipped via WHATSOUP_SKIP_DOC_DRIFT=1');
+      return [];
+    }
   }
 
   const args = parseArgs(argv);
