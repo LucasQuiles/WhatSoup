@@ -1,11 +1,30 @@
 /**
  * Fleet API client with mock data fallback.
  *
- * - In production: fleet server serves both the SPA and /api/* routes
- * - In dev mode: Vite proxies /api/* to the fleet server
- * - Fallback: if fleet server is unreachable, returns mock data so the
- *   console always renders (useful for design iteration and demos)
+ * - In production: fleet server serves both the SPA and /api/* routes.
+ *   Mock fallback is DISABLED by default so real API/auth failures surface
+ *   as errors instead of silently masquerading as healthy mock data
+ *   (closes #420). Set `VITE_MOCK_MODE=1` at build time to opt back in
+ *   for demos / design environments.
+ * - In dev mode: Vite proxies /api/* to the fleet server and mock
+ *   fallback auto-activates when the fleet is unreachable, so UI work
+ *   doesn't require a running fleet.
  */
+
+/**
+ * True when mock-data fallback should auto-activate on fleet probe
+ * failure or thrown API errors.
+ *
+ * Dev builds keep the legacy auto-activate behavior for convenience.
+ * Production builds require explicit opt-in via `VITE_MOCK_MODE=1` so
+ * a misbehaving fleet (or a stale auth ticket) cannot silently degrade
+ * the console to mock data.
+ */
+function mockFallbackEnabled(): boolean {
+  const env = import.meta.env;
+  if (!env?.PROD) return true;
+  return env.VITE_MOCK_MODE === '1';
+}
 
 import type {
   AccessEntry,
@@ -99,9 +118,15 @@ async function authHeaders(): Promise<Record<string, string>> {
   try {
     const ticket = await getApiTicket('api');
     return { 'Authorization': `Bearer ${ticket}` };
-  } catch {
-    // Mint failed (network, 401, server down). Let the surrounding fetch
-    // surface the underlying API failure or dev-proxy fallback behavior.
+  } catch (err) {
+    // Mint failed (network, 401, server down). In production we surface
+    // the failure so the UI can render a real error state instead of
+    // degrading to an unauthenticated request that masquerades as
+    // healthy. Dev / mock-mode builds tolerate the failure and let the
+    // surrounding fetch fall through to mock data (#420).
+    if (!mockFallbackEnabled()) {
+      throw err;
+    }
     return {};
   }
 }
@@ -162,6 +187,13 @@ async function checkFleetAvailable(): Promise<boolean> {
 }
 
 async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
+  // In production builds without explicit opt-in, bypass the mock
+  // fallback entirely so real failures surface to the UI (#420). We
+  // still run the API call directly; we just don't swallow its errors
+  // or substitute mock data when the availability probe trips.
+  if (!mockFallbackEnabled()) {
+    return apiFn();
+  }
   const available = await checkFleetAvailable();
   if (!available) return mockFn();
   try {

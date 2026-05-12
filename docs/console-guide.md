@@ -139,13 +139,18 @@ The console uses 60+ CSS custom properties and 40+ ESLint rules enforcing token 
 
 ## Mock Mode
 
-When the fleet server is unreachable, the console automatically falls back to built-in mock data. This is useful for:
+When the fleet server is unreachable, the console can fall back to built-in mock data. This is useful for:
 
 - **Design iteration** — Work on the UI without running any WhatsApp instances
 - **Demos** — Show the console to others without exposing real data
 - **Development** — Test components with predictable, consistent data
 
-Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds. When active, most read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. A few read endpoints intentionally still hit the live API: `searchMessages`, `getScheduledById`, `checkExists`, `checkDirectory`, and `getVersion`. Write operations require a live fleet server.
+**Activation rules (closes #420):**
+
+- **Development builds** (`npm run dev`) — Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds.
+- **Production builds** (`npm run build`) — Mock mode is **disabled by default**. Real fleet/auth failures surface as errors so the UI can render a true unhealthy state instead of masquerading as healthy mock data. To opt back in for demos or static showcase builds, set the Vite env var `VITE_MOCK_MODE=1` at build time (e.g. `VITE_MOCK_MODE=1 npm run build`).
+
+When mock mode is active, most read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. A few read endpoints intentionally still hit the live API: `searchMessages`, `getScheduledById`, `checkExists`, `checkDirectory`, and `getVersion`. Write operations always require a live fleet server.
 
 ## Development
 
