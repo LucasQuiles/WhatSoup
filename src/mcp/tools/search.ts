@@ -8,6 +8,9 @@ import type { Database } from '../../core/database.ts';
 import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { buildSafeFtsMatchQuery } from '../../fleet/db-reader.ts';
 
+const SQLITE_READ_LIMIT_MAX = 1000;
+const SqliteReadLimitSchema = z.number().int().positive().max(SQLITE_READ_LIMIT_MAX);
+
 // ---------------------------------------------------------------------------
 // search_messages — global FTS5 across all conversations
 // ---------------------------------------------------------------------------
@@ -20,7 +23,7 @@ import { buildSafeFtsMatchQuery } from '../../fleet/db-reader.ts';
 
 const SearchMessagesSchema = z.object({
   query: z.string(),
-  limit: z.number().optional(),
+  limit: SqliteReadLimitSchema.optional(),
 });
 
 function makeSearchMessages(db: Database): ToolDeclaration {
@@ -60,7 +63,7 @@ function makeSearchMessages(db: Database): ToolDeclaration {
 const SearchChatMessagesSchema = z.object({
   conversation_key: z.string(),
   query: z.string(),
-  limit: z.number().optional(),
+  limit: SqliteReadLimitSchema.optional(),
 });
 
 function makeSearchChatMessages(db: Database): ToolDeclaration {
@@ -101,7 +104,7 @@ function makeSearchChatMessages(db: Database): ToolDeclaration {
 
 const SearchContactsSchema = z.object({
   query: z.string(),
-  limit: z.number().optional(),
+  limit: SqliteReadLimitSchema.optional(),
 });
 
 interface ContactRow {
@@ -165,7 +168,7 @@ const SearchAdvancedSchema = z.object({
   after: z.number().optional().describe('Unix timestamp — messages after this time'),
   before: z.number().optional().describe('Unix timestamp — messages before this time'),
   has_media: z.boolean().optional().describe('Filter for messages with (true) or without (false) media'),
-  limit: z.number().optional().describe('Max results to return (default 20)'),
+  limit: SqliteReadLimitSchema.optional().describe(`Max results to return (default 20, max ${SQLITE_READ_LIMIT_MAX})`),
 });
 
 function makeSearchMessagesAdvanced(db: Database): ToolDeclaration {

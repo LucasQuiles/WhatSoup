@@ -7,6 +7,9 @@ import type { ExtendedBaileysSocket } from '../types.ts';
 import { validateBase64Image } from '../../core/base64.ts';
 import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
+const CATALOG_LIMIT_MAX = 100;
+const CatalogLimitSchema = z.number().int().positive().max(CATALOG_LIMIT_MAX);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
 const businessConfigs: SockToolConfig<any>[] = [
   {
@@ -69,7 +72,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     description: 'Get the product catalog for a WhatsApp Business account (global).',
     schema: z.object({
       jid: z.string().optional().describe('Business JID. Omit to get own catalog.'),
-      limit: z.number().optional().describe('Max products to return.'),
+      limit: CatalogLimitSchema.optional().describe(`Max products to return (max ${CATALOG_LIMIT_MAX}).`),
       cursor: z.string().optional().describe('Pagination cursor from a previous response.'),
     }),
     replayPolicy: 'read_only',
@@ -86,7 +89,7 @@ const businessConfigs: SockToolConfig<any>[] = [
     description: 'Get product collections for a WhatsApp Business account (global).',
     schema: z.object({
       jid: z.string().optional().describe('Business JID. Omit to use own JID.'),
-      limit: z.number().optional().describe('Max collections to return.'),
+      limit: CatalogLimitSchema.optional().describe(`Max collections to return (max ${CATALOG_LIMIT_MAX}).`),
     }),
     replayPolicy: 'read_only',
     call: async ({ jid, limit }, sock) => {
