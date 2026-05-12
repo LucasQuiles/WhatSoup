@@ -1,3 +1,5 @@
+import { isRecord } from './lib/type-guards.ts';
+
 export interface MemoryMigrationOptions {
   removeLegacy?: boolean;
 }
@@ -50,10 +52,6 @@ const LEGACY_FIELD_MAPPINGS: ReadonlyArray<{ from: string; to: string }> = [
 function cloneJson<T>(value: T): T {
   if (value === undefined) return value;
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getPath(root: Record<string, unknown>, path: string): unknown {

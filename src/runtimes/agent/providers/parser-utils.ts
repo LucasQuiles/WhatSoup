@@ -1,10 +1,15 @@
 // src/runtimes/agent/providers/parser-utils.ts
 // Shared utility functions used across multiple provider parsers.
 
+import { isRecord as isRecordBase } from '../../../lib/type-guards.ts';
+
 export type JsonObject = Record<string, unknown>;
 
+// Delegates to the central type-guard. Kept as a `function` declaration
+// (rather than a re-exported binding) because sibling parsers import this
+// name and the anti-duplication test asserts the `export function` form.
 export function isRecord(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return isRecordBase(value);
 }
 
 export function stringifyValue(value: unknown): string {
