@@ -245,10 +245,10 @@ Canonical reference: [docs/specs/2026-05-09-fleet-topology-control-plane-design.
 
 | Identifier | Mode | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `runtime:mode.supervisor` | `WHATSOUP_MODE=supervisor` | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Default; fleet + instances |
-| `runtime:mode.fleet` | `WHATSOUP_MODE=fleet` | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only |
-| `runtime:mode.instance` | `WHATSOUP_MODE=instance` | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Single-instance entrypoint |
-| `runtime:mode.auth` | `WHATSOUP_MODE=auth` | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | QR-pairing flow |
+| `runtime:mode.supervisor` | `WHATSOUP_MODE=supervisor` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker default; runs fleet + instances listed in `WHATSOUP_INSTANCES` in one container |
+| `runtime:mode.fleet` | `WHATSOUP_MODE=fleet` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker fleet-only entrypoint (`src/fleet/standalone.ts`) |
+| `runtime:mode.instance` | `WHATSOUP_MODE=instance` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker single-instance entrypoint; requires `WHATSOUP_INSTANCE` |
+| `runtime:mode.auth` | `WHATSOUP_MODE=auth` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker QR-pairing flow; requires `WHATSOUP_INSTANCE` |
 | `runtime:type.chat` | instance `type: chat` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Chat-runtime instance |
 | `runtime:type.agent` | instance `type: agent` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Agent-runtime instance |
 | `runtime:type.passive` | instance `type: passive` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Read-only ingest |
@@ -267,7 +267,7 @@ are breaking.
 
 | Identifier | Artifact | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Loads keychain secrets, exports env, dispatches by `WHATSOUP_MODE` |
+| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Takes `<instance-name>` argument; loads keychain secrets, exports env, execs `src/bootstrap.ts` for that instance |
 | `deploy:wrapper.whatsoup-fleet` | `whatsoup-fleet` launcher | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only entrypoint |
 | `deploy:wrapper.whatsoup-auth` | `whatsoup-auth` launcher | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | Auth-flow entrypoint |
 | `deploy:systemd.instance` | `whatsoup@.service` template | [`deploy/whatsoup@.service`](../deploy/whatsoup@.service) | stable | active | systemd template; per-instance unit |
