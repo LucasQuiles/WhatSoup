@@ -65,6 +65,28 @@ describe('work index scanner', () => {
     expect(findWorkIndexCheckIssues(repoRoot)).toEqual({ missing: [], stale: [], drift: [] });
   });
 
+  it('honors an explicit leading status before explanatory status words', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-status-'));
+    const planFile = path.join(root, 'docs/superpowers/plans/2026-04-25-example-plan.md');
+
+    mkdirSync(path.dirname(planFile), { recursive: true });
+    writeFileSync(
+      planFile,
+      '# Example\n**Status:** unknown - stalled at SPEC DRAFT stage; team consensus pending\n',
+      'utf8',
+    );
+    git(root, ['init']);
+    git(root, ['config', 'user.name', 'Work Index Test']);
+    git(root, ['config', 'user.email', 'work-index-test@users.noreply.github.com']);
+    git(root, ['add', '.']);
+    git(root, ['commit', '-m', 'seed docs']);
+
+    const index = buildWorkIndex(root);
+
+    expect(index.rows.find((row) => row.path === 'docs/superpowers/plans/2026-04-25-example-plan.md')?.status)
+      .toBe('unknown');
+  });
+
   it('detects stale generated work-index artifacts, not just path coverage', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-drift-'));
     const planFile = path.join(root, 'docs/superpowers/plans/2026-04-25-example-plan.md');

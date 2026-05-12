@@ -105,6 +105,16 @@ function walkMarkdownFiles(root: string): string[] {
 function normalizeStatus(raw: string): WorkIndexStatus {
   const value = raw.trim().toLowerCase();
   if (!value) return 'unknown';
+  const leadingStatus = value.match(/^(in[_ -]?progress|active|pending|merged|completed?|complete|deferred|shelved|closed|unknown)\b/);
+  if (leadingStatus) {
+    const [, status] = leadingStatus;
+    if (/^in[_ -]?progress$/.test(status) || status === 'active') return 'active';
+    if (status === 'pending') return 'pending';
+    if (status === 'merged' || status === 'complete' || status === 'completed') return 'completed';
+    if (status === 'deferred' || status === 'shelved') return 'deferred';
+    if (status === 'closed') return 'closed';
+    return 'unknown';
+  }
   if (/\bin[_-]?progress\b/.test(value) || /\bactive\b/.test(value)) return 'active';
   if (/\bpending\b/.test(value)) return 'pending';
   if (/\bmerged\b|\bcompleted?\b|\bcomplete\b/.test(value)) return 'completed';

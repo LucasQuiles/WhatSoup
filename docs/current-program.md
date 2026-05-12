@@ -15,6 +15,19 @@
 > **Refresh history:** earlier manual refreshes reduced a larger unknown backlog,
 > but exact row counts now live only in the generated work index.
 
+## 2026-05-12 Sweep Refresh
+
+Latest consolidation: [`docs/sweep-report-2026-05-12.md`](sweep-report-2026-05-12.md).
+
+Current execution queue from that sweep:
+
+- No-PR implementation issues: GitHub `#349` outbound media streaming and `#353` durable event dispatch.
+- Recently closed issues: GitHub `#348` landed via PR `#360`; GitHub `#352` landed via PR `#361`.
+- Verified internal follow-ups: private config write, disconnect-policy consolidation, access-mode constant reuse, and direct `agent-config-validator` tests.
+- False-positive sweep claims closed: memory migration mappings and provider KPI missing.
+
+Secondary backlog surfaces outside the generated work index: `docs/duplicates-report.md` and `.tmup-artifacts/dedup-triage-021.md`.
+
 ---
 
 ## 1. What is active now
