@@ -6,8 +6,8 @@
 // NOTE: API keys resolve via `resolveApiKey()` (`./api-key-resolver.ts`) at
 // request time — HTTP providers don't spawn subprocesses, so buildEnv() is
 // only used as a courtesy.
-// Precedence: inline `apiKey` from provider config → `apiKeyService` keyring
-// lookup (when configured) → `process.env.OPENAI_API_KEY` env fallback.
+// Precedence: `apiKeyService` keyring lookup (when configured) →
+// `process.env.OPENAI_API_KEY` env fallback.
 // The auth header is computed per-request so late-set keyring entries / key
 // rotations are picked up without a process restart.
 
@@ -108,7 +108,7 @@ export class OpenAIApiProvider implements ProviderSession {
     this.opts = opts;
     this.active = true;
 
-    // API key precedence: inline → apiKeyService keyring → OPENAI_API_KEY env.
+    // API key precedence: apiKeyService keyring → OPENAI_API_KEY env.
     // Re-resolved per request inside callApi() so late-set keys are picked up.
     this.apiKey = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
 
