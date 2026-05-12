@@ -15,12 +15,14 @@ Both take precedence over built-in defaults.
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances. **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so Claude Code uses Max/Pro subscription billing instead. |
-| `OPENAI_API_KEY` | string | OpenAI API key. Preferred for cloud audio transcription and used for LLM fallback in `chat` instances. Local transcription fallbacks can run without it when installed. |
-| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. Required only when the instance uses Pinecone-backed memory/search. |
+| `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
+| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
+| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
 
 These three keys are loaded from GNOME Keyring by the `whatsoup` wrapper script and exported
 before the process starts. They are never written to disk.
+
+> **Instance-type summary:** `chat` instances require **all three** keys (Anthropic, OpenAI, Pinecone) — startup aborts otherwise. `agent` instances require none at the launcher level; OpenAI and Pinecone are loaded best-effort and used only when the corresponding feature is exercised. `passive` instances require none.
 
 ### Models
 
