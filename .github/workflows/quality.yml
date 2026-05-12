@@ -40,6 +40,9 @@ jobs:
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
+      - name: Work index coverage guard
+        run: npm run guard:work-index
+
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
 
