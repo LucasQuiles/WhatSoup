@@ -1,16 +1,14 @@
 /**
- * Behavioral contract-lock for console/src/components/FeedIcon.tsx.
+ * Design contract-lock for console/src/components/FeedIcon.tsx.
  *
- * FeedIcon switches on `event.detail.type` (8 distinct branches) plus the
- * special "no-detail" fallback. The same `lucide-react` icon may appear
- * in multiple branches with different colorClasses, so the test pins
- * (iconComponent, colorClass) per branch — that's the regression that
- * matters when icons or colors get reshuffled during design updates.
+ * This intentionally pins exact lucide component identity and semantic
+ * Tailwind color token per routing path. FeedIcon has no text contract of
+ * its own, and icon/color reshuffles are the regression this test catches.
  *
  * No prior test mirror. ReactElement tree inspection only (no DOM/jsdom).
  */
 import { describe, expect, it } from 'vitest';
-import { createElement, type ReactElement } from 'react';
+import type { ReactElement } from 'react';
 import {
   Plug, WifiOff, Wifi,
   ArrowDownLeft, ArrowUpRight,
@@ -23,140 +21,56 @@ import {
 import FeedIcon from '../../console/src/components/FeedIcon.tsx';
 import type { FeedEvent } from '../../console/src/types.ts';
 
-function render(event: FeedEvent): ReactElement {
-  return (FeedIcon as (props: { event: FeedEvent }) => ReactElement)({ event });
+type IconProps = {
+  className?: string;
+  size?: number;
+  strokeWidth?: number;
+};
+
+type IconElement = ReactElement<IconProps>;
+type IconComponent = IconElement['type'];
+
+function render(event: FeedEvent): IconElement {
+  return (FeedIcon as (props: { event: FeedEvent }) => IconElement)({ event });
 }
 
-function feed(detail: FeedEvent['detail']): FeedEvent {
-  return { time: '2026-05-12T00:00:00Z', mode: 'agent', text: 't', detail };
+function feed(detail?: FeedEvent['detail']): FeedEvent {
+  const event: FeedEvent = { time: '2026-05-12T00:00:00Z', mode: 'agent', text: 't' };
+  if (detail) event.detail = detail;
+  return event;
 }
 
-describe('FeedIcon — fallback when detail is missing', () => {
-  it('renders <CircleDot className=text-t5> when no detail is set', () => {
-    const tree = render({ time: '2026-05-12T00:00:00Z', mode: 'agent', text: 't' });
-    expect(tree.type).toBe(CircleDot);
-    expect(String(tree.props.className)).toContain('text-t5');
-  });
+const routes: Array<{
+  name: string;
+  detail?: FeedEvent['detail'];
+  icon: IconComponent;
+  colorClass: string;
+}> = [
+  { name: 'missing detail fallback', icon: CircleDot, colorClass: 'text-t5' },
+  { name: 'generic detail fallback', detail: { type: 'generic' }, icon: CircleDot, colorClass: 'text-t5' },
+  { name: 'connection state="connected"', detail: { type: 'connection', state: 'connected' }, icon: Wifi, colorClass: 'text-s-ok' },
+  { name: 'connection state="disconnected"', detail: { type: 'connection', state: 'disconnected' }, icon: WifiOff, colorClass: 'text-s-crit' },
+  { name: 'connection statusCode without reconnecting', detail: { type: 'connection', statusCode: 401 }, icon: WifiOff, colorClass: 'text-s-crit' },
+  { name: 'connection reconnecting precedence over connecting state', detail: { type: 'connection', reconnecting: true, state: 'connecting' }, icon: Plug, colorClass: 'text-s-warn' },
+  { name: 'connection state="connecting"', detail: { type: 'connection', state: 'connecting' }, icon: Plug, colorClass: 'text-t4' },
+  { name: 'connection default with no fields', detail: { type: 'connection' }, icon: Plug, colorClass: 'text-t4' },
+  { name: 'message direction="inbound"', detail: { type: 'message', direction: 'inbound' }, icon: ArrowDownLeft, colorClass: 'text-m-cht' },
+  { name: 'message direction="outbound"', detail: { type: 'message', direction: 'outbound' }, icon: ArrowUpRight, colorClass: 'text-m-agt' },
+  { name: 'tool_error', detail: { type: 'tool_error', toolName: 'x', error: 'e' }, icon: AlertTriangle, colorClass: 'text-s-crit' },
+  { name: 'tool_use', detail: { type: 'tool_use', toolName: 'x' }, icon: Terminal, colorClass: 'text-m-agt' },
+  { name: 'session', detail: { type: 'session', action: 'start' }, icon: Terminal, colorClass: 'text-m-agt' },
+  { name: 'health status="online"', detail: { type: 'health', status: 'online' }, icon: HeartPulse, colorClass: 'text-s-ok' },
+  { name: 'health status="unreachable"', detail: { type: 'health', status: 'unreachable' }, icon: HeartPulse, colorClass: 'text-s-crit' },
+  { name: 'health non-online/non-unreachable status', detail: { type: 'health', status: 'degraded' }, icon: HeartPulse, colorClass: 'text-s-warn' },
+  { name: 'import', detail: { type: 'import' }, icon: Database, colorClass: 'text-t4' },
+];
 
-  it('renders <CircleDot className=text-t5> for type="generic"', () => {
-    const tree = render(feed({ type: 'generic' }));
-    expect(tree.type).toBe(CircleDot);
-    expect(String(tree.props.className)).toContain('text-t5');
-  });
-});
-
-describe('FeedIcon — connection branch', () => {
-  it('state="connected" → Wifi + text-s-ok', () => {
-    const tree = render(feed({ type: 'connection', state: 'connected' }));
-    expect(tree.type).toBe(Wifi);
-    expect(String(tree.props.className)).toContain('text-s-ok');
-  });
-
-  it('state="disconnected" → WifiOff + text-s-crit', () => {
-    const tree = render(feed({ type: 'connection', state: 'disconnected' }));
-    expect(tree.type).toBe(WifiOff);
-    expect(String(tree.props.className)).toContain('text-s-crit');
-  });
-
-  it('statusCode without reconnecting → WifiOff + text-s-crit', () => {
-    const tree = render(feed({ type: 'connection', statusCode: 401 }));
-    expect(tree.type).toBe(WifiOff);
-    expect(String(tree.props.className)).toContain('text-s-crit');
-  });
-
-  it('reconnecting=true → Plug + text-s-warn (precedence over connecting state)', () => {
-    const tree = render(feed({ type: 'connection', reconnecting: true, state: 'connecting' }));
-    expect(tree.type).toBe(Plug);
-    expect(String(tree.props.className)).toContain('text-s-warn');
-  });
-
-  it('state="connecting" (no reconnect) → Plug + text-t4', () => {
-    const tree = render(feed({ type: 'connection', state: 'connecting' }));
-    expect(tree.type).toBe(Plug);
-    expect(String(tree.props.className)).toContain('text-t4');
-  });
-
-  it('bare connection (no fields) falls through to default Plug + text-t4', () => {
-    const tree = render(feed({ type: 'connection' }));
-    expect(tree.type).toBe(Plug);
-    expect(String(tree.props.className)).toContain('text-t4');
-  });
-});
-
-describe('FeedIcon — message branch', () => {
-  it('direction="inbound" → ArrowDownLeft + text-m-cht', () => {
-    const tree = render(feed({ type: 'message', direction: 'inbound' }));
-    expect(tree.type).toBe(ArrowDownLeft);
-    expect(String(tree.props.className)).toContain('text-m-cht');
-  });
-
-  it('direction="outbound" → ArrowUpRight + text-m-agt', () => {
-    const tree = render(feed({ type: 'message', direction: 'outbound' }));
-    expect(tree.type).toBe(ArrowUpRight);
-    expect(String(tree.props.className)).toContain('text-m-agt');
-  });
-});
-
-describe('FeedIcon — tool/session/health/import branches', () => {
-  it('tool_error → AlertTriangle + text-s-crit', () => {
-    const tree = render(feed({ type: 'tool_error', toolName: 'x', error: 'e' }));
-    expect(tree.type).toBe(AlertTriangle);
-    expect(String(tree.props.className)).toContain('text-s-crit');
-  });
-
-  it('tool_use → Terminal + text-m-agt', () => {
-    const tree = render(feed({ type: 'tool_use', toolName: 'x' }));
-    expect(tree.type).toBe(Terminal);
-    expect(String(tree.props.className)).toContain('text-m-agt');
-  });
-
-  it('session → Terminal + text-m-agt (same icon as tool_use)', () => {
-    const tree = render(feed({ type: 'session', action: 'start' }));
-    expect(tree.type).toBe(Terminal);
-    expect(String(tree.props.className)).toContain('text-m-agt');
-  });
-
-  it('health status="online" → HeartPulse + text-s-ok', () => {
-    const tree = render(feed({ type: 'health', status: 'online' }));
-    expect(tree.type).toBe(HeartPulse);
-    expect(String(tree.props.className)).toContain('text-s-ok');
-  });
-
-  it('health status="unreachable" → HeartPulse + text-s-crit', () => {
-    const tree = render(feed({ type: 'health', status: 'unreachable' }));
-    expect(tree.type).toBe(HeartPulse);
-    expect(String(tree.props.className)).toContain('text-s-crit');
-  });
-
-  it('health status="degraded" (anything else) → HeartPulse + text-s-warn', () => {
-    const tree = render(feed({ type: 'health', status: 'degraded' }));
-    expect(tree.type).toBe(HeartPulse);
-    expect(String(tree.props.className)).toContain('text-s-warn');
-  });
-
-  it('import → Database + text-t4', () => {
-    const tree = render(feed({ type: 'import' }));
-    expect(tree.type).toBe(Database);
-    expect(String(tree.props.className)).toContain('text-t4');
-  });
-});
-
-describe('FeedIcon — icon sizing contract', () => {
-  it('every branch passes size=14 strokeWidth=1.75 to the lucide icon', () => {
-    const samples: Array<FeedEvent['detail']> = [
-      { type: 'connection', state: 'connected' },
-      { type: 'message', direction: 'inbound' },
-      { type: 'tool_error', toolName: 'x', error: 'e' },
-      { type: 'tool_use', toolName: 'x' },
-      { type: 'session', action: 'start' },
-      { type: 'health', status: 'online' },
-      { type: 'import' },
-      { type: 'generic' },
-    ];
-    for (const detail of samples) {
-      const tree = render(feed(detail));
-      expect(tree.props.size).toBe(14);
-      expect(tree.props.strokeWidth).toBe(1.75);
-    }
+describe('FeedIcon — exact icon and color token design contract', () => {
+  it.each(routes)('$name routes to $colorClass with shared lucide sizing', ({ detail, icon, colorClass }) => {
+    const tree = render(feed(detail));
+    expect(tree.type).toBe(icon);
+    expect(tree.props.className).toContain(colorClass);
+    expect(tree.props.size).toBe(14);
+    expect(tree.props.strokeWidth).toBe(1.75);
   });
 });
