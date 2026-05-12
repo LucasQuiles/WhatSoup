@@ -38,7 +38,7 @@ describe('p36 probe scripts smoke (#267)', () => {
 
       it('carries the DO NOT COMMIT evidence-only header', () => {
         const head = readFileSync(abs, 'utf8').slice(0, 800);
-        expect(head).toMatch(/DO NOT COMMIT/);
+        expect(head).toMatch(/^\/\/.*DO NOT COMMIT/m);
       });
 
       it.todo(

@@ -25,6 +25,7 @@
     "pretest": "npm run strip-types-compat",
     "typecheck": "tsc --noEmit",
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
     "verify:push:branch": "npm run guard:repo:staged && npm run guard:doc-drift && npm run typecheck && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/doc-drift-check.test.ts --pool=forks",
     "verify:release": "npm run guard:doc-drift && npm run typecheck:all && npm test -- --pool=forks",
     "test": "vitest run",
