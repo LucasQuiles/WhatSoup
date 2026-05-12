@@ -90,7 +90,24 @@ The header shows the instance name, mode badge, phone number, uptime, port, mess
 
 ![Line Detail — Logs](screenshots/line-detail-logs.png)
 
-**Metrics** — Performance metrics (Phase 2 — coming soon).
+**Metrics** — Performance charts for this instance, scoped by a range selector (24h, 7d, 30d) and exportable as CSV.
+
+![Line Detail — Metrics](screenshots/line-detail-metrics.png)
+
+Four charts render when data is available:
+
+- **Message Volume** — Bar chart of inbound, outbound, and media counts per time bucket.
+- **Active Hours Heatmap** — Range-aware activity view: 24h renders a collapsed hourly bar chart, 7d renders a day-by-hour heatmap, and 30d renders a date-by-hour heatmap when daily data is available or a weekly pattern heatmap otherwise.
+- **Tokens** — LLM input/output token usage over time, broken down by provider (toggle in the Tokens/Sessions tab strip).
+- **Sessions** — Active and newly started agent sessions over time, broken down by provider.
+
+Below the charts, the tab also shows static cards for cumulative **Token Usage** (input/output totals with a proportion bar) and **Model Configuration** (each configured model role returned for the line, such as conversation, extraction, validation, and fallback when present).
+
+The CSV export button (top-right of the range selector) downloads Message Volume buckets as `<line>-<range>.csv` with `bucket`, `inbound`, and `outbound` columns. Media counts are charted but not included in the CSV export.
+
+Empty, loading, and error states each render an `EmptyState` panel: a loading panel while the request is in flight, an error panel with a Retry action when the request fails, and a "No metrics data" panel when the instance has not yet processed any messages.
+
+Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) with the fleet-wide aggregate available at `GET /api/metrics?range=24h|7d|30d` for the Soup Kitchen view.
 
 ### Add Line Wizard
 
