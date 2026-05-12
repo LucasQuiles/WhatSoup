@@ -2,10 +2,25 @@
 
 **Owner:** WhatSoup application/runtime
 **Discovered:** 2026-05-09 during deployment hardening
-**Status:** pending
+**Status:** in-progress
 **Severity:** medium-high
 
 This is a WhatSoup application/runtime issue, not a general host-hardening task. Host, network, and unrelated service posture should stay in their own deployment trackers.
+
+## Phase Status
+
+Phase letters map to the W-1..W-6 wave nomenclature used in the kickoff doc's Coordination touchpoints (`2026-05-09-env-secret-exposure-kickoff.md:266`). Each row tracks the merged PR that delivered the phase. `pending` rows have no merged work yet.
+
+| Phase | Title | Status | SHA | Date | PR |
+|---|---|---|---|---|---|
+| W-1 / Phase A | Extend `keyring.ts` with a typed lookup API (no behavior change) | pending | — | — | — |
+| W-2 / Phase B | Provider boundary migration (one provider per PR) | in-progress | a4bcb536 | 2026-05-12 | [#370](https://github.com/LucasQuiles/WhatSoup/pull/370) |
+| W-3 / Phase C | Reverse the precedence (resolver-first, env-fallback) | pending | — | — | — |
+| W-4 / Phase D | Stop child env inheritance | pending | — | — | — |
+| W-5 / Phase E | Health token migration (move off `tokens.env`) | pending | — | — | — |
+| W-6 / Phase F | Wrapper-chain removal (deploy cleanup, terminal phase) | pending | — | — | — |
+
+Phase B notes: PR #370 routed OpenAI and Anthropic API providers through `lookupCredential(apiKeyService)` with env fallback preserved. The remaining Phase B providers per kickoff line 206 — Whisper, Pinecone, Knowledge MCP, ElevenLabs, and health auth — are still pending. Phase A (the formal `lookupCredentialTyped` typed API) has not landed yet; PR #370 used the existing `lookupCredential` shim.
 
 ## Finding
 

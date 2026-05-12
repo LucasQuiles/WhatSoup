@@ -420,3 +420,5 @@ If you find yourself reading these to inform an editing decision in WhatSoup, yo
 (Append one line per merged phase PR.)
 
 - 2026-05-09 — kickoff doc + finding doc on branch `docs/security-handoff-env-secrets-20260509`; PR not yet opened.
+- 2026-05-10 — kickoff + finding docs merged via PR #199 at SHA `9493012c`.
+- 2026-05-12 — Phase B (partial: OpenAI + Anthropic agent providers honor `apiKeyService`) merged via PR #370 at SHA `a4bcb536`. Remaining Phase B providers (Whisper, Pinecone, Knowledge MCP, ElevenLabs, health auth) still pending. Phase A typed-API not yet shipped — PR #370 used the existing `lookupCredential` shim.
