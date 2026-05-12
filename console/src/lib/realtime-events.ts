@@ -102,11 +102,35 @@ export function parseWsEvent(data: unknown): WsEvent | null {
 // URL construction
 // ---------------------------------------------------------------------------
 
-/** Build a WebSocket URL from the current page location and fleet token. */
-export function getFleetWebSocketUrl(location: { protocol: string; host: string }, token: string | null): string | null {
-  if (!token) return null;
+/**
+ * Fetcher contract for {@link getFleetWebSocketUrl}. The real implementation
+ * is the console's `apiFetch`, but tests supply a stub so they can assert
+ * the request shape without standing up a server.
+ */
+export type TicketFetcher = () => Promise<{ ticket: string; expiresIn: number }>;
+
+/**
+ * Build a WebSocket URL by minting a short-lived ticket via the HTTP API.
+ *
+ * The previous implementation embedded the root fleet token in the URL,
+ * which leaked through devtools, page source, and proxy logs. Issue #237.
+ * Returns `null` when the ticket fetch fails (e.g. unauthenticated) so the
+ * caller can fall back to its polling path.
+ */
+export async function getFleetWebSocketUrl(
+  location: { protocol: string; host: string },
+  fetchTicket: TicketFetcher,
+): Promise<string | null> {
+  let ticket: string;
+  try {
+    const result = await fetchTicket();
+    ticket = result.ticket;
+  } catch {
+    return null;
+  }
+  if (typeof ticket !== 'string' || ticket.length === 0) return null;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.host}/ws?token=${encodeURIComponent(token)}`;
+  return `${protocol}//${location.host}/ws?ticket=${encodeURIComponent(ticket)}`;
 }
 
 // ---------------------------------------------------------------------------

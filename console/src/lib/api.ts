@@ -386,4 +386,14 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ mode }),
     }),
+
+  /**
+   * Mint a single-use WebSocket ticket (#237). The fleet server signs the
+   * ticket with the active fleet token; the browser then opens the WS as
+   * `wss://host/ws?ticket=<ticket>`. The root token never travels in the URL.
+   */
+  getWsTicket: () =>
+    apiFetch<{ ticket: string; expiresIn: number }>('/api/ws-ticket', {
+      method: 'POST',
+    }),
 };

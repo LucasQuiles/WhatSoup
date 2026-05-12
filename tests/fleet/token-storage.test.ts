@@ -1,0 +1,184 @@
+// tests/fleet/token-storage.test.ts
+//
+// Cover the rotatable fleet-token storage in `src/fleet/token-storage.ts`:
+//  - generates a fresh tokens file when none exists
+//  - migrates a legacy single-string `fleet-token` into `{active, accept, rotatedAt}`
+//  - leaves the legacy file in place (rollback window)
+//  - rotation: active → accept[0], cap at MAX_ACCEPT_ENTRIES, fresh active
+//  - verifyFleetToken accepts active + any accept entry, rejects unknown/malformed
+//  - refuses corrupt JSON / wrong-shape files instead of silently rewriting
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  loadOrCreateFleetTokens,
+  rotateFleetTokens,
+  saveFleetTokens,
+  verifyFleetToken,
+  generateFleetToken,
+  getFleetTokensPath,
+  getLegacyFleetTokenPath,
+  MAX_ACCEPT_ENTRIES,
+  type FleetTokensFile,
+} from '../../src/fleet/token-storage.ts';
+
+let tmpRoot: string;
+let savedXdg: string | undefined;
+
+beforeEach(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-token-storage-'));
+  savedXdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = tmpRoot;
+});
+
+afterEach(() => {
+  if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = savedXdg;
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+describe('loadOrCreateFleetTokens — fresh install', () => {
+  it('generates a tokens file with active+empty accept when nothing exists', () => {
+    const tokens = loadOrCreateFleetTokens();
+    expect(tokens.active).toMatch(/^[0-9a-f]{64}$/);
+    expect(tokens.accept).toEqual([]);
+    expect(typeof tokens.rotatedAt).toBe('string');
+
+    // File written at the canonical path
+    const filePath = getFleetTokensPath();
+    expect(fs.existsSync(filePath)).toBe(true);
+    const onDisk = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as FleetTokensFile;
+    expect(onDisk.active).toBe(tokens.active);
+  });
+
+  it('returns the same active token on subsequent calls', () => {
+    const first = loadOrCreateFleetTokens();
+    const second = loadOrCreateFleetTokens();
+    expect(second.active).toBe(first.active);
+    expect(second.accept).toEqual(first.accept);
+  });
+});
+
+describe('loadOrCreateFleetTokens — legacy migration', () => {
+  it('hoists a valid legacy single-string token to active and leaves legacy on disk', () => {
+    const legacyPath = getLegacyFleetTokenPath();
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    const legacyToken = 'a'.repeat(64);
+    fs.writeFileSync(legacyPath, `${legacyToken}\n`);
+
+    const tokens = loadOrCreateFleetTokens();
+    expect(tokens.active).toBe(legacyToken);
+    expect(tokens.accept).toEqual([]);
+
+    // Legacy file preserved (one rollback cycle)
+    expect(fs.existsSync(legacyPath)).toBe(true);
+    expect(fs.readFileSync(legacyPath, 'utf-8').trim()).toBe(legacyToken);
+
+    // New JSON file persisted
+    expect(fs.existsSync(getFleetTokensPath())).toBe(true);
+  });
+
+  it('does not consult legacy when fleet-tokens.json already exists', () => {
+    // Pre-seed JSON
+    const jsonPath = getFleetTokensPath();
+    fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+    const seeded: FleetTokensFile = {
+      active: 'b'.repeat(64),
+      accept: [],
+      rotatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(jsonPath, JSON.stringify(seeded));
+
+    // Also write a legacy file with a different value
+    fs.writeFileSync(getLegacyFleetTokenPath(), 'c'.repeat(64));
+
+    const tokens = loadOrCreateFleetTokens();
+    expect(tokens.active).toBe('b'.repeat(64));
+  });
+});
+
+describe('loadOrCreateFleetTokens — corrupt file', () => {
+  it('throws on non-JSON content rather than overwriting', () => {
+    const jsonPath = getFleetTokensPath();
+    fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+    fs.writeFileSync(jsonPath, 'not-json-at-all');
+    expect(() => loadOrCreateFleetTokens()).toThrow(/refusing to auto-fix/);
+  });
+
+  it('throws on wrong-shape JSON rather than overwriting', () => {
+    const jsonPath = getFleetTokensPath();
+    fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+    fs.writeFileSync(jsonPath, JSON.stringify({ active: 'short', accept: [] }));
+    expect(() => loadOrCreateFleetTokens()).toThrow(/invalid shape/);
+  });
+});
+
+describe('rotateFleetTokens', () => {
+  it('rotates active into accept[0] and generates a new active', () => {
+    const initial = loadOrCreateFleetTokens();
+    const rotated = rotateFleetTokens(initial);
+
+    expect(rotated.active).not.toBe(initial.active);
+    expect(rotated.active).toMatch(/^[0-9a-f]{64}$/);
+    expect(rotated.accept[0]).toBe(initial.active);
+  });
+
+  it('caps accept[] at MAX_ACCEPT_ENTRIES across many rotations', () => {
+    let tokens = loadOrCreateFleetTokens();
+    for (let i = 0; i < MAX_ACCEPT_ENTRIES + 3; i++) {
+      tokens = rotateFleetTokens(tokens);
+    }
+    expect(tokens.accept).toHaveLength(MAX_ACCEPT_ENTRIES);
+    expect(tokens.accept[0]).not.toBe(tokens.active);
+  });
+
+  it('round-trips through saveFleetTokens + loadOrCreateFleetTokens', () => {
+    const initial = loadOrCreateFleetTokens();
+    const rotated = rotateFleetTokens(initial);
+    saveFleetTokens(rotated);
+    const reloaded = loadOrCreateFleetTokens();
+    expect(reloaded.active).toBe(rotated.active);
+    expect(reloaded.accept).toEqual(rotated.accept);
+  });
+});
+
+describe('verifyFleetToken', () => {
+  it('accepts the active token', () => {
+    const tokens = loadOrCreateFleetTokens();
+    expect(verifyFleetToken(tokens.active, tokens)).toBe(true);
+  });
+
+  it('accepts any token in accept[]', () => {
+    let tokens = loadOrCreateFleetTokens();
+    const original = tokens.active;
+    tokens = rotateFleetTokens(tokens);
+    expect(verifyFleetToken(original, tokens)).toBe(true);
+    expect(verifyFleetToken(tokens.active, tokens)).toBe(true);
+  });
+
+  it('rejects unknown tokens', () => {
+    const tokens = loadOrCreateFleetTokens();
+    const unknown = generateFleetToken();
+    expect(verifyFleetToken(unknown, tokens)).toBe(false);
+  });
+
+  it('rejects malformed input (wrong length / non-hex)', () => {
+    const tokens = loadOrCreateFleetTokens();
+    expect(verifyFleetToken('', tokens)).toBe(false);
+    expect(verifyFleetToken('not-hex', tokens)).toBe(false);
+    expect(verifyFleetToken('z'.repeat(64), tokens)).toBe(false);
+    expect(verifyFleetToken(tokens.active.slice(0, 63), tokens)).toBe(false);
+  });
+
+  it('rejects rotated-out tokens once they fall off accept[]', () => {
+    let tokens = loadOrCreateFleetTokens();
+    const oldest = tokens.active;
+    // Force enough rotations to push `oldest` out of accept[]
+    for (let i = 0; i < MAX_ACCEPT_ENTRIES + 1; i++) {
+      tokens = rotateFleetTokens(tokens);
+    }
+    expect(verifyFleetToken(oldest, tokens)).toBe(false);
+  });
+});

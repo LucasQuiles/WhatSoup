@@ -42,6 +42,15 @@ export function checkBearerAuth(req: IncomingMessage, expectedToken: string): bo
   return header === `Bearer ${expectedToken}`;
 }
 
+/** Extract the Bearer credential without comparing it to a known token. */
+export function extractBearer(req: IncomingMessage): string | null {
+  const header = req.headers['authorization'];
+  if (typeof header !== 'string') return null;
+  const prefix = 'Bearer ';
+  if (!header.startsWith(prefix)) return null;
+  return header.slice(prefix.length);
+}
+
 /** Route matching with named captures. Returns params or null. */
 export function parseRoute(
   method: string,

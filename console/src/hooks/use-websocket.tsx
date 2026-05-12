@@ -1,4 +1,4 @@
-/* eslint-disable react-refresh/only-export-components */
+/* eslint-disable react-refresh/only-export-components -- file exports the RealtimeProvider component alongside the useRealtime hook so HMR cannot tell them apart; safe because the provider is stable and rarely edited; expires 2026-12-31 */
 // ---------------------------------------------------------------------------
 //  WebSocket provider — single connection, invalidation-first architecture.
 //
@@ -18,7 +18,7 @@ import {
   type WsTypingEvent,
   type TypingEntry,
 } from '../lib/realtime-events';
-import { getFleetToken } from '../lib/api';
+import { api, getFleetToken } from '../lib/api';
 
 // ---------------------------------------------------------------------------
 // Context
@@ -49,10 +49,20 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    function connect() {
-      const token = getFleetToken();
-      const url = getFleetWebSocketUrl(window.location, token);
-      if (!url) return;
+    let cancelled = false;
+    async function connect() {
+      // The HTTP API still relies on the meta-tag Bearer token; if it's
+      // missing we can't mint a ticket anyway, so bail out early.
+      if (!getFleetToken()) return;
+      const url = await getFleetWebSocketUrl(window.location, () => api.getWsTicket());
+      if (cancelled) return;
+      if (!url) {
+        // Ticket mint failed — schedule a retry on the same backoff curve.
+        const delay = reconnectDelay.current;
+        reconnectDelay.current = Math.min(delay * 2, RECONNECT_MAX_MS);
+        reconnectTimer.current = setTimeout(connect, delay);
+        return;
+      }
 
       const ws = new WebSocket(url);
       wsRef.current = ws;
@@ -102,9 +112,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       };
     }
 
-    connect();
+    void connect();
 
     return () => {
+      cancelled = true;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (wsRef.current) {
         wsRef.current.onclose = null; // prevent reconnect on cleanup
