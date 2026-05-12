@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { QueryKey } from '@tanstack/react-query';
+import { isRecord } from './type-guards';
 
 // ---------------------------------------------------------------------------
 // WS event types (mirrors server contract)
@@ -47,10 +48,6 @@ const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
   'access_changed',
   'lid_conflict',
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
