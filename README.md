@@ -196,6 +196,43 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `GET` | `/api/metrics` | Fleet-wide aggregated metrics |
 | `GET` | `/api/feed` | Activity feed (all instances) |
 | `GET` | `/api/typing` | Currently typing indicators |
+<!-- Search -->
+| `GET` | `/api/lines/:name/messages/search` | Full-text search messages for an instance |
+| `GET` | `/api/lines/:name/contacts/search` | Search saved contacts for an instance |
+<!-- Directories / existence probes -->
+| `GET` | `/api/directories/check` | Check whether a configured directory path exists |
+| `GET` | `/api/lines/:name/exists` | Probe whether an instance is registered |
+<!-- Scheduled messages -->
+| `GET` | `/api/lines/:name/scheduled` | List scheduled messages for an instance |
+| `POST` | `/api/lines/:name/scheduled` | Schedule a new message |
+| `DELETE` | `/api/lines/:name/scheduled` | Cancel all scheduled messages for an instance |
+| `GET` | `/api/lines/:name/scheduled/:id` | Get a single scheduled message |
+| `PUT` | `/api/lines/:name/scheduled/:id` | Update a scheduled message |
+| `DELETE` | `/api/lines/:name/scheduled/:id` | Cancel a single scheduled message |
+<!-- Groups -->
+| `GET` | `/api/lines/:name/groups` | List groups for an instance |
+| `POST` | `/api/lines/:name/groups` | Create a new group |
+| `GET` | `/api/lines/:name/groups/:jid` | Get group detail |
+| `DELETE` | `/api/lines/:name/groups/:jid` | Leave a group |
+| `PUT` | `/api/lines/:name/groups/:jid/subject` | Update group subject |
+| `PUT` | `/api/lines/:name/groups/:jid/description` | Update group description |
+| `POST` | `/api/lines/:name/groups/:jid/participants` | Add/remove/promote/demote participants |
+| `PUT` | `/api/lines/:name/groups/:jid/settings` | Update group settings (announce/locked) |
+| `GET` | `/api/lines/:name/groups/:jid/invite` | Fetch the group's invite code |
+| `POST` | `/api/lines/:name/groups/:jid/invite/revoke` | Revoke and rotate the invite code |
+| `PUT` | `/api/lines/:name/groups/:jid/ephemeral` | Set ephemeral (disappearing-message) duration |
+| `PUT` | `/api/lines/:name/groups/:jid/member-add-mode` | Toggle who can add members |
+| `PUT` | `/api/lines/:name/groups/:jid/join-approval` | Toggle join-approval requirement |
+| `GET` | `/api/lines/:name/groups/:jid/requests` | List pending join requests |
+| `POST` | `/api/lines/:name/groups/:jid/requests` | Approve or reject pending join requests |
+<!-- LID mappings (#251) -->
+| `GET` | `/api/lid-mappings` | List cross-instance LID -> phone JID mappings |
+| `POST` | `/api/lid-mappings/sync` | Sync LID mappings from another instance |
+<!-- Version / update -->
+| `GET` | `/api/version` | Report fleet server build version |
+| `POST` | `/api/update` | Trigger a fleet self-update |
+
+<!-- Fleet API table reconciled against src/fleet/index.ts ROUTES; run `grep -cE "^\|.*api/" README.md` to confirm row count -->
 
 The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` plus a short accept-list for rotated tokens (auto-generated on first run). Existing `~/.config/whatsoup/fleet-token` files are migrated on first read and left in place for rollback.
 
