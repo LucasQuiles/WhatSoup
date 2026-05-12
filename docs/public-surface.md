@@ -116,6 +116,7 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 | `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
 | `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
 | `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:506` | stable | active | Currently-composing JIDs from presence cache |
 | `http:health.heal` | `POST /heal` | `src/core/health.ts:283` | stable | active | Inject Type-3 repair report |
 | `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:194` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
@@ -184,7 +185,7 @@ Each instance config file is at `$XDG_CONFIG_HOME/whatsoup/instances/<name>/conf
 
 | Identifier | Type | Source | Schema | Stability | Status | Notes |
 |---|---|---|---|---|---|---|
-| `config:instance_config.top-level` | config-key | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | v1 (bootstrap) | stable | active | `name`, `type`, `adminPhones`, `accessMode`, `systemPrompt`, `models`, `memory`, `maxTokens`, `tokenBudget`, `rateLimitPerHour`, `healthPort`, `siblingPhones`, `chatAliases`, `profiles`, `toolUpdateMode`, `operationTracker`, `agentOptions` |
+| `config:instance_config.top-level` | config-key | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | v1 (bootstrap) | stable | active | `enabled`, `name`, `type`, `adminPhones`, `accessMode`, `systemPrompt`, `models`, `memory`, `maxTokens`, `tokenBudget`, `rateLimitPerHour`, `healthPort`, `siblingPhones`, `chatAliases`, `profiles`, `toolUpdateMode`, `operationTracker`, `agentOptions` |
 | `config:instance_config.access-modes` | config-key | [docs/configuration.md §Access Modes](configuration.md#access-modes) | v1 (bootstrap) | stable | active | `self_only`, `allowlist`, `open_dm`, `groups_only` |
 | `config:instance_config.models` | config-key | [docs/configuration.md §models Object](configuration.md#models-object) | v1 (bootstrap) | stable | active | `conversation`, `extraction`, `validation`, `fallback` |
 | `config:instance_config.memory` | config-key | [docs/configuration.md §memory](configuration.md#memory) | v1 (bootstrap) | stable | active | Canonical BYOK memory/search config; supersedes legacy `pinecone*` flat fields |
@@ -255,10 +256,10 @@ Canonical reference: [docs/specs/2026-05-09-fleet-topology-control-plane-design.
 
 | Identifier | Mode | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `runtime:mode.supervisor` | `WHATSOUP_MODE=supervisor` | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Default; fleet + instances |
-| `runtime:mode.fleet` | `WHATSOUP_MODE=fleet` | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only |
-| `runtime:mode.instance` | `WHATSOUP_MODE=instance` | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Single-instance entrypoint |
-| `runtime:mode.auth` | `WHATSOUP_MODE=auth` | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | QR-pairing flow |
+| `runtime:mode.supervisor` | `WHATSOUP_MODE=supervisor` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker default; runs fleet + instances listed in `WHATSOUP_INSTANCES` in one container |
+| `runtime:mode.fleet` | `WHATSOUP_MODE=fleet` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker fleet-only entrypoint (`src/fleet/standalone.ts`) |
+| `runtime:mode.instance` | `WHATSOUP_MODE=instance` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker single-instance entrypoint; requires `WHATSOUP_INSTANCE` |
+| `runtime:mode.auth` | `WHATSOUP_MODE=auth` | [`docker/entrypoint.sh`](../docker/entrypoint.sh) | stable | active | Docker QR-pairing flow; requires `WHATSOUP_INSTANCE` |
 | `runtime:type.chat` | instance `type: chat` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Chat-runtime instance |
 | `runtime:type.agent` | instance `type: agent` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Agent-runtime instance |
 | `runtime:type.passive` | instance `type: passive` | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | stable | active | Read-only ingest |
@@ -277,7 +278,7 @@ are breaking.
 
 | Identifier | Artifact | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Loads keychain secrets, exports env, dispatches by `WHATSOUP_MODE` |
+| `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Takes `<instance-name>` argument; loads keychain secrets, exports env, execs `src/bootstrap.ts` for that instance |
 | `deploy:wrapper.whatsoup-fleet` | `whatsoup-fleet` launcher | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only entrypoint |
 | `deploy:wrapper.whatsoup-auth` | `whatsoup-auth` launcher | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | Auth-flow entrypoint |
 | `deploy:systemd.instance` | `whatsoup@.service` template | [`deploy/whatsoup@.service`](../deploy/whatsoup@.service) | stable | active | systemd template; per-instance unit |
@@ -309,7 +310,7 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:instance.db` | `<dataRoot>/instances/<name>/bot.db` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Per-instance SQLite; migration chain canonical |
 | `artifact:fleet.tokens` | `<configRoot>/fleet-tokens.json` | [README §Fleet API](../README.md#fleet-api) | stable | active | Active root token + rotated accept-list |
 | `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
-| `artifact:tokens.env` | `<configRoot>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
+| `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
 | `artifact:mcp.config` | `.mcp.json` (repo root) | [`.mcp.json`](../.mcp.json) | stable | active | MCP server registration for MCP-aware clients |
 | `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
