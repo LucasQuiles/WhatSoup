@@ -338,15 +338,29 @@ describe('useStickyScroll — useLayoutEffect auto-scroll on items', () => {
   })
 
   it('skips auto-scroll when items array is empty', () => {
+    // To reach the items.length === 0 guard, the ref must already be attached when
+    // useLayoutEffect fires. Sequence: start non-empty → attach ref → consume force-pin
+    // (needsPinRef=false) → scroll to a non-bottom position → rerender with items=[]
+    // → useLayoutEffect fires with live ref; items.length===0 guard returns early.
     const el = makeScrollEl({ scrollHeight: 1000, clientHeight: 400, scrollTop: 0 })
-    const { result } = renderHook(
+    const { result, rerender } = renderHook(
       ({ items }: { items: string[] }) => useStickyScroll(items, 'chat-1'),
-      { initialProps: { items: [] } },
+      { initialProps: { items: ['msg-1'] } },
     )
     attachRef(result.current.scrollRef, el)
 
-    // With empty items, useLayoutEffect returns early — scrollTop stays 0
-    // Verify by checking it doesn't throw and hook stays stable
+    // Consume force-pin: scrollTop = scrollHeight = 1000, needsPinRef = false
+    act(() => { rerender({ items: ['msg-1'] }) })
+    expect(el.scrollTop).toBe(1000)
+
+    // Move to a non-bottom position so a spurious auto-scroll would be detectable
+    el.scrollTop = 200
+
+    // Clear the items — useLayoutEffect fires, ref is live, items.length === 0 → early return
+    act(() => { rerender({ items: [] }) })
+
+    // scrollTop must be unchanged: the items.length===0 guard prevented any scroll
+    expect(el.scrollTop).toBe(200)
     expect(result.current.showJump).toBe(false)
   })
 
