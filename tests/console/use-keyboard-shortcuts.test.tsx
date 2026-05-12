@@ -291,7 +291,9 @@ describe('useKeyboardShortcuts — number key navigation', () => {
 
     act(() => { fireKey('1', { metaKey: true }); });
 
-    // metaKey+K fires the Cmd+K branch which returns early; '1' is not processed
+    // metaKey+'1' does not match the Cmd+K branch (key is '1', not 'k');
+    // it falls through to the number-key guard `if (!metaKey && ...)` which is
+    // false, so navigation is skipped.
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
