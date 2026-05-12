@@ -470,8 +470,12 @@ function readSchemaMigrationVersion(rawDb: DatabaseSync): number {
       .prepare('SELECT MAX(version) AS version FROM schema_migrations')
       .get() as { version: number | null } | undefined;
     return typeof row?.version === 'number' ? row.version : 0;
-  } catch {
-    return 0;
+  } catch (err) {
+    const message = (err as Error).message;
+    if (message.includes('no such table: schema_migrations')) {
+      return 0;
+    }
+    throw err;
   }
 }
 
