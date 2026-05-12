@@ -93,7 +93,7 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
 
 const DEFAULT_LINES: LineInstance[] = [
   makeLine({ name: 'primary-line', status: 'online' }),
-  makeLine({ name: 'sandbox-agent', status: 'offline' }),
+  makeLine({ name: 'sandbox-agent', status: 'unreachable' }),
 ]
 
 function defaultProps(overrides: Partial<{
@@ -340,7 +340,7 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
-    const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [url, opts] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('/api/update')
     expect(opts.method).toBe('POST')
     // In the no-token dev path, headers should be an empty object (no Authorization key)
