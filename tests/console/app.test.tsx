@@ -328,20 +328,24 @@ describe('App — wildcard redirect', () => {
 // ---------------------------------------------------------------------------
 
 describe('App — ErrorBoundary catches route errors', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
   it('renders error UI with "This page crashed" when a child throws', async () => {
     const { default: ErrorBoundary } = await import('../../console/src/components/ErrorBoundary');
     const Bomb = () => { throw new Error('route-crash'); };
 
-    const originalError = console.error;
-    console.error = () => {};
-    try {
-      render(createElement(ErrorBoundary, null, createElement(Bomb)));
-      const alert = screen.getByRole('alert');
-      expect(alert.textContent).toContain('This page crashed');
-    } finally {
-      console.error = originalError;
-      cleanup();
-    }
+    render(createElement(ErrorBoundary, null, createElement(Bomb)));
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toContain('This page crashed');
+    cleanup();
   });
 
   it('retry button resets the error boundary and re-renders the child', async () => {
@@ -352,18 +356,12 @@ describe('App — ErrorBoundary catches route errors', () => {
       return createElement('div', { 'data-testid': 'recovered' }, 'recovered-ok');
     };
 
-    const originalError = console.error;
-    console.error = () => {};
-    try {
-      render(createElement(ErrorBoundary, null, createElement(Bomb)));
-      const retryButton = screen.getByRole('button', { name: /retry/i });
-      shouldThrow = false;
-      fireEvent.click(retryButton);
-      expect(screen.getByTestId('recovered').textContent).toBe('recovered-ok');
-    } finally {
-      console.error = originalError;
-      cleanup();
-    }
+    render(createElement(ErrorBoundary, null, createElement(Bomb)));
+    const retryButton = screen.getByRole('button', { name: /retry/i });
+    shouldThrow = false;
+    fireEvent.click(retryButton);
+    expect(screen.getByTestId('recovered').textContent).toBe('recovered-ok');
+    cleanup();
   });
 });
 
@@ -394,7 +392,7 @@ describe('App — KeyboardShortcutsHelp modal', () => {
     });
   });
 
-  it('invoking onHelp twice toggles the dialog closed again', async () => {
+  it('clicking the backdrop closes the dialog (onClose prop)', async () => {
     await act(async () => { renderApp('/'); });
     // Open
     await act(async () => { capturedOnHelp?.(); });
