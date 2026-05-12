@@ -3,9 +3,13 @@
 // Works with OpenAI, Ollama, vLLM, Azure OpenAI, LM Studio, and any
 // endpoint that implements the OpenAI chat completions SSE streaming API.
 //
-// NOTE: HTTP providers read API keys from process.env directly in each callApi()
-// invocation (not through buildEnv) because they don't spawn subprocesses.
-// This ensures key rotations or late-set env vars are always picked up fresh.
+// NOTE: API keys resolve via `resolveApiKey()` (`./api-key-resolver.ts`) at
+// request time — HTTP providers don't spawn subprocesses, so buildEnv() is
+// only used as a courtesy.
+// Precedence: `apiKeyService` keyring lookup (when configured) →
+// `process.env.OPENAI_API_KEY` env fallback.
+// The auth header is computed per-request so late-set keyring entries / key
+// rotations are picked up without a process restart.
 
 import type {
   ProviderCheckpoint,
@@ -104,7 +108,8 @@ export class OpenAIApiProvider implements ProviderSession {
     this.opts = opts;
     this.active = true;
 
-    // API key resolved via apiKeyService (keyring) when configured, else env.
+    // API key precedence: apiKeyService keyring → OPENAI_API_KEY env.
+    // Re-resolved per request inside callApi() so late-set keys are picked up.
     this.apiKey = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
 
     // Per-turn model override takes lowest precedence; opts.model wins over
