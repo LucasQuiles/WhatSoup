@@ -1,23 +1,27 @@
 /**
+ * @vitest-environment jsdom
+ *
  * Direct unit coverage for console/src/lib/csv-export.ts.
  *
  * Two helpers ship in this module:
  * - metricsToCSV: pure CSV-string builder over MessageVolumeBucket[]
  * - downloadCSV:  DOM-heavy glue (Blob + URL.createObjectURL + anchor click)
  *
- * The repository's console tests run under the default Node env (no DOM —
- * see vitest.config.ts; no `// @vitest-environment` directive is used in any
- * existing test under `tests/console/`). Following that convention, this
- * file pins only the pure-function half. `downloadCSV` remains exercised
- * indirectly by the in-browser console workflow.
+ * This file covers both halves directly. `metricsToCSV` stays pure and
+ * `downloadCSV` runs against jsdom with browser download APIs stubbed.
  */
-import { describe, expect, it } from 'vitest';
-import { metricsToCSV } from '../../console/src/lib/csv-export';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { downloadCSV, metricsToCSV } from '../../console/src/lib/csv-export';
 import type { MessageVolumeBucket } from '../../console/src/types';
 
 function bucket(over: Partial<MessageVolumeBucket>): MessageVolumeBucket {
   return { bucket: '2026-05-12T00:00:00Z', inbound: 0, outbound: 0, media: 0, ...over };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe('metricsToCSV', () => {
   it('returns the header alone for an empty array (no trailing newline)', () => {
@@ -72,5 +76,37 @@ describe('metricsToCSV', () => {
     ]);
     expect(a.split('\n')[1]).toBe('b,1,1');
     expect(a.split('\n')[2]).toBe('a,1,1');
+  });
+});
+
+describe('downloadCSV', () => {
+  it('creates a CSV blob, clicks a download anchor, and revokes the object URL', async () => {
+    const content = 'bucket,inbound,outbound\n2026-05-12T00:00:00Z,5,3';
+    const objectUrl = 'blob:whatsoup-test-csv';
+    const createObjectURL = vi.fn((_blob: Blob) => objectUrl);
+    const revokeObjectURL = vi.fn((_url: string) => undefined);
+    class StubURL extends URL {
+      static createObjectURL = createObjectURL;
+      static revokeObjectURL = revokeObjectURL;
+    }
+    vi.stubGlobal('URL', StubURL);
+    const createElement = vi.spyOn(document, 'createElement');
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+
+    downloadCSV(content, 'metrics.csv');
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const blob = createObjectURL.mock.calls[0]![0];
+    expect(blob).toBeInstanceOf(Blob);
+    await expect(blob.text()).resolves.toBe(content);
+    expect(blob.type).toBe('text/csv;charset=utf-8;');
+    const anchor = createElement.mock.results.find((result) => result.type === 'return')?.value as
+      | HTMLAnchorElement
+      | undefined;
+    expect(createElement).toHaveBeenCalledWith('a');
+    expect(anchor?.href).toBe(objectUrl);
+    expect(anchor?.download).toBe('metrics.csv');
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl);
   });
 });
