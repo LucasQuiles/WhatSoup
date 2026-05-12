@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { persistIntroSentFlag } from '../../src/core/intro-sent-config.ts';
@@ -44,5 +44,54 @@ describe('persistIntroSentFlag', () => {
     symlinkSync(targetPath, configPath);
 
     expect(() => persistIntroSentFlag(configPath, true)).toThrow(/symlink/);
+  });
+
+  it('refuses to write config.json over a non-regular path', () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'config.json');
+    mkdirSync(configPath);
+
+    expect(() => persistIntroSentFlag(configPath, true)).toThrow(/non-regular/);
+  });
+
+  it('refuses to write config.json through a symlinked parent directory', () => {
+    const root = makeTempDir();
+    const realDir = join(root, 'real');
+    const linkDir = join(root, 'link');
+    mkdirSync(realDir);
+    symlinkSync(realDir, linkDir);
+    const configPath = join(linkDir, 'config.json');
+    writeFileSync(join(realDir, 'config.json'), JSON.stringify({ introSent: false }, null, 2) + '\n');
+
+    expect(() => persistIntroSentFlag(configPath, true)).toThrow(/symlink/);
+  });
+
+  it('leaves config.json unchanged when JSON parsing fails', () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'config.json');
+    const original = '{not-json\n';
+    writeFileSync(configPath, original);
+    chmodSync(configPath, 0o644);
+
+    expect(() => persistIntroSentFlag(configPath, true)).toThrow();
+
+    expect(readFileSync(configPath, 'utf-8')).toBe(original);
+    expect(fileMode(configPath)).toBe(0o644);
+  });
+
+  it('leaves config.json unchanged when the private temp write cannot start', () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ name: 'agent', introSent: false }, null, 2) + '\n');
+    chmodSync(configPath, 0o600);
+    chmodSync(dir, 0o500);
+
+    try {
+      expect(() => persistIntroSentFlag(configPath, true)).toThrow();
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))).toMatchObject({ introSent: false });
+      expect(fileMode(configPath)).toBe(0o600);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
   });
 });
