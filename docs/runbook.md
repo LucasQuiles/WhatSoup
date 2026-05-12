@@ -531,7 +531,7 @@ grep '"enabled"' ~/.config/whatsoup/instances/q/config.json
 }
 ```
 
-See `docs/configuration.md` — [operationTracker](#operationtracker) for the full reference.
+See `docs/configuration.md` — [operationTracker](configuration.md#operationtracker) for the full reference.
 
 ---
 
