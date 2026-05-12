@@ -27,26 +27,10 @@ vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 // Test helpers
 // ---------------------------------------------------------------------------
 
-function mockReq(body = ''): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/';
-  (stream as any).method = 'PATCH';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
+import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = data; },
-  };
-  return res as any;
+function mockReq(body = ''): IncomingMessage {
+  return helperMockReq({ body, method: 'PATCH' });
 }
 
 function fakeInstance(configPath: string, overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
