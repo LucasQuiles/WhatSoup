@@ -380,8 +380,10 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
     }
 
     // Step 2: write into every instance via the unified seam (strict freshness
-    // gate on L5). Per-instance results expose imported/flipped/noop/conflicts.
-    const results: Record<
+    // gate on L5). Keep `results` backward-compatible as imported-count/-1 and
+    // expose richer counters separately.
+    const results: Record<string, number> = {};
+    const details: Record<
       string,
       { imported: number; flipped: number; noop: number; conflicts: number; error?: string }
     > = {};
@@ -395,14 +397,16 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
       });
       if (writeResult.ok) {
         const r = writeResult.data;
-        results[inst.name] = {
+        results[inst.name] = r.imported;
+        details[inst.name] = {
           imported: r.imported,
           flipped: r.flipped,
           noop: r.noop,
           conflicts: r.conflicts.length,
         };
       } else {
-        results[inst.name] = {
+        results[inst.name] = -1;
+        details[inst.name] = {
           imported: 0,
           flipped: 0,
           noop: 0,
@@ -413,8 +417,8 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
     }
 
     const totalMappings = observations.length;
-    log.info({ totalMappings, results }, 'L5: cross-instance LID sync completed');
-    jsonResponse(res, 200, { totalMappings, results });
+    log.info({ totalMappings, results, details }, 'L5: cross-instance LID sync completed');
+    jsonResponse(res, 200, { totalMappings, results, details });
   } catch (err) {
     log.error({ err }, 'L5: failed to sync LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });

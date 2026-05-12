@@ -14,8 +14,8 @@
 //   L5   Cross-instance sync  — fleet API endpoint for broadcasting mappings between instances
 //   L6   Periodic reconciliation — scheduled sweep re-reads auth dir + cross-checks
 //
-// All layers converge on upsertLidMapping() which atomically writes the
-// lid_mappings table AND migrates orphaned access_list entries.
+// All layers converge on writeLidMapping() for mapping/history writes. The
+// upsertLidMapping() wrapper also migrates orphaned access_list entries.
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -81,6 +81,20 @@ export interface LidWriteResult {
 const HISTORY_MAX_ROWS_PER_LID = 1000;
 const HISTORY_MAX_AGE_SQL = "-90 days";
 
+function timestampToEpochMs(value: string): number | null {
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(' ', 'T')}Z`
+    : value;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isStrictlyNewerTimestamp(incoming: string, existing: string): boolean {
+  const incomingMs = timestampToEpochMs(incoming);
+  const existingMs = timestampToEpochMs(existing);
+  return incomingMs !== null && existingMs !== null && incomingMs > existingMs;
+}
+
 /**
  * Unified LID-mapping write seam. All seven write paths converge here.
  *
@@ -113,18 +127,24 @@ export function writeLidMapping(
     .prepare('SELECT phone_jid, updated_at FROM lid_mappings WHERE lid = ?')
     .get(lid) as { phone_jid: string; updated_at: string } | undefined;
 
-  if (existing && existing.phone_jid === phoneJid) {
-    // No-op: same phone. No history row written.
-    return { written: false, flipped: false };
-  }
-
   if (existing && mode === 'skip-if-exists') {
     return { written: false, flipped: false };
   }
 
   if (existing && mode === 'freshness-gated') {
     const incoming = opts.observedUpdatedAt;
-    if (!incoming || incoming <= existing.updated_at) {
+    if (existing.phone_jid === phoneJid) {
+      if (incoming && isStrictlyNewerTimestamp(incoming, existing.updated_at)) {
+        rawDb
+          .prepare('UPDATE lid_mappings SET updated_at = ? WHERE lid = ?')
+          .run(incoming, lid);
+      }
+      // Same phone: no history row and no imported/flip count, even if we
+      // advanced freshness metadata.
+      return { written: false, flipped: false };
+    }
+
+    if (!incoming || !isStrictlyNewerTimestamp(incoming, existing.updated_at)) {
       return {
         written: false,
         flipped: false,
@@ -134,6 +154,11 @@ export function writeLidMapping(
         },
       };
     }
+  }
+
+  if (existing && existing.phone_jid === phoneJid) {
+    // No-op: same phone. No history row written.
+    return { written: false, flipped: false };
   }
 
   // For freshness-gated writes, persist the source instance's observation time

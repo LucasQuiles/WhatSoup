@@ -44,6 +44,18 @@ function currentPhone(db: Database, lid: string): string | undefined {
   )?.phone_jid;
 }
 
+function currentUpdatedAt(db: Database, lid: string): string | undefined {
+  return (
+    db.raw
+      .prepare('SELECT updated_at FROM lid_mappings WHERE lid = ?')
+      .get(lid) as { updated_at: string } | undefined
+  )?.updated_at;
+}
+
+function recentTimestamp(): string {
+  return new Date(Date.now() - 60 * 1000).toISOString();
+}
+
 // ─── writeLidMapping — basic semantics ───────────────────────────────────────
 
 describe('writeLidMapping — first-seen insert', () => {
@@ -211,6 +223,41 @@ describe('writeLidMapping — freshness-gated mode (L5 import)', () => {
     expect(result.conflict?.prevUpdatedAt).toBe('2026-05-01T00:00:00Z');
   });
 
+  it('compares SQLite and ISO timestamps by instant instead of raw string ordering', () => {
+    db.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run('12345', PHONE_A, '2026-05-01 23:59:59');
+
+    const result = writeLidMapping(db.raw, '12345', PHONE_B, 'L5', 'freshness-gated', {
+      observedUpdatedAt: '2026-05-01T00:00:00Z',
+      sourceInstance: 'stale-iso-instance',
+    });
+
+    expect(result.written).toBe(false);
+    expect(result.conflict).toEqual({
+      prevPhoneJid: PHONE_A,
+      prevUpdatedAt: '2026-05-01 23:59:59',
+    });
+    expect(currentPhone(db, '12345')).toBe(PHONE_A);
+    expect(historyCount(db, '12345')).toBe(0);
+  });
+
+  it('advances updated_at for fresher same-phone L5 observations without writing history', () => {
+    db.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run('12345', PHONE_A, '2026-01-01 00:00:00');
+
+    const result = writeLidMapping(db.raw, '12345', PHONE_A, 'L5', 'freshness-gated', {
+      observedUpdatedAt: '2026-05-01T00:00:00Z',
+      sourceInstance: 'fresh-same-phone-instance',
+    });
+
+    expect(result).toEqual({ written: false, flipped: false });
+    expect(currentPhone(db, '12345')).toBe(PHONE_A);
+    expect(currentUpdatedAt(db, '12345')).toBe('2026-05-01T00:00:00Z');
+    expect(historyCount(db, '12345')).toBe(0);
+  });
+
   it('inserts a new LID freely (no existing row → no freshness check)', () => {
     const result = writeLidMapping(db.raw, '99999', PHONE_A, 'L5', 'freshness-gated', {
       observedUpdatedAt: '2026-01-01T00:00:00Z',
@@ -234,8 +281,9 @@ describe('writeLidMapping — retention cleanup', () => {
     );
     // Backfill 1100 rows directly. Use a recent timestamp so the age bound
     // doesn't prune them — the row-count cap should do the work.
+    const recentTs = recentTimestamp();
     for (let i = 0; i < 1100; i++) {
-      insertHist.run('99999', PHONE_A, PHONE_B, 'L2', '2026-05-10T12:00:00Z');
+      insertHist.run('99999', PHONE_A, PHONE_B, 'L2', recentTs);
     }
     // Seed a current row so writeLidMapping triggers a flip and the cleanup
     // runs.
@@ -259,7 +307,7 @@ describe('writeLidMapping — retention cleanup', () => {
     for (let i = 0; i < 5; i++) {
       insertHist.run('77777', PHONE_A, PHONE_B, 'L2', '2020-01-01T00:00:00Z');
     }
-    const recentTs = new Date(Date.now() - 60 * 1000).toISOString(); // 1 minute ago
+    const recentTs = recentTimestamp();
     for (let i = 0; i < 3; i++) {
       insertHist.run('77777', PHONE_A, PHONE_B, 'L2', recentTs);
     }
@@ -279,11 +327,12 @@ describe('writeLidMapping — retention cleanup', () => {
       `INSERT INTO lid_mappings_history (lid, prev_phone_jid, new_phone_jid, source, changed_at)
        VALUES (?, ?, ?, ?, ?)`,
     );
+    const recentTs = recentTimestamp();
     for (let i = 0; i < 1100; i++) {
-      insertHist.run('AAA', PHONE_A, PHONE_B, 'L2', '2026-05-10T12:00:00Z');
+      insertHist.run('AAA', PHONE_A, PHONE_B, 'L2', recentTs);
     }
     for (let i = 0; i < 5; i++) {
-      insertHist.run('BBB', PHONE_A, PHONE_B, 'L2', '2026-05-10T12:00:00Z');
+      insertHist.run('BBB', PHONE_A, PHONE_B, 'L2', recentTs);
     }
 
     db.raw
@@ -372,6 +421,29 @@ describe('importLidMappings — batch fleet-sync semantics', () => {
     expect(result.flipped).toBe(0);
     expect(result.noop).toBe(1);
     expect(result.conflicts).toHaveLength(0);
+  });
+
+  it('uses refreshed same-phone freshness to reject later stale conflicts', () => {
+    db.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+      .run('111', PHONE_A, '2026-01-01 00:00:00');
+
+    const result = importLidMappings(db, [
+      { lid: '111', phone_jid: PHONE_A, updated_at: '2026-05-01T00:00:00Z', source_instance: 'fresh-same-phone' },
+      { lid: '111', phone_jid: PHONE_B, updated_at: '2026-03-01T00:00:00Z', source_instance: 'stale-conflict' },
+    ]);
+
+    expect(result.imported).toBe(0);
+    expect(result.flipped).toBe(0);
+    expect(result.noop).toBe(1);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toMatchObject({
+      incoming_phone_jid: PHONE_B,
+      existing_phone_jid: PHONE_A,
+      source_instance: 'stale-conflict',
+    });
+    expect(currentPhone(db, '111')).toBe(PHONE_A);
+    expect(currentUpdatedAt(db, '111')).toBe('2026-05-01T00:00:00Z');
   });
 });
 
