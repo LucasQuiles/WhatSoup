@@ -158,16 +158,21 @@ export async function handleCancelScheduled(
   if (!instance) return;
 
   const qs = parseQueryString(req.url);
-  const messageId = qs.id;
-  if (!messageId) {
+  const rawId = qs.id;
+  if (!rawId) {
     jsonResponse(res, 400, { error: 'id query parameter is required' });
+    return;
+  }
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0) {
+    jsonResponse(res, 400, { error: 'id query parameter must be a positive integer' });
     return;
   }
 
   if (!socketCheck(instance, res)) return;
 
-  const result = await mcpCall(instance.socketPath!, 'cancel_scheduled', { messageId });
-  if (result.success) jsonResponse(res, 200, { cancelled: true, messageId });
+  const result = await mcpCall(instance.socketPath!, 'cancel_scheduled', { id });
+  if (result.success) jsonResponse(res, 200, { cancelled: true, id });
   else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
 }
 
