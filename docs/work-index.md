@@ -25,7 +25,7 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, doc=14, handoff=4, plan=13, review=1, spec=13, state=19 |
-| Status | active=2, closed=6, completed=105, deferred=8, pending=39, unknown=17 |
+| Status | active=2, closed=6, completed=105, deferred=8, pending=38, unknown=18 |
 | Status source | bead-manifest=3, body-marker=95, directory=7, fallback=9, phase-log=7, state-md-status=56 |
 
 ## Inconsistencies
@@ -41,13 +41,14 @@ scoped markdown files currently on disk.
 | `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
 | `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
 
-### Unknown-status — triage needed (17)
+### Unknown-status — triage needed (18)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | colony-orchestration-phase1 | 2026-04-04 |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | phase4-m2-websocket-console | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
+| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
 | `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | anti-echo-session-controls | 2026-04-07 |
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | operation-tracker | 2026-04-25 |
@@ -333,7 +334,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | unknown | fallback | colony-orchestration-phase1 | 2026-04-04 |  |
 | `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | unknown | fallback | phase4-m2-websocket-console | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | unknown | body-marker | phase4-realtime-performance | 2026-05-12 |  |
-| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | pending | body-marker | phase5-analytics-observability | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | unknown | body-marker | phase5-analytics-observability | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp1-media-access.md` | plan | completed | body-marker | sp1-media-access | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md` | plan | completed | body-marker | sp2-content-completeness | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-24 |  |
@@ -371,4 +372,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-05-12T05:17:10Z from commit `6c7248649ef48ed84db4f36efa4511a19709b877`
+- Generated at 2026-05-12T06:25:20Z from commit `2c31aa82e787926504866bdee7308f15eb878452`
