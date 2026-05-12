@@ -413,6 +413,8 @@ include `agentOptions` should keep these fields explicit.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `per_chat` via fleet API | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
+| `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
