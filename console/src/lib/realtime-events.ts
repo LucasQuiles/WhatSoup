@@ -9,9 +9,17 @@ import type { QueryKey } from '@tanstack/react-query';
 // ---------------------------------------------------------------------------
 
 export interface WsInvalidationEvent {
-  type: 'instance_status' | 'message_received' | 'chat_updated' | 'log_entry' | 'feed_event' | 'access_changed';
+  type:
+    | 'instance_status'
+    | 'message_received'
+    | 'chat_updated'
+    | 'log_entry'
+    | 'feed_event'
+    | 'access_changed'
+    | 'lid_conflict';
   instance: string;
   conversationKey?: string;
+  lid?: string;
   messagePk?: number;
 }
 
@@ -37,6 +45,7 @@ const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
   'log_entry',
   'feed_event',
   'access_changed',
+  'lid_conflict',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -94,6 +103,7 @@ export function parseWsEvent(data: unknown): WsEvent | null {
     instance: parsed.instance,
   };
   if (typeof parsed.conversationKey === 'string') event.conversationKey = parsed.conversationKey;
+  if (typeof parsed.lid === 'string') event.lid = parsed.lid;
   if (typeof parsed.messagePk === 'number' && Number.isFinite(parsed.messagePk)) event.messagePk = parsed.messagePk;
   return event;
 }
@@ -154,6 +164,8 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
       return [['feed']];
     case 'access_changed':
       return [['access', instance]];
+    case 'lid_conflict':
+      return [['lid-mappings']];
     default:
       return [];
   }

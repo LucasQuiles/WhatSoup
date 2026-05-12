@@ -25,7 +25,7 @@ import {
   handleGetGroupRequests, handleGroupRequestsUpdate,
 } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
-import { importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
+import { compareLidUpdatedAt, importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
@@ -364,10 +364,11 @@ type ConflictingLidMapping = {
   }>;
   /**
    * Deterministic resolution preview (#251 §3.3). Mirrors `writeLidMapping`
-   * in `freshness-gated` mode: max `updated_at` wins; on tie, alphabetical
-   * `phone_jid` wins with reason `tied-deterministic`. `source_instance`
-   * is the instance whose observation provided the winning phone's max
-   * `updated_at`; on a within-phone tie, alphabetically-first instance.
+   * in `freshness-gated` mode: parsed max `updated_at` wins; on tie,
+   * alphabetical `phone_jid` wins with reason `tied-deterministic`.
+   * `source_instance` is the instance whose observation provided the winning
+   * phone's max `updated_at`; on a within-phone tie, alphabetically-first
+   * instance.
    */
   resolution: ConflictResolution;
 };
@@ -385,10 +386,11 @@ function resolveConflict(phones: ConflictingLidMapping['phones']): ConflictResol
     let maxAt = '';
     let maxInst = '';
     for (const inst of instances) {
-      if (inst.updated_at > maxAt) {
+      const byFreshness = maxAt === '' ? 1 : compareLidUpdatedAt(inst.updated_at, maxAt);
+      if (byFreshness > 0) {
         maxAt = inst.updated_at;
         maxInst = inst.instance;
-      } else if (inst.updated_at === maxAt && (maxInst === '' || inst.instance < maxInst)) {
+      } else if (byFreshness === 0 && (maxInst === '' || inst.instance < maxInst)) {
         maxInst = inst.instance;
       }
     }
@@ -396,8 +398,11 @@ function resolveConflict(phones: ConflictingLidMapping['phones']): ConflictResol
   });
 
   // Find the overall freshest phone(s).
-  const overallMax = perPhone.reduce((acc, p) => (p.maxAt > acc ? p.maxAt : acc), '');
-  const tied = perPhone.filter(p => p.maxAt === overallMax);
+  const overallMax = perPhone.reduce(
+    (acc, p) => (acc === '' || compareLidUpdatedAt(p.maxAt, acc) > 0 ? p.maxAt : acc),
+    '',
+  );
+  const tied = perPhone.filter(p => compareLidUpdatedAt(p.maxAt, overallMax) === 0);
 
   if (tied.length === 1) {
     return {
@@ -496,12 +501,6 @@ function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: 
     }
 
     const { unified, conflicts } = buildConflictExplicitLidMappings(observations);
-
-    // Broadcast a refetch signal per detected conflict so consoles can
-    // surface the resolution without polling (#251).
-    for (const conflict of conflicts) {
-      publishLidConflict(deps.realtime, conflict.resolution.source_instance, conflict.lid);
-    }
 
     jsonResponse(res, 200, {
       mappings: allMappings,

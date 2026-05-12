@@ -74,6 +74,11 @@ describe('getInvalidationKeys', () => {
     const keys = getInvalidationKeys({ type: 'access_changed', instance: 'q' });
     expect(keys).toEqual([['access', 'q']]);
   });
+
+  it('maps lid_conflict to fleet LID mapping queries', () => {
+    const keys = getInvalidationKeys({ type: 'lid_conflict', instance: 'q', lid: 'lid-1' });
+    expect(keys).toEqual([['lid-mappings']]);
+  });
 });
 
 describe('applyTypingUpdate', () => {
@@ -122,6 +127,11 @@ describe('parseWsEvent', () => {
       type: 'message_received',
       instance: 'q',
       conversationKey: '123',
+    });
+    expect(parseWsEvent('{"type":"lid_conflict","instance":"q","lid":"lid-1"}')).toEqual({
+      type: 'lid_conflict',
+      instance: 'q',
+      lid: 'lid-1',
     });
   });
 

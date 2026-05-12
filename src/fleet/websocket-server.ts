@@ -36,6 +36,8 @@ export interface WsInvalidationEvent {
   instance: string;
   /** Optional conversation key for scoped invalidation. */
   conversationKey?: string;
+  /** Optional LID for lid_conflict invalidations. */
+  lid?: string;
   /** Optional message pk for precise cache updates. */
   messagePk?: number;
 }

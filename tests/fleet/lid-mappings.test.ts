@@ -6,10 +6,7 @@
  * Each conflict carries a `resolution: { phone_jid, source_instance, reason }`
  * where reason is 'freshest' or 'tied-deterministic'.
  *
- * On every detected conflict the server broadcasts a WS invalidation event
- * of type 'lid_conflict' so the console panel can refetch.
- *
- * POST /api/lid-mappings/sync also emits one `lid_conflict` event per
+ * POST /api/lid-mappings/sync emits one `lid_conflict` event per
  * detected conflict (when `details[*].conflicts > 0` for any peer).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
@@ -161,6 +158,12 @@ const LID_TIED = 'L-tied';
 const PHONE_TIED_A = '15550001111@s.whatsapp.net'; // alphabetically first
 const PHONE_TIED_B = '15550002222@s.whatsapp.net';
 
+// Mixed timestamp format scenario: raw string ordering would pick the ISO
+// timestamp because "T" sorts after space, but parsed time should pick NEWER.
+const LID_MIXED_FORMAT = 'L-mixed-format';
+const PHONE_MIXED_OLDER = '15550004444@s.whatsapp.net';
+const PHONE_MIXED_NEWER = '15550005555@s.whatsapp.net';
+
 // Single-phone (unified) mapping.
 const LID_UNIFIED = 'L-unified';
 const PHONE_UNIFIED = '15550003333@s.whatsapp.net';
@@ -205,6 +208,10 @@ beforeAll(async () => {
   // Conflict: tie. Both phones have identical max updated_at.
   insertLid(path.join(dataRoot, INST_ALPHA, 'bot.db'), LID_TIED, PHONE_TIED_A, '2026-04-01 00:00:00');
   insertLid(path.join(dataRoot, INST_BRAVO, 'bot.db'), LID_TIED, PHONE_TIED_B, '2026-04-01 00:00:00');
+
+  // Conflict: timestamp formats differ but parse to ordered instants.
+  insertLid(path.join(dataRoot, INST_ALPHA, 'bot.db'), LID_MIXED_FORMAT, PHONE_MIXED_OLDER, '2026-05-01T00:00:00Z');
+  insertLid(path.join(dataRoot, INST_BRAVO, 'bot.db'), LID_MIXED_FORMAT, PHONE_MIXED_NEWER, '2026-05-01 00:00:01');
 
   // Unified single-phone mapping.
   insertLid(path.join(dataRoot, INST_ALPHA, 'bot.db'), LID_UNIFIED, PHONE_UNIFIED, '2026-01-15 00:00:00');
@@ -282,9 +289,9 @@ describe('GET /api/lid-mappings -- conflict surfacing (#251)', () => {
     expect(Array.isArray(body.unified)).toBe(true);
     expect(Array.isArray(body.conflicts)).toBe(true);
     expect(body.conflict_count).toBe(body.conflicts.length);
-    // We seeded two distinct conflicts: freshest + tied.
-    expect(body.conflicts.length).toBe(2);
-    expect(body.conflict_count).toBe(2);
+    // We seeded three distinct conflicts: freshest + tied + mixed timestamp formats.
+    expect(body.conflicts.length).toBe(3);
+    expect(body.conflict_count).toBe(3);
 
     // Unified should contain L-unified.
     const unifiedLids = body.unified.map((u: { lid: string }) => u.lid);
@@ -328,18 +335,25 @@ describe('GET /api/lid-mappings -- conflict surfacing (#251)', () => {
     expect(tied.resolution.source_instance).toBe(INST_ALPHA);
   });
 
-  it('emits one lid_conflict event per detected conflict on GET', async () => {
+  it('mixed timestamp formats: parsed freshness wins instead of raw string order', async () => {
+    const res = await fetch(`${baseUrl}/api/lid-mappings`, { headers: auth });
+    const body = await res.json();
+    const mixed = body.conflicts.find((c: { lid: string }) => c.lid === LID_MIXED_FORMAT);
+    expect(mixed).toBeDefined();
+    expect(mixed.resolution).toEqual({
+      phone_jid: PHONE_MIXED_NEWER,
+      source_instance: INST_BRAVO,
+      reason: 'freshest',
+    });
+  });
+
+  it('does not emit lid_conflict events on GET because reads must not trigger refetch loops', async () => {
     broadcastSpy.mockClear();
     await fetch(`${baseUrl}/api/lid-mappings`, { headers: auth });
     const lidEvents = broadcastSpy.mock.calls
       .map(call => call[0] as { type: string; instance?: string })
       .filter(ev => ev.type === 'lid_conflict');
-    expect(lidEvents.length).toBe(2);
-    // Each event must carry an instance field.
-    for (const ev of lidEvents) {
-      expect(typeof ev.instance).toBe('string');
-      expect(ev.instance!.length).toBeGreaterThan(0);
-    }
+    expect(lidEvents).toEqual([]);
   });
 });
 
@@ -360,8 +374,25 @@ describe('POST /api/lid-mappings/sync -- conflict event emission (#251)', () => 
     expect(conflictDetails.length).toBeGreaterThan(0);
 
     const lidEvents = broadcastSpy.mock.calls
-      .map(call => call[0] as { type: string })
+      .map(call => call[0] as { type: string; lid?: string; conversationKey?: string })
       .filter(ev => ev.type === 'lid_conflict');
     expect(lidEvents.length).toBeGreaterThan(0);
+    expect(lidEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'lid_conflict', lid: expect.any(String) }),
+      ]),
+    );
+    expect(lidEvents.every(ev => ev.conversationKey === undefined)).toBe(true);
+
+    for (const inst of [INST_ALPHA, INST_BRAVO, INST_CHARLIE]) {
+      const db = new DatabaseSync(path.join(dataRoot, inst, 'bot.db'));
+      try {
+        const tied = db.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?')
+          .get(LID_TIED) as { phone_jid: string } | undefined;
+        expect(tied?.phone_jid).toBe(PHONE_TIED_A);
+      } finally {
+        db.close();
+      }
+    }
   });
 });

@@ -55,7 +55,7 @@ export function publishFeedEvent(rt: FleetRealtimePublisher, instance: string): 
  */
 export function publishLidConflict(rt: FleetRealtimePublisher, instance: string, lid: string): void {
   const event: WsInvalidationEvent = { type: 'lid_conflict', instance };
-  if (lid) event.conversationKey = lid;
+  if (lid) event.lid = lid;
   rt.publish(event);
 }
 
