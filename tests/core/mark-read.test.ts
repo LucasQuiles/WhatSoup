@@ -15,11 +15,26 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { markConversationRead } from '../../src/core/mark-read.ts';
+import type { ConnectionManager, WhatsAppSocket } from '../../src/transport/connection.ts';
 
 const SELF_JID = '15551234567@s.whatsapp.net';
 const PEER_JID = '15559876543@s.whatsapp.net';
 const CONV_KEY = `conv:${PEER_JID}`;
 const CHAT_JID = PEER_JID;
+
+type MarkReadPayload = {
+  markRead: boolean;
+  lastMessages: Array<{
+    key: {
+      id: string;
+      fromMe: boolean;
+    };
+    messageTimestamp: number;
+  }>;
+};
+
+type ChatModify = (payload: MarkReadPayload, jid: string) => Promise<void>;
+type TestConnectionManager = Pick<ConnectionManager, 'getSocket' | 'botJid'>;
 
 function seedChat(db: Database, opts?: { unread?: number }) {
   db.raw
@@ -38,9 +53,25 @@ function seedMessage(
     .run(CHAT_JID, CONV_KEY, opts.sender, opts.id, 'body', opts.ts);
 }
 
-function makeConnMgr(socket: unknown | null, botJid = SELF_JID) {
+function makeChatModify(impl?: ChatModify) {
+  return vi.fn(impl ?? (async () => undefined));
+}
+
+function makeSocket(chatModify = makeChatModify()): WhatsAppSocket {
+  return { chatModify } as unknown as WhatsAppSocket;
+}
+
+function firstChatModifyCall(chatModify: ReturnType<typeof makeChatModify>): [MarkReadPayload, string] {
+  const call = chatModify.mock.calls[0];
+  if (!call) {
+    throw new Error('expected chatModify to have been called');
+  }
+  return call;
+}
+
+function makeConnMgr(socket: WhatsAppSocket | null, botJid = SELF_JID): TestConnectionManager {
   return {
-    getSocket: vi.fn(() => socket),
+    getSocket: vi.fn((): WhatsAppSocket | null => socket),
     botJid,
   };
 }
@@ -89,43 +120,45 @@ describe('markConversationRead', () => {
 
   it('calls sock.chatModify with the most-recent message (ORDER BY pk DESC)', async () => {
     seedChat(db);
-    seedMessage(db, { id: 'm-old', sender: PEER_JID, ts: 1_000 });
-    seedMessage(db, { id: 'm-new', sender: PEER_JID, ts: 2_000 });
-    const chatModify = vi.fn(async () => undefined);
-    const sock = { chatModify };
+    seedMessage(db, { id: 'm-newer-timestamp', sender: PEER_JID, ts: 2_000 });
+    seedMessage(db, { id: 'm-newer-pk', sender: PEER_JID, ts: 1_000 });
+    const chatModify = makeChatModify();
+    const sock = makeSocket(chatModify);
     await markConversationRead(db, makeConnMgr(sock), CONV_KEY);
     expect(chatModify).toHaveBeenCalledTimes(1);
-    const [payload, jid] = chatModify.mock.calls[0];
+    const [payload, jid] = firstChatModifyCall(chatModify);
     expect(jid).toBe(CHAT_JID);
     expect(payload.markRead).toBe(true);
     expect(payload.lastMessages).toHaveLength(1);
-    expect(payload.lastMessages[0].key.id).toBe('m-new');
-    expect(payload.lastMessages[0].messageTimestamp).toBe(2_000);
+    expect(payload.lastMessages[0].key.id).toBe('m-newer-pk');
+    expect(payload.lastMessages[0].messageTimestamp).toBe(1_000);
   });
 
   it('flags fromMe=true when last message sender equals botJid', async () => {
     seedChat(db);
     seedMessage(db, { id: 'mine', sender: SELF_JID, ts: 1_000 });
-    const chatModify = vi.fn(async () => undefined);
-    await markConversationRead(db, makeConnMgr({ chatModify }, SELF_JID), CONV_KEY);
-    expect(chatModify.mock.calls[0][0].lastMessages[0].key.fromMe).toBe(true);
+    const chatModify = makeChatModify();
+    await markConversationRead(db, makeConnMgr(makeSocket(chatModify), SELF_JID), CONV_KEY);
+    const [payload] = firstChatModifyCall(chatModify);
+    expect(payload.lastMessages[0].key.fromMe).toBe(true);
   });
 
   it('flags fromMe=false when last message sender differs from botJid', async () => {
     seedChat(db);
     seedMessage(db, { id: 'theirs', sender: PEER_JID, ts: 1_000 });
-    const chatModify = vi.fn(async () => undefined);
-    await markConversationRead(db, makeConnMgr({ chatModify }, SELF_JID), CONV_KEY);
-    expect(chatModify.mock.calls[0][0].lastMessages[0].key.fromMe).toBe(false);
+    const chatModify = makeChatModify();
+    await markConversationRead(db, makeConnMgr(makeSocket(chatModify), SELF_JID), CONV_KEY);
+    const [payload] = firstChatModifyCall(chatModify);
+    expect(payload.lastMessages[0].key.fromMe).toBe(false);
   });
 
   it('swallows chatModify errors: still returns ok and zeroes unread', async () => {
     seedChat(db, { unread: 9 });
     seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
-    const chatModify = vi.fn(async () => {
+    const chatModify = makeChatModify(async () => {
       throw new Error('boom');
     });
-    const result = await markConversationRead(db, makeConnMgr({ chatModify }), CONV_KEY);
+    const result = await markConversationRead(db, makeConnMgr(makeSocket(chatModify)), CONV_KEY);
     expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
     const row = db.raw
       .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
@@ -135,8 +168,8 @@ describe('markConversationRead', () => {
 
   it('skips chatModify when chat has no messages even if socket is present', async () => {
     seedChat(db);
-    const chatModify = vi.fn(async () => undefined);
-    await markConversationRead(db, makeConnMgr({ chatModify }), CONV_KEY);
+    const chatModify = makeChatModify();
+    await markConversationRead(db, makeConnMgr(makeSocket(chatModify)), CONV_KEY);
     expect(chatModify).not.toHaveBeenCalled();
   });
 
