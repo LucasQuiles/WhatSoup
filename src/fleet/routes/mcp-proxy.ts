@@ -116,8 +116,12 @@ function classifyToolErrorStatus(text: string): 422 | 500 {
  * for MCP tool envelopes (`isError: true`) onto HTTP status codes so every
  * proxy handler — body-less, with-body, and the legacy custom routes — gives
  * console callers a consistent failure channel.
+ *
+ * Exported so other modules that call `mcpCall` directly (e.g. routes/ops.ts
+ * for `send_message` and `add_or_edit_contact`) can route their responses
+ * through the same status-code mapping. See issue #257 parity follow-up.
  */
-function respondMcp(
+export function respondMcp(
   res: ServerResponse,
   result: { success: boolean; result?: unknown; error?: string; toolError?: boolean },
   successCode = 200,
