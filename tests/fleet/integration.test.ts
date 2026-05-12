@@ -624,3 +624,21 @@ describe('fleet integration -- DB error resilience', () => {
     expect(body.dbStats.messageCount).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 12. Request body size guard — top-level catch honors statusCode (#250)
+// ---------------------------------------------------------------------------
+
+describe('fleet integration -- body size guard', () => {
+  it('POST with body over 64 KiB returns 413, not 500', async () => {
+    const big = 'x'.repeat(128 * 1024); // 128 KiB > 64 KiB readBody default
+    const res = await fetch(`${baseUrl}/api/lines/${INST_A}/mark-read`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: big,
+    });
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/too large/i);
+  });
+});
