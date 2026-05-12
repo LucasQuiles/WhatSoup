@@ -502,7 +502,6 @@ export function findPublicSurfaceDrift(
       for (const candidate of sourcePaths) {
         const cleanedFragment = stripFragment(candidate);
         const { path: rawPath, line: cited } = parseSourceWithLine(cleanedFragment);
-        if (cited == null) continue;
         const absolute = resolveAgainstRegistry(registryDir, cwd, rawPath);
         if (!existsSync(absolute)) continue; // missing-source already emitted above
 
@@ -526,6 +525,18 @@ export function findPublicSurfaceDrift(
                 text: row.text,
               });
             }
+            continue;
+          }
+          if (cited == null) {
+            issues.push({
+              filePath,
+              line: row.line,
+              kind: 'missing-route',
+              identifier,
+              sourcePath: rawPath,
+              expected: `${httpMethodPath.method} ${httpMethodPath.path}`,
+              text: row.text,
+            });
             continue;
           }
           // No match in the parsed ROUTES table. The route may be inline (a
@@ -554,6 +565,8 @@ export function findPublicSurfaceDrift(
           });
           continue;
         }
+
+        if (cited == null) continue;
 
         // Fallback: line-anchor symbol sanity check. Use the HTTP path (without
         // query string) when available, otherwise derive symbol candidates

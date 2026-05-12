@@ -303,6 +303,42 @@ const ROUTES = [
     ]);
   });
 
+  it('flags an unanchored HTTP row whose Method+Path has no matching ROUTES entry', () => {
+    const { root, registryPath } = makeFakeRepo();
+    const routesSource = `// stub fleet routes
+const ROUTES = [
+  { method: 'GET',   path: /^\\/api\\/lines$/, handler: 'getLines' },
+] as const;
+`;
+    writeFileSync(path.join(root, 'src/fleet/index.ts'), routesSource, 'utf8');
+    const registry = `# Public surface
+
+## HTTP
+
+| Identifier | Method + Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| \`http:fleet.ghost\` | \`POST /api/ghost\` | \`src/fleet/index.ts\` | stable | active | Ghost |
+
+## MCP
+
+| Identifier | Tools | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| \`mcp:tools.messaging\` | 9 | [\`src/mcp/tools/messaging.ts\`](../src/mcp/tools/messaging.ts) | stable | active | x |
+`;
+    writeFileSync(registryPath, registry, 'utf8');
+
+    const issues = findPublicSurfaceDrift({ cwd: root });
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        kind: 'missing-route',
+        identifier: 'http:fleet.ghost',
+        sourcePath: 'src/fleet/index.ts',
+        expected: 'POST /api/ghost',
+      }),
+    ]);
+  });
+
   it('flags a line anchor whose +-5 window does not contain the expected symbol', () => {
     const { root, registryPath } = makeFakeRepo();
     // 30-line filler file, the only meaningful symbol is far from line 2.
