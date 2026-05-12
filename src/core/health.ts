@@ -25,6 +25,7 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionStateSnapshot } from '../transport/connection.ts';
+import { readBody } from '../lib/http.ts';
 
 const log = createChildLogger('health');
 
@@ -280,28 +281,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
         if (!requireAuth(req, res)) return;
 
-        // Parse body (with size limit matching /send)
-        const MAX_BODY_BYTES = 64 * 1024;
         let rawBody = '';
-        let byteCount = 0;
-        let destroyed = false;
-        await new Promise<void>((resolve) => {
-          req.on('data', (chunk: Buffer) => {
-            if (destroyed) return;
-            byteCount += chunk.byteLength;
-            if (byteCount > MAX_BODY_BYTES) {
-              destroyed = true;
-              res.writeHead(413, jsonHeaders);
-              res.end(JSON.stringify({ error: 'request body too large' }));
-              req.destroy();
-              resolve();
-              return;
-            }
-            rawBody += chunk;
-          });
-          req.once('end', resolve);
-        });
-        if (destroyed) return;
+        try {
+          rawBody = await readBody(req);
+        } catch (err) {
+          res.writeHead(agentCommandStatus(err), jsonHeaders);
+          res.end(JSON.stringify({ error: (err as Error).message }));
+          return;
+        }
 
         let data: Record<string, unknown>;
         try {
