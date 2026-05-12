@@ -535,20 +535,15 @@ describe('ConfigEditDialog — save success', () => {
     await act(async () => { resolveUpdate() })
   })
 
-  it('calls onClose without calling api when there are no changes', async () => {
+  it('calls onClose via Cancel without invoking api', async () => {
     const onClose = vi.fn()
 
     render(withProviders(
       <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
-    // Click Save without modifying anything; button is disabled so simulate direct call indirectly:
-    // no changes means patch is empty → onClose is called immediately.
-    // To test this path we need to click the button when it's not disabled.
-    // The button is disabled when patch is empty so we cannot click it via UI.
-    // Instead verify the no-api-call invariant by confirming updateConfig is not called
-    // after a save with empty patch triggered by other means.
-    // This test validates the Cancel button calls onClose instead.
+    // Save button is disabled when patch is empty, so the no-changes early-return
+    // cannot be triggered via UI. Cancel is the correct escape hatch in that state.
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
 
     expect(onClose).toHaveBeenCalledTimes(1)
@@ -792,6 +787,30 @@ describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
 
     expect(screen.getByText('modified')).toBeDefined()
   })
+
+  it('serializes agentOptions.sessionScope as a nested object in the api.updateConfig call', async () => {
+    // SOURCE SURPRISE: patch keys use dot-notation ("agentOptions.sessionScope") but
+    // handleSave calls setValueAtPath() to rebuild the nested object before calling
+    // api.updateConfig. Verify the API receives { agentOptions: { sessionScope: 'shared' } }
+    // not { 'agentOptions.sessionScope': 'shared' }.
+    updateConfigMock.mockResolvedValue(undefined)
+
+    render(withProviders(
+      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const selects = screen.getAllByRole('combobox')
+    const scopeSelect = selects.find(s => (s as HTMLSelectElement).value === 'single')
+    fireEvent.change(scopeSelect as Element, { target: { value: 'shared' } })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, expect.objectContaining({
+      agentOptions: expect.objectContaining({ sessionScope: 'shared' }),
+    }))
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -831,18 +850,16 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
     expect(screen.getByText('modified')).toBeDefined()
   })
 
-  it('builds the correct flat api patch for adminPhones changes', async () => {
+  it('blocks save and shows error when adminPhones is emptied (validator fires)', async () => {
     updateConfigMock.mockResolvedValue(undefined)
 
     render(withProviders(
       <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
-    // Remove the existing phone
+    // Remove the only existing phone — FIELD_VALIDATORS.adminPhones rejects empty array.
     fireEvent.click(screen.getByTestId('tag-remove-0'))
 
-    // FIELD_VALIDATORS.adminPhones requires at least one phone → save should be blocked.
-    // Instead verify the error message is shown.
     expect(screen.getByText('At least one admin phone is required')).toBeDefined()
     const saveBtn = screen.getByRole('button', { name: /Save/ })
     expect((saveBtn as HTMLButtonElement).disabled).toBe(true)
