@@ -48,6 +48,8 @@ const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '
 
 const log = createChildLogger('fleet');
 
+export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
+
 export interface FleetDeps {
   db: DatabaseSync;
   selfName: string;
@@ -725,8 +727,8 @@ export function createFleetServer(deps: FleetDeps) {
   // Deprecation warning state for legacy `?token=<root>` HTTP API auth.
   // Mirrors `ws_legacy_token_path` on the WebSocket path (#393): one-shot
   // per server lifetime so a misbehaving caller hitting many endpoints does
-  // not spam logs. The legacy path itself remains functional; removal-date
-  // policy is tracked separately.
+  // not spam logs. The legacy path itself remains functional until the
+  // removal date above.
   let httpLegacyTokenWarningEmitted = false;
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -795,7 +797,7 @@ export function createFleetServer(deps: FleetDeps) {
       // `ws_legacy_token_path` warning shape.
       if (queryRootOk && !httpLegacyTokenWarningEmitted) {
         httpLegacyTokenWarningEmitted = true;
-        log.warn({ legacy: 'http-token-in-url', path: pathname }, 'http_legacy_token_path');
+        log.warn({ legacy: 'http-token-in-url', path: pathname, removeAfter: HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE }, 'http_legacy_token_path');
       }
       const ticketCandidates: string[] = [];
       if (queryTicket) ticketCandidates.push(queryTicket);

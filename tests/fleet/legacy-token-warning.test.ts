@@ -73,7 +73,7 @@ vi.mock('../../src/logger.ts', () => {
   return { default: fakeLogger, createChildLogger: () => fakeLogger, flushLogger: async () => {} };
 });
 
-import { createFleetServer } from '../../src/fleet/index.ts';
+import { createFleetServer, HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE } from '../../src/fleet/index.ts';
 
 const SCHEMA_SQL = `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
@@ -219,6 +219,7 @@ describe('fleet HTTP API -- legacy ?token= deprecation warning (#393)', () => {
     expect(last.obj).toMatchObject({
       legacy: 'http-token-in-url',
       path: '/api/lines',
+      removeAfter: HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE,
     });
   });
 
@@ -229,5 +230,11 @@ describe('fleet HTTP API -- legacy ?token= deprecation warning (#393)', () => {
     );
     expect(res.status).toBe(200);
     expect(legacyWarnCount()).toBe(before);
+  });
+
+  it('documents the same removal date in README.md', () => {
+    const readme = fs.readFileSync(path.resolve('README.md'), 'utf8');
+    expect(readme).toContain(`scheduled for removal after **${HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE}**`);
+    expect(readme).toContain(`removeAfter: "${HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE}"`);
   });
 });
