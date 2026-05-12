@@ -70,7 +70,7 @@ Draft PRs still open at sweep time: `#256`, `#271`, `#272`, `#281`, `#286`, `#29
 | Memory migration mappings | Critical claim, false positive | Not actionable | `src/config-memory-migration.ts` already maps `recencyHalfLifeDays` and `maxAgeDays`; `tests/scripts/migrate-memory-config.test.ts` covers the migration. | No PR. Keep closed. |
 | Private config write | High | Covered by PR `#374` | `src/main.ts` wrote an instance `config.json` update with string encoding only; private-write tests covered other paths, not this intro-sent write. | PR `#374` adds a private intro-sent config writer plus direct mode/symlink regression coverage. |
 | Provider KPI missing | Critical claim, false positive | Not actionable | `console/src/components/line-detail/SummaryTab.tsx` already computes and displays provider; `tests/console/summary-tab-provider-card.test.ts` exists on current main. | No new feature PR. |
-| Disconnect policy consolidation | High | Actionable | `src/transport/auth.ts` and `src/transport/connection.ts` still carry separate disconnect decision logic; connection path adds flapping behavior. | Extract shared disconnect decision policy with explicit flapping branch tests. |
+| Disconnect policy consolidation | High | Covered by updated draft PR `#297` | `src/transport/auth.ts` and `src/transport/connection.ts` carried separate disconnect decision logic; connection path adds flapping behavior. | PR `#297` now routes both call sites through the shared policy and adds explicit restart-required flapping policy coverage. |
 | Access-mode constant reuse | High | Actionable | `src/config.ts` has a local `VALID_ACCESS_MODES` set while `src/core/agent-config-validator.ts` exports the canonical set through `src/instance-loader.ts`. | Import the canonical set and keep validation messages stable. |
 | Direct validator coverage | High | Actionable | `src/core/agent-config-validator.ts` has direct validation logic but no `tests/core/agent-config-validator.test.ts`; route tests cover it indirectly. | Add direct validator contract tests. |
 
@@ -96,7 +96,7 @@ The affected row is `docs/superpowers/plans/2026-04-05-phase5-analytics-observab
 ## Recommended PR Queue
 
 1. Private config write: covered by PR `#374`; do not duplicate while that PR is active.
-2. Disconnect policy consolidation: extract helper and test restart-required/flapping semantics.
+2. Disconnect policy consolidation: covered by updated draft PR `#297`; do not duplicate while that PR is active.
 3. Access-mode constant reuse: covered by draft PR `#369`; do not duplicate while that PR is active.
 4. Direct validator coverage: covered by draft PR `#372`; do not duplicate while that PR is active.
 
