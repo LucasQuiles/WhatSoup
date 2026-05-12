@@ -21,10 +21,10 @@ export function extractStatusCode(error: unknown): number | undefined {
  * Classify an API error into a structured category.
  *
  * Checks:
- *  - 401 → 'auth'
+ *  - 401, 403 → 'auth'
  *  - 429 → 'rate_limit'
  *  - 408 / AbortError → 'timeout'
- *  - 500, 502, 503 → 'server'
+ *  - 5xx → 'server'
  *  - ECONNREFUSED, ENOTFOUND → 'network'
  *  - else → 'unknown'
  */
@@ -32,10 +32,10 @@ export function classifyApiError(error: unknown): ApiErrorType {
   const statusCode = extractStatusCode(error);
 
   if (statusCode === 400) return 'bad_request';
-  if (statusCode === 401) return 'auth';
+  if (statusCode === 401 || statusCode === 403) return 'auth';
   if (statusCode === 429) return 'rate_limit';
   if (statusCode === 408) return 'timeout';
-  if (statusCode !== undefined && (statusCode === 500 || statusCode === 502 || statusCode === 503)) return 'server';
+  if (statusCode !== undefined && statusCode >= 500 && statusCode <= 599) return 'server';
 
   if (error instanceof Error) {
     if (error.name === 'AbortError') return 'timeout';
