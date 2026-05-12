@@ -79,7 +79,13 @@ export class FleetWebSocketServer {
     // Handle upgrade requests with auth
     httpServer.on('upgrade', (req: IncomingMessage, socket, head) => {
       if (!this.authenticate(req)) {
-        log.warn({ url: req.url }, 'ws_auth_rejected');
+        // Redact the query string before logging — `req.url` carries the
+        // raw `?ticket=` / `?token=` that this same handler reads for auth,
+        // so logging it raw persists secrets to the fleet log on every
+        // failed attempt (#410). Mirror the HTTP precedent in static.ts
+        // and the http_legacy_token_path log in index.ts which log only
+        // the pathname.
+        log.warn({ path: req.url?.split('?')[0] ?? '/' }, 'ws_auth_rejected');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
