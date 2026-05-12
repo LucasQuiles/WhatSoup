@@ -43,4 +43,22 @@ describe('readFleetTokenForDevProxy', () => {
 
     expect(readFleetTokenForDevProxy(tmpRoot)).toBe('');
   });
+
+  it('reflects token rotation on subsequent reads (live rotation)', () => {
+    // Initial token written before "Vite startup"
+    writeConfigFile('fleet-tokens.json', JSON.stringify({
+      active: 'a'.repeat(64),
+      accept: [],
+      rotatedAt: '2026-05-12T00:00:00.000Z',
+    }));
+    expect(readFleetTokenForDevProxy(tmpRoot)).toBe('a'.repeat(64));
+
+    // Token rotated mid-session — next read must see the new value
+    writeConfigFile('fleet-tokens.json', JSON.stringify({
+      active: 'b'.repeat(64),
+      accept: ['a'.repeat(64)],
+      rotatedAt: '2026-05-12T01:00:00.000Z',
+    }));
+    expect(readFleetTokenForDevProxy(tmpRoot)).toBe('b'.repeat(64));
+  });
 });
