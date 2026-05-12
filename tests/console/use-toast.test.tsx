@@ -36,7 +36,7 @@ import {
   vi,
 } from 'vitest';
 import { act, cleanup, render, renderHook } from '@testing-library/react';
-import { createElement, useRef, type FC, type ReactNode } from 'react';
+import { createElement, type FC, type ReactNode } from 'react';
 
 // ─── Mocks (declared before module imports) ──────────────────────────────────
 
@@ -74,7 +74,7 @@ vi.mock('framer-motion', () => ({
 }));
 
 // ─── Imports (after mocks) ────────────────────────────────────────────────────
-import { ToastContext, useToast } from '../../console/src/hooks/toast-context.ts';
+import { useToast } from '../../console/src/hooks/toast-context.ts';
 import { ToastProvider } from '../../console/src/hooks/use-toast.tsx';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -111,21 +111,9 @@ afterEach(() => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Context default value
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('ToastContext — default value', () => {
-  it('default context value is null, meaning useToast() throws outside provider', () => {
-    const ctx = (ToastContext as unknown as { _currentValue: unknown })._currentValue;
-    // Null default → hook guard fires when context is not provided.
-    expect(ctx).toBeNull();
-    // Confirm the guard actually fires (this is the behavioral consequence of null):
-    expect(() => renderHook(() => useToast())).toThrow('useToast must be used within a ToastProvider');
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. useToast outside provider → throws
+// 1. useToast outside provider → throws
+// ToastContext is created with null as default; the guard in useToast() fires
+// whenever context is null (i.e. no ToastProvider ancestor).
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('useToast — outside provider', () => {
@@ -349,7 +337,7 @@ describe('ToastProvider — ID uniqueness (module-level counter)', () => {
 
 describe('useToast — referential stability across re-renders', () => {
   it('toast, success, error, info refs are stable after state update', () => {
-    const { getApi, rerender } = renderProvider();
+    const { getApi } = renderProvider();
     const api = getApi();
     const first = {
       toast: api.toast,
@@ -395,10 +383,10 @@ describe('ToastProvider — children are rendered', () => {
     const { getByTestId, queryAllByTestId } = render(
       createElement(ToastProvider, null, createElement(Consumer)),
     );
-    expect(getByTestId('consumer-2')).toBeTruthy();
+    expect(getByTestId('consumer-2').dataset.testid).toBe('consumer-2');
     act(() => { api!.toast('success', 'side-by-side'); });
-    // Consumer still in DOM + toast stub added by provider:
-    expect(getByTestId('consumer-2')).toBeTruthy();
+    // Consumer still in DOM after toast push + toast stub added by provider:
+    expect(getByTestId('consumer-2').dataset.testid).toBe('consumer-2');
     expect(queryAllByTestId('toast-stub')).toHaveLength(1);
   });
 });
