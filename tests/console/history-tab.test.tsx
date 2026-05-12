@@ -7,6 +7,8 @@
  *
  * @vitest-environment jsdom
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -340,8 +342,6 @@ describe('HistoryTab — outgoing background by mode', () => {
   // HistoryMessages → MessageBubble. The stub doesn't render the bg directly,
   // so we pin the exact CSS var assignment in the source file directly.
   it('uses agent soft color for agent mode (source pin)', () => {
-    const { readFileSync } = require('node:fs')
-    const { resolve } = require('node:path')
     const src = readFileSync(
       resolve(import.meta.dirname, '../../console/src/components/line-detail/HistoryTab.tsx'),
       'utf8',
