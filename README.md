@@ -230,6 +230,26 @@ The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the 
 
 The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` plus a short accept-list for rotated tokens (auto-generated on first run). Existing `~/.config/whatsoup/fleet-token` files are migrated on first read and left in place for rollback.
 
+### Legacy authentication (deprecated)
+
+Passing the root fleet token via the `?token=<root>` query parameter is **deprecated** and slated for removal in a future release. The legacy path still works today, but every successful query-token authentication emits a one-shot `http_legacy_token_path` warning on the fleet server (matching the existing `ws_legacy_token_path` warning on the WebSocket path). Query-string credentials leak into access logs, browser history, and HTTP `Referer` headers, which is why the console has already migrated off this path.
+
+External scripts and integrations should obtain a short-lived audience-scoped ticket via `POST /api/auth-ticket` using the root token as a Bearer credential:
+
+```bash
+# 1. Mint an api-audience ticket (root Bearer required)
+TICKET=$(curl -sS -X POST "http://127.0.0.1:9099/api/auth-ticket" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"audience":"api"}' | jq -r .ticket)
+
+# 2. Use the ticket as a Bearer credential on subsequent API requests
+curl -sS "http://127.0.0.1:9099/api/lines" \
+  -H "Authorization: Bearer $TICKET"
+```
+
+Tickets are single-use, audience-scoped (`api` or `sse`), and expire quickly; mint a fresh one per logical operation. Bearer authentication with the root token itself remains supported and does not trigger the deprecation warning. The removal-date policy for the legacy query-token path is tracked in [issue #393](https://github.com/LucasQuiles/WhatSoup/issues/393).
+
 `POST /api/lines/:name/send` accepts exactly one target: raw `chatJid` or alias `to`. Aliases resolve through that instance's private `chatAliases` config and `chat_aliases` table. Requests may also pass a named send `profile`.
 
 ## Instance Model
