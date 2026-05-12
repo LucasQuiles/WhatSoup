@@ -185,11 +185,9 @@ export class FleetDiscovery {
 }
 
 function validateConfig(raw: Record<string, unknown>, name: string): string | null {
-  // Thin wrapper around the shared validator. 'discovery' mode preserves the
-  // legacy looser healthPort range (1..65535) so a pre-existing on-disk config
-  // with a low port still scans (operators see configError in the UI) instead
-  // of being silently dropped. Writes (CREATE/PATCH) use the stricter
-  // 1024..65535 range to prevent the operator-bricking bug (#244).
+  // Thin wrapper around the shared validator. Discovery stays aligned with
+  // load-time validation so scans do not mark a config valid when restart would
+  // reject it. Invalid configs are still surfaced with configError in the UI.
   const error = validateInstanceConfig(raw, { name, mode: 'discovery' });
   return error ? error.message : null;
 }

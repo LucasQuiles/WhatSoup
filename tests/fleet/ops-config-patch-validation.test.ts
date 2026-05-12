@@ -163,6 +163,19 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     expect(res._status).toBe(200);
     expect(JSON.parse(res._body).healthPort).toBe(9200);
   });
+
+  it('rejects type changes with 400 and leaves the file untouched', async () => {
+    const cfg = writeConfig('test-line');
+    const before = fs.readFileSync(cfg, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ type: 'passive' })),
+      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+    );
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/type is immutable/);
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
+  });
 });
 
 describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
@@ -324,6 +337,7 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
       res, makeDeps(inst), { name: 'roundtrip' },
     );
     expect(res._status).toBe(200);
+    const responseBody = JSON.parse(res._body);
 
     const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
     expect(persisted.agentOptions.sessionScope).toBe('shared');
@@ -332,6 +346,7 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
     expect(persisted.accessMode).toBe('self_only');
     const loadErr = validateInstanceConfig(persisted, { name: 'roundtrip', mode: 'load' });
     expect(loadErr).toBeNull();
+    expect(responseBody.agentOptions.provider).toBe('claude-cli');
   });
 
   it('rejects a PATCH that would render the instance unloadable and leaves the file untouched', async () => {

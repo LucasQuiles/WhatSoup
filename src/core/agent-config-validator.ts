@@ -43,12 +43,14 @@ export interface ValidatorContext {
    *  - 'create': healthPort range 1024-65535, full strict validation, name format checked by caller.
    *  - 'patch':  healthPort range 1024-65535, immutability of name/type enforced, full strict.
    *  - 'load':   healthPort range 1024-65535 (defense-in-depth on persisted file).
-   *  - 'discovery': healthPort range 1-65535 (legacy looser bound — see reconciliation note in PR).
+   *  - 'discovery': healthPort range 1024-65535 to match load-time validation.
    * The 'load' and 'discovery' modes also accept absent agentOptions on non-agent types.
    */
   mode: 'create' | 'patch' | 'load' | 'discovery';
   /** Existing instances keyed by name, used for healthPort duplicate detection. */
   existingHealthPorts?: ReadonlyMap<string, number>;
+  /** On PATCH, the pre-merge type from the persisted config. */
+  originalType?: unknown;
   /** When true (loader auth-only flow), skip agentOptions/systemPrompt-shape rules. */
   authOnly?: boolean;
 }
@@ -67,6 +69,18 @@ export function validateInstanceConfig(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
 ): ValidationError | null {
+  if (ctx.mode === 'load') {
+    if (raw['name'] === undefined) {
+      return err('name', `Missing required field "name" in ${ctx.name}`);
+    }
+    if (raw['type'] === undefined) {
+      return err('type', `Missing required field "type" in ${ctx.name}`);
+    }
+    if (raw['accessMode'] === undefined) {
+      return err('accessMode', `Missing required field "accessMode" in ${ctx.name}`);
+    }
+  }
+
   // --- name ---
   // On 'load' the file's name MUST match the directory name (legacy behavior).
   // On 'patch' the name field is immutable — patch payload cannot rewrite it.
@@ -84,6 +98,9 @@ export function validateInstanceConfig(
   }
 
   // --- type ---
+  if (ctx.mode === 'patch' && ctx.originalType !== undefined && raw['type'] !== ctx.originalType) {
+    return err('type', 'type is immutable and cannot be changed via PATCH');
+  }
   if (raw['type'] !== undefined && !VALID_TYPES.has(String(raw['type']))) {
     if (ctx.mode === 'create' || ctx.mode === 'patch') {
       return err('type', `type must be one of: ${[...VALID_TYPES].join(', ')}`);
@@ -114,18 +131,8 @@ export function validateInstanceConfig(
     if (typeof port !== 'number' || !Number.isFinite(port) || !Number.isInteger(port)) {
       return err('healthPort', 'healthPort must be an integer');
     }
-    if (ctx.mode === 'discovery') {
-      // Legacy looser bound preserved for discovery scans of pre-existing configs.
-      if (port < 1 || port > 65535) {
-        return err(
-          'healthPort',
-          `Invalid healthPort "${String(port)}": must be a number between 1 and 65535`,
-        );
-      }
-    } else {
-      if (port < 1024 || port > 65535) {
-        return err('healthPort', 'healthPort must be between 1024 and 65535');
-      }
+    if (port < 1024 || port > 65535) {
+      return err('healthPort', 'healthPort must be between 1024 and 65535');
     }
     // Duplicate check (CREATE / PATCH only; existingHealthPorts excludes self by caller).
     if ((ctx.mode === 'create' || ctx.mode === 'patch') && ctx.existingHealthPorts) {

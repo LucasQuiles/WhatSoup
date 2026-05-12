@@ -467,6 +467,7 @@ export async function handleConfigUpdate(
       name: params.name,
       mode: 'patch',
       existingHealthPorts: existingHealthPortMap(params.name),
+      originalType: existing.type,
     });
     if (validationError) {
       if (!emitValidationError(validationError, res)) return;

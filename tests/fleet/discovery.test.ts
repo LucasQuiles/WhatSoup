@@ -238,6 +238,24 @@ describe('FleetDiscovery.scan — malformed config.json', () => {
     expect(broken?.configError).toMatch(/Invalid type/i);
   });
 
+  it('keeps instances with load-invalid healthPort and marks them config_error', () => {
+    writeInstanceConfig('low-port', {
+      name: 'low-port',
+      type: 'chat',
+      systemPrompt: 'You are low port.',
+      accessMode: 'self_only',
+      adminPhones: ['15551234567'],
+      healthPort: 80,
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const instances = discovery.scan();
+
+    const broken = instances.get('low-port');
+    expect(broken).toBeDefined();
+    expect(broken?.configError).toMatch(/healthPort must be between 1024 and 65535/);
+  });
+
   it('keeps instances with invalid chatAliases and marks them config_error', () => {
     writeInstanceConfig('bad-aliases', {
       ...chatInstance,
