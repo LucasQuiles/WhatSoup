@@ -5,6 +5,10 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
+// Keep copyable Tailwind class examples in ESLint output without exposing
+// those examples as raw content for Tailwind/Vite class extraction.
+const tw = (...parts) => parts.join('')
+
 // ╔══════════════════════════════════════════════════════════════════╗
 // ║  TOKEN CHEAT SHEET — reference for fixing lint errors           ║
 // ║  All tokens are defined in src/index.css                        ║
@@ -133,15 +137,14 @@ const designSystemRestrictions = [
 
         // ═══ TAILWIND FONT-SIZE PATTERNS ═══
         // text-xs, text-sm, text-xl etc. map to @theme --text-* tokens — use directly.
-        // text-[var(--font-size-*)] generates NO CSS in TW4 (ambiguous font-size vs color).
-        // text-[var(--text-*)] is redundant — use text-* instead.
+        // Arbitrary font-size/text var() forms are ambiguous or redundant in TW4.
         {
           selector: 'Literal[value=/text-\\[var\\(--font-size-/]',
-          message: '⛔ text-[var(--font-size-*)] generates NO CSS in Tailwind v4. FIX: use text-* utility directly. text-[var(--font-size-sm)]→"text-sm". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+          message: `⛔ ${tw('text-', '[var(--font-size-*)]')} generates NO CSS in Tailwind v4. FIX: use text-* utility directly. ${tw('text-', '[var(--font-size-sm)]')}→"text-sm". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.`,
         },
         {
           selector: 'Literal[value=/text-\\[var\\(--text-/]',
-          message: '⛔ text-[var(--text-*)] is redundant. FIX: use text-* utility directly. text-[var(--text-sm)]→"text-sm". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+          message: `⛔ ${tw('text-', '[var(--text-*)]')} is redundant. FIX: use text-* utility directly. ${tw('text-', '[var(--text-sm)]')}→"text-sm". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.`,
         },
 
         {
@@ -211,18 +214,18 @@ const designSystemRestrictions = [
           selector: 'JSXAttribute[name.name="style"] Property[key.name="background"][value.value=/^var\\(--color-d\\d\\)$/]',
           message: '⛔ Simple background color in style. FIX: remove from style, add to className. var(--color-d0)→"bg-d0" var(--color-d1)→"bg-d1" var(--color-d2)→"bg-d2" var(--color-d3)→"bg-d3" var(--color-d4)→"bg-d4" var(--color-d5)→"bg-d5" var(--color-d6)→"bg-d6".',
         },
-        // background: 'var(--*)' (non-dN tokens) → bg-[var(--*)] class
+        // background: 'var(--*)' (non-dN tokens) → Tailwind arbitrary background class
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="background"][value.value=/^var\\(--(?!color-d\\d)/]',
-          message: '⛔ background token in style. FIX: remove from style, add to className. background: "var(--s-warn-wash)"→"bg-[var(--s-warn-wash)]" background: "var(--overlay)"→"bg-[var(--overlay)]". Pattern: bg-[var(--TOKEN)].',
+          message: `⛔ background token in style. FIX: remove from style, add to className. background: "var(--s-warn-wash)"→"${tw('bg-', '[var(--s-warn-wash)]')}" background: "var(--overlay)"→"${tw('bg-', '[var(--overlay)]')}". Pattern: ${tw('bg-', '[var(--TOKEN)]')}.`,
         },
 
         // ═══ TAILWIND ARBITRARY PX VALUES ═══
-        // Tailwind arbitrary values like w-[60px] bypass the token system.
-        // Use w-[var(--*)] with a CSS variable instead.
+        // Tailwind arbitrary pixel values bypass the token system.
+        // Use a Tailwind arbitrary value with a CSS variable instead.
         {
           selector: 'Literal[value=/\\b(w|h|min-w|min-h|max-w|max-h|p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|top|bottom|left|right)-\\[\\d+px\\]/]',
-          message: '⛔ Tailwind arbitrary px value bypasses tokens. FIX: replace [Npx] with [var(--sp-*)] or [var(--size-token)]. E.g. w-[60px]→w-[var(--token)] gap-[8px]→gap-[var(--sp-2)]. Define new tokens in index.css if needed.',
+          message: `⛔ Tailwind arbitrary px value bypasses tokens. FIX: replace [Npx] with [var(--sp-*)] or [var(--size-token)]. E.g. ${tw('w-', '[60px]')}→${tw('w-', '[var(--token)]')} ${tw('gap-', '[8px]')}→${tw('gap-', '[var(--sp-2)]')}. Define new tokens in index.css if needed.`,
         },
 
         // ═══ BORDER EDGE SHORTHAND IN STYLE ═══
@@ -252,23 +255,23 @@ const designSystemRestrictions = [
         // width/height/min/max with var(--*) tokens → Tailwind arbitrary value classes
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="width"][value.value=/^var\\(--/]',
-          message: '⛔ width token in style. FIX: remove from style, add to className. width: "var(--avatar-sm)"→"w-[var(--avatar-sm)]" width: "var(--sp-3)"→"w-[var(--sp-3)]". Pattern: w-[var(--TOKEN)].',
+          message: `⛔ width token in style. FIX: remove from style, add to className. width: "var(--avatar-sm)"→"${tw('w-', '[var(--avatar-sm)]')}" width: "var(--sp-3)"→"${tw('w-', '[var(--sp-3)]')}". Pattern: ${tw('w-', '[var(--TOKEN)]')}.`,
         },
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="height"][value.value=/^var\\(--/]',
-          message: '⛔ height token in style. FIX: remove from style, add to className. height: "var(--avatar-sm)"→"h-[var(--avatar-sm)]" height: "var(--sp-3)"→"h-[var(--sp-3)]". Pattern: h-[var(--TOKEN)].',
+          message: `⛔ height token in style. FIX: remove from style, add to className. height: "var(--avatar-sm)"→"${tw('h-', '[var(--avatar-sm)]')}" height: "var(--sp-3)"→"${tw('h-', '[var(--sp-3)]')}". Pattern: ${tw('h-', '[var(--TOKEN)]')}.`,
         },
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="minHeight"][value.value=/^var\\(--/]',
-          message: '⛔ minHeight token in style. FIX: remove from style, add to className. minHeight: "var(--toolbar-h)"→"min-h-[var(--toolbar-h)]". Pattern: min-h-[var(--TOKEN)].',
+          message: `⛔ minHeight token in style. FIX: remove from style, add to className. minHeight: "var(--toolbar-h)"→"${tw('min-h-', '[var(--toolbar-h)]')}". Pattern: ${tw('min-h-', '[var(--TOKEN)]')}.`,
         },
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="maxWidth"][value.value=/^var\\(--/]',
-          message: '⛔ maxWidth token in style. FIX: remove from style, add to className. maxWidth: "var(--empty-max-w)"→"max-w-[var(--empty-max-w)]". Pattern: max-w-[var(--TOKEN)].',
+          message: `⛔ maxWidth token in style. FIX: remove from style, add to className. maxWidth: "var(--empty-max-w)"→"${tw('max-w-', '[var(--empty-max-w)]')}". Pattern: ${tw('max-w-', '[var(--TOKEN)]')}.`,
         },
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="minWidth"][value.value=/^var\\(--(?!bw)/]',
-          message: '⛔ minWidth token in style. FIX: remove from style, add to className. minWidth: "var(--feed-min-w)"→"min-w-[var(--feed-min-w)]". Pattern: min-w-[var(--TOKEN)]. Note: minWidth: 0 is handled by the min-w-0 rule.',
+          message: `⛔ minWidth token in style. FIX: remove from style, add to className. minWidth: "var(--feed-min-w)"→"${tw('min-w-', '[var(--feed-min-w)]')}". Pattern: ${tw('min-w-', '[var(--TOKEN)]')}. Note: minWidth: 0 is handled by the min-w-0 rule.`,
         },
 
         // ═══ MARGIN TOKEN IN STYLE ═══
@@ -330,10 +333,10 @@ const designSystemRestrictions = [
         },
 
         // ═══ GAP TOKEN IN STYLE ═══
-        // gap: 'var(--sp-*)' in JSX style should be a gap-[var(--sp-*)] class
+        // gap: 'var(--sp-*)' in JSX style should become a Tailwind arbitrary gap class
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="gap"][value.value=/^var\\(--sp-/]',
-          message: '⛔ gap token in style. FIX: remove gap from style, add to className. gap: "var(--sp-1)"→"gap-[var(--sp-1)]" gap: "var(--sp-2)"→"gap-[var(--sp-2)]" etc. Pattern: gap-[var(--sp-N)].',
+          message: `⛔ gap token in style. FIX: remove gap from style, add to className. gap: "var(--sp-1)"→"${tw('gap-', '[var(--sp-1)]')}" gap: "var(--sp-2)"→"${tw('gap-', '[var(--sp-2)]')}" etc. Pattern: ${tw('gap-', '[var(--sp-N)]')}.`,
         },
 
         // ═══ BORDER RADIUS TOKEN IN STYLE ═══
@@ -456,10 +459,10 @@ const designSystemRestrictions = [
           selector: 'Property[key.name="boxShadow"][value.value=/^[0-9]/]',
           message: '⛔ Hardcoded boxShadow. FIX: replace with token. Options: var(--card-shadow) var(--shadow-inset) var(--shadow-md) var(--shadow-lg). For glow: var(--s-ok-glow) var(--s-warn-glow) var(--s-crit-glow).',
         },
-        // boxShadow with token → shadow-[var(--*)] class
+        // boxShadow with token → Tailwind arbitrary shadow class
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="boxShadow"][value.value=/^var\\(--/]',
-          message: '⛔ boxShadow token in style. FIX: remove from style, add to className. boxShadow: "var(--card-shadow)"→"shadow-[var(--card-shadow)]". Pattern: shadow-[var(--TOKEN)].',
+          message: `⛔ boxShadow token in style. FIX: remove from style, add to className. boxShadow: "var(--card-shadow)"→"${tw('shadow-', '[var(--card-shadow)]')}". Pattern: ${tw('shadow-', '[var(--TOKEN)]')}.`,
         },
 
         // ═══ FOCUS RINGS ═══
@@ -610,7 +613,7 @@ const scheduledGroupsDesignSystemRestrictions = [
   },
   {
     selector: 'JSXAttribute[name.name="style"] Property[key.name=/^(left|right)$/][value.value=/^var\\(--sp/]',
-    message: '⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.',
+    message: `⛔ Inline left/right with token. FIX: remove from style, add ${tw('left-', '[var(--TOKEN)]')} or ${tw('right-', '[var(--TOKEN)]')} to className.`,
   },
 
   // ═══ LAYOUT-IN-STYLE — move to className ═══
