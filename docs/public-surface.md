@@ -174,7 +174,7 @@ Each instance config file is at `$XDG_CONFIG_HOME/whatsoup/instances/<name>/conf
 
 | Identifier | Type | Source | Schema | Stability | Status | Notes |
 |---|---|---|---|---|---|---|
-| `config:instance_config.top-level` | config-key | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | v1 (bootstrap) | stable | active | `name`, `type`, `adminPhones`, `accessMode`, `systemPrompt`, `models`, `memory`, `maxTokens`, `tokenBudget`, `rateLimitPerHour`, `healthPort`, `siblingPhones`, `chatAliases`, `profiles`, `toolUpdateMode`, `operationTracker`, `agentOptions` |
+| `config:instance_config.top-level` | config-key | [docs/configuration.md §Top-Level Fields](configuration.md#top-level-fields) | v1 (bootstrap) | stable | active | `enabled`, `name`, `type`, `adminPhones`, `accessMode`, `systemPrompt`, `models`, `memory`, `maxTokens`, `tokenBudget`, `rateLimitPerHour`, `healthPort`, `siblingPhones`, `chatAliases`, `profiles`, `toolUpdateMode`, `operationTracker`, `agentOptions` |
 | `config:instance_config.access-modes` | config-key | [docs/configuration.md §Access Modes](configuration.md#access-modes) | v1 (bootstrap) | stable | active | `self_only`, `allowlist`, `open_dm`, `groups_only` |
 | `config:instance_config.models` | config-key | [docs/configuration.md §models Object](configuration.md#models-object) | v1 (bootstrap) | stable | active | `conversation`, `extraction`, `validation`, `fallback` |
 | `config:instance_config.memory` | config-key | [docs/configuration.md §memory](configuration.md#memory) | v1 (bootstrap) | stable | active | Canonical BYOK memory/search config; supersedes legacy `pinecone*` flat fields |
