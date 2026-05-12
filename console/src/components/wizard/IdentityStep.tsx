@@ -3,6 +3,7 @@ import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
+import { slugAgentWorkspaceName } from '../../lib/agent-cwd.ts'
 import { validatePhone } from '../../lib/validation'
 
 interface IdentityStepProps {
@@ -37,13 +38,6 @@ const TYPE_OPTIONS = [
   },
 ]
 
-function slugify(input: string): string {
-  return input
-    .toLowerCase()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
-}
-
 type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 
 const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocked }) => {
@@ -68,7 +62,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
     if (debounceRef.current) clearTimeout(debounceRef.current)
     if (abortRef.current) abortRef.current.abort()
 
-    const slug = slugify(name)
+    const slug = slugAgentWorkspaceName(name)
 
     debounceRef.current = setTimeout(() => {
       if (!slug) {
@@ -120,7 +114,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           <input
             type="text"
             value={name}
-            onChange={(e) => onChange({ name: slugify(e.target.value) })}
+            onChange={(e) => onChange({ name: slugAgentWorkspaceName(e.target.value) })}
             placeholder="my-line"
             className={`c-input font-mono${nameLocked ? ' opacity-[var(--opacity-muted)] cursor-not-allowed' : ''}`}
             disabled={nameLocked}
