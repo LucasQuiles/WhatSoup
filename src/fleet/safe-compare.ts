@@ -13,10 +13,12 @@
 //
 // `safeStringEqual` normalizes both sides to Buffers up front, gates on
 // `byteLength` equality (the correct invariant for `timingSafeEqual`), and
-// wraps the comparison in try/catch so any future Node-level surprise becomes
-// a `false` instead of a 500. Returns `false` for null/undefined/non-string
-// inputs and for any pair where both sides are empty — callers must not be
-// able to authenticate by supplying nothing on both sides.
+// rejects unpaired surrogates before encoding so malformed Unicode cannot be
+// accepted after UTF-8 replacement-character normalization. It also wraps the
+// comparison in try/catch so any future Node-level surprise becomes a `false`
+// instead of a 500. Returns `false` for null/undefined/non-string inputs and
+// for any pair where both sides are empty — callers must not be able to
+// authenticate by supplying nothing on both sides.
 //
 // Precedent: this is the same shape as `safeEqual` in
 // `src/fleet/auth-ticket.ts`. That copy is the template; this module is the
@@ -24,11 +26,27 @@
 
 import * as crypto from 'node:crypto';
 
+function isWellFormedUtf16(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      if (i + 1 >= value.length) return false;
+      const next = value.charCodeAt(i + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      i += 1;
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) return false;
+  }
+  return true;
+}
+
 /**
  * Constant-time equality check for two strings.
  *
  * Returns `false` (never throws) on any of:
  *   - either side is not a non-empty string
+ *   - either side contains malformed UTF-16
  *   - the UTF-8 byteLengths differ
  *   - `crypto.timingSafeEqual` raises (defense-in-depth)
  *
@@ -38,6 +56,7 @@ import * as crypto from 'node:crypto';
 export function safeStringEqual(a: unknown, b: unknown): boolean {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   if (a.length === 0 || b.length === 0) return false;
+  if (!isWellFormedUtf16(a) || !isWellFormedUtf16(b)) return false;
   try {
     const aBuf = Buffer.from(a, 'utf8');
     const bBuf = Buffer.from(b, 'utf8');

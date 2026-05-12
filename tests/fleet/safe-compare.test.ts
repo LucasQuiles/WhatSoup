@@ -42,18 +42,15 @@ describe('safeStringEqual', () => {
   it('returns false for lone-surrogate inputs without throwing', () => {
     expect(() => safeStringEqual('\uD800', 'a')).not.toThrow();
     expect(safeStringEqual('\uD800', 'a')).toBe(false);
-    // Same lone surrogate on both sides — still false-or-true, but MUST NOT throw.
+    expect(safeStringEqual('\uD800', '\uD800')).toBe(false);
+    expect(safeStringEqual('\uD800', '\uFFFD')).toBe(false);
     expect(() => safeStringEqual('\uD800', '\uD800')).not.toThrow();
   });
 
   it('returns false for null / undefined / non-string inputs', () => {
-    // @ts-expect-error -- exercising runtime null guard.
     expect(safeStringEqual(null, 'hello')).toBe(false);
-    // @ts-expect-error -- exercising runtime undefined guard.
     expect(safeStringEqual('hello', undefined)).toBe(false);
-    // @ts-expect-error -- exercising runtime null guard.
     expect(safeStringEqual(null, null)).toBe(false);
-    // @ts-expect-error -- exercising runtime non-string guard.
     expect(safeStringEqual(42, 'hello')).toBe(false);
   });
 

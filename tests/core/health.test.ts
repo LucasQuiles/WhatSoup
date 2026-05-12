@@ -317,6 +317,16 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(401);
   });
 
+  it('returns 401 for multibyte malformed Bearer tokens without crashing', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'a'.repeat(10);
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: `Bearer ${'é'.repeat(10)}`,
+    });
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+  });
+
   it('proceeds (200) when correct Bearer token is provided', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello' });
