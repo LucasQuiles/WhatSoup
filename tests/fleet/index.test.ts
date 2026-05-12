@@ -582,8 +582,14 @@ describe('fleet server -- API route dispatch (real factory)', () => {
             instances: [{ instance: INST_B, updated_at: '2026-05-02T00:00:00Z' }],
           },
         ],
+        resolution: {
+          phone_jid: '15550002002@s.whatsapp.net',
+          source_instance: INST_B,
+          reason: 'freshest',
+        },
       },
     ]);
+    expect(body.conflict_count).toBe(body.conflicts.length);
   });
 
   it('POST /api/lid-mappings/sync keeps legacy result counts and exposes detailed counters separately', async () => {

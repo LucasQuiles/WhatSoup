@@ -25,10 +25,11 @@ import {
   handleGetGroupRequests, handleGroupRequestsUpdate,
 } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
-import { importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
+import { compareLidUpdatedAt, importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
+import { publishLidConflict } from './realtime-publisher.ts';
 import { FleetRealtimeEventPoller } from './realtime-event-poller.ts';
 import {
   loadOrCreateFleetTokens as loadOrCreateFleetTokensImpl,
@@ -347,13 +348,78 @@ type UnifiedLidMapping = {
   instances: LidMappingInstance[];
 };
 
+type ConflictResolutionReason = 'freshest' | 'tied-deterministic';
+
+type ConflictResolution = {
+  phone_jid: string;
+  source_instance: string;
+  reason: ConflictResolutionReason;
+};
+
 type ConflictingLidMapping = {
   lid: string;
   phones: Array<{
     phone_jid: string;
     instances: LidMappingInstance[];
   }>;
+  /**
+   * Deterministic resolution preview (#251 §3.3). Mirrors `writeLidMapping`
+   * in `freshness-gated` mode: parsed max `updated_at` wins; on tie,
+   * alphabetical `phone_jid` wins with reason `tied-deterministic`.
+   * `source_instance` is the instance whose observation provided the winning
+   * phone's max `updated_at`; on a within-phone tie, alphabetically-first
+   * instance.
+   */
+  resolution: ConflictResolution;
 };
+
+/**
+ * Compute the deterministic resolution for a conflicting LID. The conflict's
+ * `phones` array is assumed already sorted alphabetically by phone_jid and
+ * each phone's `instances` is assumed already sorted via `compareLidInstances`
+ * (instance name ascending then updated_at ascending).
+ */
+function resolveConflict(phones: ConflictingLidMapping['phones']): ConflictResolution {
+  // Per phone, derive the maximum observed updated_at + the instance that
+  // provided it. On within-phone tie, pick the alphabetically-first instance.
+  const perPhone = phones.map(({ phone_jid, instances }) => {
+    let maxAt = '';
+    let maxInst = '';
+    for (const inst of instances) {
+      const byFreshness = maxAt === '' ? 1 : compareLidUpdatedAt(inst.updated_at, maxAt);
+      if (byFreshness > 0) {
+        maxAt = inst.updated_at;
+        maxInst = inst.instance;
+      } else if (byFreshness === 0 && (maxInst === '' || inst.instance < maxInst)) {
+        maxInst = inst.instance;
+      }
+    }
+    return { phone_jid, maxAt, maxInst };
+  });
+
+  // Find the overall freshest phone(s).
+  const overallMax = perPhone.reduce(
+    (acc, p) => (acc === '' || compareLidUpdatedAt(p.maxAt, acc) > 0 ? p.maxAt : acc),
+    '',
+  );
+  const tied = perPhone.filter(p => compareLidUpdatedAt(p.maxAt, overallMax) === 0);
+
+  if (tied.length === 1) {
+    return {
+      phone_jid: tied[0].phone_jid,
+      source_instance: tied[0].maxInst,
+      reason: 'freshest',
+    };
+  }
+
+  // Tied: alphabetically-first phone wins.
+  const winner = tied.toSorted((a, b) => a.phone_jid.localeCompare(b.phone_jid))[0];
+  return {
+    phone_jid: winner.phone_jid,
+    source_instance: winner.maxInst,
+    reason: 'tied-deterministic',
+  };
+}
 
 function compareLidInstances(a: LidMappingInstance, b: LidMappingInstance): number {
   return a.instance.localeCompare(b.instance) || a.updated_at.localeCompare(b.updated_at);
@@ -393,12 +459,14 @@ function buildConflictExplicitLidMappings(observations: LidMappingObservation[])
       continue;
     }
 
+    const sortedPhones = phones.map(([phone_jid, instances]) => ({
+      phone_jid,
+      instances: instances.toSorted(compareLidInstances),
+    }));
     conflicts.push({
       lid,
-      phones: phones.map(([phone_jid, instances]) => ({
-        phone_jid,
-        instances: instances.toSorted(compareLidInstances),
-      })),
+      phones: sortedPhones,
+      resolution: resolveConflict(sortedPhones),
     });
   }
 
@@ -433,7 +501,14 @@ function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: 
     }
 
     const { unified, conflicts } = buildConflictExplicitLidMappings(observations);
-    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length, unified, conflicts });
+
+    jsonResponse(res, 200, {
+      mappings: allMappings,
+      count: allMappings.length,
+      unified,
+      conflicts,
+      conflict_count: conflicts.length,
+    });
   } catch (err) {
     log.error({ err }, 'L5: failed to export LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
@@ -518,6 +593,14 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
           schemaVersion: r.schemaVersion,
           ...(r.skipped ? { skipped: true, reason: r.reason } : {}),
         };
+        // Surface every freshness-rejected write so consoles can refetch
+        // the mappings panel (#251). `r.conflicts` is the array of writes
+        // that lost the gate on this peer.
+        if (!r.skipped) {
+          for (const c of r.conflicts) {
+            publishLidConflict(deps.realtime, inst.name, c.lid);
+          }
+        }
         if (r.skipped) {
           skippedInstances.push({
             instance: inst.name,

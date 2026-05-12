@@ -46,9 +46,11 @@ export type LidWriteSource = 'L1' | 'L1.5' | 'L2' | 'L3' | 'L4' | 'L5' | 'L6';
  *   - 'overwrite':       ON CONFLICT DO UPDATE unconditionally. L1.5/L2/L3/L4
  *                        (local observation is always considered current).
  *   - 'freshness-gated': ON CONFLICT DO UPDATE only when the incoming
- *                        observed_updated_at strictly exceeds the existing
- *                        row's updated_at. Used by L5 to prevent stale
- *                        cross-instance imports from clobbering newer data.
+ *                        observed_updated_at is preferred over the existing
+ *                        row's updated_at. Equal timestamps converge to the
+ *                        alphabetically-first phone_jid. Used by L5 to prevent
+ *                        stale cross-instance imports from clobbering newer
+ *                        data while keeping deterministic ties convergent.
  */
 export type LidWriteMode = 'skip-if-exists' | 'overwrite' | 'freshness-gated';
 
@@ -89,10 +91,25 @@ function timestampToEpochMs(value: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function isStrictlyNewerTimestamp(incoming: string, existing: string): boolean {
-  const incomingMs = timestampToEpochMs(incoming);
-  const existingMs = timestampToEpochMs(existing);
-  return incomingMs !== null && existingMs !== null && incomingMs > existingMs;
+export function compareLidUpdatedAt(left: string, right: string): number {
+  const leftMs = timestampToEpochMs(left);
+  const rightMs = timestampToEpochMs(right);
+  if (leftMs !== null && rightMs !== null) return Math.sign(leftMs - rightMs);
+  if (leftMs !== null) return 1;
+  if (rightMs !== null) return -1;
+  return left.localeCompare(right);
+}
+
+export function isPreferredLidObservation(
+  incomingPhoneJid: string,
+  incomingUpdatedAt: string | undefined,
+  existingPhoneJid: string,
+  existingUpdatedAt: string,
+): boolean {
+  if (!incomingUpdatedAt) return false;
+  const byFreshness = compareLidUpdatedAt(incomingUpdatedAt, existingUpdatedAt);
+  if (byFreshness !== 0) return byFreshness > 0;
+  return incomingPhoneJid.localeCompare(existingPhoneJid) < 0;
 }
 
 /**
@@ -104,9 +121,10 @@ function isStrictlyNewerTimestamp(incoming: string, existing: string): boolean {
  *   - On unchanged phone: no-op (no DB write, no history row).
  *   - On flip (different phone): updates lid_mappings; appends history row;
  *     runs retention cleanup for this LID.
- *   - Freshness-gated mode: write only if incoming observed_updated_at is
- *     strictly greater than the existing row's updated_at. Otherwise returns
- *     written=false with a populated `conflict` field for caller diagnostics.
+ *   - Freshness-gated mode: write only if the incoming observation is fresher,
+ *     or if it has the same updated_at and an alphabetically-earlier phone_jid.
+ *     Otherwise returns written=false with a populated `conflict` field for
+ *     caller diagnostics.
  *
  * Transaction policy: this function performs multiple SQL statements but does
  * NOT issue BEGIN/COMMIT. Callers that need cross-row atomicity must wrap
@@ -134,7 +152,7 @@ export function writeLidMapping(
   if (existing && mode === 'freshness-gated') {
     const incoming = opts.observedUpdatedAt;
     if (existing.phone_jid === phoneJid) {
-      if (incoming && isStrictlyNewerTimestamp(incoming, existing.updated_at)) {
+      if (incoming && compareLidUpdatedAt(incoming, existing.updated_at) > 0) {
         rawDb
           .prepare('UPDATE lid_mappings SET updated_at = ? WHERE lid = ?')
           .run(incoming, lid);
@@ -144,7 +162,7 @@ export function writeLidMapping(
       return { written: false, flipped: false };
     }
 
-    if (!incoming || !isStrictlyNewerTimestamp(incoming, existing.updated_at)) {
+    if (!isPreferredLidObservation(phoneJid, incoming, existing.phone_jid, existing.updated_at)) {
       return {
         written: false,
         flipped: false,
@@ -428,10 +446,11 @@ export function mineGroupParticipants(
 /**
  * Cross-instance LID-mapping import (fleet sync endpoint).
  *
- * Strict freshness gate (#251): a mapping from another instance is only
- * written when `observedUpdatedAt > existing.updated_at`. Same-or-older
- * observations are reported as conflicts via the return value; the caller
- * (fleet route or operator) decides what to do with them.
+ * Freshness gate (#251): a mapping from another instance is only written when
+ * it has a preferred observation timestamp, or when equal timestamps converge
+ * to the alphabetically-first phone_jid. Non-preferred observations are
+ * reported as conflicts via the return value; the caller (fleet route or
+ * operator) decides what to do with them.
  *
  * Each row may carry the source-instance `updated_at` (its own observation
  * time). When provided, that value is persisted into the target row's
