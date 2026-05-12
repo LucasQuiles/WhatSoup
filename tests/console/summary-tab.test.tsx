@@ -85,7 +85,26 @@ function makeLine(overrides: LineOverrides = {}): LineInstance {
 
 describe('SummaryTab — agent-mode PROVIDER card', () => {
   it('renders the PROVIDER label with the provider display name when line.provider is set', () => {
-    const line = makeLine({ mode: 'agent', provider: 'openai-api', activeSessions: 0 })
+    const line = makeLine({
+      mode: 'agent',
+      provider: 'openai-api',
+      activeSessions: 0,
+      config: { agentOptions: { provider: 'codex-cli' } },
+      health: {
+        status: 'ok',
+        uptime_seconds: 0,
+        messages_total: 0,
+        connection: { state: 'connected' },
+        sqlite: { messages_total: 0, schema_version: 1 },
+        instance: {
+          name: 'test-line',
+          mode: 'agent',
+          accessMode: 'allowlist',
+          socketPath: null,
+          provider: 'codex-cli',
+        },
+      },
+    })
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
@@ -115,12 +134,26 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
           provider: 'codex-cli',
         },
       },
+      config: { agentOptions: { provider: 'openai-api' } },
     })
 
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
     const card = screen.getByText('PROVIDER').closest('div.c-card') as HTMLElement
     expect(within(card).getByText(CODEX_DISPLAY)).toBeDefined()
+  })
+
+  it('falls back to config.agentOptions.provider when line and health provider hints are absent', () => {
+    const line = makeLine({
+      mode: 'agent',
+      provider: undefined,
+      config: { agentOptions: { provider: 'openai-api' } },
+    })
+
+    render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+
+    const card = screen.getByText('PROVIDER').closest('div.c-card') as HTMLElement
+    expect(within(card).getByText(OPENAI_DISPLAY)).toBeDefined()
   })
 
   it('falls back to DEFAULT_PROVIDER_ID display name when no provider hint exists', () => {
@@ -174,15 +207,20 @@ describe('SummaryTab — placeholder/empty states', () => {
 
 describe('SummaryTab — KPI row structural contract', () => {
   it('renders the always-on STATUS and CONNECTION cards across modes', () => {
-    const line = makeLine({ mode: 'agent', status: 'online' })
+    const modes: Mode[] = ['passive', 'chat', 'agent']
 
-    render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+    for (const mode of modes) {
+      cleanup()
+      const line = makeLine({ mode, status: 'online' })
 
-    const statusCard = screen.getByText('STATUS').closest('div.c-card') as HTMLElement
-    expect(within(statusCard).getByText('online')).toBeDefined()
+      render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
-    const connectionCard = screen.getByText('CONNECTION').closest('div.c-card') as HTMLElement
-    expect(within(connectionCard).getByText('connected')).toBeDefined()
+      const statusCard = screen.getByText('STATUS').closest('div.c-card') as HTMLElement
+      expect(within(statusCard).getByText('online')).toBeDefined()
+
+      const connectionCard = screen.getByText('CONNECTION').closest('div.c-card') as HTMLElement
+      expect(within(connectionCard).getByText('connected')).toBeDefined()
+    }
   })
 
   it('renders the MODEL card when line.models.conversation is set', () => {
@@ -199,13 +237,18 @@ describe('SummaryTab — KPI row structural contract', () => {
   })
 
   it('renders the action buttons (Restart, Change Mode, Stop) on every mode', () => {
-    const line = makeLine({ mode: 'agent', provider: 'openai-api' })
+    const modes: Mode[] = ['passive', 'chat', 'agent']
 
-    render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+    for (const mode of modes) {
+      cleanup()
+      const line = makeLine({ mode, provider: 'openai-api' })
 
-    expect(screen.getByRole('button', { name: /Restart Instance/i })).toBeDefined()
-    expect(screen.getByRole('button', { name: /Change Mode/i })).toBeDefined()
-    expect(screen.getByRole('button', { name: /Stop Instance/i })).toBeDefined()
+      render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+
+      expect(screen.getByRole('button', { name: /Restart Instance/i })).toBeDefined()
+      expect(screen.getByRole('button', { name: /Change Mode/i })).toBeDefined()
+      expect(screen.getByRole('button', { name: /Stop Instance/i })).toBeDefined()
+    }
   })
 
   it('omits the Edit Configuration button in passive mode', () => {
