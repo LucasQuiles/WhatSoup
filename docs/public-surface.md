@@ -183,6 +183,8 @@ Each instance config file is at `$XDG_CONFIG_HOME/whatsoup/instances/<name>/conf
 | `config:instance_config.agentOptions` | config-key | [docs/configuration.md §agentOptions](configuration.md#agentoptions) | v1 (bootstrap) | stable | active | Agent runtime settings; required fields vary by `sessionScope` |
 | `config:instance_config.agentOptions.sandbox` | config-key | [docs/configuration.md §agentOptions.sandbox](configuration.md#agentoptionssandbox) | v1 (bootstrap) | stable | active | Sandbox enforcement policy |
 | `config:instance_config.agentOptions.enabledPlugins` | config-key | [docs/configuration.md §agentOptions.enabledPlugins](configuration.md#agentoptionsenabledplugins) | v1 (bootstrap) | stable | active | Plugin allowlist for agent instances |
+| `config:instance_config.agentOptions.provider` | config-key | [docs/configuration.md §agentOptions](configuration.md#agentoptions) | v1 (bootstrap) | stable | active | Provider ID from `PROVIDER_IDS` registry; default `claude-cli` |
+| `config:instance_config.agentOptions.providerConfig` | config-key | [docs/configuration.md §agentOptions.providerConfig](configuration.md#agentoptionsproviderconfig) | v1 (bootstrap) | stable | active | Provider budget + HTTP endpoint/credential/model overrides |
 | `config:instance_config.session-scopes` | config-key | [docs/configuration.md §Session Scopes](configuration.md#session-scopes) | v1 (bootstrap) | stable | active | `single`, `per-chat`, `shared` |
 | `config:instance_config.outbound-send-audit` | config-key | [docs/configuration.md §Outbound Send Audit](configuration.md#outbound-send-audit) | v1 (bootstrap) | stable | active | Audit-log shape for fleet send pipeline |
 

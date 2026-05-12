@@ -420,6 +420,8 @@ include `agentOptions` should keep these fields explicit.
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the Claude Code subprocess. |
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
+| `provider` | string | no | `claude-cli` | Provider identifier from the shared registry: `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`. Canonical list lives in [`src/runtimes/agent/providers/index.ts`](../src/runtimes/agent/providers/index.ts) (`PROVIDER_IDS`). Unknown IDs are rejected at config-load with a 400-class error. |
+| `providerConfig` | object | no | — | Provider-specific configuration overrides — budget enforcement and (for HTTP providers) endpoint/credential/model selection. See [agentOptions.providerConfig](#agentoptionsproviderconfig). |
 
 #### Session Scopes
 
@@ -439,6 +441,33 @@ Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.
 | `allowedTools` | string[] | Claude Code tools the agent may use. Empty array blocks all non-essential tools. |
 | `allowedMcpTools` | string[] | MCP tools permitted within the sandbox. |
 | `bash` | object | Bash execution policy: `{ "enabled": boolean, "pathRestricted": boolean }`. |
+
+#### `agentOptions.providerConfig`
+
+Provider-specific configuration. Must be an object when present; unknown keys are ignored. The `budget` sub-object applies to every provider; the remaining fields are consumed only by the HTTP providers (`openai-api`, `anthropic-api`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `budget` | object | Per-provider rate / spend limits. Validated as an object; shape defined by `BudgetConfig` in [`src/runtimes/agent/providers/budget.ts`](../src/runtimes/agent/providers/budget.ts). Keys: `requestsPerMinute`, `tokensPerMinute`, `dailySpendCapUsd`, `chatBurstLimit`, `costPerMillionTokens`. Omit for unlimited. |
+| `apiKey` | string | HTTP providers only. Inline API key. Highest precedence in the resolution chain. Prefer `apiKeyService` for production. |
+| `apiKeyService` | string | HTTP providers only. Keyring service name resolved via `lookupCredential()`. |
+| `baseUrl` | string | HTTP providers only. API base URL. Defaults: `https://api.openai.com/v1` for `openai-api`, `https://api.anthropic.com/v1` for `anthropic-api`. |
+| `model` | string | HTTP providers only. Model ID. Defaults: `gpt-4o` for `openai-api`, `claude-sonnet-4-20250514` for `anthropic-api`. Per-turn `model` overrides this. |
+
+**API-key resolution.** HTTP providers resolve credentials via [`src/runtimes/agent/providers/api-key-resolver.ts`](../src/runtimes/agent/providers/api-key-resolver.ts) in this order: inline `apiKey` → `apiKeyService` keyring lookup → `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` env var → empty string (request proceeds without an `Authorization` header; the upstream API will reject). A misconfigured `apiKeyService` does not fail fast — resolution falls through to the env var.
+
+```json
+"providerConfig": {
+  "budget": {
+    "requestsPerMinute": 30,
+    "tokensPerMinute": 60000,
+    "dailySpendCapUsd": 5.0,
+    "costPerMillionTokens": 5
+  },
+  "apiKeyService": "whatsoup-openai",
+  "model": "gpt-4o-mini"
+}
+```
 
 #### `agentOptions.enabledPlugins`
 
