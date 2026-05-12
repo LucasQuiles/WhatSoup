@@ -21,10 +21,10 @@ Latest consolidation: [`docs/sweep-report-2026-05-12.md`](sweep-report-2026-05-1
 
 Current execution queue from that sweep:
 
-- No-PR implementation issue: GitHub `#349` outbound media streaming.
-- Covered by an open ready PR after the sweep: GitHub `#353` durable event dispatch via PR `#365`.
-- Recently closed issues: GitHub `#348` landed via PR `#360`; GitHub `#352` landed via PR `#361`.
-- Verified internal follow-ups: private config write, disconnect-policy consolidation, access-mode constant reuse, and direct `agent-config-validator` tests.
+- GitHub issue queue is clear as of 2026-05-12 07:08Z.
+- Sweep follow-ups landed after the report: `#353` via PR `#365`, `#364` via PR `#368`, `#363` via PR `#370`, and `#349` via PR `#371`.
+- Recently closed issues from the same sweep window: GitHub `#348` landed via PR `#360`; GitHub `#352` landed via PR `#361`.
+- Verified internal follow-ups: private config write and disconnect-policy consolidation remain implementation candidates; access-mode constant reuse is covered by draft PR `#369`; direct `agent-config-validator` tests are covered by draft PR `#372`.
 - False-positive sweep claims closed: memory migration mappings and provider KPI missing.
 
 Secondary backlog surfaces outside the generated work index: `docs/duplicates-report.md` and `.tmup-artifacts/dedup-triage-021.md`.
