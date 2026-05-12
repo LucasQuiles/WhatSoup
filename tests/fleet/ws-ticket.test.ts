@@ -30,6 +30,8 @@ describe('ticket store — issue/redeem', () => {
     const key = 'a'.repeat(64);
     const { ticket, expiresIn } = s.issue(key);
     expect(typeof ticket).toBe('string');
+    expect(ticket.split('.')).toHaveLength(4);
+    expect(ticket.split('.')[1]).toBe('ws');
     expect(expiresIn).toBe(Math.floor(TICKET_TTL_MS / 1000));
     expect(s.redeem(ticket, [key])).toBe(true);
   });
@@ -69,9 +71,9 @@ describe('ticket store — HMAC integrity', () => {
     const { ticket } = s.issue(key);
     const parts = ticket.split('.');
     // Flip the last character of the HMAC segment
-    const lastChar = parts[2].slice(-1);
+    const lastChar = parts[3].slice(-1);
     const flipped = lastChar === 'A' ? 'B' : 'A';
-    const tampered = `${parts[0]}.${parts[1]}.${parts[2].slice(0, -1)}${flipped}`;
+    const tampered = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3].slice(0, -1)}${flipped}`;
     expect(s.redeem(tampered, [key])).toBe(false);
   });
 
@@ -93,8 +95,8 @@ describe('ticket store — malformed input', () => {
     expect(s.redeem('', [key])).toBe(false);
     expect(s.redeem('not.a.ticket', [key])).toBe(false);
     expect(s.redeem('only-one-part', [key])).toBe(false);
-    expect(s.redeem('a.b.c.d', [key])).toBe(false);
+    expect(s.redeem('a.b.c', [key])).toBe(false);
     // bogus expiry segment
-    expect(s.redeem('nonce.notanumber.hmac', [key])).toBe(false);
+    expect(s.redeem('nonce.ws.notanumber.hmac', [key])).toBe(false);
   });
 });

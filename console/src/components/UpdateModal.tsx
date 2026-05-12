@@ -1,7 +1,7 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, getFleetToken } from '../lib/api'
+import { api, getApiTicket, getFleetToken } from '../lib/api'
 import type { LineInstance } from '../types'
 
 interface UpdateModalProps {
@@ -163,67 +163,82 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   const startUpdate = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'updating' })
 
-    const token = getFleetToken()
-    const headers: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {}
-
     // Abort controller so handleClose can cancel the in-flight fetch (RES-006)
     const controller = new AbortController()
     abortRef.current = controller
 
-    fetch('/api/update', {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-    }).then(response => {
-      if (!response.ok) {
-        dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
-        return
+    // Audience-scoped ticket (#313): mint an api-audience ticket rather than
+    // sending the root meta-tag token directly. In dev (no meta-tag) skip
+    // the header and let the proxy handle auth.
+    void (async () => {
+      let headers: Record<string, string> = {}
+      if (getFleetToken()) {
+        try {
+          const ticket = await getApiTicket('api')
+          headers = { 'Authorization': `Bearer ${ticket}` }
+        } catch {
+          dispatch({ type: 'setError', message: 'Update failed: unable to authenticate' })
+          return
+        }
       }
 
-      const reader = response.body!.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
+      try {
+        const response = await fetch('/api/update', {
+          method: 'POST',
+          headers,
+          signal: controller.signal,
+        })
 
-      const read = (): Promise<void> => reader.read().then(({ done, value }) => {
-        if (done) {
-          // Connection closed — fleet is restarting
-          waitForFleetRestart()
+        if (!response.ok) {
+          dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
           return
         }
 
-        buffer += decoder.decode(value, { stream: true })
-        const chunks = buffer.split('\n\n')
-        buffer = chunks.pop()! // keep incomplete chunk
+        const reader = response.body!.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
 
-        for (const block of chunks) {
-          const eventMatch = block.match(/^event: (\w+)/)
-          const dataMatch = block.match(/^data: (.+)$/m)
-          if (!eventMatch || !dataMatch) continue
-
-          const event = eventMatch[1]
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SSE stream JSON has no typed schema; expires 2026-07-01
-          const data = JSON.parse(dataMatch[1]) as any
-
-          if (event === 'progress') {
-            dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
-            if (data.step === 'restart' && data.status === 'running') {
-              dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
+        const read = async (): Promise<void> => {
+          try {
+            const { done, value } = await reader.read()
+            if (done) {
+              waitForFleetRestart()
+              return
             }
-          } else if (event === 'error') {
-            dispatch({ type: 'setError', message: data.message, step: data.step })
+            buffer += decoder.decode(value, { stream: true })
+            const chunks = buffer.split('\n\n')
+            buffer = chunks.pop()!
+
+            for (const block of chunks) {
+              const eventMatch = block.match(/^event: (\w+)/)
+              const dataMatch = block.match(/^data: (.+)$/m)
+              if (!eventMatch || !dataMatch) continue
+
+              const event = eventMatch[1]
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SSE stream JSON has no typed schema; expires 2026-07-01
+              const data = JSON.parse(dataMatch[1]) as any
+
+              if (event === 'progress') {
+                dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
+                if (data.step === 'restart' && data.status === 'running') {
+                  dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
+                }
+              } else if (event === 'error') {
+                dispatch({ type: 'setError', message: data.message, step: data.step })
+              }
+            }
+            await read()
+          } catch {
+            // Connection dropped — expected during restart
+            waitForFleetRestart()
           }
         }
-
-        return read()
-      }).catch(() => {
-        // Connection dropped — expected during restart
+        await read()
+      } catch {
+        // Aborted or network error — fleet may be restarting
         waitForFleetRestart()
-      })
-
-      return read()
-    }).catch(() => {
-      waitForFleetRestart()
-    })
+      }
+    })()
   }, [waitForFleetRestart])
 
   const restartSelectedInstances = useCallback(async () => {

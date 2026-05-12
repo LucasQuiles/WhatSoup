@@ -25,24 +25,94 @@ import type {
 
 const API_BASE = '';
 
-/** Read the fleet token from the meta tag injected by the production server. */
+/** Read the root fleet token from the meta tag injected by the production server. */
 export function getFleetToken(): string | null {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]');
   return meta?.content || null;
 }
 
-/** Build auth headers — Bearer token in production, empty in dev (proxy handles it). */
-function authHeaders(): Record<string, string> {
+// ---------------------------------------------------------------------------
+// Audience-scoped tickets (#313)
+//
+// The root meta-tag token is the bootstrap credential and is used ONLY to
+// mint short-lived tickets via POST /api/auth-ticket. Every other call --
+// HTTP API or EventSource -- threads a ticket of the matching audience so
+// the root token never leaves the bootstrap path.
+// ---------------------------------------------------------------------------
+
+type TicketAudience = 'api' | 'sse';
+
+function rootAuthHeaders(): Record<string, string> {
   const token = getFleetToken();
   return token ? { 'Authorization': `Bearer ${token}` } : {};
 }
 
+async function mintTicket(audience: TicketAudience): Promise<string> {
+  // Bootstrap: present the root token to the dedicated mint endpoint and
+  // immediately discard it from the request shape. The browser still has
+  // the meta-tag (a v1 limitation called out in the issue), but it never
+  // travels anywhere except this one path.
+  const res = await fetch(`${API_BASE}/api/auth-ticket`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...rootAuthHeaders(),
+    },
+    body: JSON.stringify({ audience }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) {
+    throw new Error(`auth-ticket ${audience} ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json() as { ticket?: unknown; expiresIn?: unknown };
+  if (typeof data.ticket !== 'string' || data.ticket.length === 0) {
+    throw new Error(`auth-ticket ${audience}: malformed server response`);
+  }
+  return data.ticket;
+}
+
+/**
+ * Mint a fresh audience-scoped ticket. Server-side tickets are single-use:
+ * sharing a fulfilled ticket across API calls causes the second redemption
+ * to fail with 401.
+ *
+ * Exported for callers (e.g. EventSource bootstrap in `LinkStep`) that
+ * need the raw ticket string.
+ */
+export async function getApiTicket(audience: TicketAudience = 'api'): Promise<string> {
+  return mintTicket(audience);
+}
+
+/** Test helper kept stable for existing imports. */
+export function clearTicketCache(): void {
+}
+
+/**
+ * Build auth headers for the HTTP API.
+ *
+ * In production we mint and thread an `api`-audience ticket. In dev or when
+ * no root token is available (the SPA is being served standalone), we omit
+ * the header and let the Vite proxy / mock fallback handle the request.
+ */
+async function authHeaders(): Promise<Record<string, string>> {
+  if (!getFleetToken()) return {};
+  try {
+    const ticket = await getApiTicket('api');
+    return { 'Authorization': `Bearer ${ticket}` };
+  } catch {
+    // Mint failed (network, 401, server down). Let the surrounding fetch
+    // surface the underlying API failure or dev-proxy fallback behavior.
+    return {};
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const auth = await authHeaders();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders(),
+      ...auth,
       ...init?.headers,
     },
     signal: init?.signal ?? AbortSignal.timeout(5000),
@@ -72,9 +142,10 @@ async function checkFleetAvailable(): Promise<boolean> {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
       try {
+        const auth = await authHeaders();
         const res = await fetch(`${API_BASE}/api/lines`, {
           signal: controller.signal,
-          headers: authHeaders(),
+          headers: auth,
         });
         fleetAvailable = res.ok;
       } finally {
@@ -392,8 +463,15 @@ export const api = {
    * ticket with the active fleet token; the browser then opens the WS as
    * `wss://host/ws?ticket=<ticket>`. The root token never travels in the URL.
    */
-  getWsTicket: () =>
-    apiFetch<{ ticket: string; expiresIn: number }>('/api/ws-ticket', {
+  getWsTicket: async () => {
+    const res = await fetch(`${API_BASE}/api/ws-ticket`, {
       method: 'POST',
-    }),
+      headers: rootAuthHeaders(),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      throw new Error(`API ${res.status}: ${await res.text()}`);
+    }
+    return await res.json() as { ticket: string; expiresIn: number };
+  },
 };

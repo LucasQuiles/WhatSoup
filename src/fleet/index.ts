@@ -35,7 +35,13 @@ import {
   verifyFleetToken as verifyFleetTokenImpl,
   type FleetTokensFile,
 } from './token-storage.ts';
-import { createTicketStore, TICKET_TTL_MS, type TicketStore } from './ws-ticket.ts';
+import { createTicketStore as createWsTicketStore, TICKET_TTL_MS, type TicketStore } from './ws-ticket.ts';
+import {
+  createTicketStore as createAuthTicketStore,
+  isTicketAudience,
+  type TicketStore as AuthTicketStore,
+  type TicketAudience,
+} from './auth-ticket.ts';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
@@ -470,7 +476,37 @@ export function createFleetServer(deps: FleetDeps) {
     if (!candidate) return false;
     return verifyFleetTokenImpl(candidate, getTokenSet());
   }
-  const ticketStore: TicketStore = createTicketStore();
+  const ticketStore: TicketStore = createWsTicketStore();
+  // Audience-scoped store for HTTP and SSE tickets (#313). The WS path keeps
+  // using `ticketStore` above so call sites do not need to care about the
+  // shared audience-scoped implementation.
+  const apiTicketStore: AuthTicketStore = createAuthTicketStore();
+
+  /**
+   * Audience-scoped HTTP/SSE auth gate (#313).
+   *
+   * Two acceptance paths during the deprecation window:
+   *   (a) the root fleet token via Bearer or `?token=` query (legacy)
+   *   (b) an audience-scoped ticket via `?ticket=` query or Bearer header
+   *
+   * Audience is derived from the route shape:
+   *   - SSE endpoints (currently `/api/lines/:name/auth`) require audience='sse'
+   *   - everything else under `/api/*` accepts audience='api'
+   *   - the ticket-vending endpoint itself is anchored to the root token (the
+   *     bootstrap credential) and is gated separately.
+   */
+  function audienceForPath(pathname: string): TicketAudience {
+    // Currently the only SSE endpoint is `/api/lines/:name/auth`.
+    if (/^\/api\/lines\/[^/]+\/auth$/.test(pathname)) return 'sse';
+    return 'api';
+  }
+
+  function verifyApiTicketCandidate(candidate: string | undefined | null, audience: TicketAudience): boolean {
+    if (!candidate) return false;
+    const tokenSet = getTokenSet();
+    const validKeys = [tokenSet.active, ...tokenSet.accept];
+    return apiTicketStore.redeem(candidate, audience, validKeys);
+  }
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -479,25 +515,69 @@ export function createFleetServer(deps: FleetDeps) {
 
     // API routes require auth
     if (pathname.startsWith('/api/')) {
-      // Accept Bearer header or ?token= query param (EventSource can't set headers).
-      // Both paths walk the active+accept token set so a rotated-out token still
-      // works for the duration of its grace window.
-      const queryToken = parseQueryString(url).token ?? '';
+      const query = parseQueryString(url);
+      const queryToken = query.token ?? '';
+      const queryTicket = query.ticket ?? '';
       const bearer = extractBearer(req);
-      if (!verifyToken(bearer) && !verifyToken(queryToken)) {
-        jsonResponse(res, 401, { error: 'unauthorized' });
+
+      // Bootstrap ticket endpoints accept ONLY the root fleet token via
+      // Authorization. They intentionally do not accept `?token=` because
+      // these POST routes do not have EventSource's header limitation.
+      if (method === 'POST' && pathname === '/api/auth-ticket') {
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        let body: unknown = null;
+        try {
+          const raw = await readBody(req, 1024);
+          if (raw && raw.length > 0) body = JSON.parse(raw);
+        } catch {
+          jsonResponse(res, 400, { error: 'invalid body' });
+          return;
+        }
+        const audience = (body as { audience?: unknown } | null)?.audience;
+        if (!isTicketAudience(audience) || audience === 'ws') {
+          jsonResponse(res, 400, { error: 'audience must be "api" or "sse"' });
+          return;
+        }
+        const { ticket, expiresIn } = apiTicketStore.issue(getTokenSet().active, audience);
+        jsonResponse(res, 200, { ticket, audience, expiresIn });
         return;
       }
 
-      // Special-case: ticket vending. The ticket store needs `active` (the
-      // signing key) and the live ticket-issuance interface, so it sits
-      // outside the table-driven ROUTES.
+      // Legacy WS ticket vending remains a root-token bootstrap path. Do
+      // this before the generic API ticket gate so an `api`-audience ticket
+      // cannot be exchanged for WebSocket capability.
       if (method === 'POST' && pathname === '/api/ws-ticket') {
-        // Defensively drain any body so the connection stays clean even if
-        // a client posted something.
-        try { await readBody(req, 1024); } catch { /* ignore — body is optional */ }
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        try { await readBody(req, 1024); } catch { /* ignore -- body is optional */ }
         const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
         jsonResponse(res, 200, { ticket, expiresIn });
+        return;
+      }
+
+      const audience = audienceForPath(pathname);
+      // Accept (a) root token via Bearer/?token=, OR (b) audience-scoped
+      // ticket via ?ticket=. Bearer header may also carry a ticket so
+      // browsers don't have to special-case the HTTP API client; we try
+      // both interpretations and accept the first success.
+      const rootOk = verifyToken(bearer) || verifyToken(queryToken);
+      const ticketCandidates: string[] = [];
+      if (queryTicket) ticketCandidates.push(queryTicket);
+      if (bearer && !rootOk) ticketCandidates.push(bearer);
+      let ticketOk = false;
+      for (const cand of ticketCandidates) {
+        if (verifyApiTicketCandidate(cand, audience)) {
+          ticketOk = true;
+          break;
+        }
+      }
+      if (!rootOk && !ticketOk) {
+        jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
 
@@ -596,6 +676,7 @@ export function createFleetServer(deps: FleetDeps) {
       discovery.stop();
       updateChecker.stop();
       ticketStore.stop();
+      apiTicketStore.stop();
       wsServer.close();
       server.close();
     },
