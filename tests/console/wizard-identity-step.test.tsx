@@ -9,21 +9,25 @@
  * Source surprises pinned in §SURPRISES below.
  *
  * §SURPRISES
- * 1. The component uses `slugAgentWorkspaceName` from `lib/agent-cwd.ts`, NOT a
- *    local `slugify`. That function applies four transforms in order:
+ * 1. The component uses a LOCAL `slugify` (IdentityStep.tsx:40) — NOT
+ *    `slugAgentWorkspaceName` from `lib/agent-cwd.ts`. The local function does:
  *      .toLowerCase()
- *      .replace(/\s+/g, '-')       — spaces → dashes
+ *      .replace(/\s+/g, '-')       — \s+ greedy: runs of whitespace → ONE dash
  *      .replace(/[^a-z0-9-]/g, '') — strip non-slug chars
+ *    It LACKS the two transforms that `slugAgentWorkspaceName` has:
  *      .replace(/-+/g, '-')        — collapse consecutive dashes
  *      .replace(/^-|-$/g, '')      — strip leading/trailing dashes
- *    The "jsdom collapses whitespace" explanation is therefore wrong: 'my  line'
- *    yields 'my-line' because slugAgentWorkspaceName collapses '--' itself, not
- *    because jsdom pre-trims the value. Similarly, leading/trailing spaces
- *    produce no leading/trailing dashes because slugAgentWorkspaceName strips
- *    them, not because jsdom trims the input value.
- * 2. The name <input> calls `onChange({ name: slugAgentWorkspaceName(e.target.value) })`
- *    on every change event — the component stores the already-slugified value,
- *    not the raw display string. Emoji and punctuation are stripped immediately.
+ *    Net effect: 'my  line' → 'my-line' (the \s+ regex collapses the whitespace
+ *    run into ONE dash). But 'my -line' → 'my--line' (the pre-existing dash and
+ *    the new one are not coalesced). And '-leading' → '-leading' (leading dash
+ *    preserved). The "jsdom normalizes whitespace" framing is also wrong — jsdom
+ *    does NOT trim input.value; \s+ does the collapse. The local-vs-canonical
+ *    divergence is tracked as F-024 in the session daemon — affects paste,
+ *    autofill, or programmatic inputs that contain dashes.
+ * 2. The name <input> calls `onChange({ name: slugify(e.target.value) })` (the
+ *    LOCAL slugify per §1) on every change event — the component stores the
+ *    already-slugified value, not the raw display string. Emoji and punctuation
+ *    are stripped immediately.
  * 3. There is NO "Next" button inside IdentityStep itself — Next-button gating
  *    lives in the parent Wizard. The component only forwards onChange/errors.
  * 4. adminPhones strips non-digits via `values.map(v => v.replace(/\D/g, ''))`.
