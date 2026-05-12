@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { WhatSoupSocketServer } from '../../src/mcp/socket-server.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import type { SessionContext, ToolDeclaration } from '../../src/mcp/types.ts';
+import { waitForSocket } from '../helpers/wait-for.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,21 +65,7 @@ function sendJsonRpc(socketPath: string, msg: unknown): Promise<unknown> {
 /**
  * Wait for the socket file to appear (server ready), then resolve.
  */
-function waitForSocket(socketPath: string, timeoutMs = 2000): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (existsSync(socketPath)) {
-        resolve();
-      } else if (Date.now() - start > timeoutMs) {
-        reject(new Error(`Socket ${socketPath} never appeared`));
-      } else {
-        setTimeout(check, 10);
-      }
-    };
-    check();
-  });
-}
+
 
 function waitForClientConnect(client: Socket, timeoutMs = 2000): Promise<void> {
   return new Promise((resolve, reject) => {
