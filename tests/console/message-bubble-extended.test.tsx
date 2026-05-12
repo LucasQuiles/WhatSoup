@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { Message } from '../../console/src/types'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
@@ -76,11 +76,12 @@ describe('text rendering', () => {
     // isMedia = (type !== 'text') so remains false → no type-badge in footer;
     // bubble still renders with no crash and shows a timestamp in the footer.
     render(<MessageBubble msg={msg({ type: 'text', content: null })} />)
+    // No crash — bubble mounted
+    expect(document.querySelector('.c-msg-bubble')).toBeDefined()
+    // isMedia is false for type='text' → no type-badge span in the footer
     const footer = document.querySelector('.font-mono') as HTMLElement
-    // Footer always has a timestamp span (even for text-type null-content)
-    expect(footer.querySelectorAll('span').length).toBeGreaterThanOrEqual(1)
-    // No type badge for text-type (isMedia is false)
-    expect(footer.textContent).not.toMatch(/^text$/)
+    const spans = Array.from(footer.querySelectorAll('span'))
+    expect(spans.every(s => s.textContent !== 'text')).toBe(true)
   })
 
   it('renders WA bold (*word*) as <strong>', () => {
@@ -233,9 +234,10 @@ describe('media type branch', () => {
 
   it('non-text message shows type badge in footer', () => {
     render(<MessageBubble msg={msg({ type: 'image', content: null })} />)
-    // The footer area includes msg.type as a small span
-    const badges = screen.getAllByText('image')
-    expect(badges.length).toBeGreaterThanOrEqual(1)
+    // The footer renders msg.type in a <span> when isMedia is true.
+    const footer = document.querySelector('.font-mono') as HTMLElement
+    const badgeTexts = Array.from(footer.querySelectorAll('span')).map(s => s.textContent)
+    expect(badgeTexts).toContain('image')
   })
 
   it('text message does NOT show type badge in footer', () => {
@@ -283,8 +285,9 @@ describe('reply-quote bar', () => {
 
   it('renders no reply bar when no contextInfo present', () => {
     render(<MessageBubble msg={msg({ content: 'Plain' })} />)
-    // No left-border reply element
-    const bars = document.querySelectorAll('[style*="borderLeftStyle"]')
+    // QuotedReplyBar has a distinctive border-left-style inline style.
+    // jsdom serialises camelCase React style objects as kebab-case attribute strings.
+    const bars = document.querySelectorAll('[style*="border-left-style"]')
     expect(bars).toHaveLength(0)
   })
 })
