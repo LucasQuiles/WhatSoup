@@ -106,19 +106,28 @@ export function findRegisterModuleImports(cwd: string = process.cwd()): ModuleIm
   const text = readFileSync(registerAllPath, 'utf8');
   const filePath = normalizeRepoPath(path.relative(cwd, registerAllPath));
   const imports: ModuleImport[] = [];
-  const importPattern = /^import\s+\{[^}]*\}\s+from\s+['"](\.\/tools\/[^'"]+\.ts)['"];?$/gm;
+  // Accept both named and namespace imports of ./tools/*.ts modules. Namespace
+  // imports (`import * as foo from './tools/x.ts'`) are required for some test
+  // surfaces (vi.spyOn on the module binding) so the canonical-module-count
+  // count must include them.
+  const namedImportPattern = /^import\s+\{[^}]*\}\s+from\s+['"](\.\/tools\/[^'"]+\.ts)['"];?$/gm;
+  const namespaceImportPattern = /^import\s+\*\s+as\s+\w+\s+from\s+['"](\.\/tools\/[^'"]+\.ts)['"];?$/gm;
+  const seen = new Set<string>();
 
   // Module count is derived from register-all.ts imports because that file is
   // the canonical runtime wiring point for tool modules, including conditional
   // modules such as knowledge search.
-  for (const match of text.matchAll(importPattern)) {
-    const modulePath = match[1];
-    if (!modulePath) continue;
-    imports.push({
-      filePath,
-      line: lineForOffset(text, match.index ?? 0),
-      modulePath,
-    });
+  for (const pattern of [namedImportPattern, namespaceImportPattern]) {
+    for (const match of text.matchAll(pattern)) {
+      const modulePath = match[1];
+      if (!modulePath || seen.has(modulePath)) continue;
+      seen.add(modulePath);
+      imports.push({
+        filePath,
+        line: lineForOffset(text, match.index ?? 0),
+        modulePath,
+      });
+    }
   }
 
   return imports;
