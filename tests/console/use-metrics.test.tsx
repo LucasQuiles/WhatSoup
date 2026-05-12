@@ -200,8 +200,8 @@ describe('getMetricsQueryOptions — queryFn data passthrough', () => {
     const opts = getMetricsQueryOptions('bob', '7d')
     await opts.queryFn!(makeQueryContext(opts.queryKey) as any)
 
-    const metricsFetchCall = fetch.mock.calls.find(
-      ([url]: [string]) => typeof url === 'string' && url.includes('/metrics')
+    const metricsFetchCall = (fetch.mock.calls as unknown[][]).find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).includes('/metrics')
     )
     expect(metricsFetchCall).toBeDefined()
     expect(metricsFetchCall![0]).toContain('/api/lines/bob/metrics')
@@ -312,8 +312,8 @@ describe('getFleetMetricsQueryOptions — queryFn data passthrough', () => {
     const opts = getFleetMetricsQueryOptions('30d')
     await opts.queryFn!(makeQueryContext(opts.queryKey) as any)
 
-    const metricsFetchCall = fetch.mock.calls.find(
-      ([url]: [string]) => typeof url === 'string' && url.includes('/api/metrics')
+    const metricsFetchCall = (fetch.mock.calls as unknown[][]).find(
+      (call) => typeof call[0] === 'string' && (call[0] as string).includes('/api/metrics')
     )
     expect(metricsFetchCall).toBeDefined()
     expect(metricsFetchCall![0]).toContain('/api/metrics')
