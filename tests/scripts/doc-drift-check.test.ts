@@ -73,7 +73,7 @@ describe('doc drift check', () => {
         claimed: 18,
         filePath: staleDoc,
         kind: 'tool-count',
-        line: 45,
+        line: 55,
         text: '| [substrate.ts](#substratets) | 18 |',
       },
       {
@@ -81,7 +81,7 @@ describe('doc drift check', () => {
         claimed: 160,
         filePath: staleDoc,
         kind: 'tool-count',
-        line: 46,
+        line: 56,
         text: '| **Total** | **160** |',
       },
     ]);

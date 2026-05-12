@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 161 MCP tools (160 always-registered + `knowledge_search` registered only when Pinecone is configured). No build step. Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 161 MCP tools (160 always-registered + `knowledge_search` registered only when Pinecone config, credentials, and profiles are usable). No build step. Probably too many MCP tools.
 
 ## What It Does
 
@@ -140,7 +140,7 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 src/
   core/           DB, access control, messages, durability engine, JID handling
   transport/      Baileys v7 — auth, reconnection, parsing, event routing
-  mcp/            Tool registry (161 tools), Unix socket server, 20 tool modules
+  mcp/            Tool registry (161 documented tools; 160 always registered), Unix socket server, 20 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media

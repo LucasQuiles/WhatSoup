@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, 161 MCP tools (160 always-registered + `knowledge_search` registered only when Pinecone is configured; see `docs/tools.md`).
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, 161 MCP tools (160 always-registered + `knowledge_search` registered only when Pinecone config, credentials, and profiles are usable; see `docs/tools.md`).
 
 ## Quick Reference
 

@@ -2,13 +2,15 @@
 
 Complete reference for all 161 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 161 documented tools, 160 are always registered at startup and 1 (`knowledge_search`) is conditionally registered only when the instance's Pinecone configuration is present and non-empty. Specifically, `knowledge_search` is registered only when all of the following hold:
+> **Conditionally-registered tools.** Of the 161 documented tools, 160 are always registered at startup and 1 (`knowledge_search`) is conditionally registered only when the instance's Pinecone configuration, credentials, and profiles are usable. Specifically, `knowledge_search` is registered only when all of the following hold:
 >
 > - `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is a non-empty array, and
 > - `memory.pinecone.knowledgeSearch.enabled` is not explicitly `false`, and
-> - `enableKnowledgeSearch` has not been disabled at the registration call site.
+> - `enableKnowledgeSearch` has not been disabled at the registration call site, and
+> - the configured Pinecone API key environment variable is set, and
+> - at least one allowed index has a declared knowledge profile and the Pinecone client initializes successfully.
 >
-> The exact gate lives in `src/mcp/register-all.ts` (the `Knowledge search — only when instance config specifies allowed indexes` block). Instances without Pinecone configured therefore omit `knowledge_search` at runtime and expose the remaining 160; the documented total of 161 reflects the full tool surface available to a fully-configured instance.
+> The initial gate lives in `src/mcp/register-all.ts` (the `Knowledge search — only when instance config specifies allowed indexes` block), and the credential/profile gate lives in `src/mcp/tools/knowledge.ts`. Instances without usable Pinecone configuration therefore omit `knowledge_search` at runtime and expose the remaining 160; the documented total of 161 reflects the full tool surface available to a fully-configured instance.
 
 ## Scope and Replay Policy Glossary
 
@@ -3081,7 +3083,7 @@ Pinecone-backed semantic search across configured knowledge base indexes.
 
 Search company knowledge bases using natural language queries. Results are pre-formatted summaries from Pinecone vector search with reranking.
 
-> **Conditional registration.** This is the only tool that is not always registered. It is registered only when `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is non-empty and `memory.pinecone.knowledgeSearch.enabled` is not `false`. Instances without Pinecone configured will not expose this tool. See `src/mcp/register-all.ts` for the gate.
+> **Conditional registration.** This is the only tool that is not always registered. It is registered only when `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is non-empty, `memory.pinecone.knowledgeSearch.enabled` is not `false`, the call site has not disabled knowledge search, the configured Pinecone API key environment variable is set, at least one allowed index has a declared knowledge profile, and the Pinecone client initializes successfully. Instances without usable Pinecone configuration will not expose this tool. See `src/mcp/register-all.ts` and `src/mcp/tools/knowledge.ts` for the gates.
 
 | | |
 |---|---|
