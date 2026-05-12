@@ -1216,18 +1216,19 @@ describe('SessionManager', () => {
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).not.toContain('Claude Code');
   });
 
-  it('system prompt uses provider string as fallback for unknown providers', async () => {
+  it('SessionManager constructor throws fail-fast for unknown providers (#447)', () => {
+    // Pre-#447: unknown provider IDs silently aliased to Claude semantics
+    // (default branches in getProviderBinary/Args/Parser). Now the
+    // SessionManager constructor rejects them so the operator sees the bug
+    // immediately. The shared config validator blocks this upstream, but
+    // direct instantiation (as here) must still fail closed.
     const db = makeDb();
     const { messenger } = makeMessenger();
 
-    const sm = new SessionManager({
+    expect(() => new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       provider: 'custom-provider',
-    });
-    await sm.spawnSession();
-
-    // Unknown providers are spawn-per-turn, so systemPrompt is stored on the instance
-    expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('a personal custom-provider agent');
+    })).toThrow(/unknown provider/i);
   });
 
   it('system prompt with instructionsPath uses provider display name', async () => {

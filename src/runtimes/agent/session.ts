@@ -22,6 +22,12 @@ import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
 import { OpenAIApiProvider } from './providers/openai-api.ts';
 import { AnthropicApiProvider } from './providers/anthropic-api.ts';
+import {
+  PROVIDER_IDS,
+  isProviderId,
+  assertNeverProvider,
+  type ProviderId,
+} from './providers/index.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -86,10 +92,22 @@ export interface SessionManagerOptions {
  * its own credentials plus the system essentials below.
  */
 export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
+  if (!isProviderId(provider)) {
+    throw new Error(
+      `[session-manager:buildChildEnv] unknown provider id: ${JSON.stringify(provider)}. ` +
+        `Valid: ${PROVIDER_IDS.join(', ')}.`,
+    );
+  }
+
   const env = buildBaseChildEnv();
 
   // Provider-specific credentials — each provider only receives the keys it needs.
   switch (provider) {
+    case 'claude-cli':
+      // OPENAI_API_KEY is allowed for this provider's auxiliary features.
+      // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
+      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+      break;
     case 'codex-cli':
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       break;
@@ -102,12 +120,13 @@ export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEn
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
       break;
-    case 'claude-cli':
+    case 'openai-api':
+    case 'anthropic-api':
+      throw new Error(
+        `[session-manager:buildChildEnv] ${provider} is a managed-loop provider and does not spawn a child process`,
+      );
     default:
-      // OPENAI_API_KEY: passed because Claude Code may use it for its own features.
-      // ANTHROPIC_API_KEY is deliberately excluded — Claude uses subscription auth.
-      if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-      break;
+      return assertNeverProvider(provider, 'session-manager:buildChildEnv');
   }
 
   // Excluded (all providers): PINECONE_API_KEY (parent MCP only),
@@ -115,6 +134,147 @@ export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEn
 
   return env;
 }
+
+// ─── Provider switch resolvers ──────────────────────────────────────────────
+// These functions encode the per-provider runtime contract for spawning a
+// CLI subprocess. They are extracted from SessionManager so they can be
+// covered by unit tests without instantiating the full manager. Each switch
+// is exhaustive on {@link ProviderId} via {@link assertNeverProvider} — adding
+// a new provider in providers/index.ts surfaces a TS compile error here
+// until every switch is updated, eliminating the silent-Claude-alias bug
+// closed by #447.
+
+/** Resolve the executable name for a CLI-backed provider. */
+function resolveProviderBinary(provider: ProviderId): string {
+  switch (provider) {
+    case 'claude-cli': return 'claude';
+    case 'codex-cli': return 'codex';
+    case 'gemini-cli': return 'gemini';
+    case 'opencode-cli': return 'opencode';
+    case 'openai-api':
+    case 'anthropic-api':
+      // Managed-loop providers do not spawn a subprocess. Reaching this
+      // branch indicates a logic error in the caller (it should have
+      // routed via createManagedProviderSession).
+      throw new Error(
+        `[session-manager:resolveProviderBinary] ${provider} is a managed-loop provider and does not spawn a binary`,
+      );
+    default:
+      return assertNeverProvider(provider, 'session-manager:resolveProviderBinary');
+  }
+}
+
+/** Resolve the argv for a CLI-backed provider. */
+function resolveProviderArgs(
+  provider: ProviderId,
+  systemPrompt: string,
+  _cwd: string,
+  resumeSessionId: string | undefined,
+  model: string | undefined,
+  pluginDirs: string[],
+): string[] {
+  switch (provider) {
+    case 'claude-cli':
+      return [
+        '-p', '--verbose',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--permission-mode', 'bypassPermissions',
+        '--system-prompt', systemPrompt,
+        ...(model ? ['--model', model] : []),
+        ...pluginDirs.flatMap((dir) => ['--plugin-dir', dir]),
+        ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
+      ];
+    case 'codex-cli':
+      return [
+        'app-server',
+        '--listen', 'stdio://',
+        ...(model ? ['--model', model] : []),
+      ];
+    case 'gemini-cli':
+      return ['--acp'];
+    case 'opencode-cli':
+      return [
+        'run',
+        '--format', 'json',
+        '--pure',
+        ...(model ? ['-m', model] : []),
+      ];
+    case 'openai-api':
+    case 'anthropic-api':
+      throw new Error(
+        `[session-manager:resolveProviderArgs] ${provider} is a managed-loop provider and has no argv`,
+      );
+    default:
+      return assertNeverProvider(provider, 'session-manager:resolveProviderArgs');
+  }
+}
+
+/** Resolve the line-parser for a CLI-backed provider's stdout stream. */
+function resolveProviderParser(
+  provider: ProviderId,
+  openCodeParser: OpenCodeParser,
+): (line: string) => AgentEvent | null {
+  switch (provider) {
+    case 'claude-cli': return parseEvent;
+    case 'codex-cli': return parseCodexEvent;
+    case 'gemini-cli': return parseGeminiAcpEvent;
+    case 'opencode-cli': return (line: string) => openCodeParser.parse(line);
+    case 'openai-api':
+    case 'anthropic-api':
+      throw new Error(
+        `[session-manager:resolveProviderParser] ${provider} is a managed-loop provider and has no stdout parser`,
+      );
+    default:
+      return assertNeverProvider(provider, 'session-manager:resolveProviderParser');
+  }
+}
+
+/**
+ * Test-only handle exposing the provider switch resolvers. Tests use this
+ * to verify the fail-fast behavior of every switch without standing up a
+ * full SessionManager (which would need a real DB, messenger, etc.). Not
+ * part of the public runtime API — production code must use the SessionManager
+ * methods, which apply the upstream `assertKnownProvider` guard first.
+ */
+export const __provider_switch_for_test = {
+  getProviderBinary(provider: string): string {
+    if (!isProviderId(provider)) {
+      throw new Error(
+        `[session-manager:test] unknown provider id: ${JSON.stringify(provider)}. ` +
+          `Valid: ${PROVIDER_IDS.join(', ')}.`,
+      );
+    }
+    return resolveProviderBinary(provider);
+  },
+  getProviderArgs(
+    provider: string,
+    systemPrompt: string,
+    cwd: string,
+    resumeSessionId: string | undefined,
+    model: string | undefined,
+    pluginDirs: string[],
+  ): string[] {
+    if (!isProviderId(provider)) {
+      throw new Error(
+        `[session-manager:test] unknown provider id: ${JSON.stringify(provider)}. ` +
+          `Valid: ${PROVIDER_IDS.join(', ')}.`,
+      );
+    }
+    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, model, pluginDirs);
+  },
+  getParser(provider: string): (line: string) => AgentEvent | null {
+    if (!isProviderId(provider)) {
+      throw new Error(
+        `[session-manager:test] unknown provider id: ${JSON.stringify(provider)}. ` +
+          `Valid: ${PROVIDER_IDS.join(', ')}.`,
+      );
+    }
+    // Construct a fresh parser for the OpenCode case — tests don't need the
+    // per-session statefulness, just shape-check that a function is returned.
+    return resolveProviderParser(provider, createOpenCodeParser());
+  },
+};
 
 export class SessionManager {
   private static readonly SHUTDOWN_GRACE_MS = 5_000;
@@ -206,6 +366,16 @@ export class SessionManager {
     this.model = opts.model;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.provider = opts.provider ?? 'claude-cli';
+    // Fail-fast on unknown provider IDs (#447). The shared validator blocks
+    // these at config-load time, but direct instantiation (tests, programmatic
+    // callers) must still surface the error here — otherwise the old silent
+    // alias to Claude semantics returns.
+    if (!isProviderId(this.provider)) {
+      throw new Error(
+        `[session-manager] unknown provider id: ${JSON.stringify(this.provider)}. ` +
+          `Valid: ${PROVIDER_IDS.join(', ')}.`,
+      );
+    }
     this.providerConfig = opts.providerConfig;
     this.mcpBridge = opts.mcpBridge;
     this.mcpSessionContext = opts.mcpSessionContext;
@@ -252,56 +422,34 @@ export class SessionManager {
   }
 
   private getProviderBinary(): string {
-    switch (this.provider) {
-      case 'codex-cli': return 'codex';
-      case 'gemini-cli': return 'gemini';
-      case 'opencode-cli': return 'opencode';
-      case 'claude-cli':
-      default: return 'claude';
-    }
+    const provider = this.assertKnownProvider('getProviderBinary');
+    return resolveProviderBinary(provider);
   }
 
   private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
-    const model = this.model;
-    switch (this.provider) {
-      case 'codex-cli':
-        return [
-          'app-server',
-          '--listen', 'stdio://',
-          ...(model ? ['--model', model] : []),
-        ];
-      case 'gemini-cli':
-        return ['--acp'];
-      case 'opencode-cli':
-        return [
-          'run',
-          '--format', 'json',
-          '--pure',
-          ...(model ? ['-m', model] : []),
-        ];
-      case 'claude-cli':
-      default:
-        return [
-          '-p', '--verbose',
-          '--input-format', 'stream-json',
-          '--output-format', 'stream-json',
-          '--permission-mode', 'bypassPermissions',
-          '--system-prompt', systemPrompt,
-          ...(model ? ['--model', model] : []),
-          ...this.pluginDirs.flatMap(dir => ['--plugin-dir', dir]),
-          ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
-        ];
-    }
+    const provider = this.assertKnownProvider('getProviderArgs');
+    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, this.model, this.pluginDirs);
   }
 
   private getParser(): (line: string) => AgentEvent | null {
-    switch (this.provider) {
-      case 'codex-cli': return parseCodexEvent;
-      case 'gemini-cli': return parseGeminiAcpEvent;
-      case 'opencode-cli': return (line: string) => this.openCodeParser.parse(line);
-      case 'claude-cli':
-      default: return parseEvent;
+    const provider = this.assertKnownProvider('getParser');
+    return resolveProviderParser(provider, this.openCodeParser);
+  }
+
+  /**
+   * Narrow `this.provider` to {@link ProviderId} at runtime, throwing if the
+   * field was somehow set to an unknown ID (defense in depth — the validator
+   * blocks this at config-load time, but tests / direct instantiation can
+   * bypass the validator). Closes #447 silent-alias hazard.
+   */
+  private assertKnownProvider(context: string): ProviderId {
+    if (!isProviderId(this.provider)) {
+      throw new Error(
+        `[session-manager:${context}] unknown provider id: ${JSON.stringify(this.provider)}. ` +
+          `Valid: ${PROVIDER_IDS.join(', ')}.`,
+      );
     }
+    return this.provider;
   }
 
   private resetStdoutBuffers(): void {

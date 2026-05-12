@@ -13,6 +13,11 @@
 // loader can import from this module without a circular dependency. The
 // loader re-exports these for backwards compatibility with existing callers
 // (fleet/discovery.ts, fleet/routes/ops.ts, lib/*).
+//
+// PROVIDER_IDS is the single source of truth for agentOptions.provider —
+// see src/runtimes/agent/providers/index.ts and issue #447.
+import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
+
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const VALID_ACCESS_MODES: ReadonlySet<string> = new Set([
   'self_only',
@@ -304,12 +309,17 @@ function validateAgentOptions(
     );
   }
 
-  // provider: non-empty string when present.
+  // provider: must be a canonical ID from the shared registry (#447). The
+  // session.ts switches throw on unknown IDs, so rejecting drift here gives
+  // the operator a clear 400-class error instead of a runtime crash.
   if (opts['provider'] !== undefined) {
-    if (typeof opts['provider'] !== 'string' || (opts['provider'] as string).trim() === '') {
+    if (
+      typeof opts['provider'] !== 'string' ||
+      !(PROVIDER_IDS as readonly string[]).includes(opts['provider'] as string)
+    ) {
       return err(
         'agentOptions.provider',
-        'agentOptions.provider must be a non-empty string when provided',
+        `agentOptions.provider must be one of: ${PROVIDER_IDS.join(', ')}`,
       );
     }
   }
