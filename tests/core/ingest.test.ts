@@ -53,6 +53,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
 
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
+import { drainIngest } from './_helpers/ingest-drain.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand, sendApprovalRequest } from '../../src/core/admin.ts';
@@ -160,8 +161,12 @@ async function runIngest(
   msg: IncomingMessage,
 ): Promise<void> {
   handler(msg);
-  // Yield one event-loop turn without a wall-clock timer.
-  await new Promise((resolve) => setImmediate(resolve));
+  // Wait on real completion signal: active === 0 && queued === 0.
+  // See tests/core/_helpers/ingest-drain.ts; replaces the legacy
+  // setTimeout(0) flush, which did not guarantee the inner async IIFE
+  // (admin routing, store, journal, runtime.handleMessage, sendMessage)
+  // had settled before assertions ran.
+  await drainIngest();
 }
 
 // ---------------------------------------------------------------------------

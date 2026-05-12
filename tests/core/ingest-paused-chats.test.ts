@@ -51,6 +51,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
 
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler } from '../../src/core/ingest.ts';
+import { drainIngest } from './_helpers/ingest-drain.ts';
 import { config } from '../../src/config.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { handleAdminCommand } from '../../src/core/admin.ts';
@@ -113,10 +114,11 @@ function makeIngest(opts?: { durability?: Record<string, unknown>; runtimeOverri
   return { db, messenger, runtime, handler, durability };
 }
 
-/** Fire the handler and yield one event-loop turn. */
+/** Fire the handler and wait until the pipeline drains. */
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
   handler(msg);
-  await new Promise((resolve) => setImmediate(resolve));
+  // Real completion signal — see tests/core/_helpers/ingest-drain.ts.
+  await drainIngest();
 }
 
 // ---------------------------------------------------------------------------
