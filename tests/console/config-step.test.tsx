@@ -289,6 +289,33 @@ describe('ConfigStep — real React handler wiring', () => {
       const patch = onChange.mock.calls[0][0] as { agentOptions: { providerConfig: Record<string, unknown> } }
       expect('maxTokens' in patch.agentOptions.providerConfig).toBe(false)
     })
+
+    it('rejects invalid number input instead of storing NaN', () => {
+      const { onChange } = renderConfigStep({
+        initialData: {
+          type: 'agent',
+          name: 'sage',
+          agentOptions: {
+            provider: 'anthropic-api',
+            providerConfig: { maxTokens: 16384 },
+          },
+        },
+      })
+      openPermissionsTab()
+      onChange.mockClear()
+
+      const maxTokensInput = screen.getByDisplayValue('16384') as HTMLInputElement
+      Object.defineProperty(maxTokensInput, 'value', {
+        configurable: true,
+        get: () => '1e',
+      })
+      fireEvent.change(maxTokensInput)
+
+      expect(onChange).toHaveBeenCalledTimes(1)
+      const patch = onChange.mock.calls[0][0] as { agentOptions: { providerConfig: Record<string, unknown> } }
+      expect(Number.isNaN(patch.agentOptions.providerConfig.maxTokens)).toBe(false)
+      expect('maxTokens' in patch.agentOptions.providerConfig).toBe(false)
+    })
   })
 
   // ──────────────────────────────────────────────────────────────────────
