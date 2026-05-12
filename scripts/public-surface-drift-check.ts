@@ -464,10 +464,17 @@ export function run(
   env: NodeJS.ProcessEnv = process.env,
 ): PublicSurfaceDriftIssue[] {
   if (env.WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT === '1') {
-    console.warn(
-      'public surface drift check skipped via WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT=1',
-    );
-    return [];
+    const inCi = env.CI === 'true' || Boolean(env.GITHUB_ACTIONS);
+    if (inCi) {
+      console.warn(
+        'WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT=1 ignored: CI/GITHUB_ACTIONS detected; public surface drift check will run (this skip is for local dev only)',
+      );
+    } else {
+      console.warn(
+        'public surface drift check skipped via WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT=1',
+      );
+      return [];
+    }
   }
 
   const args = parseArgs(argv);
