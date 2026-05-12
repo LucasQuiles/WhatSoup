@@ -74,6 +74,65 @@ export function capabilityRoleRule(args: CapabilityRoleRuleArgs): EvaluatorEvent
     }
   }
 
+  const enabledPlugins = readStringArray(observed.fields.enabled_plugins);
+  if (deploymentRole.enabled_plugins_max !== undefined && enabledPlugins.length > deploymentRole.enabled_plugins_max) {
+    findings.push(roleViolation({
+      observed,
+      reason: 'enabled_plugins_max_exceeded',
+      details: {
+        expected_max: deploymentRole.enabled_plugins_max,
+        actual_count: enabledPlugins.length,
+      },
+    }));
+  }
+
+  if (deploymentRole.enabled_plugins !== undefined) {
+    const allowed = new Set(deploymentRole.enabled_plugins);
+    const disallowed = enabledPlugins.filter((p) => !allowed.has(p)).sort((a, b) => a.localeCompare(b));
+    if (disallowed.length > 0) {
+      findings.push(roleViolation({
+        observed,
+        reason: 'enabled_plugins_outside_allowlist',
+        details: {
+          allowed: [...deploymentRole.enabled_plugins].sort((a, b) => a.localeCompare(b)),
+          disallowed,
+        },
+      }));
+    }
+  }
+
+  const accessMode = readAccessMode(observed.fields.access_mode);
+  for (const [key, expected] of Object.entries(deploymentRole.access_mode ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    const actual = accessMode[key];
+    if (actual === undefined || actual !== expected) {
+      findings.push(roleViolation({
+        observed,
+        reason: 'access_mode_mismatch',
+        details: {
+          access_key: key,
+          expected_value: expected,
+          actual_value: actual === undefined ? null : actual,
+        },
+      }));
+    }
+  }
+
+  if (deploymentRole.mcp_tool_set !== undefined) {
+    const observedTools = readStringArray(observed.fields.mcp_tool_set);
+    const allowed = new Set(deploymentRole.mcp_tool_set);
+    const disallowed = observedTools.filter((t) => !allowed.has(t)).sort((a, b) => a.localeCompare(b));
+    if (disallowed.length > 0) {
+      findings.push(roleViolation({
+        observed,
+        reason: 'mcp_tool_set_outside_allowlist',
+        details: {
+          allowed: [...deploymentRole.mcp_tool_set].sort((a, b) => a.localeCompare(b)),
+          disallowed,
+        },
+      }));
+    }
+  }
+
   return findings;
 }
 
@@ -121,6 +180,20 @@ function readProviderEnv(value: unknown): Record<string, boolean> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v): v is string => typeof v === 'string');
+}
+
+function readAccessMode(value: unknown): Record<string, boolean | string> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, boolean | string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === 'boolean' || typeof raw === 'string') out[key] = raw;
+  }
+  return out;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
