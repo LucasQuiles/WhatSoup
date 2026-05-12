@@ -73,20 +73,18 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-rollback-test-'));
-    // Agent cwd must live under HOME (resolveHomeConfinedPath confines to $HOME).
-    const homeTmp = path.join(os.homedir(), '.whatsoup-test-tmp');
-    fs.mkdirSync(homeTmp, { recursive: true });
-    agentCwd = fs.mkdtempSync(path.join(homeTmp, 'rollback-cwd-'));
-
     originalHome = process.env.HOME;
     originalConfigHome = process.env.XDG_CONFIG_HOME;
     originalDataHome = process.env.XDG_DATA_HOME;
     originalStateHome = process.env.XDG_STATE_HOME;
     originalUmask = process.umask(0o022);
 
+    process.env.HOME = path.join(tmpDir, 'home');
     process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'config');
     process.env.XDG_DATA_HOME = path.join(tmpDir, 'data');
     process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
+    fs.mkdirSync(process.env.HOME, { recursive: true, mode: 0o700 });
+    agentCwd = fs.mkdtempSync(path.join(process.env.HOME, 'rollback-cwd-'));
   });
 
   afterEach(() => {
@@ -101,7 +99,6 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     else process.env.XDG_STATE_HOME = originalStateHome;
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
-    fs.rmSync(agentCwd, { recursive: true, force: true });
   });
 
   it('restores pre-existing CLAUDE.md and settings.json when enable() throws', async () => {
@@ -111,13 +108,12 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
     const settingsPath = path.join(claudeDir, 'settings.json');
 
-    const SENTINEL_CLAUDE_MD = '# USER_DATA_v1\n\nMy curated project instructions.\n';
-    const SENTINEL_SETTINGS = {
-      hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-hook.sh' }] }] },
-      env: { MY_VAR: 'sentinel' },
-    };
-    fs.writeFileSync(claudeMdPath, SENTINEL_CLAUDE_MD);
-    fs.writeFileSync(settingsPath, JSON.stringify(SENTINEL_SETTINGS, null, 2) + '\n');
+    const sentinelClaudeMd = Buffer.from([0xff, 0xfe, 0x23, 0x20, 0x55, 0x53, 0x45, 0x52, 0x0a]);
+    const sentinelSettings = Buffer.from([0x7b, 0x20, 0x22, 0x69, 0x6e, 0x76, 0x61, 0x6c, 0x69, 0x64]);
+    fs.writeFileSync(claudeMdPath, sentinelClaudeMd);
+    fs.writeFileSync(settingsPath, sentinelSettings);
+    fs.chmodSync(claudeMdPath, 0o644);
+    fs.chmodSync(settingsPath, 0o640);
 
     const deps = failingDeps();
     const res = mockRes();
@@ -138,13 +134,13 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
 
     // CLAUDE.md must be byte-for-byte restored.
     expect(fs.existsSync(claudeMdPath)).toBe(true);
-    expect(fs.readFileSync(claudeMdPath, 'utf-8')).toBe(SENTINEL_CLAUDE_MD);
+    expect(fs.readFileSync(claudeMdPath)).toEqual(sentinelClaudeMd);
+    expect(fs.statSync(claudeMdPath).mode & 0o777).toBe(0o644);
 
-    // settings.json must still parse and retain the user's hooks + env.
+    // settings.json must be restored byte-for-byte even if it was not valid JSON.
     expect(fs.existsSync(settingsPath)).toBe(true);
-    const restored = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-    expect(restored.hooks?.PreToolUse?.[0]?.matcher).toBe('Bash');
-    expect(restored.env?.MY_VAR).toBe('sentinel');
+    expect(fs.readFileSync(settingsPath)).toEqual(sentinelSettings);
+    expect(fs.statSync(settingsPath).mode & 0o777).toBe(0o640);
 
     // And the instance configRoot must be cleaned up (rollback still removes
     // the dirs it created).

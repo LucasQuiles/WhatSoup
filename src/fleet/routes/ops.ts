@@ -57,6 +57,7 @@ function deepMergeRecords(
 
 interface PrivateWriteOptions {
   exclusive?: boolean;
+  mode?: number;
 }
 
 function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
@@ -75,8 +76,9 @@ function assertPrivateDirectorySync(dirPath: string): void {
   }
 }
 
-function writePrivateFileSync(filePath: string, data: string, options: PrivateWriteOptions = {}): void {
+function writePrivateFileSync(filePath: string, data: string | Buffer, options: PrivateWriteOptions = {}): void {
   assertPrivateDirectorySync(path.dirname(filePath));
+  const mode = options.mode ?? 0o600;
 
   try {
     const stat = fs.lstatSync(filePath);
@@ -100,15 +102,16 @@ function writePrivateFileSync(filePath: string, data: string, options: PrivateWr
     (options.exclusive ? fs.constants.O_EXCL : 0);
   let fd: number | undefined;
   try {
-    fd = fs.openSync(filePath, flags, 0o600);
+    fd = fs.openSync(filePath, flags, mode);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) {
       throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
     }
-    fs.fchmodSync(fd, 0o600);
+    fs.fchmodSync(fd, mode);
     fs.ftruncateSync(fd, 0);
-    fs.writeFileSync(fd, data, { encoding: 'utf-8' });
-    fs.fchmodSync(fd, 0o600);
+    if (typeof data === 'string') fs.writeFileSync(fd, data, { encoding: 'utf-8' });
+    else fs.writeFileSync(fd, data);
+    fs.fchmodSync(fd, mode);
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -772,6 +775,28 @@ interface ExtraRecord {
   path: string;
   existed: boolean;
   priorContents?: Buffer;
+  priorMode?: number;
+}
+
+function snapshotExtra(filePath: string): ExtraRecord {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw privateWriteError('refusing to snapshot private file through symlink', 'ELOOP');
+    }
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to snapshot non-regular private file', 'EINVAL');
+    }
+    return {
+      path: filePath,
+      existed: true,
+      priorContents: fs.readFileSync(filePath),
+      priorMode: stat.mode & 0o7777,
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    return { path: filePath, existed: false };
+  }
 }
 
 /** Remove directories/files created during a partial instance creation. */
@@ -788,12 +813,7 @@ function cleanupPartial(name: string, extras?: ExtraRecord[]): void {
     for (const e of extras) {
       try {
         if (e.existed && e.priorContents !== undefined) {
-          // Restore the user's original file contents byte-for-byte.
-          // Use writePrivateFileSync so the restored file inherits the
-          // 0o600 mode the create path already tightened it to; that
-          // matches the post-create security posture and is strictly safer
-          // than re-widening the mode on rollback.
-          writePrivateFileSync(e.path, e.priorContents.toString('utf-8'));
+          writePrivateFileSync(e.path, e.priorContents, { mode: e.priorMode ?? 0o600 });
         } else if (!e.existed) {
           // File did not exist before create — remove the one we wrote.
           // Never recursive: extras are files, not directories.
@@ -983,12 +1003,9 @@ export async function handleCreateLine(
       const claudeDir = path.join(cwd, '.claude');
       ensureHomeConfinedDirectory(claudeDir);
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-      // Capture pre-existence + prior contents BEFORE overwriting so the
-      // rollback path can restore user data on enable() failure.
-      const claudeMdExisted = fs.existsSync(claudeMdPath);
-      const claudeMdPrior = claudeMdExisted ? fs.readFileSync(claudeMdPath) : undefined;
+      const claudeMdSnapshot = snapshotExtra(claudeMdPath);
+      createdExtras.push(claudeMdSnapshot);
       writePrivateFileSync(claudeMdPath, body.claudeMd as string);
-      createdExtras.push({ path: claudeMdPath, existed: claudeMdExisted, priorContents: claudeMdPrior });
     }
 
     // --- Write settings.json for agent instances ---
@@ -1005,14 +1022,9 @@ export async function handleCreateLine(
           settings.enabledPlugins = ao.enabledPlugins as Record<string, boolean>;
         }
         const settingsPath = path.join(claudeDir, 'settings.json');
-        // writePermissionsSettings merges with existing JSON, so any prior file
-        // carries user-curated hooks/env/project keys. Snapshot the raw bytes
-        // first so rollback can rewind the full merged file, not just the
-        // permissions block.
-        const settingsExisted = fs.existsSync(settingsPath);
-        const settingsPrior = settingsExisted ? fs.readFileSync(settingsPath) : undefined;
+        const settingsSnapshot = snapshotExtra(settingsPath);
+        createdExtras.push(settingsSnapshot);
         writePermissionsSettings(claudeDir, settings);
-        createdExtras.push({ path: settingsPath, existed: settingsExisted, priorContents: settingsPrior });
       }
     }
 
