@@ -25,6 +25,15 @@ import { ToastContext, type ToastContextValue } from '../../console/src/hooks/to
 const useLinesMock = vi.hoisted(() => vi.fn());
 const useFeedMock = vi.hoisted(() => vi.fn());
 const useFleetMetricsMock = vi.hoisted(() => vi.fn());
+const navigateMock = vi.hoisted(() => vi.fn());
+
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>();
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
 
 vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../console/src/hooks/use-fleet')>();
@@ -168,6 +177,16 @@ function tableBody(): HTMLElement {
   return tbody as HTMLElement;
 }
 
+function tableRows(): HTMLTableRowElement[] {
+  return Array.from(tableBody().querySelectorAll('tr'));
+}
+
+function tableCell(row: HTMLElement, index: number): HTMLElement {
+  const cell = row.querySelectorAll('td')[index];
+  if (!cell) throw new Error(`missing table cell at index ${index}`);
+  return cell as HTMLElement;
+}
+
 /** AlertBanner — anchor on the "N alert(s)" badge text. */
 function alertBanner(): HTMLElement | null {
   const badge = screen.queryByText(/^\d+ alerts?$/);
@@ -182,10 +201,16 @@ function alertBanner(): HTMLElement | null {
  * ModeBadge labels can't bleed in.
  */
 function visibleTableLineNames(lines: LineInstance[]): string[] {
-  const body = tableBody();
-  return lines
-    .map((l) => l.name)
-    .filter((name) => within(body).queryByText(displayInstanceName(name)) !== null);
+  const known = new Map(lines.map((line) => [displayInstanceName(line.name), line.name]));
+  return tableRows()
+    .map((row) => {
+      const lineCell = tableCell(row, 1);
+      for (const [displayName, rawName] of known) {
+        if (within(lineCell).queryByText(displayName)) return rawName;
+      }
+      return undefined;
+    })
+    .filter((name): name is string => name !== undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -343,14 +368,11 @@ describe('SoupKitchen instance table rendering', () => {
     renderPage({ lines });
     // operator-agent (agent mode) should expose its totalSessions value
     const agentRow = screen.getByText(displayInstanceName('operator-agent')).closest('tr') as HTMLElement;
-    expect(within(agentRow).getByText('47')).toBeDefined();
+    expect(tableCell(agentRow, 8).textContent).toBe('47');
 
     // primary-line (passive mode) should show em-dash in the Sessions column.
-    // We can't address the cell by header alone in jsdom, so verify the row
-    // contains the em-dash glyph somewhere (the dash also appears for tokens,
-    // but the assertion still proves agent-only sessions aren't being rendered).
     const passiveRow = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
-    expect(passiveRow.textContent).toContain('—');
+    expect(tableCell(passiveRow, 8).textContent).toBe('—');
     // And the passive row must NOT contain "47"
     expect(within(passiveRow).queryByText('47')).toBeNull();
   });
@@ -359,9 +381,8 @@ describe('SoupKitchen instance table rendering', () => {
     renderPage({ lines });
     const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
     fireEvent.click(row);
-    // MemoryRouter doesn't expose location directly; assert by re-rendering
-    // would lose the click. Instead, confirm the row is the clickable target.
-    expect(row.className).toContain('cursor-pointer');
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+    expect(navigateMock).toHaveBeenCalledWith('/lines/primary-line');
   });
 });
 
@@ -480,6 +501,37 @@ describe('SoupKitchen filter behavior', () => {
   it('renders all lines by default', () => {
     renderPage({ lines });
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
+  });
+
+  it('sorts by line name and exposes aria-sort direction', () => {
+    renderPage({ lines });
+    const lineHeader = screen.getByRole('columnheader', { name: /^Line\b/ });
+
+    fireEvent.click(lineHeader);
+    expect(lineHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(lines)).toEqual(['echo', 'delta', 'charlie', 'bravo', 'alpha']);
+
+    fireEvent.click(lineHeader);
+    expect(lineHeader.getAttribute('aria-sort')).toBe('ascending');
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
+  });
+
+  it('sorts unread counts numerically and reverses direction on repeat click', () => {
+    const unreadLines = [
+      makeLine({ name: 'one-unread', unread: 1 }),
+      makeLine({ name: 'ten-unread', unread: 10 }),
+      makeLine({ name: 'two-unread', unread: 2 }),
+    ];
+    renderPage({ lines: unreadLines });
+    const unreadHeader = screen.getByRole('columnheader', { name: /^Unread\b/ });
+
+    fireEvent.click(unreadHeader);
+    expect(unreadHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
+
+    fireEvent.click(unreadHeader);
+    expect(unreadHeader.getAttribute('aria-sort')).toBe('ascending');
+    expect(visibleTableLineNames(unreadLines)).toEqual(['one-unread', 'two-unread', 'ten-unread']);
   });
 
   it('clicking "Lines Connected" KPI filters to online lines only', () => {
