@@ -239,7 +239,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
     expect(JSON.parse(res._body).error).toMatch(/sandboxPerChat requires sessionScope "per_chat"/);
   });
 
-  it('rejects empty provider string with 400', async () => {
+  it('rejects empty provider string with 400 (registry enum, #447)', async () => {
     const cfg = writeAgentConfig();
     const inst = fakeInstance(cfg, { name: 'test-agent', type: 'agent' });
     const res = mockRes();
@@ -248,7 +248,10 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       res, makeDeps(inst), { name: 'test-agent' },
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/provider must be a non-empty string/);
+    // #447: provider is now validated against the shared PROVIDER_IDS registry,
+    // so the error enumerates the valid set. Empty string is still rejected.
+    expect(JSON.parse(res._body).error).toMatch(/provider must be one of:/);
+    expect(JSON.parse(res._body).error).toMatch(/claude-cli/);
   });
 
   it('rejects providerConfig that is an array with 400', async () => {
