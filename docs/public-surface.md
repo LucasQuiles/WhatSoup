@@ -116,6 +116,7 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 | `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
 | `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
 | `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:506` | stable | active | Currently-composing JIDs from presence cache |
 | `http:health.heal` | `POST /heal` | `src/core/health.ts:283` | stable | active | Inject Type-3 repair report |
 | `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:194` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
