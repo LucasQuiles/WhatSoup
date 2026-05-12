@@ -3,8 +3,7 @@
 // Ported from legacy whatsapp-bot/src/runtimes/agent/media-bridge.ts.
 
 import { createServer, type Server, type Socket } from 'node:net';
-import { readFile } from 'node:fs/promises';
-import { unlinkSync, realpathSync } from 'node:fs';
+import { createReadStream, statSync, unlinkSync, realpathSync } from 'node:fs';
 import { resolve, extname, dirname, basename, join } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
 import { isPathWithinAllowedRoot } from '../../mcp/types.ts';
@@ -59,6 +58,12 @@ const EXT_TO_MIME: Record<string, string> = {
   '.mov': 'video/quicktime',
   '.webm': 'video/webm',
 };
+
+function destroyOutboundMediaStream(media: OutboundMedia): void {
+  if (media.stream === undefined) return;
+  media.stream.on('error', () => {});
+  media.stream.destroy();
+}
 
 // ─── Bridge handle ────────────────────────────────────────────────────────────
 
@@ -224,13 +229,12 @@ async function handleRequest(
     return { ok: false, error: 'current chat is required' };
   }
 
-  let buffer: Buffer;
   try {
-    buffer = await readFile(resolvedPath);
+    statSync(resolvedPath);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return { ok: false, error: `file not found: ${resolvedPath}` };
-    log.error({ err, resolvedPath }, 'failed to read file');
+    log.error({ err, resolvedPath }, 'failed to stat file');
     return { ok: false, error: 'failed to read file' };
   }
 
@@ -247,16 +251,16 @@ async function handleRequest(
   let media: OutboundMedia;
   switch (mediaType) {
     case 'image':
-      media = { type: 'image', buffer, mimetype, caption };
+      media = { type: 'image', stream: createReadStream(resolvedPath), mimetype, caption };
       break;
     case 'audio':
-      media = { type: 'audio', buffer, mimetype };
+      media = { type: 'audio', stream: createReadStream(resolvedPath), mimetype };
       break;
     case 'video':
-      media = { type: 'video', buffer, mimetype, caption };
+      media = { type: 'video', stream: createReadStream(resolvedPath), mimetype, caption };
       break;
     default:
-      media = { type: 'document', buffer, filename, mimetype, caption };
+      media = { type: 'document', stream: createReadStream(resolvedPath), filename, mimetype, caption };
       break;
   }
 
@@ -265,6 +269,7 @@ async function handleRequest(
     log.info({ chatJid, mediaType, ext }, 'media sent');
     return { ok: true };
   } catch (err) {
+    destroyOutboundMediaStream(media);
     log.error({ err, chatJid }, 'sendMedia failed');
     return { ok: false, error: 'failed to send media — try again' };
   }

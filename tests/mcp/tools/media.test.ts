@@ -70,6 +70,14 @@ function globalSession(): SessionContext {
   return { tier: 'global' };
 }
 
+function destroyCapturedMediaStreams(mediaCalls: Array<{ media: unknown }>): void {
+  for (const { media } of mediaCalls) {
+    const stream = (media as { stream?: { destroy?: () => void; on?: (event: 'error', listener: () => void) => void } } | null)?.stream;
+    stream?.on?.('error', () => {});
+    stream?.destroy?.();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -102,6 +110,7 @@ describe('registerMediaTools', () => {
   });
 
   afterEach(() => {
+    destroyCapturedMediaStreams(mediaCalls);
     for (const f of filesToClean) {
       try { unlinkSync(f); } catch { /* ignore */ }
     }
@@ -149,6 +158,9 @@ describe('registerMediaTools', () => {
     expect(media.type).toBe('image');
     expect(media.mimetype).toBe('image/jpeg');
     expect(media.caption).toBe('A photo');
+    expect(media.stream).toBeDefined();
+    expect(media.buffer).toBeUndefined();
+    media.stream.destroy();
   });
 
   it('sends a PNG image file', async () => {
