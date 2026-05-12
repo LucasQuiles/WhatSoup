@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { readFleetTokenForDevProxy } from './vite.fleet-token.ts'
+import { attachFleetTokenAuth } from './vite.proxy-auth.ts'
 
 // Token is read per-request (see configure hooks below) so dev sessions
 // pick up rotations without restarting Vite.
@@ -19,10 +19,7 @@ export default defineConfig({
         target: 'http://127.0.0.1:9099',
         changeOrigin: true,
         configure: (proxy) => {
-          proxy.on('proxyReq', (proxyReq) => {
-            const token = readFleetTokenForDevProxy()
-            if (token) proxyReq.setHeader('Authorization', `Bearer ${token}`)
-          })
+          attachFleetTokenAuth(proxy)
           // Disable response buffering for SSE streams
           proxy.on('proxyRes', (proxyRes) => {
             const ct = proxyRes.headers['content-type'] ?? ''
@@ -37,10 +34,7 @@ export default defineConfig({
         target: 'http://127.0.0.1:9099',
         changeOrigin: true,
         configure: (proxy) => {
-          proxy.on('proxyReq', (proxyReq) => {
-            const token = readFleetTokenForDevProxy()
-            if (token) proxyReq.setHeader('Authorization', `Bearer ${token}`)
-          })
+          attachFleetTokenAuth(proxy)
         },
       },
     },
