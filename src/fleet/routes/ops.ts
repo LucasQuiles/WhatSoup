@@ -12,7 +12,7 @@ import { mcpCall } from '../mcp-client.ts';
 import { respondMcp } from './mcp-proxy.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
-import { configRoot, dataRoot, stateRoot } from '../paths.ts';
+import { configRoot, dataRoot, stateRoot, repoRoot } from '../paths.ts';
 import { writePermissionsSettings } from '../../core/workspace.ts';
 import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
 import type { PermissionsSettings } from '../../core/settings-template.ts';
@@ -1141,8 +1141,15 @@ export async function handleAuth(
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
   // and does not process untrusted input, so full env inheritance is acceptable.
-  const child = spawn('node', ['--experimental-strip-types', 'src/bootstrap-auth.ts', params.name], {
-    cwd: process.cwd(),
+  // Resolve bootstrap-auth against the repo root, not `process.cwd()`.
+  // Under systemd the fleet unit ships with no `WorkingDirectory=`, so cwd
+  // is the service user's `$HOME` and a relative script path ENOENTs (#419).
+  const child = spawn('node', [
+    '--experimental-strip-types',
+    path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
+    params.name,
+  ], {
+    cwd: repoRoot,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
