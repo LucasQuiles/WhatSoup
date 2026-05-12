@@ -637,7 +637,7 @@ const retentionInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
 }, 24 * 60 * 60 * 1000);
 
-// 12. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories (SP7)
+// 12. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories
 // config.mediaDir resolves to .../media/tmp; base is one level up
 const mediaBaseDir = join(config.mediaDir, '..');
 const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
@@ -686,7 +686,7 @@ const lidReconcileInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'L6: LID reconciliation failed'); }
 }, 30 * 60 * 1000); // every 30 minutes
 
-// 16. Message scheduler (SP11)
+// 16. Message scheduler
 const messageScheduler = new MessageScheduler(db, connectionManager, {
   intervalMs: 60_000,   // check every minute
   maxRetries: 3,

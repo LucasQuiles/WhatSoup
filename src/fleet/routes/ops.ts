@@ -142,12 +142,11 @@ export async function handleSend(
   // Validate target shape + normalize JID in request body.
   // chatJid xor to: callers must commit to exactly one. Both -> 400; neither -> 400.
   //
-  // Architectural note (deviation from the transport-completion design's
-  // Decision 3 on chat-resolver placement):
+  // Architectural note (docs/tools.md#send_message and src/core/send-pipeline.ts):
   // We do NOT add a `chatResolver` field to OpsDeps. Aliases live in per-instance
-  // DBs (Decisions 1+2) and the fleet has no per-instance DB connection. Honoring
-  // the literal design would require Map<line, ChatResolver> + new infrastructure
-  // for fleet-side instance DB connections. Instead, the fleet validates xor and
+  // DBs and the fleet has no per-instance DB connection. Fleet-side alias
+  // resolution would require Map<line, ChatResolver> + new infrastructure for
+  // fleet-side instance DB connections. Instead, the fleet validates xor and
   // forwards the body verbatim; the per-instance MCP `send_message` tool
   // resolves the alias against its own DB. Defense in depth: fleet xor protects
   // HTTP callers; MCP xor protects direct-MCP callers. Instance returns its own

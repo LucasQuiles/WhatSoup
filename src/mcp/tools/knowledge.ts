@@ -392,7 +392,7 @@ export function registerKnowledgeTools(
         });
 
         const durationMs = Date.now() - startMs;
-        // T1 PII hygiene: the raw query text may contain personal details
+        // PII hygiene: the raw query text may contain personal details
         // (names, phone numbers, addresses) and must NOT land in the INFO
         // stream that ships to aggregated log surfaces. The query prefix is
         // demoted to DEBUG for local diagnosis; routing and count metadata

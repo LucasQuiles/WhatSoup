@@ -164,7 +164,7 @@ export class EnrichmentPoller {
         // the exporter is responsible for the remote upsert and for
         // calling markFactsExported once Pinecone confirms.
         //
-        // T1 accounting-gated promotion: we only mark the segment's
+        // Queue accounting-gated promotion: we only mark the segment's
         // messages as processed if the queue accepted every fact without
         // a hard failure. `failed === 0 && inserted + duplicates === facts.length`
         // captures both the "all new" and the "some idempotent duplicates"

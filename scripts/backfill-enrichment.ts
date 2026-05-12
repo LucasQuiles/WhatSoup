@@ -11,10 +11,10 @@
  *   - Does NOT widen the `is_from_me = 0` filter; skips messages where
  *     `enrichment_processed_at IS NOT NULL` (those were processed under the
  *     pre-exporter-rollout architecture; their facts live in the frozen
- *     `whatsapp` namespace and are out of scope per plan §21).
+ *     `whatsapp` namespace and are out of scope for this backfill).
  *   - Does NOT instantiate PineconeMemory (queue-only path).
  *   - Emits no outbound WhatsApp traffic.
- *   - Preserves the T1 accounting gate: source messages are marked
+ *   - Preserves the queue accounting gate: source messages are marked
  *     processed only when `failed === 0 && inserted + duplicates === facts.length`.
  *   - Tags `enrichment_runs.error` with `backfill_ok:<run_id>` or
  *     `backfill_fail:<run_id>` so operators can distinguish backfill runs
@@ -52,12 +52,11 @@ import {
 export { shortHash, toExportable };
 
 /**
- * P3.6 review S-1a: shared stage vocabulary for ExtractionError and
- * ValidationError. Both error classes use the exact same four-value union,
- * so promoting it to a named type keeps the backfill summary / failedBatches
- * surface in sync with the error sources. If a future stage is added in
- * extractor.ts / validator.ts without updating this alias, tsc flags the
- * gap here and in StrictFailure.stage below.
+ * Shared stage vocabulary for ExtractionError and ValidationError. Both error
+ * classes use the exact same four-value union, so promoting it to a named type
+ * keeps the backfill summary / failedBatches surface in sync with the error
+ * sources. If a future stage is added in extractor.ts / validator.ts without
+ * updating this alias, tsc flags the gap here and in StrictFailure.stage below.
  */
 export type StrictStage =
   | 'provider-call'
@@ -77,7 +76,7 @@ export function groupByChatJid(messages: StoredMessage[]): Map<string, StoredMes
   return byChat;
 }
 
-/** Mirrors the poller's T1 accounting rule. */
+/** Mirrors the poller's queue accounting rule. */
 export function accountingOk(result: EnqueueFactsResult, expected: number): boolean {
   return result.failed === 0 && result.inserted + result.duplicates === expected;
 }
@@ -301,10 +300,9 @@ export interface BackfillBatchDeps {
 }
 
 /**
- * P3.6-H2 strict-mode failure record attached to a per-batch result when
- * the extractor or validator raises. Lives on BackfillBatchResult so the
- * runBackfill caller can aggregate these into summary.failedBatches without
- * a second data path.
+ * Strict-mode failure record attached to a per-batch result when the extractor
+ * or validator raises. Lives on BackfillBatchResult so the runBackfill caller
+ * can aggregate these into summary.failedBatches without a second data path.
  */
 export interface StrictFailure {
   errorType: 'ExtractionError' | 'ValidationError';
@@ -322,10 +320,10 @@ export interface BackfillBatchResult {
   markedProcessed: boolean;
   error?: string;
   /**
-   * P3.6-H2. Populated only when the batch failed-closed under strict mode
-   * (caller passed `strict=true` and extractFacts / validateFacts raised).
-   * Non-strict generic errors still land on `error` instead, preserving the
-   * pre-H2 caller contract.
+   * Populated only when the batch failed-closed under strict mode (caller
+   * passed `strict=true` and extractFacts / validateFacts raised). Non-strict
+   * generic errors still land on `error` instead, preserving the caller
+   * contract.
    */
   strictFailure?: StrictFailure;
 }
@@ -351,11 +349,11 @@ export async function processBatch(
   const batchMessageIds = chatMessages.map((m) => m.pk);
 
   try {
-    // P3.6-H2: pass the strict flag through; H1 owns the decision of what
-    // becomes an ExtractionError (provider-call / json-parse / schema-shape
-    // / schema-items-all-dropped). Legitimate empties (empty batch, model
-    // replied `[]`) still return `[]` silently — we do NOT classify those
-    // as failures here.
+    // Pass the strict flag through; the extractor owns what becomes an
+    // ExtractionError (provider-call / json-parse / schema-shape /
+    // schema-items-all-dropped). Legitimate empties (empty batch, model
+    // replied `[]`) still return `[]` silently — we do NOT classify those as
+    // failures here.
     const facts = await deps.extract(providers.extraction, chatMessages, { strict });
     out.factsExtracted = facts.length;
 
@@ -390,17 +388,17 @@ export async function processBatch(
       deps.markProcessed(db, batchMessageIds);
       out.markedProcessed = true;
     }
-    // Note: accountingOk===false (T1 invariant) is a separate failure class
+    // Note: accountingOk===false (queue invariant) is a separate failure class
     // from strict-mode fail-closed. Both skip markProcessed but the
     // discrimination happens at the runBackfill summary level, not here.
   } catch (err) {
-    // P3.6-H2 fail-closed: ExtractionError / ValidationError get structured
-    // treatment — stage + messageIds preserved verbatim for the operator
-    // retry path. Non-strict paths can never reach this branch (extract /
-    // validate silently coerce to `[]`), so `strict` is implicitly true
-    // when we observe these classes, but we still gate explicitly so a
-    // future regression that throws H1 errors from a non-strict caller
-    // doesn't silently corrupt the summary contract.
+    // Strict fail-closed: ExtractionError / ValidationError get structured
+    // treatment — stage + messageIds preserved verbatim for the operator retry
+    // path. Non-strict paths can never reach this branch (extract / validate
+    // silently coerce to `[]`), so `strict` is implicitly true when we observe
+    // these classes, but we still gate explicitly so a future regression that
+    // throws strict-mode errors from a non-strict caller doesn't silently
+    // corrupt the summary contract.
     if (strict && err instanceof ExtractionError) {
       out.strictFailure = {
         errorType: 'ExtractionError',
@@ -448,11 +446,10 @@ export interface BackfillSummary {
   elapsedMs: number;
   perChat: BackfillBatchResult[];
   /**
-   * P3.6-H2. Every batch whose extractor / validator raised under strict
-   * mode. Always present as an array (empty if no failures); non-strict
-   * runs never populate entries here even if generic errors land on
-   * `perChat[i].error`. The `chatJid` + `messageIds` are what operators
-   * need for a manual retry.
+   * Every batch whose extractor / validator raised under strict mode. Always
+   * present as an array (empty if no failures); non-strict runs never populate
+   * entries here even if generic errors land on `perChat[i].error`. The
+   * `chatJid` + `messageIds` are what operators need for a manual retry.
    */
   failedBatches: Array<{
     chatJid: string;
@@ -537,8 +534,8 @@ export async function runBackfill(
     summary.factsExtracted += batchResult.factsExtracted;
     summary.factsValidated += batchResult.factsValidated;
     summary.factsQueued += batchResult.enqueueResult?.inserted ?? 0;
-    // P3.6-H2: strict failures feed the structured failedBatches list so
-    // main() can emit the JSON summary and pick the correct exit code.
+    // Strict failures feed the structured failedBatches list so main() can
+    // emit the JSON summary and pick the correct exit code.
     if (batchResult.strictFailure) {
       summary.failedBatches.push({
         chatJid: batchResult.chatJid,
@@ -711,7 +708,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       ].join('\n'),
     );
 
-    // P3.6-H2 summary block: always emit under --strict so operators see
+    // Strict-mode summary block: always emit under --strict so operators see
     // the message pks they need to retry, even when failedBatches is empty
     // (the empty case proves fail-closed didn't fire, which is itself useful
     // evidence on a clean run).
@@ -732,12 +729,12 @@ export async function main(argv: readonly string[]): Promise<number> {
       console.log('[backfill] BACKFILL_NO_OP: 0 unprocessed messages');
       return 0;
     }
-    // P3.6-H2: exit code 6 is reserved for "strict-mode fail-closed ran and
-    // blocked at least one batch from being marked". Dry-run suppresses the
-    // non-zero exit because dry-run is informational. Codes in use elsewhere:
-    // 0 success, 2 unhandled, 3 bot.db missing, 4 general batch failure,
-    // 5 provider config. Code 6 distinguishes strict-blocked from the
-    // accountingOk===false path (which still returns 4).
+    // Exit code 6 is reserved for "strict-mode fail-closed ran and blocked at
+    // least one batch from being marked". Dry-run suppresses the non-zero exit
+    // because dry-run is informational. Codes in use elsewhere: 0 success, 2
+    // unhandled, 3 bot.db missing, 4 general batch failure, 5 provider config.
+    // Code 6 distinguishes strict-blocked from the accountingOk===false path
+    // (which still returns 4).
     if (args.strict && !args.dryRun && summary.failedBatches.length > 0) {
       return 6;
     }

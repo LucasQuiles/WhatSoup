@@ -2,7 +2,7 @@
 // Chat alias resolver — maps a chat reference to a raw chatJid via a
 // per-instance SQLite alias table.
 //
-// Per the transport-completion design:
+// Per docs/tools.md#send_message and src/core/send-pipeline.ts:
 //   - Aliases live in a per-instance chat_aliases table; line identity is
 //     implicit-per-DB (a given line's resolver consults only its own DB).
 //   - resolve() takes a target object that must contain exactly one of

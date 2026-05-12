@@ -74,7 +74,7 @@ function anyMatch(lower: string, triggers: readonly string[]): boolean {
  * the caller's explicit choice wins regardless of query text; the intent is
  * reported as 'hybrid' to reflect that the router deferred to the caller.
  *
- * Policy (see plan §Retrieval Policy):
+ * Retrieval policy:
  *   identity/preference/standing fact  ->  configured facts, then summaries, chunks
  *   thread catch-up / quote / what did I say  ->  summaries, chunks, then facts
  *   mixed / ambiguous  ->  summaries, then facts and chunks
