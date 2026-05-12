@@ -40,7 +40,7 @@ CI but does not fail the build (§9.4); this transitions to hard-fail at the v1.
 
 ## HTTP API — Fleet server
 
-Canonical route table: [`src/fleet/index.ts:279-331`](../src/fleet/index.ts) (`ROUTES`
+Canonical route table: [`src/fleet/index.ts:279-329`](../src/fleet/index.ts) (`ROUTES`
 array). Operator-facing description: [README §Fleet API](../README.md#fleet-api). The fleet
 server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 (`Authorization: Bearer`), an audience-scoped ticket, or the legacy `?token=` query string
@@ -93,13 +93,13 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:279` | stable | active | Currently-typing indicators |
 | `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:282` | stable | active | Path writable probe |
 | `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:291` | stable | active | Fleet-wide metrics |
-| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:327` | stable | active | Build version |
-| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:328` | stable | active | Self-update trigger |
-| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:329` | stable | active | List cross-instance LID mappings |
-| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:330` | stable | active | Sync mappings between instances |
+| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:325` | stable | active | Build version |
+| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:326` | stable | active | Self-update trigger |
+| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:327` | stable | active | List cross-instance LID mappings |
+| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:328` | stable | active | Sync mappings between instances |
 | `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:749`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer required) |
 | `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:775`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer required) |
-| `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Removal scheduled after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
+| `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
 
 ### Health server (per-instance)
 
@@ -174,7 +174,7 @@ Each instance config file is at `$XDG_CONFIG_HOME/whatsoup/instances/<name>/conf
 | `config:instance_config.models` | config-key | [docs/configuration.md §models Object](configuration.md#models-object) | v1 (bootstrap) | stable | active | `conversation`, `extraction`, `validation`, `fallback` |
 | `config:instance_config.memory` | config-key | [docs/configuration.md §memory](configuration.md#memory) | v1 (bootstrap) | stable | active | Canonical BYOK memory/search config; supersedes legacy `pinecone*` flat fields |
 | `config:instance_config.memory.pinecone` | config-key | [docs/configuration.md §Pinecone BYOK Fields](configuration.md#pinecone-byok-fields) | v1 (bootstrap) | stable | active | `index`, `searchMode`, `rerank`, `topK`, `rerankTopN`, `allowedIndexes`, `apiKeyEnv` |
-| `config:instance_config.memory.legacy-aliases` | config-key | [docs/configuration.md §Legacy Migration](configuration.md#legacy-migration) | v1 (bootstrap) | stable | deprecated | Flat `pineconeIndex`, `pineconeSearchMode`, `pineconeRerank`, `pineconeTopK`, `pineconeRerankTopN`, `pineconeAllowedIndexes`. Auto-migrated to `memory.pinecone.*`; new configs use canonical form. |
+| `config:instance_config.memory.legacy-aliases` | config-key | [docs/configuration.md §Legacy Migration](configuration.md#legacy-migration) | v1 (bootstrap) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Flat `pineconeIndex`, `pineconeSearchMode`, `pineconeRerank`, `pineconeTopK`, `pineconeRerankTopN`, `pineconeAllowedIndexes` are auto-migrated to `memory.pinecone.*`; new configs use canonical form. |
 | `config:instance_config.chatAliases` | config-key | [docs/configuration.md §chatAliases](configuration.md#chataliases) | v1 (bootstrap) | stable | active | Per-instance alias map for outbound sends |
 | `config:instance_config.profiles` | config-key | [docs/configuration.md §profiles](configuration.md#profiles) | v1 (bootstrap) | stable | active | Named send-decoration policies (`prefix`, `tag`, `linkPreview`) |
 | `config:instance_config.operationTracker` | config-key | [docs/configuration.md §operationTracker](configuration.md#operationtracker) | v1 (bootstrap) | stable | active | Per-tool progress + stall detection |
@@ -200,7 +200,7 @@ The registry tracks env-var groups at the section level.
 | `env:api-keys` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY` | [docs/configuration.md §API Keys](configuration.md#api-keys-required-for-chat-and-audio-transcription) | stable | active | Loaded from GNOME Keyring by wrapper; required for `chat` instances, soft-optional for `agent`, unused for `passive` |
 | `env:models` | `CONVERSATION_MODEL`, `EXTRACTION_MODEL`, `VALIDATION_MODEL`, `FALLBACK_MODEL` | [docs/configuration.md §Models](configuration.md#models) | stable | active | Overridable per instance via `models` |
 | `env:conversation` | `MAX_TOKENS`, `RATE_LIMIT_PER_HOUR` | [docs/configuration.md §Conversation](configuration.md#conversation) | stable | active | Per-instance overrides available |
-| `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Single-instance only; `instance.json:adminPhones` is the canonical form in multi-instance mode |
+| `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Single-instance only; `instance.json:adminPhones` is the canonical form in multi-instance mode |
 | `env:storage-paths` | `WHATSOUP_CONFIG_DIR`, `WHATSOUP_DATA_DIR`, `WHATSOUP_STATE_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | [docs/configuration.md §Storage Paths](configuration.md#storage-paths-single-instance-legacy-mode-only) | stable | active | Legacy / single-instance mode only |
 | `env:pinecone` | `PINECONE_INDEX`, `PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`, `MW_MIND_EMBED_URL`, `RECENCY_HALF_LIFE_DAYS`, `MAX_AGE_DAYS` | [docs/configuration.md §Pinecone](configuration.md#pinecone) | stable | active | Defaults that per-instance `memory.pinecone.*` can override |
 | `env:health-server` | `HEALTH_PORT`, `HEALTH_BIND_ADDRESS`, `WHATSOUP_HEALTH_TOKEN` | [docs/configuration.md §Health Server](configuration.md#health-server) | stable | active | Mutation endpoints fail closed `401` without token |
@@ -293,7 +293,7 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:instance.auth` | `<configRoot>/instances/<name>/auth/` | [docs/configuration.md](configuration.md) | stable | active | WhatsApp session credentials; never copy across machines |
 | `artifact:instance.db` | `<dataRoot>/instances/<name>/bot.db` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Per-instance SQLite; migration chain canonical |
 | `artifact:fleet.tokens` | `<configRoot>/fleet-tokens.json` | [README §Fleet API](../README.md#fleet-api) | stable | active | Active root token + rotated accept-list |
-| `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Migrated on first read to `fleet-tokens.json`; retained for rollback |
+| `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
 | `artifact:tokens.env` | `<configRoot>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
 | `artifact:mcp.config` | `.mcp.json` (repo root) | [`.mcp.json`](../.mcp.json) | stable | active | MCP server registration for MCP-aware clients |
@@ -325,6 +325,7 @@ behavioral contract is documented at [docs/console-guide.md](console-guide.md) a
 - [docs/specs/2026-05-09-settings-migration-framework-design.md](specs/2026-05-09-settings-migration-framework-design.md) — `public_surface_registry` is the eighth migration domain
 - [docs/specs/2026-05-09-fleet-topology-control-plane-design.md](specs/2026-05-09-fleet-topology-control-plane-design.md) — admin / client / standalone modes
 - [docs/specs/2026-05-08-whatsoup-protection-layer-design.md](specs/2026-05-08-whatsoup-protection-layer-design.md) — protection-policy surface
+- [docs/releases/2026-05-12-public-surface-baseline.md](releases/2026-05-12-public-surface-baseline.md) — bootstrap release note for public-surface additions and deprecations
 - [docs/configuration.md](configuration.md) — canonical config / env-var reference
 - [docs/tools.md](tools.md) — canonical MCP tool reference (per-tool schemas)
 - [docs/runbook.md](runbook.md) — operator runbook
