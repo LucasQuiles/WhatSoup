@@ -136,10 +136,10 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 
 | Identifier | Tools | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `mcp:tools.messaging` | 9 | [`src/mcp/tools/messaging.ts`](../src/mcp/tools/messaging.ts) | stable | active | `send_message`, `edit_message`, `delete_message`, `delete_message_for_me`, `reply_message`, `react_message`, `forward_message`, `pin_message`, `star_message` |
-| `mcp:tools.media` | 3 | [`src/mcp/tools/media.ts`](../src/mcp/tools/media.ts) | stable | active | `send_media`, `download_media`, `cleanup_media` |
-| `mcp:tools.chat-management` | 10 | [`src/mcp/tools/chat-management.ts`](../src/mcp/tools/chat-management.ts) | stable | active | Archive / pin / mute / clear / delete chat + manage labels |
-| `mcp:tools.chat-operations` | 11 | [`src/mcp/tools/chat-operations.ts`](../src/mcp/tools/chat-operations.ts) | stable | active | List / get chats, fetch message history, mark read, receipts, context, reactions, etc. |
+| `mcp:tools.messaging` | 9 | [`src/mcp/tools/messaging.ts`](../src/mcp/tools/messaging.ts) | stable | active | `send_message`, `reply_message`, `react_message`, `edit_message`, `delete_message`, `send_location`, `send_contact`, `send_poll`, `pin_message` |
+| `mcp:tools.media` | 3 | [`src/mcp/tools/media.ts`](../src/mcp/tools/media.ts) | stable | active | `send_media`, `download_media`, `transcribe_audio` |
+| `mcp:tools.chat-management` | 10 | [`src/mcp/tools/chat-management.ts`](../src/mcp/tools/chat-management.ts) | stable | active | `list_messages`, `get_message_context`, `list_chats`, `get_chat`, `forward_message`, `archive_chat`, `pin_chat`, `mute_chat`, `mark_messages_read`, `star_message` |
+| `mcp:tools.chat-operations` | 11 | [`src/mcp/tools/chat-operations.ts`](../src/mcp/tools/chat-operations.ts) | stable | active | `clear_chat`, `delete_chat`, `delete_message_for_me`, `set_disappearing_messages`, `send_event_message`, `mark_chat_read`, `update_push_name`, `fetch_message_history`, `request_placeholder_resend`, `get_reactions`, `get_message_receipts` |
 | `mcp:tools.search` | 4 | [`src/mcp/tools/search.ts`](../src/mcp/tools/search.ts) | stable | active | `search_messages`, `search_messages_advanced`, `search_chat_messages`, `search_contacts` |
 | `mcp:tools.groups` | 19 | [`src/mcp/tools/groups.ts`](../src/mcp/tools/groups.ts) | stable | active | Group lifecycle, invites, participants, ephemeral, join-approval |
 | `mcp:tools.community` | 12 | [`src/mcp/tools/community.ts`](../src/mcp/tools/community.ts) | stable | active | Community create / link / unlink / participants / metadata |
@@ -149,7 +149,7 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.advanced` | 13 | [`src/mcp/tools/advanced.ts`](../src/mcp/tools/advanced.ts) | stable | active | Phone-number registration, pairing, app-state resync, placeholder resend, relay |
 | `mcp:tools.calls` | 1 | [`src/mcp/tools/calls.ts`](../src/mcp/tools/calls.ts) | stable | active | `reject_call` |
 | `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
-| `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `transcribe_audio` |
+| `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
 | `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone) |
 | `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
@@ -201,12 +201,12 @@ The registry tracks env-var groups at the section level.
 | `env:models` | `CONVERSATION_MODEL`, `EXTRACTION_MODEL`, `VALIDATION_MODEL`, `FALLBACK_MODEL` | [docs/configuration.md §Models](configuration.md#models) | stable | active | Overridable per instance via `models` |
 | `env:conversation` | `MAX_TOKENS`, `RATE_LIMIT_PER_HOUR` | [docs/configuration.md §Conversation](configuration.md#conversation) | stable | active | Per-instance overrides available |
 | `env:access-control` | `ADMIN_PHONES` | [docs/configuration.md §Access Control](configuration.md#access-control) | stable | deprecated | Single-instance only; `instance.json:adminPhones` is the canonical form in multi-instance mode |
-| `env:storage-paths` | `WHATSOUP_CONFIG_DIR`, `WHATSOUP_DATA_DIR`, `WHATSOUP_STATE_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | [docs/configuration.md §Storage Paths](configuration.md#storage-paths-single-instance--legacy-mode-only) | stable | active | Legacy / single-instance mode only |
+| `env:storage-paths` | `WHATSOUP_CONFIG_DIR`, `WHATSOUP_DATA_DIR`, `WHATSOUP_STATE_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | [docs/configuration.md §Storage Paths](configuration.md#storage-paths-single-instance-legacy-mode-only) | stable | active | Legacy / single-instance mode only |
 | `env:pinecone` | `PINECONE_INDEX`, `PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`, `MW_MIND_EMBED_URL`, `RECENCY_HALF_LIFE_DAYS`, `MAX_AGE_DAYS` | [docs/configuration.md §Pinecone](configuration.md#pinecone) | stable | active | Defaults that per-instance `memory.pinecone.*` can override |
 | `env:health-server` | `HEALTH_PORT`, `HEALTH_BIND_ADDRESS`, `WHATSOUP_HEALTH_TOKEN` | [docs/configuration.md §Health Server](configuration.md#health-server) | stable | active | Mutation endpoints fail closed `401` without token |
 | `env:logging` | `LOG_LEVEL`, `LOG_DIR` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino log level + rotation directory |
 | `env:docker` | `WHATSOUP_DOCKER`, `WHATSOUP_MODE`, `WHATSOUP_INSTANCES`, `FLEET_BIND_ADDRESS` | [docs/configuration.md §Docker](configuration.md#docker) | stable | active | Container entrypoint controls |
-| `env:internal` | `INSTANCE_CONFIG` | [docs/configuration.md §Internal / Bootstrap](configuration.md#internal--bootstrap) | internal | active | Set by bootstrap process — operators must not set manually |
+| `env:internal` | `INSTANCE_CONFIG` | [docs/configuration.md §Internal / Bootstrap](configuration.md#internal-bootstrap) | internal | active | Set by bootstrap process — operators must not set manually |
 
 ---
 
@@ -311,7 +311,7 @@ behavioral contract is documented at [docs/console-guide.md](console-guide.md) a
 | Identifier | Workflow | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
 | `console:fleet-overview` | Fleet overview + line list | [README §Fleet Overview](../README.md#fleet-overview), [docs/console-guide.md](console-guide.md) | stable | active | Behavior contract — internal React component layout is private |
-| `console:line-detail.metrics` | Per-line metrics view | [README §Line Detail — Metrics](../README.md#line-detail--metrics) | stable | active | 24h / 7d / 30d windows |
+| `console:line-detail.metrics` | Per-line metrics view | [README §Line Detail — Metrics](../README.md#line-detail-metrics) | stable | active | 24h / 7d / 30d windows |
 | `console:operations` | Operations panel | [README §Operations](../README.md#operations) | stable | active | Restart / stop / access / send |
 | `console:inbox` | Inbox / conversation list | [README §Inbox](../README.md#inbox) | stable | active | Operator inbox view |
 | `console:instance-lifecycle` | Create / pair / delete instance | [README §Instance Lifecycle](../README.md#instance-lifecycle) | stable | active | Pair-via-QR flow |
