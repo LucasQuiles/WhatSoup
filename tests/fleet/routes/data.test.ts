@@ -28,18 +28,10 @@ const mockProxyToInstance = vi.mocked(proxyToInstance);
 // Mock helpers
 // ---------------------------------------------------------------------------
 
-function mockReq(url = '/'): IncomingMessage {
-  return { url, method: 'GET', headers: {} } as unknown as IncomingMessage;
-}
+import { mockReq as helperMockReq, mockRes } from '../../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = data; },
-  };
-  return res as any;
+function mockReq(url = '/'): IncomingMessage {
+  return helperMockReq({ url });
 }
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
