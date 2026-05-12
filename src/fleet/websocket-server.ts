@@ -25,7 +25,14 @@ const log = createChildLogger('fleet:ws');
 
 /** Invalidation events — trigger React Query refetch on the client. */
 export interface WsInvalidationEvent {
-  type: 'instance_status' | 'message_received' | 'chat_updated' | 'log_entry' | 'feed_event' | 'access_changed';
+  type:
+    | 'instance_status'
+    | 'message_received'
+    | 'chat_updated'
+    | 'log_entry'
+    | 'feed_event'
+    | 'access_changed'
+    | 'lid_conflict';
   instance: string;
   /** Optional conversation key for scoped invalidation. */
   conversationKey?: string;

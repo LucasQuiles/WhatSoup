@@ -47,6 +47,18 @@ export function publishFeedEvent(rt: FleetRealtimePublisher, instance: string): 
   rt.publish({ type: 'feed_event', instance });
 }
 
+/**
+ * Broadcast a LID-mapping conflict signal so consoles can refetch the
+ * `/api/lid-mappings` panel (#251). The `instance` field carries the
+ * controller's deterministic choice for the conflict's "owning" peer —
+ * see `handleGetLidMappings`/`handleSyncLidMappings` for how it is picked.
+ */
+export function publishLidConflict(rt: FleetRealtimePublisher, instance: string, lid: string): void {
+  const event: WsInvalidationEvent = { type: 'lid_conflict', instance };
+  if (lid) event.conversationKey = lid;
+  rt.publish(event);
+}
+
 export function publishTypingUpdate(
   rt: FleetRealtimePublisher,
   instance: string,
