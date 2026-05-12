@@ -161,8 +161,8 @@ describe('whatsoup-proxy', () => {
       server = null;
     }
     try { unlinkSync(socketPath); } catch { /* already gone */ }
-    // No socket-release sleep needed: makeSocketPath() returns a unique path
-    // per test, so OS port/inode reuse races don't apply.
+    // No socket-release sleep needed: server.close() has completed and each
+    // test uses its own socket path.
   });
 
   it('relays JSON-RPC from stdin to socket and response back to stdout', async () => {

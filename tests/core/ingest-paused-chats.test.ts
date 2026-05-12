@@ -113,7 +113,7 @@ function makeIngest(opts?: { durability?: Record<string, unknown>; runtimeOverri
   return { db, messenger, runtime, handler, durability };
 }
 
-/** Fire the handler and flush the microtask queue. */
+/** Fire the handler and yield one event-loop turn. */
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
   handler(msg);
   await new Promise((resolve) => setImmediate(resolve));
