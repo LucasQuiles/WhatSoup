@@ -9,6 +9,7 @@ import { normalizePhoneE164 } from '../../lib/phone.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
+import { respondMcp } from './mcp-proxy.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import { configRoot, dataRoot, stateRoot } from '../paths.ts';
@@ -201,12 +202,17 @@ export async function handleSend(
       if (socketStat) {
         const parsed = JSON.parse(fixedBody);
         const result = await mcpCall(instance.socketPath, 'send_message', parsed);
-        if (result.success) {
+        // Publish realtime events only on a fully clean tool envelope —
+        // transport failure (`success: false`) and tool-level error
+        // (`toolError: true`) must NOT fan out a "message received" signal.
+        if (result.success && !result.toolError) {
           publishMessageReceived(deps.realtime, params.name);
           publishChatUpdated(deps.realtime, params.name);
           publishFeedEvent(deps.realtime, params.name);
         }
-        jsonResponse(res, result.success ? 200 : 502, result);
+        // Route through `respondMcp` so `isError: true` envelopes map to
+        // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
+        respondMcp(res, result, 200);
         return;
       }
     } catch { /* fall through to HTTP */ }
@@ -333,7 +339,9 @@ export async function handleSaveContact(
   if (instance.socketPath && fs.existsSync(instance.socketPath)) {
     try {
       const result = await mcpCall(instance.socketPath, 'add_or_edit_contact', contactParams);
-      jsonResponse(res, result.success ? 200 : 502, result);
+      // Route through `respondMcp` so `isError: true` envelopes map to
+      // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
+      respondMcp(res, result, 200);
       return;
     } catch { /* fall through to HTTP proxy */ }
   }
