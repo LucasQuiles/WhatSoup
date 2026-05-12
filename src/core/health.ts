@@ -25,6 +25,7 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionStateSnapshot } from '../transport/connection.ts';
+import { readBody } from '../lib/http.ts';
 
 const log = createChildLogger('health');
 
@@ -280,9 +281,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
         if (!requireAuth(req, res)) return;
 
-        // Parse body
         let rawBody = '';
-        for await (const chunk of req) rawBody += chunk;
+        try {
+          rawBody = await readBody(req);
+        } catch (err) {
+          res.writeHead(agentCommandStatus(err), jsonHeaders);
+          res.end(JSON.stringify({ error: (err as Error).message }));
+          return;
+        }
+
         let data: Record<string, unknown>;
         try {
           data = JSON.parse(rawBody) as Record<string, unknown>;

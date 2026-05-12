@@ -6,17 +6,26 @@ export function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<st
   return new Promise((resolve, reject) => {
     let body = '';
     let bytes = 0;
+    let settled = false;
     req.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
       bytes += Buffer.byteLength(chunk);
       if (bytes > maxBytes) {
-        req.destroy();
+        settled = true;
         reject(Object.assign(new Error('request body too large'), { statusCode: 413 }));
         return;
       }
       body += chunk;
     });
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (!settled) resolve(body);
+    });
+    req.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
   });
 }
 
