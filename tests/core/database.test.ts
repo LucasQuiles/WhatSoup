@@ -861,3 +861,55 @@ describe('migration 19 — agent_sessions.provider', () => {
     expect(col!.type).toBe('TEXT');
   });
 });
+
+describe('migration 25 — lid_mappings_history', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('records migration version 25 in schema_migrations', () => {
+    const row = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 25')
+      .get() as { version: number } | undefined;
+    expect(row?.version).toBe(25);
+  });
+
+  it('creates lid_mappings_history table with expected columns', () => {
+    const cols = db.raw
+      .prepare("PRAGMA table_info('lid_mappings_history')")
+      .all() as Array<{ name: string; type: string; notnull: number; dflt_value: string | null; pk: number }>;
+    const byName = Object.fromEntries(cols.map((c) => [c.name, c]));
+
+    expect(byName.id).toMatchObject({ type: 'INTEGER', pk: 1 });
+    expect(byName.lid).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.prev_phone_jid).toMatchObject({ type: 'TEXT', notnull: 0 });
+    expect(byName.new_phone_jid).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.source).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.source_instance).toMatchObject({ type: 'TEXT', notnull: 0 });
+    expect(byName.changed_at).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.observed_updated_at).toMatchObject({ type: 'TEXT', notnull: 0 });
+  });
+
+  it('creates indexes on lid and changed_at', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='lid_mappings_history'")
+      .all() as Array<{ name: string }>;
+    const names = indexes.map((i) => i.name);
+    expect(names).toContain('idx_lid_mappings_history_lid');
+    expect(names).toContain('idx_lid_mappings_history_changed_at');
+  });
+
+  it('table is empty after migration (no backfill)', () => {
+    const row = db.raw
+      .prepare('SELECT COUNT(*) AS c FROM lid_mappings_history')
+      .get() as { c: number };
+    expect(row.c).toBe(0);
+  });
+});

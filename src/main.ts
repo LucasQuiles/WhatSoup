@@ -410,7 +410,7 @@ connectionManager.on('lidPairDiscovered', (participant, participantAlt) => {
   try {
     const pair = mineMessageKey(db, participant, participantAlt);
     if (pair) {
-      upsertLidMapping(db, pair.lid, pair.phoneJid);
+      upsertLidMapping(db, pair.lid, pair.phoneJid, 'L3');
       connectionManager.contactsDir.invalidateLidCache();
       log.info({ lid: pair.lid, phoneJid: pair.phoneJid, source: 'L3-message-mining' }, 'new LID mapping from message key');
     }

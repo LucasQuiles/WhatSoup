@@ -94,6 +94,23 @@ CREATE TABLE access_list (
   requested_at TEXT,
   decided_at TEXT
 );
+
+CREATE TABLE lid_mappings (
+  lid TEXT PRIMARY KEY,
+  phone_jid TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE lid_mappings_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lid TEXT NOT NULL,
+  prev_phone_jid TEXT,
+  new_phone_jid TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_instance TEXT,
+  changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  observed_updated_at TEXT
+);
 `;
 
 function writeInstanceConfig(configRoot: string, name: string, overrides: Record<string, unknown> = {}): void {
@@ -456,6 +473,36 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     // Missing `path` query param returns 400 from the handler — that's a successful dispatch.
     const res = await fetch(`${baseUrl}/api/directories/check`, { headers: auth });
     expect(res.status).toBe(400);
+  });
+
+  it('POST /api/lid-mappings/sync keeps legacy result counts and exposes detailed counters separately', async () => {
+    const instDbPath = path.join(dataRoot, INST_A, 'bot.db');
+    const db = new DatabaseSync(instDbPath);
+    try {
+      db.prepare('DELETE FROM lid_mappings_history WHERE lid = ?').run('424242');
+      db.prepare('DELETE FROM lid_mappings WHERE lid = ?').run('424242');
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run('424242', '15550004242@s.whatsapp.net', '2026-05-01 00:00:00');
+    } finally {
+      db.close();
+    }
+
+    const res = await fetch(`${baseUrl}/api/lid-mappings/sync`, {
+      method: 'POST',
+      headers: auth,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.totalMappings).toBeGreaterThanOrEqual(1);
+    expect(typeof body.results[INST_A]).toBe('number');
+    expect(body.results[INST_A]).toBe(0);
+    expect(body.details[INST_A]).toMatchObject({
+      imported: 0,
+      flipped: 0,
+      conflicts: 0,
+    });
   });
 
   it('PATCH /api/lines/:name/config dispatches (verb other than GET/POST)', async () => {

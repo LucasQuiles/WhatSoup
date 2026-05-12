@@ -434,6 +434,32 @@ CREATE INDEX IF NOT EXISTS idx_outbound_sends_alias_created
   WHERE alias IS NOT NULL;
 `;
 
+// ─── Migration 25: LID mapping history (audit trail for #251) ────────────────
+//
+// Append-only history of every LID→phone change. Written by the unified
+// writeLidMapping seam in lid-resolver.ts whenever a flip is detected (i.e.
+// the new phone differs from the existing row). Retention is enforced by the
+// seam, not a trigger: cap at 1000 rows per LID AND 90 days, whichever first.
+
+const MIGRATION_25 = `
+CREATE TABLE IF NOT EXISTS lid_mappings_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lid TEXT NOT NULL,
+  prev_phone_jid TEXT,
+  new_phone_jid TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_instance TEXT,
+  changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  observed_updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lid_mappings_history_lid
+  ON lid_mappings_history(lid);
+
+CREATE INDEX IF NOT EXISTS idx_lid_mappings_history_changed_at
+  ON lid_mappings_history(changed_at);
+`;
+
 // ─── Known migrations ────────────────────────────────────────────────────────
 
 type MigrationFn = (db: DatabaseSync) => void;
@@ -603,7 +629,12 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [22, (db: DatabaseSync) => { db.exec(MIGRATION_22); }],
   [23, runMigration23],
   [24, runMigration24],
+  [25, runMigration25],
 ]);
+
+function runMigration25(db: DatabaseSync): void {
+  db.exec(MIGRATION_25);
+}
 
 function runMigration20(db: DatabaseSync): void {
   db.exec(MIGRATION_20);
