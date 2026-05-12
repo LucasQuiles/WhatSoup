@@ -7,7 +7,7 @@ export interface FanoutOptions {
   readonly subscriberTimeoutMs: number;
   readonly overflowThreshold: number;
   readonly consecutiveTimeoutThreshold: number;
-  readonly persistDurableEvent?: (event: InboundEvent) => void;
+  readonly persistDurableEvent: (event: InboundEvent) => void;
 }
 
 export type SubscriberHandler = (event: InboundEvent) => void | Promise<void>;
@@ -43,6 +43,9 @@ export class FanoutDispatcher {
   };
 
   constructor(opts: FanoutOptions) {
+    if (typeof opts.persistDurableEvent !== 'function') {
+      throw new Error('persistDurableEvent is required');
+    }
     this.opts = opts;
   }
 
@@ -79,7 +82,10 @@ export class FanoutDispatcher {
   enqueue(event: InboundEvent): void {
     if (this.disposed) return;
     if (isDurableEventKind(event.kind)) {
-      this.opts.persistDurableEvent?.(event);
+      const result = this.opts.persistDurableEvent(event) as unknown;
+      if (isThenable(result)) {
+        throw new Error('persistDurableEvent must be synchronous');
+      }
     }
     for (const sub of this.subs.values()) {
       if (sub.suspended) {
@@ -171,4 +177,12 @@ export class FanoutDispatcher {
     sub.suspended = true;
     this.metrics.subscriberSuspensions.set(sub.id, reason);
   }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function')
+    && value !== null
+    && typeof (value as { then?: unknown }).then === 'function'
+  );
 }

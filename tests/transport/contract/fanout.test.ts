@@ -35,6 +35,7 @@ const opts: FanoutOptions = {
   subscriberTimeoutMs: 50,
   overflowThreshold: 2,
   consecutiveTimeoutThreshold: 2,
+  persistDurableEvent: () => {},
 };
 
 describe('FanoutDispatcher', () => {
@@ -50,6 +51,15 @@ describe('FanoutDispatcher', () => {
     await d.flush();
     expect(a).toHaveBeenCalledOnce();
     expect(b).toHaveBeenCalledOnce();
+  });
+
+  it('requires a durable persistence hook', () => {
+    expect(() => new FanoutDispatcher({
+      perSubscriberCapacity: 4,
+      subscriberTimeoutMs: 50,
+      overflowThreshold: 2,
+      consecutiveTimeoutThreshold: 2,
+    } as unknown as FanoutOptions)).toThrow(/persistDurableEvent is required/);
   });
 
   it('persists durable events before subscriber dispatch', async () => {
@@ -94,6 +104,20 @@ describe('FanoutDispatcher', () => {
     d.subscribe('s', handler);
 
     expect(() => d.enqueue(ev(1))).toThrow(/persist failed/);
+    await d.flush();
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rejects async durable persistence hooks before dispatch', async () => {
+    const handler = vi.fn();
+    const d = new FanoutDispatcher({
+      ...opts,
+      persistDurableEvent: (() => Promise.resolve()) as unknown as FanoutOptions['persistDurableEvent'],
+    });
+    d.subscribe('s', handler);
+
+    expect(() => d.enqueue(ev(1))).toThrow(/synchronous/i);
     await d.flush();
 
     expect(handler).not.toHaveBeenCalled();
