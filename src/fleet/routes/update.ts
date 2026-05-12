@@ -29,7 +29,7 @@ function parseTrackedChanges(porcelain: string): string[] {
 /**
  * Attempt to rollback to a previous SHA after a failed update step. Before resetting,
  * captures any post-pull tracked modifications (typically `package-lock.json` after
- * `npm install` runs) into a patch file on disk plus a `git stash` entry, so the
+ * `npm install` runs) into a private patch file on disk plus a tracked-file `git stash` entry, so the
  * destructive `git reset --hard` does not silently lose work. Best-effort — logs but
  * doesn't throw. Surfaces preserved files / patch path / stash ref via SSE.
  */
@@ -70,14 +70,14 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
         writeSSE('progress', {
           step: 'rollback',
           status: 'skipped',
-          reason: 'patch-write-failed',
+          reason: 'diff-capture-failed',
           files: preservedFiles,
         });
         return;
       }
 
       try {
-        writeFileSync(candidatePath, diffOut, { encoding: 'utf8' });
+        writeFileSync(candidatePath, diffOut, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         patchPath = candidatePath;
       } catch (writeErr) {
         // ENOSPC / EACCES / read-only fs — do NOT reset; leave the working tree intact
@@ -97,7 +97,7 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
       try {
         await execFileAsync(
           'git',
-          ['stash', 'push', '--include-untracked', '--message', `whatsoup-update-rollback ${timestamp}`],
+          ['stash', 'push', '--message', `whatsoup-update-rollback ${timestamp}`, '--', ...preservedFiles],
           { cwd: repoRoot, timeout: 15_000 },
         );
         stashRef = 'stash@{0}';

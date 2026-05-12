@@ -661,9 +661,10 @@ describe('handleUpdate — rollback', () => {
 
     // Patch was written before the destructive reset.
     expect(writeFileSyncSpy).toHaveBeenCalledTimes(1);
-    const [patchPathArg, patchBodyArg] = writeFileSyncSpy.mock.calls[0];
+    const [patchPathArg, patchBodyArg, patchOptionsArg] = writeFileSyncSpy.mock.calls[0];
     expect(patchPathArg).toMatch(/^\/tmp\/whatsoup-update-rollback-.*-abc1234\.patch$/);
     expect(patchBodyArg).toContain('diff --git a/package-lock.json');
+    expect(patchOptionsArg).toEqual({ encoding: 'utf8', mode: 0o600, flag: 'wx' });
 
     // Ordering: status -> diff -> stash push -> reset.
     const calls = execFileAsyncCalls();
@@ -671,8 +672,9 @@ describe('handleUpdate — rollback', () => {
     expect(rollbackSlice[0]).toEqual({ cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 });
     expect(rollbackSlice[1]).toEqual({ cmd: 'git', args: ['diff', 'HEAD'], cwd: '/repo', timeout: 10_000 });
     expect(rollbackSlice[2].cmd).toBe('git');
-    expect(rollbackSlice[2].args.slice(0, 4)).toEqual(['stash', 'push', '--include-untracked', '--message']);
-    expect(rollbackSlice[2].args[4]).toMatch(/^whatsoup-update-rollback /);
+    expect(rollbackSlice[2].args.slice(0, 3)).toEqual(['stash', 'push', '--message']);
+    expect(rollbackSlice[2].args[3]).toMatch(/^whatsoup-update-rollback /);
+    expect(rollbackSlice[2].args.slice(4)).toEqual(['--', 'package-lock.json']);
     expect(rollbackSlice[3]).toEqual({
       cmd: 'git',
       args: ['reset', '--hard', 'abc1234abc1234abc1234abc1234abc1234abc1234'],
