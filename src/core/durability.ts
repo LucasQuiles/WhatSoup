@@ -527,7 +527,7 @@ export class DurabilityEngine {
   // ── Recovery engine ──
 
   /**
-   * Phase 1: Run before reconnect. All synchronous SQLite operations.
+   * Pre-reconnect step: Run before reconnect. All synchronous SQLite operations.
    *
    * 1. Detect orphaned sessions via kill -0 on claude_pid.
    * 2. Promote all `sending` outbound ops → `maybe_sent` (crash-in-flight).
@@ -659,7 +659,7 @@ export class DurabilityEngine {
   }
 
   /**
-   * Phase 2: Run after reconnect + echo grace period. All synchronous SQLite operations.
+   * Post-reconnect step: Run after reconnect + echo grace period. All synchronous SQLite operations.
    *
    * 1. Reconcile `maybe_sent` ops: check messages table for wa_message_id match.
    *    - Found: mark echoed.

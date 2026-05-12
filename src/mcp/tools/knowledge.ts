@@ -351,7 +351,7 @@ export function registerKnowledgeTools(
         // Sort merged results by score descending
         hits.sort((a, b) => b.score - a.score);
 
-        // Phase 2: client-side rerank if configured
+        // Client-side rerank if configured
         if (profile.rerank && hits.length > 0) {
           try {
             const rerankResult = await pc.inference.rerank({
@@ -392,7 +392,7 @@ export function registerKnowledgeTools(
         });
 
         const durationMs = Date.now() - startMs;
-        // T1 PII hygiene: the raw query text may contain personal details
+        // PII hygiene: the raw query text may contain personal details
         // (names, phone numbers, addresses) and must NOT land in the INFO
         // stream that ships to aggregated log surfaces. The query prefix is
         // demoted to DEBUG for local diagnosis; routing and count metadata

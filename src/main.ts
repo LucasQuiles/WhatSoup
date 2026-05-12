@@ -145,7 +145,7 @@ process.on('exit', () => releaseLock());
 // com.whatsoup.mw-cell has a separate DB, and com.whatsoup.whatsoup-fleet
 // reads instance DBs read-only (see src/fleet/db-reader.ts) — it does not
 // run migrations. Operator runbook: docs/runbooks/mwlab-transcription-pinecone.md
-// (Phase 3 gate G1).
+// (operator-gated migration trigger for the enrichment exporter rollout).
 const db = new Database(config.dbPath);
 db.open();
 
@@ -263,8 +263,8 @@ if (instanceType === 'agent') {
   const openai = createOpenAIProvider();
   const pinecone = new PineconeMemory();
   // Enrichment is now drain-via-queue: the poller enqueues validated facts
-  // into `fact_export_queue` (see Phase 3, Task 1), and the Python mw-mind
-  // pipeline drains that queue and upserts them to standalone MWLab
+  // into `fact_export_queue` (introduced by the exporter rollout), and the
+  // Python mw-mind pipeline drains that queue and upserts them to standalone MWLab
   // `mw-mind`. Any instance with a configured pineconeIndex participates
   // (historical `whatsapp-bot` callers still enqueue against their own
   // index name; routing to the right index is the pipeline's concern).
@@ -637,7 +637,7 @@ const retentionInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'retention cleanup failed'); }
 }, 24 * 60 * 60 * 1000);
 
-// 12. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories (SP7)
+// 12. Media retention timer — periodic cleanup of tmp/ and cache/ subdirectories
 // config.mediaDir resolves to .../media/tmp; base is one level up
 const mediaBaseDir = join(config.mediaDir, '..');
 const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
@@ -686,7 +686,7 @@ const lidReconcileInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'L6: LID reconciliation failed'); }
 }, 30 * 60 * 1000); // every 30 minutes
 
-// 16. Message scheduler (SP11)
+// 16. Message scheduler
 const messageScheduler = new MessageScheduler(db, connectionManager, {
   intervalMs: 60_000,   // check every minute
   maxRetries: 3,
