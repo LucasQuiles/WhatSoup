@@ -7,5 +7,5 @@
     "jsx": "react-jsx",
     "lib": ["ES2024", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "console/src/**/*.ts", "console/src/**/*.tsx", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.tsx", "console/src/**/*.ts", "console/src/**/*.tsx", "scripts/**/*.ts"]
 }
