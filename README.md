@@ -86,7 +86,7 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 - **Docker** with Compose V2 (`docker compose version`)
 - No Node.js, systemd, or keyring required — the image bundles everything
 
-> **Pinned dependencies:** Due to the increase in recent supply chain attacks, all dependency versions in `package.json` are pinned to exact versions known to be safe at time of release. This minimizes the risk of compromised packages being pulled in by WhatSoup. If you choose to unpin or update these, do so at your own risk and with due diligence. Pinned versions will be updated in future releases with known good sources.
+> **Dependency policy:** Production and dev dependencies in `package.json` and `console/package.json` use caret-range constraints; reproducibility is enforced by the committed `package-lock.json` files, which pin every direct and transitive version. Always use `npm ci` (not `npm install`) in CI and on fresh checkouts so the lockfile is honored exactly. Lockfile updates are reviewed before merge as the supply-chain boundary.
 
 ## Quick Start
 
