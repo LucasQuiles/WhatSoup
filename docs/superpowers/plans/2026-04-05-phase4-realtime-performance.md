@@ -1,5 +1,7 @@
 # Phase 4: Real-Time & Performance
 
+> **HISTORICAL — superseded by PR #310 (WS ticket + rotatable tokens) and PR #287 (HTTP API token auth). For current operator commands see `docs/runbook.md` and `docs/runbooks/`. Examples below referencing `~/.config/whatsoup/fleet-token` or `/ws?token=...` reflect the pre-rotation design and should not be used as guidance.**
+
 **Status:** unknown — stalled at SPEC DRAFT stage; never became an SDLC epic. Kept for historical reference. _Originally marked "SPEC DRAFT — converging from team analysis"._  
 **Date:** 2026-04-05  
 **Contributors:** Q (orchestrator), Shannon (console analysis), BES Bot (polling analysis)
