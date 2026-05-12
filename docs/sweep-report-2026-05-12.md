@@ -43,7 +43,7 @@ Open issue state at sweep time:
 | Issue | State | Coverage |
 |---|---|---|
 | `#349` `mcp: stream outbound media instead of buffering whole file` | Open | No open PR found. Needs implementation PR. |
-| `#353` `transport: wire isDurableEventKind into dispatch path` | Open | No open PR found. Needs implementation PR. |
+| `#353` `transport: wire isDurableEventKind into dispatch path` | Open | Review-time update: covered by open ready PR `#365`. Do not duplicate. |
 | `#348` Tailwind warning cleanup | Closed | PR `#360` merged. |
 | `#352` provider KPI on summary | Closed | PR `#361` merged; provider display code and direct test are on current main. |
 
@@ -77,7 +77,7 @@ Draft PRs still open at sweep time: `#256`, `#271`, `#272`, `#281`, `#286`, `#29
 The work-index scanner previously treated this status text as `pending`:
 
 ```md
-**Status:** unknown - stalled at SPEC DRAFT stage; team consensus pending
+**Status:** unknown — stalled at SPEC stage; never became an SDLC epic. Kept for historical reference. _Originally marked "SPEC — team consensus pending"._
 ```
 
 That violated the status policy because the leading explicit status token should win. This branch adds a regression test and changes the normalizer so leading policy vocabulary is authoritative before fallback text scanning.
@@ -94,7 +94,7 @@ The affected row is `docs/superpowers/plans/2026-04-05-phase5-analytics-observab
 ## Recommended PR Queue
 
 1. `#349` outbound media streaming: implement streaming path and memory/backpressure tests.
-2. `#353` durable event dispatch: wire `isDurableEventKind` into dispatch path and add routing tests.
+2. `#353` durable event dispatch: review and land PR `#365`; do not open a duplicate implementation PR.
 3. Private config write: ensure intro-sent config updates preserve private file mode.
 4. Disconnect policy consolidation: extract helper and test restart-required/flapping semantics.
 5. Access-mode constant reuse: import canonical `VALID_ACCESS_MODES`.
