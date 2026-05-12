@@ -273,7 +273,7 @@ describe('useVirtualMessages — virtualizer integration', () => {
       toJSON: () => ({}),
     } as DOMRect)
 
-    const measured = opts.measureElement!(fakeEl as HTMLDivElement)
+    const measured = opts.measureElement!(fakeEl as HTMLDivElement, undefined, undefined as any)
     expect(measured).toBe(94) // Math.ceil(93.4)
 
     // Height = 0 (element not laid out, e.g. display:none) → fallback to base height
@@ -284,7 +284,7 @@ describe('useVirtualMessages — virtualizer integration', () => {
       toJSON: () => ({}),
     } as DOMRect)
 
-    const fallback = opts.measureElement!(fakeEl as HTMLDivElement)
+    const fallback = opts.measureElement!(fakeEl as HTMLDivElement, undefined, undefined as any)
     expect(fallback).toBe(MESSAGE_BASE_ROW_HEIGHT)
   })
 
