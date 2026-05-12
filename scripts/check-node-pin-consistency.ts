@@ -220,10 +220,17 @@ export function run(
   env: NodeJS.ProcessEnv = process.env,
 ): NodePinDrift {
   if (env.WHATSOUP_SKIP_NODE_PIN_CHECK === '1') {
-    console.warn(
-      'node-pin consistency check skipped via WHATSOUP_SKIP_NODE_PIN_CHECK=1',
-    );
-    return { canonical: '', mismatches: [], missing: [] };
+    const inCi = env.CI === 'true' || Boolean(env.GITHUB_ACTIONS);
+    if (inCi) {
+      console.warn(
+        'WHATSOUP_SKIP_NODE_PIN_CHECK=1 ignored: CI/GITHUB_ACTIONS detected; node-pin consistency check will run (this skip is for local dev only)',
+      );
+    } else {
+      console.warn(
+        'node-pin consistency check skipped via WHATSOUP_SKIP_NODE_PIN_CHECK=1',
+      );
+      return { canonical: '', mismatches: [], missing: [] };
+    }
   }
   const drift = findNodePinDrift({ cwd });
   if (drift.mismatches.length > 0 || drift.missing.length > 0) {

@@ -164,7 +164,7 @@ describe('node-pin consistency check', () => {
     expect(printed).toContain('24.13.0');
   });
 
-  it('run() honors the WHATSOUP_SKIP_NODE_PIN_CHECK escape hatch', () => {
+  it('run() honors the WHATSOUP_SKIP_NODE_PIN_CHECK escape hatch locally', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // Point at a drift-laden fixture; the escape hatch must short-circuit
     // before any file reads happen, returning the empty-skip sentinel.
@@ -178,5 +178,33 @@ describe('node-pin consistency check', () => {
     // even though the underlying fixture is intentionally drift-laden.
     expect(process.exitCode).not.toBe(1);
     expect(process.exitCode).toBe(undefined);
+  });
+
+  it('run() ignores WHATSOUP_SKIP_NODE_PIN_CHECK in CI and still reports drift', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({ wrapperVersion: '24.13.0' });
+
+    const drift = run([], dir, { WHATSOUP_SKIP_NODE_PIN_CHECK: '1', CI: 'true' });
+
+    expect(drift.mismatches.length).toBeGreaterThan(0);
+    expect(process.exitCode).toBe(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'WHATSOUP_SKIP_NODE_PIN_CHECK=1 ignored: CI/GITHUB_ACTIONS detected; node-pin consistency check will run (this skip is for local dev only)',
+    );
+  });
+
+  it('run() ignores WHATSOUP_SKIP_NODE_PIN_CHECK in GitHub Actions and still reports drift', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({ wrapperVersion: '24.13.0' });
+
+    const drift = run([], dir, { WHATSOUP_SKIP_NODE_PIN_CHECK: '1', GITHUB_ACTIONS: 'true' });
+
+    expect(drift.mismatches.length).toBeGreaterThan(0);
+    expect(process.exitCode).toBe(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'WHATSOUP_SKIP_NODE_PIN_CHECK=1 ignored: CI/GITHUB_ACTIONS detected; node-pin consistency check will run (this skip is for local dev only)',
+    );
   });
 });
