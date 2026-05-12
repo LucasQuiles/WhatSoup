@@ -1,0 +1,148 @@
+/**
+ * Direct unit coverage for src/core/mark-read.ts.
+ *
+ * `markConversationRead(db, connectionManager, conversationKey)`:
+ *   1. Looks up chats.jid by conversation_key (returns chat_not_found if missing).
+ *   2. Picks the most-recent message via `ORDER BY pk DESC`.
+ *   3. If a socket and a last message exist, calls sock.chatModify(...) with
+ *      a key shape that flips `fromMe` based on botJid equality.
+ *   4. Always zeroes chats.unread_count even when no socket / last message.
+ *   5. Swallows chatModify() errors (logs warn, still returns ok+jid).
+ *
+ * Uses real in-memory SQLite (project convention) + minimal fakes for
+ * sock + connectionManager. No prior direct mirror.
+ */
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+import { Database } from '../../src/core/database.ts';
+import { markConversationRead } from '../../src/core/mark-read.ts';
+
+const SELF_JID = '15551234567@s.whatsapp.net';
+const PEER_JID = '15559876543@s.whatsapp.net';
+const CONV_KEY = `conv:${PEER_JID}`;
+const CHAT_JID = PEER_JID;
+
+function seedChat(db: Database, opts?: { unread?: number }) {
+  db.raw
+    .prepare('INSERT INTO chats (jid, conversation_key, unread_count) VALUES (?, ?, ?)')
+    .run(CHAT_JID, CONV_KEY, opts?.unread ?? 5);
+}
+
+function seedMessage(
+  db: Database,
+  opts: { id: string; sender: string; ts: number },
+) {
+  db.raw
+    .prepare(
+      'INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run(CHAT_JID, CONV_KEY, opts.sender, opts.id, 'body', opts.ts);
+}
+
+function makeConnMgr(socket: unknown | null, botJid = SELF_JID) {
+  return {
+    getSocket: vi.fn(() => socket),
+    botJid,
+  };
+}
+
+describe('markConversationRead', () => {
+  let db: Database;
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns { ok: false, error: "chat_not_found" } when no chat row exists', async () => {
+    const result = await markConversationRead(db, makeConnMgr(null), 'no-such-key');
+    expect(result).toEqual({
+      ok: false,
+      error: 'chat_not_found',
+      conversation_key: 'no-such-key',
+    });
+  });
+
+  it('zeroes unread_count on success even when there are no messages and no socket', async () => {
+    seedChat(db, { unread: 7 });
+    const result = await markConversationRead(db, makeConnMgr(null), CONV_KEY);
+    expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
+    const row = db.raw
+      .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
+      .get(CONV_KEY) as { unread_count: number };
+    expect(row.unread_count).toBe(0);
+  });
+
+  it('skips chatModify when no socket is available, still zeroes unread', async () => {
+    seedChat(db, { unread: 3 });
+    seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
+    const connMgr = makeConnMgr(null);
+    const result = await markConversationRead(db, connMgr, CONV_KEY);
+    expect(result.ok).toBe(true);
+    expect(connMgr.getSocket).toHaveBeenCalledTimes(1);
+    const row = db.raw
+      .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
+      .get(CONV_KEY) as { unread_count: number };
+    expect(row.unread_count).toBe(0);
+  });
+
+  it('calls sock.chatModify with the most-recent message (ORDER BY pk DESC)', async () => {
+    seedChat(db);
+    seedMessage(db, { id: 'm-old', sender: PEER_JID, ts: 1_000 });
+    seedMessage(db, { id: 'm-new', sender: PEER_JID, ts: 2_000 });
+    const chatModify = vi.fn(async () => undefined);
+    const sock = { chatModify };
+    await markConversationRead(db, makeConnMgr(sock), CONV_KEY);
+    expect(chatModify).toHaveBeenCalledTimes(1);
+    const [payload, jid] = chatModify.mock.calls[0];
+    expect(jid).toBe(CHAT_JID);
+    expect(payload.markRead).toBe(true);
+    expect(payload.lastMessages).toHaveLength(1);
+    expect(payload.lastMessages[0].key.id).toBe('m-new');
+    expect(payload.lastMessages[0].messageTimestamp).toBe(2_000);
+  });
+
+  it('flags fromMe=true when last message sender equals botJid', async () => {
+    seedChat(db);
+    seedMessage(db, { id: 'mine', sender: SELF_JID, ts: 1_000 });
+    const chatModify = vi.fn(async () => undefined);
+    await markConversationRead(db, makeConnMgr({ chatModify }, SELF_JID), CONV_KEY);
+    expect(chatModify.mock.calls[0][0].lastMessages[0].key.fromMe).toBe(true);
+  });
+
+  it('flags fromMe=false when last message sender differs from botJid', async () => {
+    seedChat(db);
+    seedMessage(db, { id: 'theirs', sender: PEER_JID, ts: 1_000 });
+    const chatModify = vi.fn(async () => undefined);
+    await markConversationRead(db, makeConnMgr({ chatModify }, SELF_JID), CONV_KEY);
+    expect(chatModify.mock.calls[0][0].lastMessages[0].key.fromMe).toBe(false);
+  });
+
+  it('swallows chatModify errors: still returns ok and zeroes unread', async () => {
+    seedChat(db, { unread: 9 });
+    seedMessage(db, { id: 'm1', sender: PEER_JID, ts: 1_000 });
+    const chatModify = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const result = await markConversationRead(db, makeConnMgr({ chatModify }), CONV_KEY);
+    expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
+    const row = db.raw
+      .prepare('SELECT unread_count FROM chats WHERE conversation_key = ?')
+      .get(CONV_KEY) as { unread_count: number };
+    expect(row.unread_count).toBe(0);
+  });
+
+  it('skips chatModify when chat has no messages even if socket is present', async () => {
+    seedChat(db);
+    const chatModify = vi.fn(async () => undefined);
+    await markConversationRead(db, makeConnMgr({ chatModify }), CONV_KEY);
+    expect(chatModify).not.toHaveBeenCalled();
+  });
+
+  it('returns the chat_jid (raw chat JID for sends) on success', async () => {
+    seedChat(db);
+    const result = await markConversationRead(db, makeConnMgr(null), CONV_KEY);
+    expect(result).toEqual({ ok: true, jid: CHAT_JID, conversation_key: CONV_KEY });
+  });
+});
