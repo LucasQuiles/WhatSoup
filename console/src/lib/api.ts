@@ -201,7 +201,7 @@ export const api = {
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
     ).then(normalizeSearchResponse),
   saveContact: (name: string, contact: { jid: string; firstName?: string; lastName?: string }) =>
-    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
+    apiFetch<{ saved: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(contact),
@@ -236,7 +236,7 @@ export const api = {
     apiFetch<{ deleted: string }>(`/api/lines/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   sendMessage: (name: string, chatJid: string, text: string) =>
-    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
+    apiFetch<{ sent: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
       method: 'POST',
       body: JSON.stringify({ chatJid, text }),
     }),
