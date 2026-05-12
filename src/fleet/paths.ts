@@ -2,7 +2,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 export function xdgDir(envKey: string, fallbackSuffix: string): string {
-  return process.env[envKey] ?? path.join(os.homedir(), fallbackSuffix);
+  const value = process.env[envKey];
+  return value ? value : path.join(os.homedir(), fallbackSuffix);
 }
 
 export function configRoot(): string {
