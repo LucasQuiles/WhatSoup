@@ -16,6 +16,8 @@ import { writePermissionsSettings } from '../../core/workspace.ts';
 import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
 import type { PermissionsSettings } from '../../core/settings-template.ts';
 import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
+import { validateInstanceConfig } from '../../core/agent-config-validator.ts';
+import type { ValidationError as ConfigValidationError } from '../../core/agent-config-validator.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
@@ -430,7 +432,9 @@ export async function handleConfigUpdate(
   // sibling namespaces, BYOK key-env settings, or project guards.
   const merged = deepMergeRecords(existing, patch);
 
-  // Validate cwd path traversal (same guard as handleCreateLine)
+  // --- Shape/normalization that must run BEFORE the shared validator ---
+  // 1. agentOptions defaulting + cwd traversal check (paths are inherently
+  //    filesystem-aware; the shared validator only does type/range/enum).
   if (merged.type === 'agent') {
     if (merged.agentOptions == null) {
       merged.agentOptions = defaultAgentOptions(params.name);
@@ -442,42 +446,38 @@ export async function handleConfigUpdate(
     if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) return;
   }
 
-  // Validate numeric bounds if present in patch
-  if (!validateNumericBounds(patch, res)) return;
-
-  // Validate accessMode if patched
-  if (patch.accessMode !== undefined) {
-    if (!VALID_ACCESS_MODES.has(patch.accessMode as string)) {
-      jsonResponse(res, 400, { error: `accessMode must be one of: ${[...VALID_ACCESS_MODES].join(', ')}` });
-      return;
-    }
-  }
-
-  // Validate and normalize adminPhones if patched
+  // 2. Normalize adminPhones if patched so the validator sees E.164.
   if (patch.adminPhones !== undefined) {
-    if (!Array.isArray(patch.adminPhones) || patch.adminPhones.length === 0 || !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())) {
+    if (
+      !Array.isArray(patch.adminPhones) ||
+      patch.adminPhones.length === 0 ||
+      !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())
+    ) {
       jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
       return;
     }
     merged.adminPhones = normalizeAdminPhones(patch.adminPhones as string[]);
   }
 
-  // Cross-field constraint: sessionScope "single" requires accessMode "self_only"
-  const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
-  if (mergedAo?.sessionScope === 'single' && merged.accessMode !== 'self_only') {
-    jsonResponse(res, 400, { error: 'sessionScope "single" requires accessMode "self_only"' });
-    return;
+  // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
+  // Runs on the post-merge view so partial patches are checked against the
+  // assembled config, not the bare patch. Mirrors loader + CREATE.
+  {
+    const validationError = validateInstanceConfig(merged, {
+      name: params.name,
+      mode: 'patch',
+      existingHealthPorts: existingHealthPortMap(params.name),
+      originalType: existing.type,
+    });
+    if (validationError) {
+      if (!emitValidationError(validationError, res)) return;
+    }
   }
 
-  // Validate pluginDirs paths are within home directory
+  // pluginDirs home-confinement is fs-aware (not in the shared validator).
+  const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
   if (Array.isArray(mergedAo?.pluginDirs)) {
     if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) return;
-  }
-
-  // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
-  if (patch.claudeMd && typeof patch.claudeMd === 'string' && (patch.claudeMd as string).length > 32_768) {
-    jsonResponse(res, 400, { error: 'claudeMd exceeds maximum size (32KB)' });
-    return;
   }
   if (patch.claudeMd && merged.type === 'agent') {
     const ao = merged.agentOptions as Record<string, unknown> | undefined;
@@ -763,6 +763,33 @@ function usedHealthPorts(): number[] {
   return ports;
 }
 
+/**
+ * Build a name -> healthPort map by scanning the config root.
+ * Excludes the named instance so a self-PATCH that doesn't change the port
+ * isn't flagged as a duplicate against itself.
+ */
+function existingHealthPortMap(excludeName?: string): ReadonlyMap<string, number> {
+  const map = new Map<string, number>();
+  const root = configRoot();
+  let entries: string[];
+  try { entries = fs.readdirSync(root); } catch { return map; }
+  for (const n of entries) {
+    if (n === excludeName) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(root, n, 'config.json'), 'utf-8'));
+      if (raw.enabled === false) continue;
+      if (typeof raw.healthPort === 'number') map.set(n, raw.healthPort);
+    } catch { /* skip unreadable */ }
+  }
+  return map;
+}
+
+/** Map a ValidationError to the HTTP response and return false to halt the handler. */
+function emitValidationError(err: ConfigValidationError, res: ServerResponse): boolean {
+  jsonResponse(res, err.status ?? 400, { error: err.message });
+  return false;
+}
+
 
 /**
  * Record of a file written during create that may need to be rolled back.
@@ -961,6 +988,21 @@ export async function handleCreateLine(
     if (body[field] != null) config[field] = body[field];
   }
   config = migrateLegacyMemoryConfig(config, { removeLegacy: true }).config;
+
+  // --- Shared validator: defense-in-depth before writing to disk ---
+  // CREATE has already done inline shape checks above; this catches any field
+  // that slips through (e.g. invalid instructionsPath in agentOptions, oversize
+  // claudeMd, malformed providerConfig) and keeps CREATE/PATCH/loader aligned.
+  {
+    const validationError = validateInstanceConfig(
+      { ...config, claudeMd: body.claudeMd },
+      { name, mode: 'create', existingHealthPorts: existingHealthPortMap(name) },
+    );
+    if (validationError) {
+      jsonResponse(res, validationError.status ?? 400, { error: validationError.message });
+      return;
+    }
+  }
 
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
