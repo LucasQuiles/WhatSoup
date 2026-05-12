@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   getFleetWebSocketUrl,
   getInvalidationKeys,
@@ -30,19 +30,27 @@ describe('getFleetWebSocketUrl', () => {
   });
 
   it('returns null when the ticket fetcher rejects', async () => {
+    const fetchTicket = vi.fn(() => Promise.reject(new Error('unauthorized')));
     const url = await getFleetWebSocketUrl(
       { protocol: 'http:', host: 'localhost' },
-      () => Promise.reject(new Error('unauthorized')),
+      fetchTicket,
     );
     expect(url).toBeNull();
+    // Strengthen the null-path: fetcher invoked exactly once, no URL constructed.
+    expect(fetchTicket).toHaveBeenCalledTimes(1);
+    expect(typeof url === 'string' && /^wss?:/.test(url)).toBe(false);
   });
 
   it('returns null when the ticket payload is empty', async () => {
+    const fetchTicket = vi.fn(() => Promise.resolve({ ticket: '', expiresIn: 60 }));
     const url = await getFleetWebSocketUrl(
       { protocol: 'http:', host: 'localhost' },
-      () => Promise.resolve({ ticket: '', expiresIn: 60 }),
+      fetchTicket,
     );
     expect(url).toBeNull();
+    // Strengthen the null-path: fetcher invoked exactly once, no URL constructed.
+    expect(fetchTicket).toHaveBeenCalledTimes(1);
+    expect(typeof url === 'string' && /^wss?:/.test(url)).toBe(false);
   });
 
   it('encodes the ticket payload', async () => {
