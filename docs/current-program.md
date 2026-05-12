@@ -24,7 +24,7 @@ Current execution queue from that sweep:
 - GitHub issue queue is clear as of 2026-05-12 07:08Z.
 - Sweep follow-ups landed after the report: `#353` via PR `#365`, `#364` via PR `#368`, `#363` via PR `#370`, and `#349` via PR `#371`.
 - Recently closed issues from the same sweep window: GitHub `#348` landed via PR `#360`; GitHub `#352` landed via PR `#361`.
-- Verified internal follow-ups: private config write is covered by PR `#374`; disconnect-policy consolidation remains an implementation candidate; access-mode constant reuse is covered by draft PR `#369`; direct `agent-config-validator` tests are covered by draft PR `#372`.
+- Verified internal follow-ups: private config write is covered by PR `#374`; disconnect-policy consolidation is covered by updated draft PR `#297`; access-mode constant reuse is covered by draft PR `#369`; direct `agent-config-validator` tests are covered by draft PR `#372`.
 - False-positive sweep claims closed: memory migration mappings and provider KPI missing.
 
 Secondary backlog surfaces outside the generated work index: `docs/duplicates-report.md` and `.tmup-artifacts/dedup-triage-021.md`.
