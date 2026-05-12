@@ -15,7 +15,12 @@ FROM deps AS console-build
 
 WORKDIR /app/console
 COPY console/ .
-RUN npx vite build
+# 'npm run build' runs 'tsc -b && vite build' — matches the CI Console
+# build step and the verify:release gate, so the stricter
+# tsconfig.app.json flags (noUnusedLocals/Parameters, verbatimModuleSyntax,
+# erasableSyntaxOnly, noUncheckedSideEffectImports) are enforced in the
+# image build instead of being silently dropped by a bare vite invocation.
+RUN npm run build
 # Output lands at /app/dist (vite.config.ts: outDir: '../dist')
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────

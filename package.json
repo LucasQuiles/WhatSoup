@@ -29,7 +29,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
     "verify:push:branch": "npm run guard:repo:staged && npm run guard:doc-drift && npm run typecheck && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/doc-drift-check.test.ts --pool=forks",
-    "verify:release": "npm run guard:doc-drift && npm run typecheck:all && npm test -- --pool=forks",
+    "verify:release": "npm run guard:doc-drift && npm run typecheck:all && npm test -- --pool=forks && npm --prefix console ci --legacy-peer-deps && npm --prefix console run build",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "test:watch": "vitest"
