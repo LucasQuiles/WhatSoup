@@ -22,14 +22,7 @@ vi.mock('../../console/src/lib/api', () => ({
 // Import after vi.mock so the component picks up the mocked module.
 const { ModeSwitchDialog } = await import('../../console/src/components/line-detail/ModeSwitchDialog')
 
-interface Harness {
-  queryClient: QueryClient
-  toast: ToastContextValue
-  onClose: ReturnType<typeof vi.fn>
-  invalidateSpy: ReturnType<typeof vi.spyOn>
-}
-
-function makeHarness(): Harness {
+function makeHarness() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const toast: ToastContextValue = {
     toast: vi.fn(),
@@ -41,6 +34,8 @@ function makeHarness(): Harness {
   const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
   return { queryClient, toast, onClose, invalidateSpy }
 }
+
+type Harness = ReturnType<typeof makeHarness>
 
 function renderDialog(h: Harness, currentMode: 'passive' | 'chat' | 'agent' = 'passive', lineName = 'demo-line'): ReactElement {
   return render(
