@@ -77,7 +77,7 @@ echo ""
 # Matches .github/workflows/quality.yml install step exactly so local
 # setup, CI, and Docker all reproduce the pinned lockfile tree.
 echo "[2/6] Installing dependencies..."
-(cd "$REPO_ROOT" && npm ci --legacy-peer-deps)
+(cd "$REPO_ROOT" && npm ci)
 echo "  ✓ Root dependencies installed"
 
 # ── Step 3: Install wrapper scripts ─────────────────────────────────

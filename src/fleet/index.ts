@@ -35,7 +35,13 @@ import {
   verifyFleetToken as verifyFleetTokenImpl,
   type FleetTokensFile,
 } from './token-storage.ts';
-import { createTicketStore, TICKET_TTL_MS, type TicketStore } from './ws-ticket.ts';
+import { createTicketStore as createWsTicketStore, TICKET_TTL_MS, type TicketStore } from './ws-ticket.ts';
+import {
+  createTicketStore as createAuthTicketStore,
+  isTicketAudience,
+  type TicketStore as AuthTicketStore,
+  type TicketAudience,
+} from './auth-ticket.ts';
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
@@ -323,28 +329,111 @@ const ROUTES = [
 // L5: Cross-instance LID mapping sync handlers
 // ---------------------------------------------------------------------------
 
+type LidMappingObservation = {
+  lid: string;
+  phone_jid: string;
+  updated_at: string;
+  instance: string;
+};
+
+type LidMappingInstance = {
+  instance: string;
+  updated_at: string;
+};
+
+type UnifiedLidMapping = {
+  lid: string;
+  phone_jid: string;
+  instances: LidMappingInstance[];
+};
+
+type ConflictingLidMapping = {
+  lid: string;
+  phones: Array<{
+    phone_jid: string;
+    instances: LidMappingInstance[];
+  }>;
+};
+
+function compareLidInstances(a: LidMappingInstance, b: LidMappingInstance): number {
+  return a.instance.localeCompare(b.instance) || a.updated_at.localeCompare(b.updated_at);
+}
+
+function buildConflictExplicitLidMappings(observations: LidMappingObservation[]): {
+  unified: UnifiedLidMapping[];
+  conflicts: ConflictingLidMapping[];
+} {
+  const byLid = new Map<string, Map<string, LidMappingInstance[]>>();
+  for (const obs of observations) {
+    let byPhone = byLid.get(obs.lid);
+    if (!byPhone) {
+      byPhone = new Map<string, LidMappingInstance[]>();
+      byLid.set(obs.lid, byPhone);
+    }
+
+    let instances = byPhone.get(obs.phone_jid);
+    if (!instances) {
+      instances = [];
+      byPhone.set(obs.phone_jid, instances);
+    }
+    instances.push({ instance: obs.instance, updated_at: obs.updated_at });
+  }
+
+  const unified: UnifiedLidMapping[] = [];
+  const conflicts: ConflictingLidMapping[] = [];
+  for (const [lid, byPhone] of [...byLid.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const phones = [...byPhone.entries()].sort(([a], [b]) => a.localeCompare(b));
+    if (phones.length === 1) {
+      const [phone_jid, instances] = phones[0];
+      unified.push({
+        lid,
+        phone_jid,
+        instances: instances.toSorted(compareLidInstances),
+      });
+      continue;
+    }
+
+    conflicts.push({
+      lid,
+      phones: phones.map(([phone_jid, instances]) => ({
+        phone_jid,
+        instances: instances.toSorted(compareLidInstances),
+      })),
+    });
+  }
+
+  return { unified, conflicts };
+}
+
 /** GET /api/lid-mappings — export all LID mappings from all instances. */
 function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): void {
   try {
     const instances = [...deps.discovery.getInstances().values()];
     const allMappings: Array<{ lid: string; phone_jid: string; instance: string }> = [];
+    const observations: LidMappingObservation[] = [];
     const seen = new Set<string>();
 
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+        return db.prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings').all() as Array<{
+          lid: string;
+          phone_jid: string;
+          updated_at: string;
+        }>;
       });
       if (result.ok) {
         for (const m of result.data) {
+          observations.push({ ...m, instance: inst.name });
           if (!seen.has(m.lid)) {
             seen.add(m.lid);
-            allMappings.push({ ...m, instance: inst.name });
+            allMappings.push({ lid: m.lid, phone_jid: m.phone_jid, instance: inst.name });
           }
         }
       }
     }
 
-    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length });
+    const { unified, conflicts } = buildConflictExplicitLidMappings(observations);
+    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length, unified, conflicts });
   } catch (err) {
     log.error({ err }, 'L5: failed to export LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
@@ -385,15 +474,38 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
     const results: Record<string, number> = {};
     const details: Record<
       string,
-      { imported: number; flipped: number; noop: number; conflicts: number; error?: string }
+      {
+        imported: number;
+        flipped: number;
+        noop: number;
+        conflicts: number;
+        skipped?: boolean;
+        reason?: string;
+        schemaVersion?: number;
+        error?: string;
+      }
     > = {};
+    const skippedInstances: Array<{ instance: string; schemaVersion: number; required: number; reason: string }> = [];
     for (const inst of instances) {
       const writeResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (rawDb: DatabaseSync) => {
+        const schemaVersion = readSchemaMigrationVersion(rawDb);
+        if (schemaVersion < 25) {
+          return {
+            imported: 0,
+            flipped: 0,
+            noop: 0,
+            conflicts: [],
+            skipped: true,
+            reason: 'schema_migration_below_25',
+            schemaVersion,
+          } as const;
+        }
+
         // Build a minimal Database-shaped facade so importLidMappings can
         // operate on the underlying raw handle without us instantiating a
         // full Database instance against a path we don't own here.
         const dbFacade = { raw: rawDb } as unknown as import('../core/database.ts').Database;
-        return importLidMappings(dbFacade, observations);
+        return { ...importLidMappings(dbFacade, observations), schemaVersion };
       });
       if (writeResult.ok) {
         const r = writeResult.data;
@@ -403,7 +515,17 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
           flipped: r.flipped,
           noop: r.noop,
           conflicts: r.conflicts.length,
+          schemaVersion: r.schemaVersion,
+          ...(r.skipped ? { skipped: true, reason: r.reason } : {}),
         };
+        if (r.skipped) {
+          skippedInstances.push({
+            instance: inst.name,
+            schemaVersion: r.schemaVersion,
+            required: 25,
+            reason: r.reason,
+          });
+        }
       } else {
         results[inst.name] = -1;
         details[inst.name] = {
@@ -417,11 +539,26 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
     }
 
     const totalMappings = observations.length;
-    log.info({ totalMappings, results, details }, 'L5: cross-instance LID sync completed');
-    jsonResponse(res, 200, { totalMappings, results, details });
+    log.info({ totalMappings, results, details, skippedInstances }, 'L5: cross-instance LID sync completed');
+    jsonResponse(res, 200, { totalMappings, results, details, skippedInstances });
   } catch (err) {
     log.error({ err }, 'L5: failed to sync LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
+  }
+}
+
+function readSchemaMigrationVersion(rawDb: DatabaseSync): number {
+  try {
+    const row = rawDb
+      .prepare('SELECT MAX(version) AS version FROM schema_migrations')
+      .get() as { version: number | null } | undefined;
+    return typeof row?.version === 'number' ? row.version : 0;
+  } catch (err) {
+    const message = (err as Error).message;
+    if (message.includes('no such table: schema_migrations')) {
+      return 0;
+    }
+    throw err;
   }
 }
 
@@ -470,7 +607,37 @@ export function createFleetServer(deps: FleetDeps) {
     if (!candidate) return false;
     return verifyFleetTokenImpl(candidate, getTokenSet());
   }
-  const ticketStore: TicketStore = createTicketStore();
+  const ticketStore: TicketStore = createWsTicketStore();
+  // Audience-scoped store for HTTP and SSE tickets (#313). The WS path keeps
+  // using `ticketStore` above so call sites do not need to care about the
+  // shared audience-scoped implementation.
+  const apiTicketStore: AuthTicketStore = createAuthTicketStore();
+
+  /**
+   * Audience-scoped HTTP/SSE auth gate (#313).
+   *
+   * Two acceptance paths during the deprecation window:
+   *   (a) the root fleet token via Bearer or `?token=` query (legacy)
+   *   (b) an audience-scoped ticket via `?ticket=` query or Bearer header
+   *
+   * Audience is derived from the route shape:
+   *   - SSE endpoints (currently `/api/lines/:name/auth`) require audience='sse'
+   *   - everything else under `/api/*` accepts audience='api'
+   *   - the ticket-vending endpoint itself is anchored to the root token (the
+   *     bootstrap credential) and is gated separately.
+   */
+  function audienceForPath(pathname: string): TicketAudience {
+    // Currently the only SSE endpoint is `/api/lines/:name/auth`.
+    if (/^\/api\/lines\/[^/]+\/auth$/.test(pathname)) return 'sse';
+    return 'api';
+  }
+
+  function verifyApiTicketCandidate(candidate: string | undefined | null, audience: TicketAudience): boolean {
+    if (!candidate) return false;
+    const tokenSet = getTokenSet();
+    const validKeys = [tokenSet.active, ...tokenSet.accept];
+    return apiTicketStore.redeem(candidate, audience, validKeys);
+  }
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -479,25 +646,69 @@ export function createFleetServer(deps: FleetDeps) {
 
     // API routes require auth
     if (pathname.startsWith('/api/')) {
-      // Accept Bearer header or ?token= query param (EventSource can't set headers).
-      // Both paths walk the active+accept token set so a rotated-out token still
-      // works for the duration of its grace window.
-      const queryToken = parseQueryString(url).token ?? '';
+      const query = parseQueryString(url);
+      const queryToken = query.token ?? '';
+      const queryTicket = query.ticket ?? '';
       const bearer = extractBearer(req);
-      if (!verifyToken(bearer) && !verifyToken(queryToken)) {
-        jsonResponse(res, 401, { error: 'unauthorized' });
+
+      // Bootstrap ticket endpoints accept ONLY the root fleet token via
+      // Authorization. They intentionally do not accept `?token=` because
+      // these POST routes do not have EventSource's header limitation.
+      if (method === 'POST' && pathname === '/api/auth-ticket') {
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        let body: unknown = null;
+        try {
+          const raw = await readBody(req, 1024);
+          if (raw && raw.length > 0) body = JSON.parse(raw);
+        } catch {
+          jsonResponse(res, 400, { error: 'invalid body' });
+          return;
+        }
+        const audience = (body as { audience?: unknown } | null)?.audience;
+        if (!isTicketAudience(audience) || audience === 'ws') {
+          jsonResponse(res, 400, { error: 'audience must be "api" or "sse"' });
+          return;
+        }
+        const { ticket, expiresIn } = apiTicketStore.issue(getTokenSet().active, audience);
+        jsonResponse(res, 200, { ticket, audience, expiresIn });
         return;
       }
 
-      // Special-case: ticket vending. The ticket store needs `active` (the
-      // signing key) and the live ticket-issuance interface, so it sits
-      // outside the table-driven ROUTES.
+      // Legacy WS ticket vending remains a root-token bootstrap path. Do
+      // this before the generic API ticket gate so an `api`-audience ticket
+      // cannot be exchanged for WebSocket capability.
       if (method === 'POST' && pathname === '/api/ws-ticket') {
-        // Defensively drain any body so the connection stays clean even if
-        // a client posted something.
-        try { await readBody(req, 1024); } catch { /* ignore — body is optional */ }
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        try { await readBody(req, 1024); } catch { /* ignore -- body is optional */ }
         const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
         jsonResponse(res, 200, { ticket, expiresIn });
+        return;
+      }
+
+      const audience = audienceForPath(pathname);
+      // Accept (a) root token via Bearer/?token=, OR (b) audience-scoped
+      // ticket via ?ticket=. Bearer header may also carry a ticket so
+      // browsers don't have to special-case the HTTP API client; we try
+      // both interpretations and accept the first success.
+      const rootOk = verifyToken(bearer) || verifyToken(queryToken);
+      const ticketCandidates: string[] = [];
+      if (queryTicket) ticketCandidates.push(queryTicket);
+      if (bearer && !rootOk) ticketCandidates.push(bearer);
+      let ticketOk = false;
+      for (const cand of ticketCandidates) {
+        if (verifyApiTicketCandidate(cand, audience)) {
+          ticketOk = true;
+          break;
+        }
+      }
+      if (!rootOk && !ticketOk) {
+        jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
 
@@ -596,6 +807,7 @@ export function createFleetServer(deps: FleetDeps) {
       discovery.stop();
       updateChecker.stop();
       ticketStore.stop();
+      apiTicketStore.stop();
       wsServer.close();
       server.close();
     },

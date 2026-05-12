@@ -12,7 +12,7 @@
  * verbs/param shapes) plus loadOrCreateFleetToken. Long-tail per-route
  * coverage lives in integration.test.ts and future per-route test files.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -71,7 +71,7 @@ import { createFleetServer, loadOrCreateFleetToken } from '../../src/fleet/index
 
 const SCHEMA_SQL = `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-INSERT INTO schema_migrations VALUES (1);
+INSERT INTO schema_migrations VALUES (25);
 
 CREATE TABLE messages (
   pk INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +113,39 @@ CREATE TABLE lid_mappings_history (
 );
 `;
 
+const SCHEMA_SQL_V24 = `
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+INSERT INTO schema_migrations VALUES (24);
+
+CREATE TABLE messages (
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_key TEXT NOT NULL,
+  sender_jid TEXT,
+  sender_name TEXT,
+  content TEXT,
+  content_type TEXT DEFAULT 'text',
+  timestamp INTEGER NOT NULL,
+  is_from_me INTEGER DEFAULT 0,
+  deleted_at TEXT,
+  enrichment_processed_at TEXT
+);
+
+CREATE TABLE access_list (
+  subject_type TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  display_name TEXT,
+  requested_at TEXT,
+  decided_at TEXT
+);
+
+CREATE TABLE lid_mappings (
+  lid TEXT PRIMARY KEY,
+  phone_jid TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 function writeInstanceConfig(configRoot: string, name: string, overrides: Record<string, unknown> = {}): void {
   const instanceDir = path.join(configRoot, name);
   fs.mkdirSync(instanceDir, { recursive: true });
@@ -120,11 +153,27 @@ function writeInstanceConfig(configRoot: string, name: string, overrides: Record
   fs.writeFileSync(path.join(instanceDir, 'config.json'), JSON.stringify(config, null, 2));
 }
 
-function seedDatabase(dbPath: string): void {
+function seedDatabase(dbPath: string, schemaSql = SCHEMA_SQL): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
-  db.exec(SCHEMA_SQL);
+  db.exec(schemaSql);
   db.close();
+}
+
+function withInstanceDb<T>(name: string, fn: (db: DatabaseSync) => T): T {
+  const db = new DatabaseSync(path.join(dataRoot, name, 'bot.db'));
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function deleteLidMapping(name: string, lid: string): void {
+  withInstanceDb(name, (db) => {
+    db.prepare('DELETE FROM lid_mappings_history WHERE lid = ?').run(lid);
+    db.prepare('DELETE FROM lid_mappings WHERE lid = ?').run(lid);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +183,9 @@ function seedDatabase(dbPath: string): void {
 const FLEET_TOKEN = 'test-fleet-token-' + crypto.randomBytes(8).toString('hex');
 const SELF_NAME = '__index_test_self__';
 const INST_A = 'line-alpha';
+const INST_B = 'line-beta';
+const CONFLICT_LID = 'conflict-lid-251';
+const STABLE_LID = 'stable-lid-251';
 
 let tmpDir: string;
 let configRoot: string;
@@ -167,7 +219,9 @@ beforeAll(async () => {
   process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
 
   writeInstanceConfig(configRoot, INST_A, { type: 'chat', accessMode: 'self_only', healthPort: 19010 });
+  writeInstanceConfig(configRoot, INST_B, { type: 'chat', accessMode: 'self_only', healthPort: 19011 });
   seedDatabase(path.join(dataRoot, INST_A, 'bot.db'));
+  seedDatabase(path.join(dataRoot, INST_B, 'bot.db'));
 
   const selfDataDir = path.join(dataRoot, SELF_NAME);
   fs.mkdirSync(selfDataDir, { recursive: true });
@@ -233,6 +287,13 @@ afterAll(async () => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+});
+
+afterEach(() => {
+  deleteLidMapping(INST_A, CONFLICT_LID);
+  deleteLidMapping(INST_B, CONFLICT_LID);
+  deleteLidMapping(INST_A, STABLE_LID);
+  deleteLidMapping(INST_B, STABLE_LID);
 });
 
 // ---------------------------------------------------------------------------
@@ -475,6 +536,56 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     expect(res.status).toBe(400);
   });
 
+  it('GET /api/lid-mappings exposes conflicting phones without changing legacy mappings/count', async () => {
+    withInstanceDb(INST_A, (db) => {
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(CONFLICT_LID, '15550001001@s.whatsapp.net', '2026-05-01T00:00:00Z');
+    });
+    withInstanceDb(INST_B, (db) => {
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(CONFLICT_LID, '15550002002@s.whatsapp.net', '2026-05-02T00:00:00Z');
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(STABLE_LID, '15550003003@s.whatsapp.net', '2026-05-03T00:00:00Z');
+    });
+
+    const res = await fetch(`${baseUrl}/api/lid-mappings`, { headers: auth });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const legacyMappings = body.mappings.filter((m: { lid: string }) => m.lid === CONFLICT_LID);
+    expect(legacyMappings).toEqual([
+      { lid: CONFLICT_LID, phone_jid: '15550001001@s.whatsapp.net', instance: INST_A },
+    ]);
+    expect(body.count).toBe(body.mappings.length);
+
+    const unifiedMappings = body.unified.filter((m: { lid: string }) => m.lid === STABLE_LID);
+    expect(unifiedMappings).toEqual([
+      {
+        lid: STABLE_LID,
+        phone_jid: '15550003003@s.whatsapp.net',
+        instances: [{ instance: INST_B, updated_at: '2026-05-03T00:00:00Z' }],
+      },
+    ]);
+    expect(body.conflicts).toEqual([
+      {
+        lid: CONFLICT_LID,
+        phones: [
+          {
+            phone_jid: '15550001001@s.whatsapp.net',
+            instances: [{ instance: INST_A, updated_at: '2026-05-01T00:00:00Z' }],
+          },
+          {
+            phone_jid: '15550002002@s.whatsapp.net',
+            instances: [{ instance: INST_B, updated_at: '2026-05-02T00:00:00Z' }],
+          },
+        ],
+      },
+    ]);
+  });
+
   it('POST /api/lid-mappings/sync keeps legacy result counts and exposes detailed counters separately', async () => {
     const instDbPath = path.join(dataRoot, INST_A, 'bot.db');
     const db = new DatabaseSync(instDbPath);
@@ -505,6 +616,51 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     });
   });
 
+  it('POST /api/lid-mappings/sync skips schema-v24 peers before history writes', async () => {
+    const staleName = 'line-schema-24';
+    const staleDbPath = path.join(dataRoot, staleName, 'bot.db');
+    writeInstanceConfig(configRoot, staleName, { type: 'chat', accessMode: 'self_only', healthPort: 19024 });
+    seedDatabase(staleDbPath, SCHEMA_SQL_V24);
+    fleet.discovery.scan();
+
+    const db = new DatabaseSync(staleDbPath);
+    try {
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run('242424', '15550002424@s.whatsapp.net', '2026-05-02 00:00:00');
+    } finally {
+      db.close();
+    }
+
+    const res = await fetch(`${baseUrl}/api/lid-mappings/sync`, {
+      method: 'POST',
+      headers: auth,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.results[staleName]).toBe(0);
+    expect(body.details[staleName]).toMatchObject({
+      imported: 0,
+      flipped: 0,
+      noop: 0,
+      conflicts: 0,
+      skipped: true,
+      reason: 'schema_migration_below_25',
+      schemaVersion: 24,
+    });
+
+    const verifyDb = new DatabaseSync(staleDbPath);
+    try {
+      const historyTable = verifyDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='lid_mappings_history'")
+        .get();
+      expect(historyTable).toBeUndefined();
+    } finally {
+      verifyDb.close();
+    }
+  });
+
   it('PATCH /api/lines/:name/config dispatches (verb other than GET/POST)', async () => {
     const res = await fetch(`${baseUrl}/api/lines/${INST_A}/config`, {
       method: 'PATCH',
@@ -514,6 +670,143 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.systemPrompt).toBe('hi');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Audience-scoped tickets (#313) — POST /api/auth-ticket + ticket auth
+// ---------------------------------------------------------------------------
+
+describe('fleet server -- audience-scoped auth tickets (#313)', () => {
+  it('POST /api/auth-ticket returns an api-audience ticket with Bearer root token', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.ticket).toBe('string');
+    expect(body.audience).toBe('api');
+    // 4-part wire format: nonce.audience.expiry.hmac
+    expect((body.ticket as string).split('.').length).toBe(4);
+    expect(typeof body.expiresIn).toBe('number');
+  });
+
+  it('POST /api/auth-ticket returns an sse-audience ticket', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'sse' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.audience).toBe('sse');
+    expect((body.ticket as string).split('.')[1]).toBe('sse');
+  });
+
+  it('POST /api/auth-ticket rejects an unknown audience with 400', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'admin' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/auth-ticket rejects audience="ws" -- WS tickets keep their own endpoint', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'ws' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/auth-ticket requires a Bearer root credential (401 otherwise)', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('POST /api/auth-ticket rejects the root credential in ?token=', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket?token=${encodeURIComponent(FLEET_TOKEN)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  async function mintApiTicket(audience: 'api' | 'sse'): Promise<string> {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    return body.ticket as string;
+  }
+
+  it('an api-audience ticket authenticates HTTP API calls via ?ticket=', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('an api-audience ticket authenticates HTTP API calls via Bearer header', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/lines`, {
+      headers: { Authorization: `Bearer ${ticket}` },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('an api-audience ticket cannot mint a WebSocket ticket', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/ws-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ticket}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('POST /api/ws-ticket rejects the root credential in ?token=', async () => {
+    const res = await fetch(`${baseUrl}/api/ws-ticket?token=${encodeURIComponent(FLEET_TOKEN)}`, {
+      method: 'POST',
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('an api-audience ticket is single-use', async () => {
+    const ticket = await mintApiTicket('api');
+    const first = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(first.status).toBe(200);
+    const second = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(second.status).toBe(401);
+  });
+
+  it('an sse-audience ticket is REJECTED on plain HTTP API routes (audience mismatch)', async () => {
+    const ticket = await mintApiTicket('sse');
+    const res = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('an api-audience ticket is REJECTED on the SSE auth route (audience mismatch)', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/lines/${INST_A}/auth?ticket=${encodeURIComponent(ticket)}`);
+    // The SSE handler will accept the auth check then return 409 (auth busy)
+    // or proceed to stream; 401 specifically proves the audience gate rejected it.
+    expect(res.status).toBe(401);
+  });
+
+  it('a garbage ticket value falls through to 401', async () => {
+    const res = await fetch(`${baseUrl}/api/lines?ticket=not.a.real.ticket`);
+    expect(res.status).toBe(401);
   });
 });
 

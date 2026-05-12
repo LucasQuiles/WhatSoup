@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Local dev uses .nvmrc (single version for fast iteration);
       # CI runs a matrix to validate the engines range declared in package.json.
@@ -26,7 +28,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
@@ -45,6 +47,9 @@ jobs:
 
       - name: Documentation drift guard
         run: npm run guard:doc-drift
+
+      - name: Work index coverage guard
+        run: npm run guard:work-index
 
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
