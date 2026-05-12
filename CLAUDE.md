@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, 161 MCP tools.
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, 161 MCP tools (160 always-registered + `knowledge_search` registered only when Pinecone config, credentials, and profiles are usable; see `docs/tools.md`).
 
 ## Quick Reference
 
@@ -54,7 +54,7 @@ Key files:
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
-- `docs/tools.md` — complete MCP tool API reference (161 tools, 20 modules)
+- `docs/tools.md` — complete MCP tool API reference (161 tools across 20 modules; 160 always-registered + 1 conditionally-registered)
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms
 - `docs/security-handoffs/` — open security handoffs that belong to the WhatSoup application lifecycle
