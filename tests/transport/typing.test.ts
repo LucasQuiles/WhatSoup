@@ -19,18 +19,10 @@ const { mockConfig } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@whiskeysockets/baileys', () => ({
-  makeWASocket: vi.fn(),
-  useMultiFileAuthState: vi.fn().mockResolvedValue({
-    state: { creds: {}, keys: {} },
-    saveCreds: vi.fn(),
-  }),
-  fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 2413, 1] }),
-  makeCacheableSignalKeyStore: vi.fn().mockReturnValue({}),
-  DisconnectReason: { loggedOut: 401, restartRequired: 515, connectionClosed: 428 },
-  isJidGroup: vi.fn((jid: string) => jid?.endsWith('@g.us')),
-  jidNormalizedUser: vi.fn((jid: string) => jid?.replace(/:.*@/, '@')),
-}));
+vi.mock('@whiskeysockets/baileys', async () => {
+  const { baileysMock } = await import('../helpers/baileys-mock.ts');
+  return baileysMock();
+});
 
 vi.mock('../../src/config.ts', () => ({ config: mockConfig }));
 
