@@ -6,7 +6,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import { createFleetServer, loadOrCreateFleetTokens } from './index.ts';
+import { createFleetServer } from './index.ts';
+import { loadOrCreateFleetTokens } from './token-storage.ts';
 
 const port = parseInt(process.argv[2] ?? '9099', 10);
 
@@ -21,6 +22,7 @@ const server = createFleetServer({
   selfName: '__standalone__',
   fleetToken: tokens.active,
   acceptTokens: tokens.accept,
+  getFleetTokens: loadOrCreateFleetTokens,
   getSelfHealth: () => ({ status: 'healthy', standalone: true }),
 });
 

@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { WebSocket } from 'ws';
 
 // ---------------------------------------------------------------------------
 // Mocks — must be set up before importing fleet modules
@@ -323,6 +324,77 @@ describe('fleet server -- API auth via ?token= query param', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.name).toBe(INST_A);
+  });
+});
+
+describe('fleet server -- runtime token rotation', () => {
+  it('re-reads active and accepted tokens without restarting the server', async () => {
+    const oldToken = 'a'.repeat(64);
+    const newToken = 'b'.repeat(64);
+    let tokenSet = { active: oldToken, accept: [] as string[] };
+    const db = new DatabaseSync(':memory:');
+    db.exec(SCHEMA_SQL);
+    const dynamicFleet = createFleetServer({
+      db,
+      selfName: '__dynamic_token_test__',
+      fleetToken: oldToken,
+      getFleetTokens: () => tokenSet,
+      getSelfHealth: () => ({ status: 'ok' }),
+    });
+
+    await new Promise<void>((resolve) => {
+      dynamicFleet.server.listen(0, '127.0.0.1', () => resolve());
+    });
+    const addr = dynamicFleet.server.address();
+    if (!addr || typeof addr === 'string') throw new Error('unexpected address type');
+    const dynamicBaseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      const initial = await fetch(`${dynamicBaseUrl}/api/lines`, {
+        headers: { Authorization: `Bearer ${oldToken}` },
+      });
+      expect(initial.status).toBe(200);
+
+      tokenSet = { active: newToken, accept: [oldToken] };
+      const fresh = await fetch(`${dynamicBaseUrl}/api/lines`, {
+        headers: { Authorization: `Bearer ${newToken}` },
+      });
+      expect(fresh.status).toBe(200);
+
+      const acceptedPrior = await fetch(`${dynamicBaseUrl}/api/lines`, {
+        headers: { Authorization: `Bearer ${oldToken}` },
+      });
+      expect(acceptedPrior.status).toBe(200);
+
+      const ticketRes = await fetch(`${dynamicBaseUrl}/api/ws-ticket`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${newToken}` },
+      });
+      expect(ticketRes.status).toBe(200);
+      const { ticket } = await ticketRes.json() as { ticket: string };
+      const ws = await new Promise<WebSocket>((resolve, reject) => {
+        const socket = new WebSocket(`ws://127.0.0.1:${addr.port}/ws?ticket=${encodeURIComponent(ticket)}`);
+        socket.once('open', () => resolve(socket));
+        socket.once('error', reject);
+      });
+      ws.close();
+
+      const html = await fetch(dynamicBaseUrl).then((res) => res.text());
+      expect(html).toContain(`<meta name="fleet-token" content="${newToken}">`);
+      expect(html).not.toContain(`<meta name="fleet-token" content="${oldToken}">`);
+
+      tokenSet = { active: newToken, accept: [] };
+      const expiredPrior = await fetch(`${dynamicBaseUrl}/api/lines`, {
+        headers: { Authorization: `Bearer ${oldToken}` },
+      });
+      expect(expiredPrior.status).toBe(401);
+    } finally {
+      await new Promise<void>((resolve) => {
+        dynamicFleet.server.once('close', resolve);
+        dynamicFleet.stop();
+      });
+      db.close();
+    }
   });
 });
 

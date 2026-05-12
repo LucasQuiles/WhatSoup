@@ -134,4 +134,4 @@ cd console && npm run build        # Build to dist/, served by fleet server
 cd console && npm run lint         # ESLint with token enforcement rules
 ```
 
-The dev server proxies `/api/*` requests to the fleet server at `http://127.0.0.1:9099` with automatic Bearer token injection from `~/.config/whatsoup/fleet-token`.
+The dev server proxies `/api/*` requests to the fleet server at `http://127.0.0.1:9099` with automatic Bearer token injection from `~/.config/whatsoup/fleet-tokens.json` (`active`). It falls back to the legacy `~/.config/whatsoup/fleet-token` file only when the rotatable token file is absent.

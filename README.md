@@ -195,7 +195,7 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `GET` | `/api/feed` | Activity feed (all instances) |
 | `GET` | `/api/typing` | Currently typing indicators |
 
-The fleet token is stored at `~/.config/whatsoup/fleet-token` (auto-generated on first run).
+The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` plus a short accept-list for rotated tokens (auto-generated on first run). Existing `~/.config/whatsoup/fleet-token` files are migrated on first read and left in place for rollback.
 
 `POST /api/lines/:name/send` accepts exactly one target: raw `chatJid` or alias `to`. Aliases resolve through that instance's private `chatAliases` config and `chat_aliases` table. Requests may also pass a named send `profile`.
 
