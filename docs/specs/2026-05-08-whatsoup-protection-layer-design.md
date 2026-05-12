@@ -142,7 +142,7 @@ Evaluators            — apply policy rules, produce drift/info events with sev
        ↓
 Event Ledger          — append-only record (sqlite + jsonl); source of truth for everything else
        ↓
-Alert Sinks + Actions — primary, fallback, meta-alert; observe / alert / block / propose / remediate
+Alert Sinks + Actions — primary, fallback, meta-alert; observe / alert / propose_fix / meta_alert (block/remediate are schema-reserved and runtime-rejected)
 ```
 
 ### 6.1 Collectors
@@ -242,7 +242,7 @@ Targets are addressed by stable identifier (canonical chat identity, hash, ID). 
 
 ### 7.4 Alert content shape
 
-A single alert maps to a single drift event maps to a single fingerprint. No bundles. Alert bodies always include: severity, scope ID, probe ID, structural diff, action taken (`observe` / `alert` / `propose_fix:<command>` / `remediate:APPLIED` / `remediate:FAILED`), fingerprint, copy-pasteable mute command, event ID.
+A single alert maps to a single drift event maps to a single fingerprint. No bundles. Alert bodies always include: severity, scope ID, probe ID, structural diff, action taken (`observe` / `alert` / `propose_fix:<command>` / `meta_alert`), fingerprint, copy-pasteable mute command, event ID. Runtime v1 never emits remediation result labels because `block` and `remediate` policies fail closed during runtime config construction.
 
 ### 7.5 Storm guard
 

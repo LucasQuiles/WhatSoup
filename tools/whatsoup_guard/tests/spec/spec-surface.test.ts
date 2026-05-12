@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { EventKind } from '../../src/types.ts';
 import { ActionSchema } from '../../src/policy/schema.ts';
@@ -10,7 +11,7 @@ import { ActionSchema } from '../../src/policy/schema.ts';
 //
 // Resolved relative to this test file so the test runs regardless of cwd.
 const SPEC_PATH = resolve(
-  new URL('.', import.meta.url).pathname,
+  dirname(fileURLToPath(import.meta.url)),
   '..',
   '..',
   '..',
@@ -38,5 +39,13 @@ describe('spec surface', () => {
         `Action \`${action}\` not mentioned in protection-layer spec at ${SPEC_PATH}`,
       ).toBe(true);
     }
+  });
+
+  it('does not retain stale action summaries that contradict shipped v1 behavior', () => {
+    expect(SPEC).not.toContain('observe / alert / block / propose / remediate');
+    expect(SPEC).not.toContain('remediate:APPLIED');
+    expect(SPEC).not.toContain('remediate:FAILED');
+    expect(SPEC).toContain('Runtime v1 never emits remediation result labels');
+    expect(SPEC).toContain('`observe` / `alert` / `propose_fix:<command>` / `meta_alert`');
   });
 });
