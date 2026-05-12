@@ -53,6 +53,8 @@ export interface FleetDeps {
   fleetToken: string;
   /** Optional historic tokens still accepted (cap honored at storage layer). */
   acceptTokens?: string[];
+  /** Optional request-time token source used by the standalone server after CLI rotation. */
+  getFleetTokens?: () => { active: string; accept: readonly string[] };
   getSelfHealth: () => Record<string, unknown>;
 }
 
@@ -431,7 +433,11 @@ export function createFleetServer(deps: FleetDeps) {
     const s = updateChecker.getState().sha;
     return (s && s !== 'unknown') ? s : startupSha;
   };
-  const staticHandler = createStaticHandler(distDir, deps.fleetToken, getVersion);
+  function getTokenSet(): { active: string; accept: readonly string[] } {
+    return deps.getFleetTokens?.() ?? { active: deps.fleetToken, accept: deps.acceptTokens ?? [] };
+  }
+
+  const staticHandler = createStaticHandler(distDir, () => getTokenSet().active, getVersion);
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
@@ -439,10 +445,9 @@ export function createFleetServer(deps: FleetDeps) {
   const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, serviceManager, log, updateChecker };
 
   // ---- Auth helpers (rotation-aware) -----------------------------------
-  const tokenSet = { active: deps.fleetToken, accept: deps.acceptTokens ?? [] };
   function verifyToken(candidate: string | null | undefined): boolean {
     if (!candidate) return false;
-    return verifyFleetTokenImpl(candidate, tokenSet);
+    return verifyFleetTokenImpl(candidate, getTokenSet());
   }
   const ticketStore: TicketStore = createTicketStore();
 
@@ -470,7 +475,7 @@ export function createFleetServer(deps: FleetDeps) {
         // Defensively drain any body so the connection stays clean even if
         // a client posted something.
         try { await readBody(req, 1024); } catch { /* ignore — body is optional */ }
-        const { ticket, expiresIn } = ticketStore.issue(deps.fleetToken);
+        const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
         jsonResponse(res, 200, { ticket, expiresIn });
         return;
       }
@@ -529,7 +534,10 @@ export function createFleetServer(deps: FleetDeps) {
   // `?token=<active>` still works for one rollout cycle.
   const wsServer = new FleetWebSocketServer(server, {
     ticketStore,
-    ticketValidKeys: () => [tokenSet.active, ...tokenSet.accept],
+    ticketValidKeys: () => {
+      const tokenSet = getTokenSet();
+      return [tokenSet.active, ...tokenSet.accept];
+    },
     verifyLegacyToken: (token) => verifyToken(token),
   });
 

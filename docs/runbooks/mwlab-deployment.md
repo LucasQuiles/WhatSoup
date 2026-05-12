@@ -111,7 +111,7 @@ Reference docs:
 | Concept | Path |
 | --- | --- |
 | Per-instance SQLite DB | `~/.local/share/whatsoup/instances/<name>/bot.db` |
-| Fleet token file | `~/.config/whatsoup/fleet-token` |
+| Fleet token file | `~/.config/whatsoup/fleet-tokens.json` (`active`) |
 | Fleet logs | `~/.local/share/whatsoup/fleet-{stdout,stderr}.log` |
 | mw-mind bridge logs | `~/.local/share/mw-mind/whatsapp-bridge-{stdout,stderr}.log` |
 | mw-mind WhatSoup MCP proxy | `/Users/mw/LAB/WhatSoup/deploy/mcp/whatsoup-proxy.ts` |

@@ -22,7 +22,7 @@ const MIME_TYPES: Record<string, string> = {
  * @param getVersion — function returning current version (called per-request so it stays fresh
  *   after git pull updates the code without restarting the fleet server).
  */
-export function createStaticHandler(distDir: string, fleetToken?: string, getVersion?: () => string) {
+export function createStaticHandler(distDir: string, fleetToken?: string | (() => string), getVersion?: () => string) {
   return (req: IncomingMessage, res: ServerResponse): boolean => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
@@ -34,8 +34,9 @@ export function createStaticHandler(distDir: string, fleetToken?: string, getVer
 
     // Helper: serve HTML with token injection when applicable
     const version = getVersion?.();
+    const token = typeof fleetToken === 'function' ? fleetToken() : fleetToken;
     const serveHtml = (htmlPath: string) =>
-      (fleetToken && version) ? serveHtmlWithMeta(htmlPath, fleetToken, version, res) : serveFile(htmlPath, res);
+      (token && version) ? serveHtmlWithMeta(htmlPath, token, version, res) : serveFile(htmlPath, res);
 
     // Try exact file first
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {

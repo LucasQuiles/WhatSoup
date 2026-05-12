@@ -1,15 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { readFleetTokenForDevProxy } from './vite.fleet-token.ts'
 
 // Read fleet token for dev proxy auth injection
-let fleetToken = ''
-try {
-  fleetToken = readFileSync(join(homedir(), '.config/whatsoup/fleet-token'), 'utf-8').trim()
-} catch { /* no token file — proxy will forward without auth */ }
+const fleetToken = readFleetTokenForDevProxy()
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
