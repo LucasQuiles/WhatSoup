@@ -14,6 +14,8 @@ import { nowUnixSec } from '../../fleet/time-utils.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 
 const log = createChildLogger('chat-management');
+const SQLITE_READ_LIMIT_MAX = 1000;
+const SqliteReadLimitSchema = z.number().int().positive().max(SQLITE_READ_LIMIT_MAX);
 
 // ---------------------------------------------------------------------------
 // list_messages — paginated messages in a conversation (scope: chat)
@@ -21,7 +23,7 @@ const log = createChildLogger('chat-management');
 
 const ListMessagesSchema = z.object({
   conversation_key: z.string(),
-  limit: z.number().optional(),
+  limit: SqliteReadLimitSchema.optional(),
   before_pk: z.number().optional(),
 });
 
@@ -157,7 +159,7 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
 // ---------------------------------------------------------------------------
 
 const ListChatsSchema = z.object({
-  limit: z.number().optional(),
+  limit: SqliteReadLimitSchema.optional(),
 });
 
 function makeListChats(db: Database): ToolDeclaration {
