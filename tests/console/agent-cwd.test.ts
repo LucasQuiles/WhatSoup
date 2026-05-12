@@ -130,9 +130,11 @@ describe('withDefaultAgentWorkspace', () => {
       name: 'alpha',
       agentOptions: { cwd: 42 },
     });
-    expect((result.agentOptions as { cwd: string }).cwd).toBe(
-      '~/.local/share/whatsoup/instances/alpha/workspace',
-    );
+    expect(result).toEqual({
+      type: 'agent',
+      name: 'alpha',
+      agentOptions: { cwd: '~/.local/share/whatsoup/instances/alpha/workspace' },
+    });
   });
 
   it('treats array-valued agentOptions as missing (not an object) and recovers', () => {
@@ -141,8 +143,10 @@ describe('withDefaultAgentWorkspace', () => {
       name: 'alpha',
       agentOptions: ['array', 'is', 'invalid'],
     });
-    expect((result.agentOptions as { cwd: string }).cwd).toBe(
-      '~/.local/share/whatsoup/instances/alpha/workspace',
-    );
+    expect(result).toEqual({
+      type: 'agent',
+      name: 'alpha',
+      agentOptions: { cwd: '~/.local/share/whatsoup/instances/alpha/workspace' },
+    });
   });
 });
