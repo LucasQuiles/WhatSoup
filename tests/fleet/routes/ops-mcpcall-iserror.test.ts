@@ -177,6 +177,74 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
 
       expect(res._status).toBe(200);
     });
+
+    // ---------------------------------------------------------------------
+    //  Publish gate — explicit regression test pinning the `!toolError`
+    //  guard at ops.ts L208. Without this gate, a tool-level failure would
+    //  fan out fake `message_received` / `chat_updated` / `feed_event`
+    //  signals to every WebSocket client and lie about delivery state.
+    //
+    //  RED-GREEN proof: temporarily replacing
+    //    `if (result.success && !result.toolError) {`
+    //  with
+    //    `if (result.success) {`
+    //  in ops.ts makes this test fail with `publish` called 3 times.
+    //  Restoring the gate makes it pass. Recorded in commit body.
+    // ---------------------------------------------------------------------
+    it('does NOT publish realtime events when mcpCall returns toolError: true', async () => {
+      const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
+      const publishSpy = vi.fn();
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst) } as any,
+        realtime: { publish: publishSpy },
+      });
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(mcpCall).mockResolvedValue({
+        success: true,
+        toolError: true,
+        result: toolErrorEnvelope('Invalid parameters for tool "send_message": chatJid is required'),
+      });
+
+      const res = mockRes();
+      await handleSend(
+        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        res,
+        deps,
+        { name: 'test-line' },
+      );
+
+      // Sanity: the failure path was actually taken.
+      expect(res._status).toBe(422);
+      // Core assertion: NO fan-out on a tool-level failure.
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+
+    it('DOES publish realtime events on clean MCP success (counter-test)', async () => {
+      const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
+      const publishSpy = vi.fn();
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst) } as any,
+        realtime: { publish: publishSpy },
+      });
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(mcpCall).mockResolvedValue({ success: true, result: { sent: true } });
+
+      const res = mockRes();
+      await handleSend(
+        mockReq(JSON.stringify({ chatJid: 'x@s.whatsapp.net', text: 'hi' })),
+        res,
+        deps,
+        { name: 'test-line' },
+      );
+
+      expect(res._status).toBe(200);
+      // Exactly three signals: message_received, chat_updated, feed_event.
+      expect(publishSpy).toHaveBeenCalledTimes(3);
+      const eventTypes = publishSpy.mock.calls.map((c) => c[0].type);
+      expect(eventTypes).toEqual(
+        expect.arrayContaining(['message_received', 'chat_updated', 'feed_event']),
+      );
+    });
   });
 
   describe('handleSaveContact (add_or_edit_contact)', () => {
@@ -241,6 +309,40 @@ describe('ops.ts mcpCall consumers honor isError tool envelopes (parity follow-u
       );
 
       expect(res._status).toBe(200);
+    });
+
+    // ---------------------------------------------------------------------
+    //  Publish gate — handleSaveContact currently does NOT publish on any
+    //  path (success or failure). This regression test pins that contract
+    //  so a future maintainer who adds publish-on-success cannot land it
+    //  without also gating on `!toolError`.
+    // ---------------------------------------------------------------------
+    it('does NOT publish realtime events when mcpCall returns toolError: true', async () => {
+      const inst = fakeInstance({ type: 'passive', socketPath: '/state/test-line/whatsoup.sock' });
+      const publishSpy = vi.fn();
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst) } as any,
+        realtime: { publish: publishSpy },
+      });
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(mcpCall).mockResolvedValue({
+        success: true,
+        toolError: true,
+        result: toolErrorEnvelope('Invalid parameters for tool "add_or_edit_contact": jid must be a valid JID'),
+      });
+
+      const res = mockRes();
+      await handleSaveContact(
+        mockReq(JSON.stringify({ jid: 'malformed', firstName: 'X' })),
+        res,
+        deps,
+        { name: 'test-line' },
+      );
+
+      // Sanity: the failure path was actually taken.
+      expect(res._status).toBe(422);
+      // Core assertion: NO realtime fan-out on a tool-level failure.
+      expect(publishSpy).not.toHaveBeenCalled();
     });
   });
 });
