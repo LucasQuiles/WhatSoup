@@ -1,12 +1,13 @@
 import { BoundedQueue } from './queue.ts';
 import { makeSubscription, type Subscription } from './subscription.ts';
-import type { InboundEvent } from './events.ts';
+import { isDurableEventKind, type InboundEvent } from './events.ts';
 
 export interface FanoutOptions {
   readonly perSubscriberCapacity: number;
   readonly subscriberTimeoutMs: number;
   readonly overflowThreshold: number;
   readonly consecutiveTimeoutThreshold: number;
+  readonly persistDurableEvent?: (event: InboundEvent) => void;
 }
 
 export type SubscriberHandler = (event: InboundEvent) => void | Promise<void>;
@@ -77,6 +78,9 @@ export class FanoutDispatcher {
 
   enqueue(event: InboundEvent): void {
     if (this.disposed) return;
+    if (isDurableEventKind(event.kind)) {
+      this.opts.persistDurableEvent?.(event);
+    }
     for (const sub of this.subs.values()) {
       if (sub.suspended) {
         this.metrics.droppedForSuspended += 1;

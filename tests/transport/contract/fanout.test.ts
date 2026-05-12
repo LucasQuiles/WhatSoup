@@ -19,6 +19,17 @@ const ev = (n: number): InboundEvent => ({
   },
 });
 
+const reactionEv = (n: number): InboundEvent => ({
+  kind: 'reaction',
+  data: {
+    target: { channel: makeChannelId('whatsapp', 'test'), conversation: 'c', id: String(n) },
+    actor: { channel: makeChannelId('whatsapp', 'test'), id: 's' },
+    emoji: '👍',
+    removed: false,
+    at: new Date(),
+  },
+});
+
 const opts: FanoutOptions = {
   perSubscriberCapacity: 4,
   subscriberTimeoutMs: 50,
@@ -39,6 +50,53 @@ describe('FanoutDispatcher', () => {
     await d.flush();
     expect(a).toHaveBeenCalledOnce();
     expect(b).toHaveBeenCalledOnce();
+  });
+
+  it('persists durable events before subscriber dispatch', async () => {
+    const order: string[] = [];
+    const d = new FanoutDispatcher({
+      ...opts,
+      persistDurableEvent: (event) => {
+        order.push(`persist:${event.kind}`);
+      },
+    });
+    d.subscribe('s', () => {
+      order.push('handler');
+    });
+
+    d.enqueue(ev(1));
+    await d.flush();
+
+    expect(order).toEqual(['persist:message', 'handler']);
+  });
+
+  it('does not force non-durable events through the persistence hook', async () => {
+    const persistDurableEvent = vi.fn();
+    const handler = vi.fn();
+    const d = new FanoutDispatcher({ ...opts, persistDurableEvent });
+    d.subscribe('s', handler);
+
+    d.enqueue(reactionEv(1));
+    await d.flush();
+
+    expect(persistDurableEvent).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('does not dispatch a durable event when the persistence hook throws', async () => {
+    const handler = vi.fn();
+    const d = new FanoutDispatcher({
+      ...opts,
+      persistDurableEvent: () => {
+        throw new Error('persist failed');
+      },
+    });
+    d.subscribe('s', handler);
+
+    expect(() => d.enqueue(ev(1))).toThrow(/persist failed/);
+    await d.flush();
+
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('a slow subscriber does NOT delay another', async () => {
