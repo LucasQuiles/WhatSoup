@@ -5,8 +5,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { LogsTab } from '../../console/src/components/line-detail/LogsTab'
-import { formatTime } from '../../console/src/lib/format-time'
-import { levelColor, levelBg, levelLineBg } from '../../console/src/lib/log-theme'
 import type { LogEntry } from '../../console/src/types'
 
 afterEach(() => cleanup())
@@ -15,16 +13,22 @@ const LEVELS = ['all', 'info', 'warn', 'error', 'debug'] as const
 
 function makeLogs(): LogEntry[] {
   return [
-    { timestamp: '2026-05-12T10:00:00Z', level: 'info', msg: 'startup ok', source: 'core' },
-    { timestamp: '2026-05-12T10:01:00Z', level: 'warn', msg: 'queue slow', source: 'transport' },
-    { timestamp: '2026-05-12T10:02:00Z', level: 'error', msg: 'send failed', source: 'mcp' },
-    { timestamp: '2026-05-12T10:03:00Z', level: 'debug', msg: 'tick', source: 'metrics' },
-    { timestamp: '2026-05-12T10:04:00Z', level: 'info', msg: 'second info', source: 'core' },
+    { timestamp: '2026-05-12T10:00:00', level: 'info', msg: 'startup ok', source: 'core' },
+    { timestamp: '2026-05-12T10:01:00', level: 'warn', msg: 'queue slow', source: 'transport' },
+    { timestamp: '2026-05-12T10:02:00', level: 'error', msg: 'send failed', source: 'mcp' },
+    { timestamp: '2026-05-12T10:03:00', level: 'debug', msg: 'tick', source: 'metrics' },
+    { timestamp: '2026-05-12T10:04:00', level: 'info', msg: 'second info', source: 'core' },
   ]
 }
 
 function getPill(label: string): HTMLButtonElement {
   return screen.getByRole('button', { name: new RegExp(`^${label}$`, 'i') }) as HTMLButtonElement
+}
+
+function getRowByMessage(message: string): HTMLElement {
+  const row = screen.getByText(message).closest('.c-row-hover')
+  expect(row).toBeDefined()
+  return row as HTMLElement
 }
 
 describe('LogsTab', () => {
@@ -46,17 +50,17 @@ describe('LogsTab', () => {
     expect(screen.getByText('second info')).toBeDefined()
   })
 
-  it('renders the formatted timestamp for each entry via formatTime', () => {
+  it('renders a readable timestamp for each entry without showing raw ISO values', () => {
     const logs = makeLogs()
     render(<LogsTab logs={logs} filter="all" onFilterChange={vi.fn()} />)
 
-    for (const log of logs) {
-      const formatted = formatTime(log.timestamp)
-      // Each timestamp appears at least once (some timestamps may format the same minute in test tz);
-      // getAllByText guards against single-match assumption while ensuring presence.
-      const matches = screen.getAllByText(formatted)
-      expect(matches.length).toBeGreaterThan(0)
-    }
+    expect(screen.getByText('10:00 AM')).toBeDefined()
+    expect(screen.getByText('10:01 AM')).toBeDefined()
+    expect(screen.getByText('10:02 AM')).toBeDefined()
+    expect(screen.getByText('10:03 AM')).toBeDefined()
+    expect(screen.getByText('10:04 AM')).toBeDefined()
+
+    for (const log of logs) expect(screen.queryByText(log.timestamp)).toBeNull()
   })
 
   it('filters rows by level when a non-"all" filter is applied', () => {
@@ -134,7 +138,7 @@ describe('LogsTab', () => {
   it('renders nothing in the body when no entries match the active filter', () => {
     // Logs contain only info/warn/error/debug — filter to a level with no entries
     const logs: LogEntry[] = [
-      { timestamp: '2026-05-12T10:00:00Z', level: 'info', msg: 'only info', source: 'core' },
+      { timestamp: '2026-05-12T10:00:00', level: 'info', msg: 'only info', source: 'core' },
     ]
     render(<LogsTab logs={logs} filter="error" onFilterChange={vi.fn()} />)
 
@@ -145,10 +149,10 @@ describe('LogsTab', () => {
 
   it('renders level badge, source, and message with the level-themed classes per entry', () => {
     const logs: LogEntry[] = [
-      { timestamp: '2026-05-12T10:00:00Z', level: 'error', msg: 'boom', source: 'mcp' },
-      { timestamp: '2026-05-12T10:01:00Z', level: 'warn', msg: 'careful', source: 'queue' },
-      { timestamp: '2026-05-12T10:02:00Z', level: 'info', msg: 'okay', source: 'core' },
-      { timestamp: '2026-05-12T10:03:00Z', level: 'debug', msg: 'trace', source: 'inner' },
+      { timestamp: '2026-05-12T10:00:00', level: 'error', msg: 'boom', source: 'mcp' },
+      { timestamp: '2026-05-12T10:01:00', level: 'warn', msg: 'careful', source: 'queue' },
+      { timestamp: '2026-05-12T10:02:00', level: 'info', msg: 'okay', source: 'core' },
+      { timestamp: '2026-05-12T10:03:00', level: 'debug', msg: 'trace', source: 'inner' },
     ]
     const { container } = render(
       <LogsTab logs={logs} filter="all" onFilterChange={vi.fn()} />,
@@ -160,44 +164,28 @@ describe('LogsTab', () => {
     expect(screen.getByText('core')).toBeDefined()
     expect(screen.getByText('inner')).toBeDefined()
 
-    // Badge: the exact text "error", "warn", "info", "debug" appears at least twice
-    // (once inside the pill toolbar, once inside the row badge); badges carry the levelBg style.
-    const errorNodes = screen.getAllByText('error')
-    const warnNodes = screen.getAllByText('warn')
-    const infoNodes = screen.getAllByText('info')
-    const debugNodes = screen.getAllByText('debug')
-    expect(errorNodes.length).toBeGreaterThanOrEqual(2)
-    expect(warnNodes.length).toBeGreaterThanOrEqual(2)
-    expect(infoNodes.length).toBeGreaterThanOrEqual(2)
-    expect(debugNodes.length).toBeGreaterThanOrEqual(2)
+    const badges = Array.from(container.querySelectorAll('span.text-label')) as HTMLElement[]
+    expect(badges).toHaveLength(4)
+    expect(badges.map(badge => badge.textContent)).toEqual(['error', 'warn', 'info', 'debug'])
+    expect(badges[0]!.className).toContain('text-s-crit')
+    expect(badges[0]!.style.background).toBe('var(--s-crit-soft)')
+    expect(badges[1]!.className).toContain('text-s-warn')
+    expect(badges[1]!.style.background).toBe('var(--s-warn-wash)')
+    expect(badges[2]!.className).toContain('text-t3')
+    expect(badges[2]!.style.background).toBe('var(--color-d5)')
+    expect(badges[3]!.className).toContain('text-t5')
+    expect(badges[3]!.style.background).toBe('var(--color-d4)')
 
-    // The badge node (a <span> inside the row, not the <button> pill) must carry levelColor + levelBg
-    const errorBadge = errorNodes.find(n => n.tagName === 'SPAN' && n.style.background === levelBg.error)
-    const warnBadge = warnNodes.find(n => n.tagName === 'SPAN' && n.style.background === levelBg.warn)
-    const infoBadge = infoNodes.find(n => n.tagName === 'SPAN' && n.style.background === levelBg.info)
-    const debugBadge = debugNodes.find(n => n.tagName === 'SPAN' && n.style.background === levelBg.debug)
-    expect(errorBadge).toBeDefined()
-    expect(warnBadge).toBeDefined()
-    expect(infoBadge).toBeDefined()
-    expect(debugBadge).toBeDefined()
-    expect(errorBadge!.className).toContain(levelColor.error!)
-    expect(warnBadge!.className).toContain(levelColor.warn!)
-    expect(infoBadge!.className).toContain(levelColor.info!)
-    expect(debugBadge!.className).toContain(levelColor.debug!)
-
-    // Message text inherits the level color class on its container
     const boomMsg = screen.getByText('boom')
-    expect(boomMsg.className).toContain(levelColor.error!)
+    expect(boomMsg.className).toContain('text-s-crit')
     const carefulMsg = screen.getByText('careful')
-    expect(carefulMsg.className).toContain(levelColor.warn!)
+    expect(carefulMsg.className).toContain('text-s-warn')
 
-    // Row background uses levelLineBg only for warn/error (info/debug have no entry → empty string)
     const rows = container.querySelectorAll('.c-row-hover')
     expect(rows).toHaveLength(4)
-    const [errorRow, warnRow, infoRow, debugRow] = rows as unknown as HTMLElement[]
-    expect(errorRow!.style.background).toBe(levelLineBg.error)
-    expect(warnRow!.style.background).toBe(levelLineBg.warn)
-    expect(infoRow!.style.background).toBe('')
-    expect(debugRow!.style.background).toBe('')
+    expect(getRowByMessage('boom').style.background).toBe('var(--s-crit-wash)')
+    expect(getRowByMessage('careful').style.background).toBe('var(--s-warn-wash)')
+    expect(getRowByMessage('okay').style.background).toBe('')
+    expect(getRowByMessage('trace').style.background).toBe('')
   })
 })
