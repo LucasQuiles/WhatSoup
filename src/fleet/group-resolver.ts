@@ -103,13 +103,11 @@ async function fetchGroupMetadata(
   if (instance.socketPath && fs.existsSync(instance.socketPath)) {
     try {
       const result = await mcpCall(instance.socketPath, 'get_group_metadata', { jid: groupJid }, 8000);
-      if (result.success) {
+      if (result.success && !result.toolError) {
         const resultObj = result.result as Record<string, unknown>;
-        if (!resultObj?.isError) {
-          const content = resultObj?.content;
-          const text = (Array.isArray(content) ? content.find((c: { type: string }) => c.type === 'text')?.text : null) as string | null;
-          if (text) return JSON.parse(text);
-        }
+        const content = resultObj?.content;
+        const text = (Array.isArray(content) ? content.find((c: { type: string }) => c.type === 'text')?.text : null) as string | null;
+        if (text) return JSON.parse(text);
       }
     } catch { /* fall through to HTTP */ }
   }

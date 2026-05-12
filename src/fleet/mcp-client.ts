@@ -7,6 +7,15 @@ export interface McpCallResult {
   success: boolean;
   result?: unknown;
   error?: string;
+  /**
+   * True when the tool returned a successful JSON-RPC envelope but the
+   * `CallToolResult` set `isError: true` (MCP tool-level failure: invalid
+   * params, business-rule rejection, sanitized handler throw).
+   *
+   * Distinct from `success: false`, which indicates a JSON-RPC transport
+   * failure (socket dropped, timeout, parse error).
+   */
+  toolError?: boolean;
 }
 
 /** Send a tools/call request via JSON-RPC 2.0 over Unix socket */
@@ -85,7 +94,12 @@ export async function mcpCall(
                 error: msg.error.message ?? JSON.stringify(msg.error),
               });
             } else {
-              settle({ success: true, result: msg.result });
+              const r = msg.result as { isError?: boolean } | undefined;
+              settle({
+                success: true,
+                result: msg.result,
+                toolError: r?.isError === true,
+              });
             }
             return;
           }
