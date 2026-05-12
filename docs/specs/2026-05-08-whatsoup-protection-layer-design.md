@@ -147,7 +147,7 @@ Alert Sinks + Actions — primary, fallback, meta-alert; observe / alert / propo
 
 ### 6.1 Collectors
 
-A **collector pack** is a versioned module that observes one slice of state and returns canonical JSON. Packs are independent, drop-in, and live under `tools/whatsoup_guard/collectors/<pack>/`. Initial packs:
+A **collector pack** is a versioned module that observes one slice of state and returns canonical JSON. Packs are independent, drop-in, and live under `tools/whatsoup_guard/src/collector/`. Initial packs:
 
 | Pack | Domain coverage |
 |---|---|
@@ -293,7 +293,7 @@ The engine self-checks its own credentials on every cycle: alert-sink bearer tok
 
 ## 9. Deployment profiles
 
-Four reusable profiles ship with the protection layer. Each is a policy YAML in `tools/whatsoup_guard/profiles/`.
+Four reusable profiles ship with the protection layer. Each is a policy YAML in `tools/whatsoup_guard/src/policy/profiles/`.
 
 ### 9.1 `development`
 

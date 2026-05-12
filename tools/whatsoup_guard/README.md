@@ -4,9 +4,7 @@ Universal WhatSoup Protection Layer package for detecting drift, recording guard
 events, and exercising deployment-neutral protection workflows.
 
 See `../../docs/specs/2026-05-08-whatsoup-protection-layer-design.md` for the
-public design and
-`../../docs/plans/2026-05-09-whatsoup-protection-layer-integration-follow-up-plan.md`
-for the current integration follow-up.
+public design.
 
 ## Scope
 
