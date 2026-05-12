@@ -45,6 +45,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  // Remove any scroll-container divs appended by makeScrollContainer.
+  // RTL cleanup() unmounts React trees but does not remove manually-appended nodes.
+  document.body.replaceChildren()
 })
 
 // ── scroll container helpers ──────────────────────────────────────────────────
@@ -195,13 +198,14 @@ describe('useVirtualMessages — virtualizer integration', () => {
     const opts = createVirtualMessagesOptions({ messages, getScrollElement: () => container })
 
     expect(opts.overscan).toBe(DEFAULT_MESSAGE_OVERSCAN)
-    expect(opts.overscan).toBe(8)
 
     const { result } = renderHook(() =>
       useVirtualMessages({ messages, getScrollElement: () => container }),
     )
-    // Hook returns a Virtualizer instance with getVirtualItems
-    expect(typeof result.current.getVirtualItems).toBe('function')
+    // Virtualizer exposes getVirtualItems and reports the one message
+    const items = result.current.getVirtualItems()
+    expect(items.length).toBeGreaterThanOrEqual(1)
+    expect(items[0]).toMatchObject({ index: 0 })
   })
 
   // ── 6. custom overscan threads through ────────────────────────────────────
@@ -217,8 +221,6 @@ describe('useVirtualMessages — virtualizer integration', () => {
     })
 
     expect(opts.overscan).toBe(3)
-    // Also verify it is not the default
-    expect(opts.overscan).not.toBe(8)
   })
 
   // ── 7. item key stability — pk used when present, index as fallback ────────
