@@ -36,6 +36,9 @@ jobs:
       - name: Typecheck scripts/
         run: npm run typecheck:scripts
 
+      - name: Typecheck (all)
+        run: npm run typecheck:all
+
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
