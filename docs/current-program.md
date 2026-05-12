@@ -148,40 +148,19 @@ All 19 SDLC epic state.md rows now classify to a policy-vocabulary status. Resol
 
 ---
 
-## 7. Normalization backlog — 12 unknown rows for future triage
+## 7. Normalization backlog
 
-Step 4 reduced the backlog from 27 to 12. The remaining entries have no authored status AND no clear parent-epic evidence. Per policy they stay unknown until explicit markers are authored. All are in `docs/superpowers/` — the legacy `docs/plans/` bucket was drained.
-
-### docs/superpowers/plans — 7 rows
-
-**Inherited legacy (drained):**
-- `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` — authored `unknown` with stalled-at-draft note
-- `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` — same
-
-**No authored status yet:**
-- `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md`
-- `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md`
-- `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md`
-- `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md`
-- `docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md`
-
-### docs/superpowers/specs — 4 rows
-
-- `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md`
-- `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md`
-- `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md`
-- `docs/superpowers/specs/2026-04-07-provider-attribution.md`
-
-### docs/superpowers/reviews — 1 row
-
-- `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md`
+The authoritative unknown-status list is generated in `docs/work-index.md`.
+This narrative keeps only triage themes so it does not drift from the scanner.
+Unknown entries have no authored status and no clear parent-epic evidence; per
+policy they stay unknown until explicit markers are authored.
 
 ### Triage heuristics for the next pass (non-prescriptive)
 
 - **phase4-realtime-performance / phase5-analytics-observability** (drained legacy plans): review whether any portion of this work became part of a later SDLC epic. If yes, mark superseded-by that epic. If not, leave as explicit `unknown`.
 - **colony-orchestration plan + spec**: cluster decision — was this implemented or abandoned? No matching SDLC epic exists.
 - **phase4-m2-websocket-console**: predates fleet-charts; likely superseded by later console work. Needs an author to confirm.
-- **mw-bot-group-protection** (dated 2026-04-22): recent; check whether it became an SDLC epic or remains in flight.
+- **operation-tracker / PR-0A transport work**: check whether the later transport artifacts are active planning surfaces, superseded by SDLC epics, or completed.
 - **scheduled-groups-tabs** (plan + spec): cluster decision — was this implemented? If yes, which epic?
 - **anti-echo-session-controls** (plan + spec in the cross-tree cluster; plus a separate review-handoff row): was this implemented? If yes, which epic? The review-handoff row, though not in the cluster, belongs to the same topic and should be triaged together.
 - **provider-attribution spec**: single spec, no plan, no cluster. Needs author confirmation of implementation or abandonment.
