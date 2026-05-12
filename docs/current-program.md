@@ -114,7 +114,9 @@ Explicit supersession relationships captured in the index: **one** (via the poli
 
 For every other epic and every `docs/superpowers/*` artifact, **the supersession relation is unknown** — no structured `Supersedes:` or `Superseded by:` marker exists in the index. The `supersedes_hint` column in `docs/work-index.json` has zero populated rows.
 
-Cross-tree topic clusters exist (`fleet-charts` = 6 entries across 3 trees; `anti-echo-session-controls` = 2 entries, plan + spec; `scheduled-groups-tabs` = 2 entries, plan + spec) but the index does not state which entry within each cluster supersedes another. Per policy these remain unknown until explicit markers are authored. Note: an anti-echo review-handoff exists at `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` but is not part of the cross-tree cluster (it's a single-tree row), and is listed separately in the normalization backlog.
+Cross-tree topic clusters exist (`fleet-charts` = 6 entries across 3 trees; `anti-echo-session-controls` = 2 entries, plan + spec) but the index does not state which entry within each cluster supersedes another. Per policy these remain unknown until explicit markers are authored. Note: an anti-echo review-handoff exists at `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` but is not part of the cross-tree cluster (it's a single-tree row), and is listed separately in the normalization backlog.
+
+The `scheduled-groups-tabs` cluster (plan + spec) is **resolved**: both tabs ship in `console/src/pages/LineDetail.tsx` (MCP-gated, after Metrics) and are now documented in [`docs/console-guide.md`](console-guide.md) (Line Detail → Tabs → Scheduled, Groups), with backend routes live in `src/fleet/index.ts` and listed in the README Fleet API table.
 
 ---
 
@@ -174,7 +176,7 @@ policy they stay unknown until explicit markers are authored.
 - **colony-orchestration plan + spec**: cluster decision — was this implemented or abandoned? No matching SDLC epic exists.
 - **phase4-m2-websocket-console**: predates fleet-charts; likely superseded by later console work. Needs an author to confirm.
 - **operation-tracker / PR-0A transport work**: check whether the later transport artifacts are active planning surfaces, superseded by SDLC epics, or completed.
-- **scheduled-groups-tabs** (plan + spec): cluster decision — was this implemented? If yes, which epic?
+- ~~**scheduled-groups-tabs** (plan + spec): cluster decision — was this implemented? If yes, which epic?~~ **Resolved**: both tabs ship in `console/src/pages/LineDetail.tsx` (MCP-gated, after Metrics); see [`docs/console-guide.md`](console-guide.md) → Line Detail → Tabs → Scheduled, Groups, and the Fleet API table in the README for the 20 backing routes.
 - **anti-echo-session-controls** (plan + spec in the cross-tree cluster; plus a separate review-handoff row): was this implemented? If yes, which epic? The review-handoff row, though not in the cluster, belongs to the same topic and should be triaged together.
 - **provider-attribution spec**: single spec, no plan, no cluster. Needs author confirmation of implementation or abandonment.
 
