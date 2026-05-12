@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -6,6 +10,11 @@ import {
   commandsForDecision,
   ZERO_SHA,
 } from '../../scripts/pre-push-guard.ts';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const packageJson = JSON.parse(
+  readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
+) as { scripts: Record<string, string> };
 
 describe('pre-push guard classifier', () => {
   it('classifies delete-only ref updates as metadata-only', () => {
@@ -63,5 +72,22 @@ describe('pre-push guard classifier', () => {
 
   it('rejects malformed pre-push ref lines', () => {
     expect(() => classifyPrePushLine('refs/heads/main only-two-fields')).toThrow(/Invalid pre-push/);
+  });
+});
+
+describe('verify chain composition (package.json)', () => {
+  it('verify:push:branch invokes guard:work-index', () => {
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:work-index\b/);
+  });
+
+  it('verify:release invokes guard:work-index', () => {
+    // Regression guard for #495: verify:release was missing the work-index
+    // step that verify:push:branch and CI quality.yml both run, allowing
+    // work-index drift to land on main without local detection.
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
 });
