@@ -1,325 +1,167 @@
 /**
  * Behavioral contract-lock for KpiCard.
- * Pure-render component with one hook (useId for SVG gradient id);
- * useId is stubbed so tests can inspect the returned ReactElement tree
- * directly (no DOM/jsdom).
+ * @vitest-environment jsdom
  */
-import { describe, expect, it, vi } from 'vitest';
-import { createElement, type CSSProperties, type ReactElement, type ReactNode } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import KpiCard from '../../console/src/components/KpiCard'
 
-vi.mock('react', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('react')>();
-  return {
-    ...actual,
-    useId: () => 'test-grad-id',
-  };
-});
+afterEach(() => cleanup())
 
-import KpiCard from '../../console/src/components/KpiCard.tsx';
-
-type ElementProps = {
-  children?: ReactNode;
-  className?: string;
-  style?: CSSProperties;
-  'aria-label'?: string;
-  'aria-pressed'?: boolean;
-  type?: string;
-  onClick?: () => void;
-  id?: string;
-  fill?: string;
-  stroke?: string;
-  points?: string;
-  viewBox?: string;
-  offset?: string;
-  stopColor?: string;
-  stopOpacity?: string;
-};
-
-type TestElement = ReactElement<ElementProps>;
-
-interface KpiCardProps {
-  value: string | number;
-  label: string;
-  color: string;
-  onClick?: () => void;
-  active?: boolean;
-  sparkData?: number[];
-  suffix?: string;
+type KpiCardProps = {
+  value: string | number
+  label: string
+  color: string
+  onClick?: () => void
+  active?: boolean
+  sparkData?: number[]
+  suffix?: string
 }
 
-function propsOf(element: TestElement): ElementProps {
-  return element.props;
-}
-
-function classTokens(element: TestElement): string[] {
-  return propsOf(element).className?.split(/\s+/).filter(Boolean) ?? [];
-}
-
-function collectStrings(node: ReactNode): string[] {
-  if (typeof node === 'string') return [node];
-  if (typeof node === 'number') return [String(node)];
-  if (Array.isArray(node)) return node.flatMap(collectStrings);
-  if (typeof node === 'object' && node !== null && 'props' in node) {
-    return collectStrings(propsOf(node as TestElement).children);
+function renderCard(props: Partial<KpiCardProps> = {}) {
+  const merged: KpiCardProps = {
+    value: 1,
+    label: 'Requests',
+    color: 'text-s-ok',
+    ...props,
   }
-  return [];
+
+  render(<KpiCard {...merged} />)
+
+  return screen.getByRole('button', {
+    name: new RegExp(String.raw`${merged.value}${merged.suffix ? String.raw`\s*${merged.suffix}` : ''}\s*${merged.label}`, 'i'),
+  })
 }
 
-function flattenElements(node: ReactNode): TestElement[] {
-  if (typeof node !== 'object' || node === null) return [];
-  if (Array.isArray(node)) return node.flatMap(flattenElements);
-  if ('type' in node) {
-    const el = node as TestElement;
-    return [el, ...flattenElements(propsOf(el).children)];
-  }
-  return [];
-}
+describe('KpiCard root behavior', () => {
+  it('renders as a named button with inactive pressed state by default', () => {
+    const card = renderCard({ value: 42, label: 'Lines Connected' })
 
-function render(props: KpiCardProps): TestElement {
-  const fn = KpiCard as unknown as (p: KpiCardProps) => TestElement;
-  return fn(props);
-}
+    expect(card.tagName).toBe('BUTTON')
+    expect(card.getAttribute('type')).toBe('button')
+    expect(card.getAttribute('aria-pressed')).toBe('false')
+    expect(within(card).getByText('42')).toBeDefined()
+    expect(within(card).getByText('Lines Connected')).toBeDefined()
+  })
 
-describe('KpiCard — root structure', () => {
-  it('returns a <button type="button"> with aria-pressed bound to active', () => {
-    const t1 = render({ value: 1, label: 'A', color: 'text-s-ok', active: true });
-    const t2 = render({ value: 1, label: 'A', color: 'text-s-ok', active: false });
-    const t3 = render({ value: 1, label: 'A', color: 'text-s-ok' });
-    expect(t1.type).toBe('button');
-    expect(propsOf(t1).type).toBe('button');
-    expect(propsOf(t1)['aria-pressed']).toBe(true);
-    expect(propsOf(t2)['aria-pressed']).toBe(false);
-    // default for active is false
-    expect(propsOf(t3)['aria-pressed']).toBe(false);
-  });
+  it('reflects active state through aria-pressed and visible DOM styling', () => {
+    const card = renderCard({ active: true })
 
-  it('attaches the onClick handler passed in props', () => {
-    const cb = vi.fn();
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok', onClick: cb });
-    expect(propsOf(tree).onClick).toBe(cb);
-    propsOf(tree).onClick?.();
-    expect(cb).toHaveBeenCalledTimes(1);
-  });
+    expect(card.getAttribute('aria-pressed')).toBe('true')
+    expect(card.style.background).toBe('var(--color-d3)')
+    expect(card.style.border).toBe('var(--bw) solid var(--color-s-ok)')
+    expect(card.style.boxShadow).toBe('var(--shadow-inset)')
+  })
 
-  it('omits an onClick prop when none is supplied', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok' });
-    expect(propsOf(tree).onClick).toBeUndefined();
-  });
+  it('keeps inactive state visually neutral', () => {
+    const card = renderCard({ active: false })
 
-  it('locks the canonical class token set on the root button', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok' });
-    const tokens = classTokens(tree);
-    expect(tokens).toEqual(
-      expect.arrayContaining([
-        'cursor-pointer',
-        'select-none',
-        'relative',
-        'overflow-hidden',
-        'c-kpi-pad',
-        'c-kpi-hover',
-        'rounded-md',
-      ]),
-    );
-  });
-});
+    expect(card.getAttribute('aria-pressed')).toBe('false')
+    expect(card.style.background).toBe('var(--color-d2)')
+    expect(card.style.border).toBe('var(--bw) solid var(--b1)')
+    expect(card.style.boxShadow).toBe('none')
+  })
 
-describe('KpiCard — active state styling', () => {
-  it('active=true uses d3 background + colored border + inset shadow', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok', active: true });
-    const style = propsOf(tree).style ?? {};
-    expect(style.background).toBe('var(--color-d3)');
-    expect(style.border).toBe('var(--bw) solid var(--color-s-ok)');
-    expect(style.boxShadow).toBe('var(--shadow-inset)');
-  });
+  it('calls the supplied click handler from the rendered button', () => {
+    const onClick = vi.fn()
+    const card = renderCard({ onClick })
 
-  it('active=false uses d2 background + neutral border + no shadow', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok', active: false });
-    const style = propsOf(tree).style ?? {};
-    expect(style.background).toBe('var(--color-d2)');
-    expect(style.border).toBe('var(--bw) solid var(--b1)');
-    expect(style.boxShadow).toBe('none');
-  });
+    fireEvent.click(card)
 
-  it('falls back to currentColor when the color key is not in colorMap', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-unknown-xyz', active: true });
-    const style = propsOf(tree).style ?? {};
-    expect(style.border).toBe('var(--bw) solid currentColor');
-  });
-});
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
 
-describe('KpiCard — value + label content', () => {
-  it('renders the value text inside the c-kpi-value container with the color class', () => {
-    const tree = render({ value: 42, label: 'OPS', color: 'text-s-ok' });
-    const children = flattenElements(propsOf(tree).children);
-    const valueDiv = children.find(
-      (el) => el.type === 'div' && classTokens(el).includes('c-kpi-value'),
-    );
-    expect(valueDiv).toBeDefined();
-    expect(classTokens(valueDiv!)).toEqual(
-      expect.arrayContaining(['c-kpi-value', 'text-s-ok']),
-    );
-    expect(collectStrings(propsOf(valueDiv!).children)).toEqual(['42']);
-  });
+  it('uses the canonical root class tokens on the button', () => {
+    const card = renderCard()
 
-  it('accepts string values and preserves them verbatim', () => {
-    const tree = render({ value: 'N/A', label: 'OPS', color: 'text-s-ok' });
-    const valueDiv = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'div' && classTokens(el).includes('c-kpi-value'),
-    );
-    expect(valueDiv).toBeDefined();
-    expect(collectStrings(propsOf(valueDiv!).children)).toEqual(['N/A']);
-  });
+    expect(card.classList.contains('cursor-pointer')).toBe(true)
+    expect(card.classList.contains('select-none')).toBe(true)
+    expect(card.classList.contains('relative')).toBe(true)
+    expect(card.classList.contains('overflow-hidden')).toBe(true)
+    expect(card.classList.contains('c-kpi-pad')).toBe(true)
+    expect(card.classList.contains('c-kpi-hover')).toBe(true)
+    expect(card.classList.contains('rounded-md')).toBe(true)
+  })
+})
 
-  it('renders the label inside an uppercase c-label container', () => {
-    const tree = render({ value: 1, label: 'requests', color: 'text-s-ok' });
-    const children = flattenElements(propsOf(tree).children);
-    const labelDiv = children.find(
-      (el) => el.type === 'div' && classTokens(el).includes('c-label'),
-    );
-    expect(labelDiv).toBeDefined();
-    expect(classTokens(labelDiv!)).toEqual(
-      expect.arrayContaining(['c-label', 'uppercase']),
-    );
-    expect(collectStrings(propsOf(labelDiv!).children)).toEqual(['requests']);
-  });
-});
+describe('KpiCard value, label, and suffix', () => {
+  it('renders a numeric value and label in their observable containers', () => {
+    const card = renderCard({ value: 42, label: 'OPS', color: 'text-s-ok' })
+    const value = within(card).getByText('42')
+    const label = within(card).getByText('OPS')
 
-describe('KpiCard — suffix slot', () => {
-  it('omits the suffix span entirely when suffix is not provided', () => {
-    const tree = render({ value: 42, label: 'A', color: 'text-s-ok' });
-    const valueDiv = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'div' && classTokens(el).includes('c-kpi-value'),
-    )!;
-    const spans = flattenElements(propsOf(valueDiv).children).filter(
-      (el) => el.type === 'span',
-    );
-    expect(spans).toHaveLength(0);
-  });
+    expect(value.classList.contains('c-kpi-value')).toBe(true)
+    expect(value.classList.contains('text-s-ok')).toBe(true)
+    expect(label.classList.contains('c-label')).toBe(true)
+    expect(label.classList.contains('uppercase')).toBe(true)
+  })
 
-  it('renders the suffix in a span sibling with text-data + font-normal tokens', () => {
-    const tree = render({ value: 42, label: 'A', color: 'text-s-ok', suffix: 'ms' });
-    const valueDiv = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'div' && classTokens(el).includes('c-kpi-value'),
-    )!;
-    const spans = flattenElements(propsOf(valueDiv).children).filter(
-      (el) => el.type === 'span',
-    );
-    expect(spans).toHaveLength(1);
-    expect(classTokens(spans[0]!)).toEqual(
-      expect.arrayContaining(['text-data', 'font-normal']),
-    );
-    expect(collectStrings(propsOf(spans[0]!).children)).toEqual(['ms']);
-  });
-});
+  it('preserves string values verbatim', () => {
+    const card = renderCard({ value: 'N/A', label: 'OPS' })
 
-describe('KpiCard — sparkline gating', () => {
-  it('omits the <svg> when sparkData is undefined', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok' });
-    const svgs = flattenElements(propsOf(tree).children).filter(
-      (el) => el.type === 'svg',
-    );
-    expect(svgs).toHaveLength(0);
-  });
+    expect(within(card).getByText('N/A')).toBeDefined()
+  })
 
-  it('omits the <svg> when sparkData has length <= 1 (single-sample is not a line)', () => {
-    const t0 = render({ value: 1, label: 'A', color: 'text-s-ok', sparkData: [] });
-    const t1 = render({ value: 1, label: 'A', color: 'text-s-ok', sparkData: [0.5] });
-    const svgs0 = flattenElements(propsOf(t0).children).filter((el) => el.type === 'svg');
-    const svgs1 = flattenElements(propsOf(t1).children).filter((el) => el.type === 'svg');
-    expect(svgs0).toHaveLength(0);
-    expect(svgs1).toHaveLength(0);
-  });
+  it('omits the suffix when one is not supplied', () => {
+    const card = renderCard({ value: 42, label: 'Latency' })
 
-  it('renders the <svg> when sparkData has 2+ samples', () => {
-    const tree = render({ value: 1, label: 'A', color: 'text-s-ok', sparkData: [0.2, 0.8] });
-    const svgs = flattenElements(propsOf(tree).children).filter(
-      (el) => el.type === 'svg',
-    );
-    expect(svgs).toHaveLength(1);
-  });
-});
+    expect(within(card).queryByText('ms')).toBeNull()
+  })
 
-describe('KpiCard — sparkline shape', () => {
-  it('sets viewBox to "0 0 N-1 1" so each sample maps to one x-unit', () => {
-    const tree = render({
-      value: 1,
-      label: 'A',
-      color: 'text-s-ok',
-      sparkData: [0.1, 0.5, 0.9, 0.3, 0.7],
-    });
-    const svg = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'svg',
-    )!;
-    expect(propsOf(svg).viewBox).toBe('0 0 4 1');
-  });
+  it('renders the suffix as visible adjacent text with suffix styling', () => {
+    const card = renderCard({ value: 42, label: 'Latency', suffix: 'ms' })
+    const suffix = within(card).getByText('ms')
 
-  it('plots polyline points as "i,1-d" pairs in sample order', () => {
-    const tree = render({
-      value: 1,
-      label: 'A',
-      color: 'text-s-ok',
-      sparkData: [0, 0.25, 1],
-    });
-    const polyline = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'polyline',
-    )!;
-    expect(propsOf(polyline).points).toBe('0,1 1,0.75 2,0');
-    expect(propsOf(polyline).fill).toBe('none');
-  });
+    expect(suffix.tagName).toBe('SPAN')
+    expect(suffix.classList.contains('text-data')).toBe(true)
+    expect(suffix.classList.contains('font-normal')).toBe(true)
+  })
+})
 
-  it('closes the polygon by prepending "0,1" and appending "N-1,1" to the line points', () => {
-    const tree = render({
-      value: 1,
-      label: 'A',
-      color: 'text-s-ok',
-      sparkData: [0.25, 0.75],
-    });
-    const polygon = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'polygon',
-    )!;
-    expect(propsOf(polygon).points).toBe('0,1 0,0.75 1,0.25 1,1');
-  });
+describe('KpiCard sparkline DOM', () => {
+  it('does not render a sparkline without at least two samples', () => {
+    const withoutData = renderCard({ label: 'No Data' })
+    expect(withoutData.querySelector('svg')).toBeNull()
 
-  it('routes strokeColor from colorMap into both the polyline stroke and the gradient stops', () => {
-    const tree = render({
-      value: 1,
-      label: 'A',
-      color: 'text-m-agt',
-      sparkData: [0.2, 0.8],
-    });
-    const polyline = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'polyline',
-    )!;
-    expect(propsOf(polyline).stroke).toBe('var(--color-m-agt)');
+    cleanup()
+    const emptyData = renderCard({ label: 'Empty Data', sparkData: [] })
+    expect(emptyData.querySelector('svg')).toBeNull()
 
-    const stops = flattenElements(propsOf(tree).children).filter(
-      (el) => el.type === 'stop',
-    );
-    expect(stops).toHaveLength(2);
-    expect(propsOf(stops[0]!).stopColor).toBe('var(--color-m-agt)');
-    expect(propsOf(stops[1]!).stopColor).toBe('var(--color-m-agt)');
-  });
+    cleanup()
+    const singleSample = renderCard({ label: 'Single Sample', sparkData: [0.5] })
+    expect(singleSample.querySelector('svg')).toBeNull()
+  })
 
-  it('wires the polygon fill to url(#<gradientId>) matching the linearGradient id', () => {
-    const tree = render({
-      value: 1,
-      label: 'A',
-      color: 'text-s-ok',
-      sparkData: [0.4, 0.6],
-    });
-    const polygon = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'polygon',
-    )!;
-    const gradient = flattenElements(propsOf(tree).children).find(
-      (el) => el.type === 'linearGradient',
-    )!;
-    const gradientId = propsOf(gradient).id;
-    expect(gradientId).toBe('test-grad-id');
-    expect(propsOf(polygon).fill).toBe(`url(#${gradientId})`);
-  });
-});
+  it('renders a sparkline SVG for two or more samples', () => {
+    const card = renderCard({ sparkData: [0.2, 0.8] })
 
-describe('KpiCard — colorMap coverage', () => {
+    expect(card.querySelector('svg')).toBeDefined()
+  })
+
+  it('exposes the plotted sparkline shape through rendered SVG attributes', () => {
+    const card = renderCard({ sparkData: [0, 0.25, 1] })
+    const svg = card.querySelector('svg')
+    const polygon = card.querySelector('polygon')
+    const polyline = card.querySelector('polyline')
+
+    expect(svg?.getAttribute('viewBox')).toBe('0 0 2 1')
+    expect(polygon?.getAttribute('points')).toBe('0,1 0,1 1,0.75 2,0 2,1')
+    expect(polyline?.getAttribute('points')).toBe('0,1 1,0.75 2,0')
+    expect(polyline?.getAttribute('fill')).toBe('none')
+  })
+
+  it('wires the rendered polygon fill to the rendered gradient id', () => {
+    const card = renderCard({ sparkData: [0.4, 0.6] })
+    const gradient = card.querySelector('linearGradient')
+    const polygon = card.querySelector('polygon')
+
+    const gradientId = gradient?.getAttribute('id')
+    expect(gradientId).toBeTruthy()
+    expect(polygon?.getAttribute('fill')).toBe(`url(#${gradientId})`)
+  })
+})
+
+describe('KpiCard color variants', () => {
   const expectedMap: Array<[string, string]> = [
     ['text-s-ok', 'var(--color-s-ok)'],
     ['text-s-crit', 'var(--color-s-crit)'],
@@ -328,22 +170,34 @@ describe('KpiCard — colorMap coverage', () => {
     ['text-m-cht', 'var(--color-m-cht)'],
     ['text-m-pas', 'var(--color-m-pas)'],
     ['text-t2', 'var(--color-t2)'],
-  ];
+  ]
 
   for (const [token, cssVar] of expectedMap) {
-    it(`maps color="${token}" to stroke ${cssVar} and uses it for active border`, () => {
-      const tree = render({
-        value: 1,
-        label: 'A',
+    it(`renders ${token} as the active border and sparkline stroke`, () => {
+      const card = renderCard({
         color: token,
         active: true,
         sparkData: [0.1, 0.9],
-      });
-      expect(propsOf(tree).style?.border).toBe(`var(--bw) solid ${cssVar}`);
-      const polyline = flattenElements(propsOf(tree).children).find(
-        (el) => el.type === 'polyline',
-      )!;
-      expect(propsOf(polyline).stroke).toBe(cssVar);
-    });
+      })
+      const polyline = card.querySelector('polyline')
+      const stops = card.querySelectorAll('stop')
+
+      expect(card.style.border).toBe(`var(--bw) solid ${cssVar}`)
+      expect(polyline?.getAttribute('stroke')).toBe(cssVar)
+      expect(stops).toHaveLength(2)
+      expect(stops[0]?.getAttribute('stop-color')).toBe(cssVar)
+      expect(stops[1]?.getAttribute('stop-color')).toBe(cssVar)
+    })
   }
-});
+
+  it('falls back to currentColor for unknown active and sparkline colors', () => {
+    const card = renderCard({
+      color: 'text-unknown-xyz',
+      active: true,
+      sparkData: [0.1, 0.9],
+    })
+
+    expect(card.style.border).toBe('var(--bw) solid currentColor')
+    expect(card.querySelector('polyline')?.getAttribute('stroke')).toBe('currentColor')
+  })
+})
