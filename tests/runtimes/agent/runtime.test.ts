@@ -147,6 +147,7 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
+    mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
     elevenlabs: {
