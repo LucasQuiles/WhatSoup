@@ -42,8 +42,10 @@ Open issue state at sweep time:
 
 | Issue | State | Coverage |
 |---|---|---|
-| `#349` `mcp: stream outbound media instead of buffering whole file` | Open | No open PR found. Needs implementation PR. |
-| `#353` `transport: wire isDurableEventKind into dispatch path` | Open | Review-time update: covered by open ready PR `#365`. Do not duplicate. |
+| `#349` `mcp: stream outbound media instead of buffering whole file` | Closed after sweep | PR `#371` merged. |
+| `#353` `transport: wire isDurableEventKind into dispatch path` | Closed after sweep | PR `#365` merged. |
+| `#363` `agent: honor HTTP provider apiKeyService config` | Closed after sweep | PR `#370` merged; duplicate PR `#367` closed. |
+| `#364` `docs: clarify typing_update is not a refetch invalidation` | Closed after sweep | PR `#368` merged; duplicate PR `#366` closed. |
 | `#348` Tailwind warning cleanup | Closed | PR `#360` merged. |
 | `#352` provider KPI on summary | Closed | PR `#361` merged; provider display code and direct test are on current main. |
 
@@ -93,14 +95,12 @@ The affected row is `docs/superpowers/plans/2026-04-05-phase5-analytics-observab
 
 ## Recommended PR Queue
 
-1. `#349` outbound media streaming: implement streaming path and memory/backpressure tests.
-2. `#353` durable event dispatch: review and land PR `#365`; do not open a duplicate implementation PR.
-3. Private config write: ensure intro-sent config updates preserve private file mode.
-4. Disconnect policy consolidation: extract helper and test restart-required/flapping semantics.
-5. Access-mode constant reuse: import canonical `VALID_ACCESS_MODES`.
-6. Direct validator coverage: add focused tests for `agent-config-validator.ts`.
+1. Private config write: ensure intro-sent config updates preserve private file mode.
+2. Disconnect policy consolidation: extract helper and test restart-required/flapping semantics.
+3. Access-mode constant reuse: covered by draft PR `#369`; do not duplicate while that PR is active.
+4. Direct validator coverage: covered by draft PR `#372`; do not duplicate while that PR is active.
 
-Recently merged PRs `#360` and `#361` should not be duplicated.
+Recently merged PRs `#360`, `#361`, `#365`, `#368`, `#370`, and `#371` should not be duplicated.
 
 ## Follow-Up Registry Work
 
