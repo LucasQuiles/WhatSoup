@@ -21,10 +21,15 @@ Latest consolidation: [`docs/sweep-report-2026-05-12.md`](sweep-report-2026-05-1
 
 Current execution queue from that sweep:
 
-- GitHub issue queue is clear as of 2026-05-12 07:08Z.
+- GitHub issue queue is clear as of 2026-05-12 09:13Z; no open issues remain.
 - Sweep follow-ups landed after the report: `#353` via PR `#365`, `#364` via PR `#368`, `#363` via PR `#370`, and `#349` via PR `#371`.
 - Recently closed issues from the same sweep window: GitHub `#348` landed via PR `#360`; GitHub `#352` landed via PR `#361`.
-- Verified internal follow-ups: private config write is covered by PR `#374`; disconnect-policy consolidation is covered by updated draft PR `#297`; access-mode constant reuse is covered by draft PR `#369`; direct `agent-config-validator` tests are covered by draft PR `#372`.
+- Docs and security follow-ups closed today: `#376` via PR `#381`, `#377` via PR `#384`, `#378` via PR `#383`, `#382` via PR `#388`, `#385` via PR `#387`, `#389` via PR `#395`, `#390` via PR `#399`, `#391` via PR `#396`, and `#393` via PR `#401`.
+- Private config write landed: PR `#374` merged at `6c18169d` (`6c18169dee0ddcb69c180d22043058d080a92f3b`) on 2026-05-12.
+- Legacy root query-token auth now has a dated removal plan: PR `#397` added one-shot warning observability, and PR `#401` set the removal date to 2026-06-30.
+- Ready-for-review PRs: none as of 2026-05-12 09:13Z.
+- Draft PRs remain separate from the ready queue: `#256`, `#271`, `#272`, `#281`, `#286`, `#293`, `#297`, `#369`, `#372`, `#375`, `#379`, `#380`, `#386`, `#394`, `#398`, and `#400`.
+- Verified internal follow-ups: disconnect-policy consolidation is covered by updated draft PR `#297`; access-mode constant reuse is covered by draft PR `#369`; direct `agent-config-validator` tests are covered by draft PR `#372`.
 - False-positive sweep claims closed: memory migration mappings and provider KPI missing.
 
 Secondary backlog surfaces outside the generated work index: `docs/duplicates-report.md` and `.tmup-artifacts/dedup-triage-021.md`.
