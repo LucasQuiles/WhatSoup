@@ -33,8 +33,11 @@ the relevant reference (`docs/configuration.md`, `docs/tools.md`, README API tab
 Every deprecation requires: status change here, runtime/operator warning where feasible,
 and a release-notes entry under "Deprecations" naming the removal-target version per §5.
 
-**Maintainer:** WhatSoup core team. Pre-baseline (advisory) registry drift is reported by
-CI but does not fail the build (§9.4); this transitions to hard-fail at the v1.0.0 baseline cut.
+**Maintainer:** WhatSoup core team. Registry drift is a hard gate in CI and release checks:
+`npm run guard:public-surface-drift` fails when registry source paths, the required npm
+script entry, documented MCP modules/tool counts, or required MCP identifiers drift. The
+v1.0.0 baseline cut remains the point where the registry becomes the sole source of public
+status; before that cut, documented surfaces still inherit the bootstrap caveat in §9.3.
 
 ---
 
@@ -180,10 +183,10 @@ Each instance config file is at `$XDG_CONFIG_HOME/whatsoup/instances/<name>/conf
 | `config:instance_config.chatAliases` | config-key | [docs/configuration.md §chatAliases](configuration.md#chataliases) | v1 (bootstrap) | stable | active | Per-instance alias map for outbound sends |
 | `config:instance_config.profiles` | config-key | [docs/configuration.md §profiles](configuration.md#profiles) | v1 (bootstrap) | stable | active | Named send-decoration policies (`prefix`, `tag`, `linkPreview`) |
 | `config:instance_config.operationTracker` | config-key | [docs/configuration.md §operationTracker](configuration.md#operationtracker) | v1 (bootstrap) | stable | active | Per-tool progress + stall detection |
-| `config:instance_config.agentOptions` | config-key | [docs/configuration.md §agentOptions](configuration.md#agentoptions) | v1 (bootstrap) | stable | active | Agent runtime settings; required fields vary by `sessionScope` |
+| `config:instance_config.agentOptions` | config-key | [docs/configuration.md §agentOptions](configuration.md#agentoptions) | v1 (bootstrap) | stable | active | Agent runtime settings; required fields vary by `sessionScope`; provider IDs are `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api` |
 | `config:instance_config.agentOptions.sandbox` | config-key | [docs/configuration.md §agentOptions.sandbox](configuration.md#agentoptionssandbox) | v1 (bootstrap) | stable | active | Sandbox enforcement policy |
 | `config:instance_config.agentOptions.enabledPlugins` | config-key | [docs/configuration.md §agentOptions.enabledPlugins](configuration.md#agentoptionsenabledplugins) | v1 (bootstrap) | stable | active | Plugin allowlist for agent instances |
-| `config:instance_config.session-scopes` | config-key | [docs/configuration.md §Session Scopes](configuration.md#session-scopes) | v1 (bootstrap) | stable | active | `single`, `per-chat`, `shared` |
+| `config:instance_config.session-scopes` | config-key | [docs/configuration.md §Session Scopes](configuration.md#session-scopes) | v1 (bootstrap) | stable | active | `single`, `per_chat`, `shared` |
 | `config:instance_config.outbound-send-audit` | config-key | [docs/configuration.md §Outbound Send Audit](configuration.md#outbound-send-audit) | v1 (bootstrap) | stable | active | Audit-log shape for fleet send pipeline |
 
 Fleet, agent, and protection policy artifacts (`fleet.json`, `agent.json`,

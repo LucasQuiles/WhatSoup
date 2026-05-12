@@ -17,19 +17,19 @@
 
 ## 2026-05-12 Sweep Refresh
 
-<!-- last reconciled 2026-05-12 via #439 -->
+<!-- last reconciled 2026-05-12 via #456 -->
 
 Latest consolidation: [`docs/sweep-report-2026-05-12.md`](sweep-report-2026-05-12.md).
 
 Current execution queue from that sweep:
 
-- GitHub issue queue has three open items as of 2026-05-12 (post-#439 reconciliation): `#411` tracks connector mutation permission fail-closed policy; `#423` tracks the missing publication-audit SSOT (reopened after an earlier false-positive close); `#424` tracks repo hygiene private-label and commit-email blockers. Recently shipped from this same queue: `#417` closed via PR `#431`; `#418` closed via PR `#427`; `#419` closed via PR `#430`; `#420` closed via PR `#428`; `#425` closed via PR `#434`; `#426` closed as `not planned` (no PR). Earlier `#404` was closed as a false-positive after a fresh `/test-integrity` scan on `origin/main`; `#405` closed via PR `#408`; `#410` closed via PR `#414`.
+- GitHub issue queue has six remaining open items as of 2026-05-12 (post-#452 reconciliation; this refresh closes `#456`, `#457`, `#458`, and `#459`): `#411` tracks connector mutation permission fail-closed policy; `#423` tracks the missing publication-audit SSOT (reopened after an earlier false-positive close); `#424` tracks repo hygiene private-label and commit-email blockers; `#453` tracks `propose_fix` alert command semantics; `#454` tracks weak SoupKitchen source-string coverage; `#455` tracks the matching `/test-integrity` detector gap. Recently shipped from this same queue: `#417` closed via PR `#431`; `#418` closed via PR `#427`; `#419` closed via PR `#430`; `#420` closed via PR `#428`; `#425` closed via PR `#434`; `#426` closed as `not planned` (no PR); `#439` closed via PR `#442`; `#440` closed via PR `#444`; `#441` closed via PR `#443`; `#445` closed via PR `#449`; `#446` closed via PR `#450`; `#447` closed via PR `#452`; `#448` closed via PR `#451`. Earlier `#404` was closed as a false-positive after a fresh `/test-integrity` scan on `origin/main`; `#405` closed via PR `#408`; `#410` closed via PR `#414`.
 - Sweep follow-ups landed after the report: `#353` via PR `#365`, `#364` via PR `#368`, `#363` via PR `#370`, and `#349` via PR `#371`.
 - Recently closed issues from the same sweep window: GitHub `#348` landed via PR `#360`; GitHub `#352` landed via PR `#361`.
 - Docs and security follow-ups closed today: `#376` via PR `#381`, `#377` via PR `#384`, `#378` via PR `#383`, `#382` via PR `#388`, `#385` via PR `#387`, `#389` via PR `#395`, `#390` via PR `#399`, `#391` via PR `#396`, `#393` via PR `#401`, `#405` via PR `#408`, and `#410` via PR `#414`.
 - Private config write landed: PR `#374` merged at `6c18169d` (`6c18169dee0ddcb69c180d22043058d080a92f3b`) on 2026-05-12.
 - Legacy root query-token auth now has a dated removal plan: PR `#397` added one-shot warning observability, and PR `#401` set the removal date to 2026-06-30.
-- Open PR snapshot from `gh pr list` as of 2026-05-12T12:27Z: ready-for-review PRs are `#442` and `#444`; PR `#443` merged at 2026-05-12T12:20:12Z and is no longer in the open queue.
+- Open PR snapshot from `gh pr list` as of 2026-05-12T14:34Z: ready-for-review PR `#460` is this registry/docs refresh. It should not remain open after this paragraph lands. Recently merged ready PRs from the previous snapshot: `#442`, `#443`, `#444`, `#449`, `#450`, `#451`, and `#452`.
 - Draft PRs remain separate from the ready queue in that same snapshot: `#256`, `#271`, `#272`, `#281`, `#286`, `#293`, `#297`, `#369`, `#372`, `#375`, `#379`, `#380`, `#386`, `#394`, `#398`, `#400`, `#403`, `#406`, `#409`, `#412`, `#415`, `#421`, `#429`, `#432`, `#435`, `#436`, `#437`, and `#438`.
 - Verified internal follow-ups: disconnect-policy consolidation is covered by updated draft PR `#297`; access-mode constant reuse is covered by draft PR `#369`; direct `agent-config-validator` tests are covered by draft PR `#372`.
 - False-positive sweep claims closed: memory migration mappings and provider KPI missing.
