@@ -6,7 +6,9 @@ export type PublicSurfaceDriftKind =
   | 'missing-source'
   | 'missing-npm-script'
   | 'missing-registry-entry'
-  | 'registry-doc-mismatch';
+  | 'registry-doc-mismatch'
+  | 'stale-line-anchor'
+  | 'missing-route';
 
 export interface PublicSurfaceDriftIssue {
   filePath: string;
@@ -18,6 +20,18 @@ export interface PublicSurfaceDriftIssue {
   expected?: string | number;
   actual?: string | number;
   text: string;
+}
+
+/**
+ * Parsed entry from a ROUTES-table style declaration of the form
+ * `{ method: 'GET', path: /^\/api\/x$/, handler: 'getX' }`. We track the
+ * source-line of the entry so we can compare to a registry's claimed line.
+ */
+interface ParsedRouteEntry {
+  method: string;
+  pattern: RegExp;
+  handler: string;
+  line: number;
 }
 
 export interface PublicSurfaceDriftOptions {
@@ -206,6 +220,13 @@ function findScriptColumnIndex(headers: string[]): number {
   return headers.findIndex((header) => header.trim().toLowerCase() === 'script');
 }
 
+function findMethodPathColumnIndex(headers: string[]): number {
+  return headers.findIndex((header) => {
+    const normalized = header.trim().toLowerCase();
+    return normalized === 'method + path' || normalized === 'method+path';
+  });
+}
+
 function findToolsColumnIndex(headers: string[]): number {
   return headers.findIndex((header) => header.trim().toLowerCase() === 'tools');
 }
@@ -281,6 +302,120 @@ function registryMcpModules(tables: ParsedTable[]): Map<string, RegistryMcpModul
   return modules;
 }
 
+/**
+ * Extract ROUTES entries from a source file shaped like `src/fleet/index.ts`.
+ *
+ * Recognises rows of the form
+ *   `{ method: 'GET', path: /<regex-body>/, handler: 'handlerName' }`
+ * inside the file's text. Returns one parsed entry per matched line; if a row
+ * spans multiple lines or contains characters the regex can't tolerate it is
+ * skipped silently (route cross-check is best-effort: when no rows are parsed
+ * we degrade to existing existence-only checks rather than emit false drift).
+ */
+export function extractRouteEntries(source: string): ParsedRouteEntry[] {
+  const lines = source.split(/\r?\n/);
+  // The handler value may use single or double quotes; the regex body uses
+  // backslash-escaped slashes so we have to consume everything up to the
+  // closing `/` that immediately precedes the next comma.
+  const rowPattern =
+    /method:\s*['"]([A-Z]+)['"]\s*,\s*path:\s*\/(.*?)\/\s*,\s*handler:\s*['"]([A-Za-z0-9_$]+)['"]/;
+  const entries: ParsedRouteEntry[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    const match = line.match(rowPattern);
+    if (!match) continue;
+    const [, method, body, handler] = match;
+    if (!method || !body || !handler) continue;
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(body);
+    } catch {
+      continue;
+    }
+    entries.push({ method, pattern, handler, line: index + 1 });
+  }
+  return entries;
+}
+
+/**
+ * Substitutes `:param` segments in a registry-style path (`GET /api/lines/:name`)
+ * with a non-slash placeholder so it can be tested against a runtime route regex.
+ * Uses an all-digit value so digit-constrained named groups (e.g. `(?<id>\d+)`)
+ * still match alongside the generic `[^/]+` pattern. Strips a trailing query
+ * string (`?path=...`) before substitution.
+ */
+function pathTemplateToProbe(template: string): string {
+  const noQuery = template.split('?', 1)[0] ?? template;
+  return noQuery.replace(/:[A-Za-z_][A-Za-z0-9_]*/g, '42');
+}
+
+/** Parses a registry "Method + Path" cell into `{ method, path }`. */
+function parseMethodPathCell(cell: string): { method: string; path: string } | null {
+  const stripped = stripBackticks(cell.trim());
+  const match = stripped.match(/^([A-Z]+)\s+(\/\S*)/);
+  if (!match) return null;
+  return { method: match[1] ?? '', path: match[2] ?? '' };
+}
+
+/** Parses `path/to/file.ts:LINE` (or `:START-END`) → `{ path, line }`. */
+function parseSourceWithLine(value: string): { path: string; line: number | null } {
+  const match = value.match(/^(.*?):(\d+)(?:-\d+)?$/);
+  if (!match) return { path: value, line: null };
+  const path = match[1] ?? '';
+  const lineNum = Number.parseInt(match[2] ?? '', 10);
+  return { path, line: Number.isFinite(lineNum) ? lineNum : null };
+}
+
+/**
+ * Tail symbol-name candidates derived from a registry identifier. Used by the
+ * non-HTTP line-anchor sanity check to fuzzy-match the cited source line.
+ */
+function identifierSymbolCandidates(identifier: string): string[] {
+  // Drop the type prefix (`lib:`, `cli:npm.`, etc.) and split on `.` / `-`.
+  const tail = identifier.replace(/^[a-z]+(?::[a-z0-9-]+)*\./i, (m) => {
+    // keep only the last dotted segment
+    const parts = identifier.split('.');
+    return parts.slice(-1).join('.') === m.replace(/\.$/, '') ? m : '';
+  });
+  const parts = identifier.split(/[:.]/).filter(Boolean);
+  const candidates = new Set<string>();
+  if (parts.length > 0) {
+    candidates.add(parts[parts.length - 1] ?? '');
+  }
+  if (tail) candidates.add(tail);
+  return [...candidates].filter((value) => value.length >= 3);
+}
+
+function readSourceLines(absPath: string): string[] | null {
+  if (!existsSync(absPath)) return null;
+  try {
+    return readFileSync(absPath, 'utf8').split(/\r?\n/);
+  } catch {
+    return null;
+  }
+}
+
+/** Verifies the line ±N window around an anchored source path contains a hint
+ * of either the registry's identifier symbol (non-HTTP) or the HTTP path
+ * template (HTTP rows whose source isn't a ROUTES table file). */
+function lineAnchorWindowContains(
+  lines: string[],
+  centerLine: number,
+  needles: string[],
+  window = 5,
+): boolean {
+  const start = Math.max(0, centerLine - 1 - window);
+  const end = Math.min(lines.length, centerLine + window);
+  for (let index = start; index < end; index += 1) {
+    const text = lines[index] ?? '';
+    for (const needle of needles) {
+      if (!needle) continue;
+      if (text.includes(needle)) return true;
+    }
+  }
+  return false;
+}
+
 export function findPublicSurfaceDrift(
   options: PublicSurfaceDriftOptions = {},
 ): PublicSurfaceDriftIssue[] {
@@ -299,10 +434,36 @@ export function findPublicSurfaceDrift(
   const registeredMcpModules = registryMcpModules(tables);
   const issues: PublicSurfaceDriftIssue[] = [];
 
+  // Per-file caches so we don't re-parse `src/fleet/index.ts` for every HTTP row.
+  const routeCache = new Map<string, ParsedRouteEntry[]>();
+  const sourceLinesCache = new Map<string, string[] | null>();
+
+  const getRoutes = (absPath: string): ParsedRouteEntry[] => {
+    const cached = routeCache.get(absPath);
+    if (cached) return cached;
+    const lines = sourceLinesCache.get(absPath) ?? readSourceLines(absPath);
+    sourceLinesCache.set(absPath, lines);
+    if (!lines) {
+      routeCache.set(absPath, []);
+      return [];
+    }
+    const parsed = extractRouteEntries(lines.join('\n'));
+    routeCache.set(absPath, parsed);
+    return parsed;
+  };
+
+  const getSourceLines = (absPath: string): string[] | null => {
+    if (sourceLinesCache.has(absPath)) return sourceLinesCache.get(absPath) ?? null;
+    const lines = readSourceLines(absPath);
+    sourceLinesCache.set(absPath, lines);
+    return lines;
+  };
+
   for (const table of tables) {
     const sourceIdx = findSourceColumnIndex(table.headers);
     const idIdx = findIdentifierColumnIndex(table.headers);
     const scriptIdx = findScriptColumnIndex(table.headers);
+    const methodPathIdx = findMethodPathColumnIndex(table.headers);
     if (sourceIdx < 0 || idIdx < 0) continue;
 
     for (const row of table.rows) {
@@ -324,6 +485,119 @@ export function findPublicSurfaceDrift(
           sourcePath: reportedPath,
           text: row.text,
         });
+      }
+
+      // --- Line-anchor + route cross-check ----------------------------------
+      // Triggered only for rows that explicitly cite `path:LINE` in the Source
+      // cell. Two flavours:
+      //   1. HTTP rows whose source resolves to a file that parses as a ROUTES
+      //      table -> cross-check (method, path) → ROUTES entry line.
+      //   2. Other rows -> read the source at LINE ±5 and assert it contains
+      //      a needle derived from the identifier / Method+Path cell.
+      const httpMethodPath =
+        methodPathIdx >= 0
+          ? parseMethodPathCell(row.cells[methodPathIdx] ?? '')
+          : null;
+
+      for (const candidate of sourcePaths) {
+        const cleanedFragment = stripFragment(candidate);
+        const { path: rawPath, line: cited } = parseSourceWithLine(cleanedFragment);
+        const absolute = resolveAgainstRegistry(registryDir, cwd, rawPath);
+        if (!existsSync(absolute)) continue; // missing-source already emitted above
+
+        const routes = getRoutes(absolute);
+        if (httpMethodPath && routes.length > 0) {
+          const probe = pathTemplateToProbe(httpMethodPath.path);
+          const match = routes.find(
+            (route) =>
+              route.method === httpMethodPath.method && route.pattern.test(probe),
+          );
+          if (match) {
+            if (cited == null) continue;
+            if (match.line !== cited) {
+              issues.push({
+                filePath,
+                line: row.line,
+                kind: 'stale-line-anchor',
+                identifier,
+                sourcePath: `${rawPath}:${cited}`,
+                expected: `${rawPath}:${match.line} (handler ${match.handler})`,
+                actual: `${rawPath}:${cited}`,
+                text: row.text,
+              });
+            }
+            continue;
+          }
+          if (cited == null) {
+            issues.push({
+              filePath,
+              line: row.line,
+              kind: 'missing-route',
+              identifier,
+              sourcePath: rawPath,
+              expected: `${httpMethodPath.method} ${httpMethodPath.path}`,
+              text: row.text,
+            });
+            continue;
+          }
+          // No match in the parsed ROUTES table. The route may be inline (a
+          // hand-written `if (pathname === '/api/x')` outside ROUTES). Before
+          // declaring `missing-route` drift, look for the path literal in the
+          // ±N window around the cited line — that's strong evidence the
+          // anchor is at least pointing at the correct handler region.
+          const inlineLines = getSourceLines(absolute);
+          if (inlineLines) {
+            const noQuery = httpMethodPath.path.split('?', 1)[0] ?? httpMethodPath.path;
+            const inlineNeedles = [noQuery];
+            const tail = noQuery.replace(/^\/api\//, '/');
+            if (tail !== noQuery) inlineNeedles.push(tail);
+            if (lineAnchorWindowContains(inlineLines, cited, inlineNeedles)) {
+              continue;
+            }
+          }
+          issues.push({
+            filePath,
+            line: row.line,
+            kind: 'missing-route',
+            identifier,
+            sourcePath: rawPath,
+            expected: `${httpMethodPath.method} ${httpMethodPath.path}`,
+            text: row.text,
+          });
+          continue;
+        }
+
+        if (cited == null) continue;
+
+        // Fallback: line-anchor symbol sanity check. Use the HTTP path (without
+        // query string) when available, otherwise derive symbol candidates
+        // from the identifier tail.
+        const lines = getSourceLines(absolute);
+        if (!lines) continue;
+        const needles: string[] = [];
+        if (httpMethodPath) {
+          const noQuery = httpMethodPath.path.split('?', 1)[0] ?? httpMethodPath.path;
+          // Path with concrete value already in source code, plus the
+          // template-without-prefix segment for handlers that match on a
+          // basename (`'/send'`, `'/access'`).
+          needles.push(noQuery);
+          const tail = noQuery.replace(/^\/api\//, '/');
+          if (tail !== noQuery) needles.push(tail);
+        } else {
+          needles.push(...identifierSymbolCandidates(identifier));
+        }
+        if (needles.length === 0) continue;
+        if (!lineAnchorWindowContains(lines, cited, needles)) {
+          issues.push({
+            filePath,
+            line: row.line,
+            kind: 'stale-line-anchor',
+            identifier,
+            sourcePath: `${rawPath}:${cited}`,
+            expected: needles.join(' | '),
+            text: row.text,
+          });
+        }
       }
 
       if (identifier.startsWith(cliNpmIdentifierPrefix) && scriptIdx >= 0) {
