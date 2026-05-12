@@ -1,0 +1,19 @@
+# Project-level override (refs #511): promote the global advisory
+# `test-file-tree-sitter-parse-error` rule to BLOCK severity so that
+# tree-sitter parse failures cannot silently pass `test-integrity scan --ci`.
+#
+# Rationale: when the parser cannot read a test file, integrity rules cannot
+# run against it. Advisory severity lets the scan exit clean while the file
+# is effectively unchecked, which masks genuine syntax issues and undermines
+# the rest of the integrity suite. For WhatSoup we want parser errors to
+# fail the scan so they are addressed at edit time, not discovered later.
+#
+# The loader (test_integrity_core.py:305-320) walks rule roots in order
+# plugin-global -> machine-global -> project, with last write winning per
+# rule id, so this file overrides the global advisory definition.
+- id: test-file-tree-sitter-parse-error
+  language: general
+  severity: block
+  title: Tree-sitter reported a parse error
+  rationale: Parser errors mean integrity rules could not run against this test file; the scan must not pass while a test is unchecked.
+  remediation: Reproduce the failure with the project's compiler or test runner, fix the underlying syntax, or narrow the file to a grammar tree-sitter can parse before re-running the scan.
