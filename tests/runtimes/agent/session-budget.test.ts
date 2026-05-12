@@ -20,9 +20,10 @@ vi.mock('node:os', () => ({
   userInfo: vi.fn(() => ({ username: 'testuser' })),
 }));
 
-vi.mock('node:child_process', () => ({
-  spawn: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),

@@ -23,32 +23,10 @@ import { proxyToInstance } from '../../src/fleet/http-proxy.ts';
 // Test helpers
 // ---------------------------------------------------------------------------
 
-function mockReq(body = ''): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/';
-  (stream as any).method = 'POST';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
+import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _headers: Record<string, string>; _body: string } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as any;
+function mockReq(body = ''): IncomingMessage {
+  return helperMockReq({ body, method: 'POST' });
 }
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {

@@ -2,7 +2,6 @@
  * Tests for src/fleet/routes/lines.ts
  */
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   _getLineCachesForTests,
   _resetLineCaches,
@@ -12,28 +11,7 @@ import {
 import type { LinesDeps } from '../../../src/fleet/routes/lines.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import type { InstanceStatus } from '../../../src/fleet/health-poller.ts';
-
-// ---------------------------------------------------------------------------
-// Mock helpers
-// ---------------------------------------------------------------------------
-
-function mockReq(url = '/'): IncomingMessage {
-  return { url, method: 'GET', headers: {} } as unknown as IncomingMessage;
-}
-
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number, _headers?: Record<string, string>) {
-      res._status = status;
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as any;
-}
+import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
   return {
