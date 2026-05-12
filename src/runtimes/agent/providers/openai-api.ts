@@ -17,6 +17,7 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
+import { resolveApiKey } from './api-key-resolver.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -82,14 +83,16 @@ export class OpenAIApiProvider implements ProviderSession {
   private model: string;
   private apiKey: string = '';
   private abortController: AbortController | null = null;
+  private apiKeyService: string | undefined;
 
   /**
    * @param config - Optional provider config block from the instance's config.json.
-   *   Allows overriding `baseUrl` and `model` at registration time.
+   *   Allows overriding `baseUrl`, `model`, and `apiKeyService` at registration time.
    */
   constructor(config?: ProviderConfig['providerConfig']) {
     this.baseUrl = config?.baseUrl ?? 'https://api.openai.com/v1';
     this.model = config?.model ?? 'gpt-4o';
+    this.apiKeyService = config?.apiKeyService;
   }
 
   // ── ProviderSession interface ─────────────────────────────────────────────
@@ -101,8 +104,8 @@ export class OpenAIApiProvider implements ProviderSession {
     this.opts = opts;
     this.active = true;
 
-    // API key from environment (populated by buildEnv or the host process)
-    this.apiKey = process.env.OPENAI_API_KEY ?? '';
+    // API key resolved via apiKeyService (keyring) when configured, else env.
+    this.apiKey = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
 
     // Per-turn model override takes lowest precedence; opts.model wins over
     // the constructor default when explicitly set.
@@ -225,8 +228,9 @@ export class OpenAIApiProvider implements ProviderSession {
     // HTTP providers don't spawn subprocesses, but the interface requires this.
     // Return only what this provider actually needs.
     const env: NodeJS.ProcessEnv = {};
-    if (process.env.OPENAI_API_KEY) {
-      env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const resolved = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
+    if (resolved) {
+      env.OPENAI_API_KEY = resolved;
     }
     return env;
   }
@@ -244,11 +248,13 @@ export class OpenAIApiProvider implements ProviderSession {
 
     let response: Response;
     try {
+      // Resolve each request so key rotation / late-set keyring entries are picked up.
+      const authKey = resolveApiKey({ service: this.apiKeyService, envVar: 'OPENAI_API_KEY' });
       response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(process.env.OPENAI_API_KEY ? { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } : {}),
+          ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}),
         },
         body: JSON.stringify({
           model,

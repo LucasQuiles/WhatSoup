@@ -16,6 +16,7 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { convertMcpToolsToAnthropic } from './mcp-bridge.ts';
+import { resolveApiKey } from './api-key-resolver.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -102,8 +103,8 @@ export class AnthropicApiProvider implements ProviderSession {
     this.opts = opts;
     this.active = true;
 
-    // API key from environment (populated by buildEnv or the host process)
-    this.apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+    // API key resolved via apiKeyService (keyring) when configured, else env.
+    this.apiKey = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
 
     // Per-turn model override takes lowest precedence; opts.model wins over
     // the constructor default when explicitly set.
@@ -228,8 +229,9 @@ export class AnthropicApiProvider implements ProviderSession {
   buildEnv(): NodeJS.ProcessEnv {
     // HTTP providers don't spawn subprocesses, but the interface requires this.
     const env: NodeJS.ProcessEnv = {};
-    if (process.env.ANTHROPIC_API_KEY) {
-      env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    const resolved = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
+    if (resolved) {
+      env.ANTHROPIC_API_KEY = resolved;
     }
     return env;
   }
@@ -250,12 +252,14 @@ export class AnthropicApiProvider implements ProviderSession {
 
     let response: Response;
     try {
+      // Resolve each request so key rotation / late-set keyring entries are picked up.
+      const authKey = resolveApiKey({ service: this.config?.apiKeyService, envVar: 'ANTHROPIC_API_KEY' });
       response = await fetch(`${this.baseUrl}/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'anthropic-version': '2023-06-01',
-          ...(process.env.ANTHROPIC_API_KEY ? { 'x-api-key': process.env.ANTHROPIC_API_KEY } : {}),
+          ...(authKey ? { 'x-api-key': authKey } : {}),
         },
         body: JSON.stringify({
           model,
