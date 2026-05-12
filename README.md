@@ -74,7 +74,7 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 
 ### Host deployment (systemd / launchd)
 
-- **Node.js >= 23.10** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
+- **Node.js >= 24.0** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
 - **Linux with systemd** — user units for process management (`systemctl --user`); enable lingering for headless servers: `loginctl enable-linger $USER`
 - **GNOME Keyring** (`libsecret-tools`) or environment variables for API keys — `npm run setup` checks both
 - **ffmpeg** — video frame extraction in chat mode (optional)
