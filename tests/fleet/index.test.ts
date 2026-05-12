@@ -518,6 +518,118 @@ describe('fleet server -- API route dispatch (real factory)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Audience-scoped tickets (#313) — POST /api/auth-ticket + ticket auth
+// ---------------------------------------------------------------------------
+
+describe('fleet server -- audience-scoped auth tickets (#313)', () => {
+  it('POST /api/auth-ticket returns an api-audience ticket with Bearer root token', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.ticket).toBe('string');
+    expect(body.audience).toBe('api');
+    // 4-part wire format: nonce.audience.expiry.hmac
+    expect((body.ticket as string).split('.').length).toBe(4);
+    expect(typeof body.expiresIn).toBe('number');
+  });
+
+  it('POST /api/auth-ticket returns an sse-audience ticket', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'sse' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.audience).toBe('sse');
+    expect((body.ticket as string).split('.')[1]).toBe('sse');
+  });
+
+  it('POST /api/auth-ticket rejects an unknown audience with 400', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'admin' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/auth-ticket rejects audience="ws" -- WS tickets keep their own endpoint', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'ws' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/auth-ticket requires Bearer / ?token= root credential (401 otherwise)', async () => {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  async function mintApiTicket(audience: 'api' | 'sse'): Promise<string> {
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    return body.ticket as string;
+  }
+
+  it('an api-audience ticket authenticates HTTP API calls via ?ticket=', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('an api-audience ticket authenticates HTTP API calls via Bearer header', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/lines`, {
+      headers: { Authorization: `Bearer ${ticket}` },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('an api-audience ticket is single-use', async () => {
+    const ticket = await mintApiTicket('api');
+    const first = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(first.status).toBe(200);
+    const second = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(second.status).toBe(401);
+  });
+
+  it('an sse-audience ticket is REJECTED on plain HTTP API routes (audience mismatch)', async () => {
+    const ticket = await mintApiTicket('sse');
+    const res = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(res.status).toBe(401);
+  });
+
+  it('an api-audience ticket is REJECTED on the SSE auth route (audience mismatch)', async () => {
+    const ticket = await mintApiTicket('api');
+    const res = await fetch(`${baseUrl}/api/lines/${INST_A}/auth?ticket=${encodeURIComponent(ticket)}`);
+    // The SSE handler will accept the auth check then return 409 (auth busy)
+    // or proceed to stream; 401 specifically proves the audience gate rejected it.
+    expect(res.status).toBe(401);
+  });
+
+  it('a garbage ticket value falls through to 401', async () => {
+    const res = await fetch(`${baseUrl}/api/lines?ticket=not.a.real.ticket`);
+    expect(res.status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Static file serving — verifies createStaticHandler is wired with full args
 // (token + getVersion), not the stripped-down call the old mirror used.
 // ---------------------------------------------------------------------------
