@@ -80,14 +80,47 @@ export function registerAllTools(
   const failures: ModuleRegistrationFailure[] = [];
 
   /**
+   * Build a `register` callback bound to the parent module's `core` flag so that
+   * a thrown `registry.register(tool)` (typically a duplicate-name collision)
+   * propagates correctly to the runModule aggregator.
+   *
+   * Without this binding, the shared helper would swallow every throw, and a
+   * core callback-style module (chat-management, search, groups, ...) could ship
+   * with a silently truncated toolset — the residual gap from issue #480 that
+   * #510 closes. By re-throwing for core modules and tolerating for optional
+   * ones, both registration shapes (module-loop and callback) honour the same
+   * fail-closed contract.
+   */
+  const makeRegister = (moduleName: string, core: boolean) => (tool: ToolDeclaration) => {
+    try {
+      registry.register(tool);
+    } catch (err) {
+      if (core) {
+        // Core module: re-throw so runModule's catch records the failure and
+        // the post-loop aggregator aborts boot with the full failure list.
+        log.error({ err, tool: tool.name, module: moduleName }, 'core tool registration failed — aborting module');
+        throw err;
+      }
+      // Optional module: log and continue. The parent module is allowed to
+      // register its remaining tools (or simply skip this one).
+      log.warn({ err, tool: tool.name, module: moduleName }, 'optional tool registration failed — continuing');
+    }
+  };
+
+  /**
    * Run a single module's registration. If it throws, classify the failure by
    * `core` and continue with the next module — core failures are aggregated and
    * thrown after the loop so the caller sees every broken module, not just the
-   * first one.
+   * first one. The module receives a `register` callback bound to its `core`
+   * flag so callback-path failures also reach this aggregator (issue #510).
    */
-  const runModule = (name: string, core: boolean, fn: () => void): void => {
+  const runModule = (
+    name: string,
+    core: boolean,
+    fn: (register: (tool: ToolDeclaration) => void) => void,
+  ): void => {
     try {
-      fn();
+      fn(makeRegister(name, core));
     } catch (err) {
       failures.push({ module: name, core, err });
       if (core) {
@@ -98,15 +131,9 @@ export function registerAllTools(
     }
   };
 
-  const register = (tool: ToolDeclaration) => {
-    try {
-      registry.register(tool);
-    } catch (err) {
-      log.error({ err, tool: tool.name }, 'failed to register tool');
-    }
-  };
-
-  // Pattern 1 — options-object: take ToolRegistry + deps directly
+  // Pattern 1 — options-object: take ToolRegistry + deps directly. These bypass
+  // the callback `register` helper; registry throws inside the module body
+  // propagate to runModule's catch directly.
   runModule('messaging', true, () => messagingTools.registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter }));
   runModule('media', true, () => mediaTools.registerMediaTools(registry, { connection, db }));
   runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));
@@ -121,22 +148,23 @@ export function registerAllTools(
     memory: config.memory,
   }));
 
-  // Pattern 2 — DB-dependent
-  runModule('chat-management', true, () => chatManagement.registerChatManagementTools(db, getSock, register));
-  runModule('chat-operations', true, () => chatOperations.registerChatOperationTools(db, getSock, register));
-  runModule('search', true, () => searchTools.registerSearchTools(db, register));
+  // Pattern 2 — DB-dependent. The `register` argument is bound to this module's
+  // core flag so registry.register throws abort the module (issue #510).
+  runModule('chat-management', true, (register) => chatManagement.registerChatManagementTools(db, getSock, register));
+  runModule('chat-operations', true, (register) => chatOperations.registerChatOperationTools(db, getSock, register));
+  runModule('search', true, (register) => searchTools.registerSearchTools(db, register));
 
-  // Pattern 3 — socket+callback
-  runModule('groups', true, () => groupTools.registerGroupTools(getSock, register));
-  runModule('community', true, () => communityTools.registerCommunityTools(getSock, register));
-  runModule('newsletter', true, () => newsletterTools.registerNewsletterTools(getSock, register));
-  runModule('business', true, () => businessTools.registerBusinessTools(getSock, register));
-  runModule('advanced', true, () => advancedTools.registerAdvancedTools(getSock, register, db));
-  runModule('calls', true, () => callTools.registerCallTools(getSock, register));
-  runModule('profile', true, () => profileTools.registerProfileTools(getSock, db, register));
+  // Pattern 3 — socket+callback. Same core-aware register binding as Pattern 2.
+  runModule('groups', true, (register) => groupTools.registerGroupTools(getSock, register));
+  runModule('community', true, (register) => communityTools.registerCommunityTools(getSock, register));
+  runModule('newsletter', true, (register) => newsletterTools.registerNewsletterTools(getSock, register));
+  runModule('business', true, (register) => businessTools.registerBusinessTools(getSock, register));
+  runModule('advanced', true, (register) => advancedTools.registerAdvancedTools(getSock, register, db));
+  runModule('calls', true, (register) => callTools.registerCallTools(getSock, register));
+  runModule('profile', true, (register) => profileTools.registerProfileTools(getSock, db, register));
 
   // Presence needs the shared presenceCache from ConnectionManager
-  runModule('presence', true, () => presenceTools.registerPresenceTools(getSock, connection.presenceCache, register));
+  runModule('presence', true, (register) => presenceTools.registerPresenceTools(getSock, connection.presenceCache, register));
 
   // Knowledge search — only when instance config specifies allowed indexes.
   // Vendor-gated (Pinecone): tagged core: false so failure is tolerated.
@@ -148,7 +176,7 @@ export function registerAllTools(
     : Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
   const knowledgeEnabled = memoryPinecone?.knowledgeSearch?.enabled !== false;
   if (allowedIndexes.length > 0 && knowledgeEnabled && options.enableKnowledgeSearch !== false) {
-    runModule('knowledge', false, () => knowledgeTools.registerKnowledgeTools(allowedIndexes, register));
+    runModule('knowledge', false, (register) => knowledgeTools.registerKnowledgeTools(allowedIndexes, register));
   }
 
   // Fail-closed: if any core module threw, abort boot with the full failure list

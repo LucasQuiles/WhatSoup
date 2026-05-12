@@ -151,6 +151,72 @@ describe('registerAllTools', () => {
     db.raw.close();
   });
 
+  // Issue #510: callback-path failures inside a core module must also fail closed.
+  // The shared `register` helper passed to Pattern 2/3 modules previously swallowed
+  // throws from `registry.register(tool)` (e.g. duplicate-name collisions), so a
+  // core callback module would appear to register successfully even though tools
+  // were silently dropped. The fix threads the parent module's `core` flag into
+  // the helper so callback failures re-throw and surface to the runModule aggregator.
+  it('fails closed when a core callback module hits a registry.register failure', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Pre-register a tool that chat-management (core, callback-path) will later
+    // attempt to register, forcing registry.register to throw on duplicate.
+    registry.register({
+      name: 'list_messages',
+      description: 'stale duplicate to force registry collision',
+      inputSchema: { type: 'object', properties: {} },
+      scope: 'global',
+      replayPolicy: 'reject',
+      handler: async () => ({ ok: true }),
+    } as unknown as ToolDeclaration);
+
+    expect(() => registerAllTools(registry, connection, db)).toThrow(
+      /chat-management|core/i,
+    );
+
+    db.raw.close();
+  });
+
+  it('tolerates a callback-path registry failure from an optional module', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Pre-register the tool name that knowledge (optional, callback-path) will emit
+    // so registry.register throws on duplicate when the optional module runs.
+    registry.register({
+      name: 'knowledge_search',
+      description: 'stale duplicate to force optional collision',
+      inputSchema: { type: 'object', properties: {} },
+      scope: 'global',
+      replayPolicy: 'reject',
+      handler: async () => ({ ok: true }),
+    } as unknown as ToolDeclaration);
+
+    // Configure Pinecone so the knowledge branch runs.
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...(original ?? {}),
+      pinecone: {
+        ...((original as { pinecone?: object } | undefined)?.pinecone ?? {}),
+        allowedIndexes: ['mw-mind'],
+      },
+    };
+
+    try {
+      expect(() => registerAllTools(registry, connection, db)).not.toThrow();
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
+  });
+
   // Gap #4: every tool has an explicit scope and replayPolicy (no relying on defaults)
   it('every registered tool has an explicit scope and replayPolicy', () => {
     const db = new Database(':memory:');
