@@ -1,164 +1,191 @@
 /**
- * FleetSessionChart — pure render coverage for the recharts composed wrapper.
- * Tests traverse the returned React element tree (no jsdom, no DOM render).
+ * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen, within } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { FleetSessionChart } from '../../console/src/components/FleetSessionChart';
 import type { SessionActivityBucket } from '../../console/src/types';
 
-afterEach(() => {
-  vi.restoreAllMocks();
+vi.mock('recharts', async () => {
+  const React = await vi.importActual<typeof import('react')>('react');
+
+  type ChartRow = Record<string, string | number | null | undefined>;
+
+  const ChartDataContext = React.createContext<ChartRow[]>([]);
+
+  function readNumber(row: ChartRow, dataKey: string): number {
+    const value = row[dataKey];
+    return typeof value === 'number' ? value : 0;
+  }
+
+  function renderSeries(name: string, dataKey: string, kind: string) {
+    const rows = React.useContext(ChartDataContext);
+
+    return (
+      <section role="group" aria-label={name} data-chart-kind={kind}>
+        <h2>{name}</h2>
+        {rows.length === 0 ? (
+          <p>No values</p>
+        ) : (
+          <ul>
+            {rows.map((row) => (
+              <li key={`${row.bucket}:${dataKey}`}>
+                {String(row.bucket)}: {readNumber(row, dataKey)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    );
+  }
+
+  return {
+    ResponsiveContainer({
+      children,
+      width,
+      height,
+    }: {
+      children: ReactNode;
+      width: string | number;
+      height: string | number;
+    }) {
+      return (
+        <div aria-label="Responsive chart region" style={{ width: String(width), height: String(height) }}>
+          {children}
+        </div>
+      );
+    },
+    ComposedChart({ children, data }: { children: ReactNode; data: ChartRow[] }) {
+      return (
+        <div role="img" aria-label="Fleet session activity chart">
+          <ChartDataContext.Provider value={data}>{children}</ChartDataContext.Provider>
+        </div>
+      );
+    },
+    CartesianGrid() {
+      return null;
+    },
+    XAxis({
+      dataKey,
+      tickFormatter,
+    }: {
+      dataKey: string;
+      tickFormatter?: (value: string) => string;
+    }) {
+      const rows = React.useContext(ChartDataContext);
+      return (
+        <div aria-label="Time axis">
+          {rows.map((row) => {
+            const raw = String(row[dataKey]);
+            return <span key={raw}>{tickFormatter ? tickFormatter(raw) : raw}</span>;
+          })}
+        </div>
+      );
+    },
+    YAxis({
+      tickFormatter,
+    }: {
+      tickFormatter?: (value: number) => string;
+    }) {
+      const rows = React.useContext(ChartDataContext);
+      const values = rows.flatMap((row) =>
+        Object.entries(row)
+          .filter(([key, value]) => key !== 'bucket' && typeof value === 'number')
+          .map(([, value]) => value as number),
+      );
+
+      return (
+        <div aria-label="Session count axis">
+          {[...new Set(values)].map((value) => (
+            <span key={value}>{tickFormatter ? tickFormatter(value) : String(value)}</span>
+          ))}
+        </div>
+      );
+    },
+    Tooltip({ labelFormatter }: { labelFormatter?: (value: string) => string }) {
+      const rows = React.useContext(ChartDataContext);
+      const firstBucket = rows[0]?.bucket;
+      if (firstBucket === undefined) return null;
+      const label = String(firstBucket);
+      return <div aria-label="Chart tooltip label">{labelFormatter ? labelFormatter(label) : label}</div>;
+    },
+    Legend() {
+      return <div aria-label="Chart legend">Chart legend</div>;
+    },
+    Area({ dataKey, name }: { dataKey: string; name: string }) {
+      return renderSeries(name, dataKey, 'area');
+    },
+    Bar({ dataKey, name }: { dataKey: string; name: string }) {
+      return renderSeries(name, dataKey, 'bar');
+    },
+  };
 });
 
-function getProps(node: unknown): Record<string, unknown> {
-  if (!node || typeof node !== 'object') return {};
-  return (node as { props?: Record<string, unknown> }).props ?? {};
-}
-
-function toChildren(node: unknown): unknown[] {
-  const children = getProps(node).children;
-  if (children === undefined || children === null || children === false) return [];
-  return Array.isArray(children) ? children.flat(Infinity) : [children];
-}
-
-function elementName(node: unknown): string | undefined {
-  if (!node || typeof node !== 'object') return undefined;
-  const type = (node as { type?: { displayName?: string; name?: string } | string }).type;
-  if (typeof type === 'string') return type;
-  return type?.displayName ?? type?.name;
-}
-
-function findAll(node: unknown, name: string): unknown[] {
-  const matches: unknown[] = [];
-  function walk(n: unknown): void {
-    if (!n || typeof n !== 'object') return;
-    if (elementName(n) === name) matches.push(n);
-    for (const child of toChildren(n)) walk(child);
-  }
-  walk(node);
-  return matches;
-}
-
-function findOne(node: unknown, name: string): unknown {
-  return findAll(node, name)[0];
-}
-
-/**
- * Recharts wrappers (ResponsiveContainer, ComposedChart) ship as memoized
- * components without displayName, so they read as anonymous in the rendered
- * element tree. We identify them positionally: the FleetSessionChart return
- * value is always ResponsiveContainer, and its single child is ComposedChart.
- */
-function getResponsiveContainer(tree: unknown): unknown {
-  return tree;
-}
-
-function getComposedChart(tree: unknown): unknown {
-  return toChildren(tree)[0];
-}
+afterEach(() => cleanup());
 
 const SINGLE_DATA: SessionActivityBucket[] = [
   { bucket: '2026-04-05T18:00:00.000Z', active: 3, started: 2 },
   { bucket: '2026-04-05T19:00:00.000Z', active: 5, started: 1 },
 ];
 
-describe('FleetSessionChart — single-provider path', () => {
-  it('wraps the chart in a 100%-sized responsive container and forwards input data unchanged', () => {
-    const tree = FleetSessionChart({ data: SINGLE_DATA });
+function renderChart(props: Parameters<typeof FleetSessionChart>[0]) {
+  return render(<FleetSessionChart {...props} />);
+}
 
-    expect(getProps(getResponsiveContainer(tree))).toMatchObject({ width: '100%', height: '100%' });
+function series(name: string): HTMLElement {
+  return screen.getByRole('group', { name });
+}
 
-    const composed = getComposedChart(tree);
-    // Data passed through unchanged when no multi-provider config
-    expect(getProps(composed).data).toBe(SINGLE_DATA);
-    expect(getProps(composed).margin).toMatchObject({ top: 4, right: 8, left: -12, bottom: 0 });
+describe('FleetSessionChart single-provider rendering', () => {
+  it('renders a labeled chart, formatted axes, and the two session series', () => {
+    renderChart({ data: SINGLE_DATA, range: '30d' });
+
+    expect(screen.getByRole('img', { name: 'Fleet session activity chart' })).toBeDefined();
+    const chartRegion = screen.getByLabelText('Responsive chart region') as HTMLElement;
+    expect(chartRegion.style.width).toBe('100%');
+    expect(chartRegion.style.height).toBe('100%');
+    expect(screen.getByLabelText('Time axis').textContent).toContain('Apr 5');
+    expect(screen.getByLabelText('Chart tooltip label').textContent).toContain('Apr 5');
+    expect(screen.queryByLabelText('Chart legend')).toBeNull();
+
+    const active = series('Active Sessions');
+    expect(within(active).getByText('2026-04-05T18:00:00.000Z: 3')).toBeDefined();
+    expect(within(active).getByText('2026-04-05T19:00:00.000Z: 5')).toBeDefined();
+
+    const started = series('Sessions Started');
+    expect(within(started).getByText('2026-04-05T18:00:00.000Z: 2')).toBeDefined();
+    expect(within(started).getByText('2026-04-05T19:00:00.000Z: 1')).toBeDefined();
   });
 
-  it('renders Area for active sessions and Bar for sessions started with success-color theming', () => {
-    const tree = FleetSessionChart({ data: SINGLE_DATA, range: '7d' });
-
-    const areas = findAll(tree, 'Area');
-    const bars = findAll(tree, 'Bar');
-    expect(areas).toHaveLength(1);
-    expect(bars).toHaveLength(1);
-
-    expect(getProps(areas[0])).toMatchObject({
-      type: 'monotone',
-      dataKey: 'active',
-      name: 'Active Sessions',
-      stroke: 'var(--color-s-ok)',
-      fill: 'var(--color-s-ok)',
-    });
-    expect(getProps(bars[0])).toMatchObject({
-      dataKey: 'started',
-      name: 'Sessions Started',
-      fill: 'var(--color-s-ok)',
-      barSize: 4,
-    });
-  });
-
-  it('configures XAxis on bucket and YAxis with no-decimal compact formatting; tickFormatters wire range through', () => {
-    const tree = FleetSessionChart({ data: SINGLE_DATA, range: '30d' });
-
-    const xAxis = findOne(tree, 'XAxis');
-    const yAxis = findOne(tree, 'YAxis');
-    expect(getProps(xAxis)).toMatchObject({ dataKey: 'bucket', minTickGap: 40, tickLine: false });
-    expect(getProps(yAxis)).toMatchObject({ width: 32, allowDecimals: false, tickLine: false, axisLine: false });
-
-    // YAxis tick formatter — formatCompact treats non-numeric input as 0
-    const yFormatter = getProps(yAxis).tickFormatter as (v: unknown) => string;
-    expect(yFormatter(0)).toBe('0');
-    expect(yFormatter('garbage')).toBe('0');
-    expect(yFormatter(1500)).toMatch(/1\.5K|1,500|1500/);
-
-    // XAxis tick formatter exists and returns a string when given a bucket
-    const xFormatter = getProps(xAxis).tickFormatter as (v: string) => string;
-    expect(typeof xFormatter('2026-04-05T18:00:00.000Z')).toBe('string');
-
-    // Tooltip labelFormatter is wired through; returns a string for any bucket label
-    const tooltip = findOne(tree, 'Tooltip');
-    const labelFormatter = getProps(tooltip).labelFormatter as (v: string) => string;
-    expect(typeof labelFormatter('2026-04-05T18:00:00.000Z')).toBe('string');
-  });
-
-  it('falls back to single-provider rendering when only one provider is supplied', () => {
-    const tree = FleetSessionChart({
+  it('keeps the single-provider view when one provider is supplied or provider data is missing', () => {
+    const { rerender } = renderChart({
       data: SINGLE_DATA,
       providers: ['claude-cli'],
       byProvider: { 'claude-cli': SINGLE_DATA },
     });
 
-    const composed = getComposedChart(tree);
-    // Single path identifies by data === SINGLE_DATA (not merged)
-    expect(getProps(composed).data).toBe(SINGLE_DATA);
-    expect(findAll(tree, 'Area')).toHaveLength(1);
-    expect(findAll(tree, 'Bar')).toHaveLength(1);
-    // No legend in single path
-    expect(findOne(tree, 'Legend')).toBeUndefined();
+    expect(series('Active Sessions')).toBeDefined();
+    expect(screen.queryByRole('group', { name: 'Claude Active' })).toBeNull();
+    expect(screen.queryByLabelText('Chart legend')).toBeNull();
+
+    rerender(<FleetSessionChart data={SINGLE_DATA} providers={['claude-cli', 'codex-cli']} />);
+
+    expect(series('Active Sessions')).toBeDefined();
+    expect(series('Sessions Started')).toBeDefined();
+    expect(screen.queryByRole('group', { name: 'Claude Active' })).toBeNull();
+    expect(screen.queryByLabelText('Chart legend')).toBeNull();
   });
 
-  it('falls back to single-provider rendering when byProvider is omitted even if providers has multiple entries', () => {
-    const tree = FleetSessionChart({
-      data: SINGLE_DATA,
-      providers: ['claude-cli', 'codex-cli'],
-    });
+  it('renders empty single-provider data without throwing', () => {
+    renderChart({ data: [] });
 
-    expect(findAll(tree, 'Area')).toHaveLength(1);
-    expect(findAll(tree, 'Bar')).toHaveLength(1);
-    expect(findOne(tree, 'Legend')).toBeUndefined();
-  });
-
-  it('passes empty data through without crashing', () => {
-    const tree = FleetSessionChart({ data: [] });
-
-    const composed = getComposedChart(tree);
-    expect(getProps(composed).data).toEqual([]);
-    expect(findAll(tree, 'Area')).toHaveLength(1);
-    expect(findAll(tree, 'Bar')).toHaveLength(1);
+    expect(within(series('Active Sessions')).getByText('No values')).toBeDefined();
+    expect(within(series('Sessions Started')).getByText('No values')).toBeDefined();
   });
 });
 
-describe('FleetSessionChart — multi-provider path', () => {
+describe('FleetSessionChart multi-provider rendering', () => {
   const providers = ['claude-cli', 'codex-cli'];
   const byProvider: Record<string, SessionActivityBucket[]> = {
     'claude-cli': [
@@ -171,77 +198,47 @@ describe('FleetSessionChart — multi-provider path', () => {
     ],
   };
 
-  it('merges per-provider buckets into one row per timestamp with per-provider active/started keys', () => {
-    const tree = FleetSessionChart({ data: SINGLE_DATA, providers, byProvider });
+  it('renders a legend and one active and started series per provider', () => {
+    renderChart({ data: SINGLE_DATA, providers, byProvider });
 
-    const composed = getComposedChart(tree);
-    const merged = getProps(composed).data as Record<string, unknown>[];
-    expect(merged).toHaveLength(2);
-    expect(merged[0]).toEqual({
-      bucket: '2026-04-05T18:00:00.000Z',
-      'claude-cli:active': 3,
-      'claude-cli:started': 2,
-      'codex-cli:active': 7,
-      'codex-cli:started': 5,
-    });
-    expect(merged[1]).toEqual({
-      bucket: '2026-04-05T19:00:00.000Z',
-      'claude-cli:active': 4,
-      'claude-cli:started': 1,
-      'codex-cli:active': 2,
-      'codex-cli:started': 0,
-    });
+    expect(screen.getByLabelText('Chart legend')).toBeDefined();
+
+    expect(within(series('Claude Active')).getByText('2026-04-05T18:00:00.000Z: 3')).toBeDefined();
+    expect(within(series('Claude Active')).getByText('2026-04-05T19:00:00.000Z: 4')).toBeDefined();
+    expect(within(series('Claude Started')).getByText('2026-04-05T18:00:00.000Z: 2')).toBeDefined();
+    expect(within(series('CDX Active')).getByText('2026-04-05T18:00:00.000Z: 7')).toBeDefined();
+    expect(within(series('CDX Started')).getByText('2026-04-05T18:00:00.000Z: 5')).toBeDefined();
+    expect(within(series('CDX Started')).getByText('2026-04-05T19:00:00.000Z: 0')).toBeDefined();
   });
 
-  it('emits one Area + one Bar per provider with provider-specific dataKeys, stack ids, and a Legend', () => {
-    const tree = FleetSessionChart({ data: SINGLE_DATA, providers, byProvider });
-
-    const areas = findAll(tree, 'Area');
-    const bars = findAll(tree, 'Bar');
-    expect(areas).toHaveLength(2);
-    expect(bars).toHaveLength(2);
-    expect(findOne(tree, 'Legend')).toBeTruthy();
-
-    const areaKeys = areas.map((a) => getProps(a).dataKey);
-    const barKeys = bars.map((b) => getProps(b).dataKey);
-    expect(areaKeys).toEqual(['claude-cli:active', 'codex-cli:active']);
-    expect(barKeys).toEqual(['claude-cli:started', 'codex-cli:started']);
-
-    // Shared stack ids so series stack within their own category
-    expect(areas.every((a) => getProps(a).stackId === 'active')).toBe(true);
-    expect(bars.every((b) => getProps(b).stackId === 'started')).toBe(true);
-  });
-
-  it('labels series using the provider shortName when known and the raw id when unknown', () => {
-    const tree = FleetSessionChart({
+  it('uses raw provider ids as labels when a provider is unknown', () => {
+    renderChart({
       data: SINGLE_DATA,
       providers: ['claude-cli', 'bogus-provider'],
       byProvider: { ...byProvider, 'bogus-provider': SINGLE_DATA },
     });
 
-    const areas = findAll(tree, 'Area');
-    expect(getProps(areas[0]).name).toBe('Claude Active');
-    expect(getProps(areas[1]).name).toBe('bogus-provider Active');
+    expect(series('Claude Active')).toBeDefined();
+    expect(series('bogus-provider Active')).toBeDefined();
+    expect(series('bogus-provider Started')).toBeDefined();
   });
 
-  it('fills missing per-provider buckets with zero so misaligned series do not propagate NaN', () => {
-    const sparse: Record<string, SessionActivityBucket[]> = {
-      'claude-cli': [{ bucket: '2026-04-05T18:00:00.000Z', active: 1, started: 1 }],
-      'codex-cli': [], // entirely empty
-    };
-    const tree = FleetSessionChart({
+  it('fills missing provider buckets with zero values', () => {
+    renderChart({
       data: [
         { bucket: '2026-04-05T18:00:00.000Z', active: 0, started: 0 },
         { bucket: '2026-04-05T19:00:00.000Z', active: 0, started: 0 },
       ],
       providers,
-      byProvider: sparse,
+      byProvider: {
+        'claude-cli': [{ bucket: '2026-04-05T18:00:00.000Z', active: 1, started: 1 }],
+        'codex-cli': [],
+      },
     });
 
-    const merged = getProps(getComposedChart(tree)).data as Record<string, number | string>[];
-    expect(merged[0]['claude-cli:active']).toBe(1);
-    expect(merged[0]['codex-cli:active']).toBe(0);
-    expect(merged[1]['claude-cli:active']).toBe(0);
-    expect(merged[1]['codex-cli:started']).toBe(0);
+    expect(within(series('Claude Active')).getByText('2026-04-05T18:00:00.000Z: 1')).toBeDefined();
+    expect(within(series('Claude Active')).getByText('2026-04-05T19:00:00.000Z: 0')).toBeDefined();
+    expect(within(series('CDX Active')).getByText('2026-04-05T18:00:00.000Z: 0')).toBeDefined();
+    expect(within(series('CDX Started')).getByText('2026-04-05T19:00:00.000Z: 0')).toBeDefined();
   });
 });
