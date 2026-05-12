@@ -357,21 +357,18 @@ describe('useKeyboardShortcuts — input element opt-out', () => {
     });
   }
 
-  it('does not call onHelp when contentEditable element has isContentEditable=true', () => {
-    // jsdom limitation (S8): jsdom does not implement isContentEditable — the
-    // property returns undefined, so the opt-out guard in the source does not
-    // fire in the test environment.  We verify the guard via the property value
-    // rather than dispatching a real event, which would give a misleading result.
+  it('documents jsdom gap: isContentEditable is not implemented (S8)', () => {
+    // jsdom limitation (S8): jsdom does not implement HTMLElement.isContentEditable,
+    // so the property returns undefined regardless of contentEditable="true".
+    // The source guard `target.isContentEditable` therefore cannot be exercised
+    // end-to-end here. This test pins the gap so a future jsdom upgrade that adds
+    // the property will fail this assertion (changing undefined → true) and signal
+    // that we can finally write the behavior test for the opt-out path.
     const div = document.createElement('div');
     div.contentEditable = 'true';
     document.body.appendChild(div);
 
-    // Confirm jsdom limitation: isContentEditable is not implemented
-    const isImpl = div.isContentEditable;
-    // The source guard: `target.isContentEditable` must be truthy to block.
-    // In a real browser this is true; in jsdom it is undefined.
-    // We document this gap — the guard exists in source, but jsdom can't exercise it.
-    expect(typeof isImpl === 'undefined' || isImpl === true).toBe(true);
+    expect(div.isContentEditable).toBeUndefined();
 
     document.body.removeChild(div);
   });
