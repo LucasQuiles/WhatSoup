@@ -52,7 +52,7 @@ function ensurePrivateDirectorySync(dirPath: string): void {
   assertPrivateDirectorySync(dirPath);
 }
 
-function writePrivateFileSync(filePath: string, data: string): void {
+export function writePrivateFileSync(filePath: string, data: string): void {
   assertPrivateDirectorySync(dirname(filePath));
 
   try {
@@ -314,7 +314,7 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
         env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
       };
     }
-    writeFileSync(
+    writePrivateFileSync(
       join(workspacePath, '.mcp.json'),
       JSON.stringify({ mcpServers }, null, 2),
     );

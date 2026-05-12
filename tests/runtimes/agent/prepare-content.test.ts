@@ -116,6 +116,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
   provisionWorkspace: vi.fn(() => '/tmp/test.sock'),
   writeSandboxArtifacts: vi.fn(),
   ensurePermissionsSettings: vi.fn(),
+  writePrivateFileSync: vi.fn(),
 }));
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
