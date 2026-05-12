@@ -107,8 +107,10 @@ describe('waitForHistorySyncThenRecover', () => {
       echoGraceMs: 100,
     });
 
+    expect(emitter.listenerCount('historySyncComplete')).toBe(1);
     // Emit twice — listener is `once`, so only the first event ends the race
     emitter.emit('historySyncComplete');
+    expect(emitter.listenerCount('historySyncComplete')).toBe(0);
     emitter.emit('historySyncComplete');
     await vi.advanceTimersByTimeAsync(100);
     await promise;
