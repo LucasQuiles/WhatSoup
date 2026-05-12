@@ -78,8 +78,18 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 
 - **Node.js >= 24.0** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
 - **Linux with systemd** — user units for process management (`systemctl --user`); enable lingering for headless servers: `loginctl enable-linger $USER`
-- **GNOME Keyring** (`libsecret-tools`) or environment variables for API keys — `npm run setup` checks both
+- **macOS with launchd** — per-user `LaunchAgents` plists for the fleet and each instance; see the [macOS subsection](#macos-launchd) below
+- **GNOME Keyring** (`libsecret-tools`) on Linux, macOS Keychain on Darwin, or environment variables for API keys — `npm run setup` checks both
 - **ffmpeg** — video frame extraction in chat mode (optional)
+
+WhatSoup auto-detects the host platform via `src/fleet/platform.ts` (`linux-systemd`, `macos-launchd`, `docker`, or `linux-no-systemd`) and routes service control (`start`/`stop`/`restart`) through the matching backend — `systemctl --user` on Linux, `launchctl` on macOS, in-process supervision under Docker. The same Fleet API endpoints work everywhere.
+
+#### macOS (launchd)
+
+- **Canonical operator runbook:** [docs/runbooks/macos-launchd-deployment.md](docs/runbooks/macos-launchd-deployment.md) — plist patterns (`com.whatsoup.<instance>.plist`, `com.whatsoup.fleet.plist`), Keychain-backed secrets, `PATH` handling for Homebrew Node, and per-instance health-token files.
+- **Service template:** `deploy/whatsoup@.service` is the systemd template; the matching launchd plists are generated per-instance under the `deploy:launchd.generated` public surface (see [docs/public-surface.md:303](docs/public-surface.md) — regeneration is non-destructive by policy).
+- **Platform-detection seam:** `src/fleet/platform.ts` is the single source of truth for which service manager runs — override with `WHATSOUP_DOCKER=1` to force the supervisor path inside containers.
+- The [Quick Start](#quick-start) below targets Linux/systemd as the primary path; macOS operators should follow the runbook for plist installation and `launchctl bootstrap`/`bootout` lifecycle after `npm ci`.
 
 ### Docker deployment
 
