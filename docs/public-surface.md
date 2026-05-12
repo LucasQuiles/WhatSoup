@@ -127,7 +127,9 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 161 tools. Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/);
+all 161 tools (160 always-registered + 1 (`knowledge_search`) conditionally-registered when
+Pinecone is configured; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the
+full gating conditions). Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/);
 each file exports a factory that registers tools with the names listed below. Tool counts
 and module groupings come from the [docs/tools.md table of contents](tools.md#table-of-contents).
 
@@ -150,7 +152,7 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.calls` | 1 | [`src/mcp/tools/calls.ts`](../src/mcp/tools/calls.ts) | stable | active | `reject_call` |
 | `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
 | `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
-| `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone) |
+| `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone). Pinecone-gated registration: conditionally-registered only when the instance's Pinecone allowed-indexes, credentials, and knowledge profiles are usable; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for full gating conditions. |
 | `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
 | `mcp:tools.scheduling` | 5 | [`src/mcp/tools/scheduling.ts`](../src/mcp/tools/scheduling.ts) | stable | active | `schedule_message`, `list_scheduled`, `get_scheduled`, `update_scheduled`, `cancel_scheduled` |
