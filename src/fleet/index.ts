@@ -329,28 +329,111 @@ const ROUTES = [
 // L5: Cross-instance LID mapping sync handlers
 // ---------------------------------------------------------------------------
 
+type LidMappingObservation = {
+  lid: string;
+  phone_jid: string;
+  updated_at: string;
+  instance: string;
+};
+
+type LidMappingInstance = {
+  instance: string;
+  updated_at: string;
+};
+
+type UnifiedLidMapping = {
+  lid: string;
+  phone_jid: string;
+  instances: LidMappingInstance[];
+};
+
+type ConflictingLidMapping = {
+  lid: string;
+  phones: Array<{
+    phone_jid: string;
+    instances: LidMappingInstance[];
+  }>;
+};
+
+function compareLidInstances(a: LidMappingInstance, b: LidMappingInstance): number {
+  return a.instance.localeCompare(b.instance) || a.updated_at.localeCompare(b.updated_at);
+}
+
+function buildConflictExplicitLidMappings(observations: LidMappingObservation[]): {
+  unified: UnifiedLidMapping[];
+  conflicts: ConflictingLidMapping[];
+} {
+  const byLid = new Map<string, Map<string, LidMappingInstance[]>>();
+  for (const obs of observations) {
+    let byPhone = byLid.get(obs.lid);
+    if (!byPhone) {
+      byPhone = new Map<string, LidMappingInstance[]>();
+      byLid.set(obs.lid, byPhone);
+    }
+
+    let instances = byPhone.get(obs.phone_jid);
+    if (!instances) {
+      instances = [];
+      byPhone.set(obs.phone_jid, instances);
+    }
+    instances.push({ instance: obs.instance, updated_at: obs.updated_at });
+  }
+
+  const unified: UnifiedLidMapping[] = [];
+  const conflicts: ConflictingLidMapping[] = [];
+  for (const [lid, byPhone] of [...byLid.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const phones = [...byPhone.entries()].sort(([a], [b]) => a.localeCompare(b));
+    if (phones.length === 1) {
+      const [phone_jid, instances] = phones[0];
+      unified.push({
+        lid,
+        phone_jid,
+        instances: instances.toSorted(compareLidInstances),
+      });
+      continue;
+    }
+
+    conflicts.push({
+      lid,
+      phones: phones.map(([phone_jid, instances]) => ({
+        phone_jid,
+        instances: instances.toSorted(compareLidInstances),
+      })),
+    });
+  }
+
+  return { unified, conflicts };
+}
+
 /** GET /api/lid-mappings — export all LID mappings from all instances. */
 function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): void {
   try {
     const instances = [...deps.discovery.getInstances().values()];
     const allMappings: Array<{ lid: string; phone_jid: string; instance: string }> = [];
+    const observations: LidMappingObservation[] = [];
     const seen = new Set<string>();
 
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+        return db.prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings').all() as Array<{
+          lid: string;
+          phone_jid: string;
+          updated_at: string;
+        }>;
       });
       if (result.ok) {
         for (const m of result.data) {
+          observations.push({ ...m, instance: inst.name });
           if (!seen.has(m.lid)) {
             seen.add(m.lid);
-            allMappings.push({ ...m, instance: inst.name });
+            allMappings.push({ lid: m.lid, phone_jid: m.phone_jid, instance: inst.name });
           }
         }
       }
     }
 
-    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length });
+    const { unified, conflicts } = buildConflictExplicitLidMappings(observations);
+    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length, unified, conflicts });
   } catch (err) {
     log.error({ err }, 'L5: failed to export LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });

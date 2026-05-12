@@ -12,7 +12,7 @@
  * verbs/param shapes) plus loadOrCreateFleetToken. Long-tail per-route
  * coverage lives in integration.test.ts and future per-route test files.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -160,6 +160,22 @@ function seedDatabase(dbPath: string, schemaSql = SCHEMA_SQL): void {
   db.close();
 }
 
+function withInstanceDb<T>(name: string, fn: (db: DatabaseSync) => T): T {
+  const db = new DatabaseSync(path.join(dataRoot, name, 'bot.db'));
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function deleteLidMapping(name: string, lid: string): void {
+  withInstanceDb(name, (db) => {
+    db.prepare('DELETE FROM lid_mappings_history WHERE lid = ?').run(lid);
+    db.prepare('DELETE FROM lid_mappings WHERE lid = ?').run(lid);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -167,6 +183,9 @@ function seedDatabase(dbPath: string, schemaSql = SCHEMA_SQL): void {
 const FLEET_TOKEN = 'test-fleet-token-' + crypto.randomBytes(8).toString('hex');
 const SELF_NAME = '__index_test_self__';
 const INST_A = 'line-alpha';
+const INST_B = 'line-beta';
+const CONFLICT_LID = 'conflict-lid-251';
+const STABLE_LID = 'stable-lid-251';
 
 let tmpDir: string;
 let configRoot: string;
@@ -200,7 +219,9 @@ beforeAll(async () => {
   process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
 
   writeInstanceConfig(configRoot, INST_A, { type: 'chat', accessMode: 'self_only', healthPort: 19010 });
+  writeInstanceConfig(configRoot, INST_B, { type: 'chat', accessMode: 'self_only', healthPort: 19011 });
   seedDatabase(path.join(dataRoot, INST_A, 'bot.db'));
+  seedDatabase(path.join(dataRoot, INST_B, 'bot.db'));
 
   const selfDataDir = path.join(dataRoot, SELF_NAME);
   fs.mkdirSync(selfDataDir, { recursive: true });
@@ -266,6 +287,13 @@ afterAll(async () => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+});
+
+afterEach(() => {
+  deleteLidMapping(INST_A, CONFLICT_LID);
+  deleteLidMapping(INST_B, CONFLICT_LID);
+  deleteLidMapping(INST_A, STABLE_LID);
+  deleteLidMapping(INST_B, STABLE_LID);
 });
 
 // ---------------------------------------------------------------------------
@@ -506,6 +534,56 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     // Missing `path` query param returns 400 from the handler — that's a successful dispatch.
     const res = await fetch(`${baseUrl}/api/directories/check`, { headers: auth });
     expect(res.status).toBe(400);
+  });
+
+  it('GET /api/lid-mappings exposes conflicting phones without changing legacy mappings/count', async () => {
+    withInstanceDb(INST_A, (db) => {
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(CONFLICT_LID, '15550001001@s.whatsapp.net', '2026-05-01T00:00:00Z');
+    });
+    withInstanceDb(INST_B, (db) => {
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(CONFLICT_LID, '15550002002@s.whatsapp.net', '2026-05-02T00:00:00Z');
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run(STABLE_LID, '15550003003@s.whatsapp.net', '2026-05-03T00:00:00Z');
+    });
+
+    const res = await fetch(`${baseUrl}/api/lid-mappings`, { headers: auth });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const legacyMappings = body.mappings.filter((m: { lid: string }) => m.lid === CONFLICT_LID);
+    expect(legacyMappings).toEqual([
+      { lid: CONFLICT_LID, phone_jid: '15550001001@s.whatsapp.net', instance: INST_A },
+    ]);
+    expect(body.count).toBe(body.mappings.length);
+
+    const unifiedMappings = body.unified.filter((m: { lid: string }) => m.lid === STABLE_LID);
+    expect(unifiedMappings).toEqual([
+      {
+        lid: STABLE_LID,
+        phone_jid: '15550003003@s.whatsapp.net',
+        instances: [{ instance: INST_B, updated_at: '2026-05-03T00:00:00Z' }],
+      },
+    ]);
+    expect(body.conflicts).toEqual([
+      {
+        lid: CONFLICT_LID,
+        phones: [
+          {
+            phone_jid: '15550001001@s.whatsapp.net',
+            instances: [{ instance: INST_A, updated_at: '2026-05-01T00:00:00Z' }],
+          },
+          {
+            phone_jid: '15550002002@s.whatsapp.net',
+            instances: [{ instance: INST_B, updated_at: '2026-05-02T00:00:00Z' }],
+          },
+        ],
+      },
+    ]);
   });
 
   it('POST /api/lid-mappings/sync keeps legacy result counts and exposes detailed counters separately', async () => {
