@@ -391,15 +391,38 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
     const results: Record<string, number> = {};
     const details: Record<
       string,
-      { imported: number; flipped: number; noop: number; conflicts: number; error?: string }
+      {
+        imported: number;
+        flipped: number;
+        noop: number;
+        conflicts: number;
+        skipped?: boolean;
+        reason?: string;
+        schemaVersion?: number;
+        error?: string;
+      }
     > = {};
+    const skippedInstances: Array<{ instance: string; schemaVersion: number; required: number; reason: string }> = [];
     for (const inst of instances) {
       const writeResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (rawDb: DatabaseSync) => {
+        const schemaVersion = readSchemaMigrationVersion(rawDb);
+        if (schemaVersion < 25) {
+          return {
+            imported: 0,
+            flipped: 0,
+            noop: 0,
+            conflicts: [],
+            skipped: true,
+            reason: 'schema_migration_below_25',
+            schemaVersion,
+          } as const;
+        }
+
         // Build a minimal Database-shaped facade so importLidMappings can
         // operate on the underlying raw handle without us instantiating a
         // full Database instance against a path we don't own here.
         const dbFacade = { raw: rawDb } as unknown as import('../core/database.ts').Database;
-        return importLidMappings(dbFacade, observations);
+        return { ...importLidMappings(dbFacade, observations), schemaVersion };
       });
       if (writeResult.ok) {
         const r = writeResult.data;
@@ -409,7 +432,17 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
           flipped: r.flipped,
           noop: r.noop,
           conflicts: r.conflicts.length,
+          schemaVersion: r.schemaVersion,
+          ...(r.skipped ? { skipped: true, reason: r.reason } : {}),
         };
+        if (r.skipped) {
+          skippedInstances.push({
+            instance: inst.name,
+            schemaVersion: r.schemaVersion,
+            required: 25,
+            reason: r.reason,
+          });
+        }
       } else {
         results[inst.name] = -1;
         details[inst.name] = {
@@ -423,11 +456,22 @@ async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse,
     }
 
     const totalMappings = observations.length;
-    log.info({ totalMappings, results, details }, 'L5: cross-instance LID sync completed');
-    jsonResponse(res, 200, { totalMappings, results, details });
+    log.info({ totalMappings, results, details, skippedInstances }, 'L5: cross-instance LID sync completed');
+    jsonResponse(res, 200, { totalMappings, results, details, skippedInstances });
   } catch (err) {
     log.error({ err }, 'L5: failed to sync LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
+  }
+}
+
+function readSchemaMigrationVersion(rawDb: DatabaseSync): number {
+  try {
+    const row = rawDb
+      .prepare('SELECT MAX(version) AS version FROM schema_migrations')
+      .get() as { version: number | null } | undefined;
+    return typeof row?.version === 'number' ? row.version : 0;
+  } catch {
+    return 0;
   }
 }
 

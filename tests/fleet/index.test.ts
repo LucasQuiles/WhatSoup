@@ -71,7 +71,7 @@ import { createFleetServer, loadOrCreateFleetToken } from '../../src/fleet/index
 
 const SCHEMA_SQL = `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-INSERT INTO schema_migrations VALUES (1);
+INSERT INTO schema_migrations VALUES (25);
 
 CREATE TABLE messages (
   pk INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +113,39 @@ CREATE TABLE lid_mappings_history (
 );
 `;
 
+const SCHEMA_SQL_V24 = `
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+INSERT INTO schema_migrations VALUES (24);
+
+CREATE TABLE messages (
+  pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_key TEXT NOT NULL,
+  sender_jid TEXT,
+  sender_name TEXT,
+  content TEXT,
+  content_type TEXT DEFAULT 'text',
+  timestamp INTEGER NOT NULL,
+  is_from_me INTEGER DEFAULT 0,
+  deleted_at TEXT,
+  enrichment_processed_at TEXT
+);
+
+CREATE TABLE access_list (
+  subject_type TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  display_name TEXT,
+  requested_at TEXT,
+  decided_at TEXT
+);
+
+CREATE TABLE lid_mappings (
+  lid TEXT PRIMARY KEY,
+  phone_jid TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 function writeInstanceConfig(configRoot: string, name: string, overrides: Record<string, unknown> = {}): void {
   const instanceDir = path.join(configRoot, name);
   fs.mkdirSync(instanceDir, { recursive: true });
@@ -120,10 +153,10 @@ function writeInstanceConfig(configRoot: string, name: string, overrides: Record
   fs.writeFileSync(path.join(instanceDir, 'config.json'), JSON.stringify(config, null, 2));
 }
 
-function seedDatabase(dbPath: string): void {
+function seedDatabase(dbPath: string, schemaSql = SCHEMA_SQL): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
-  db.exec(SCHEMA_SQL);
+  db.exec(schemaSql);
   db.close();
 }
 
@@ -503,6 +536,51 @@ describe('fleet server -- API route dispatch (real factory)', () => {
       flipped: 0,
       conflicts: 0,
     });
+  });
+
+  it('POST /api/lid-mappings/sync skips schema-v24 peers before history writes', async () => {
+    const staleName = 'line-schema-24';
+    const staleDbPath = path.join(dataRoot, staleName, 'bot.db');
+    writeInstanceConfig(configRoot, staleName, { type: 'chat', accessMode: 'self_only', healthPort: 19024 });
+    seedDatabase(staleDbPath, SCHEMA_SQL_V24);
+    fleet.discovery.scan();
+
+    const db = new DatabaseSync(staleDbPath);
+    try {
+      db
+        .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+        .run('242424', '15550002424@s.whatsapp.net', '2026-05-02 00:00:00');
+    } finally {
+      db.close();
+    }
+
+    const res = await fetch(`${baseUrl}/api/lid-mappings/sync`, {
+      method: 'POST',
+      headers: auth,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.results[staleName]).toBe(0);
+    expect(body.details[staleName]).toMatchObject({
+      imported: 0,
+      flipped: 0,
+      noop: 0,
+      conflicts: 0,
+      skipped: true,
+      reason: 'schema_migration_below_25',
+      schemaVersion: 24,
+    });
+
+    const verifyDb = new DatabaseSync(staleDbPath);
+    try {
+      const historyTable = verifyDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='lid_mappings_history'")
+        .get();
+      expect(historyTable).toBeUndefined();
+    } finally {
+      verifyDb.close();
+    }
   });
 
   it('PATCH /api/lines/:name/config dispatches (verb other than GET/POST)', async () => {
