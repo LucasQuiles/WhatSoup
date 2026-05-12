@@ -1642,6 +1642,9 @@ export class AgentRuntime implements Runtime {
 
     // Register emit_heal_result MCP tool (once, for control-plane repair completion).
     // Only on non-sandboxed instances (Q) — sandboxed instances (Loops) are repair targets, not repairers.
+    // Tagged `core: false` because this registration is conditional on configured control peers;
+    // see `src/mcp/types.ts` for the contract — non-core tools must tolerate absence on instances
+    // that do not meet the gate (no control peers, sandbox mode, or per-chat sandbox).
     if (config.controlPeers.size > 0 && !this.sandboxPerChat && !this.sandbox) {
       this.registry.register({
         name: 'emit_heal_result',
@@ -1650,6 +1653,7 @@ export class AgentRuntime implements Runtime {
         scope: 'global',
         targetMode: 'caller-supplied',
         replayPolicy: 'unsafe',
+        core: false,
         handler: async (params) => {
           const parsed = EmitHealResultSchema.parse(params);
 

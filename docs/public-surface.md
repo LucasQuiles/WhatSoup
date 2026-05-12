@@ -130,11 +130,15 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 161 tools (160 always-registered + 1 (`knowledge_search`) conditionally-registered when
-Pinecone is configured; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the
-full gating conditions). Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/);
-each file exports a factory that registers tools with the names listed below. Tool counts
-and module groupings come from the [docs/tools.md table of contents](tools.md#table-of-contents).
+all 162 tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when
+Pinecone is configured, and `emit_heal_result` when the runtime has at least one configured
+control-plane peer and is not in any sandbox mode; see
+[docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
+Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each file exports a
+factory that registers tools with the names listed below — except for `emit_heal_result`,
+which is registered inline from [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts).
+Tool counts and module groupings come from the
+[docs/tools.md table of contents](tools.md#table-of-contents).
 
 The registry entries here are at the **module** level (a tool group is a public unit; the
 individual tool inventory is `docs/tools.md`). Tool-level entries follow on promotion.
@@ -161,6 +165,12 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.scheduling` | 5 | [`src/mcp/tools/scheduling.ts`](../src/mcp/tools/scheduling.ts) | stable | active | `schedule_message`, `list_scheduled`, `get_scheduled`, `update_scheduled`, `cancel_scheduled` |
 | `mcp:tools.audit` | 1 | [`src/mcp/tools/audit.ts`](../src/mcp/tools/audit.ts) | stable | active | `read_outbound_sends` |
 | `mcp:tools.substrate` | 19 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities. Schema still settling. |
+
+> The 162nd canonical tool (`emit_heal_result`) is registered inline from
+> [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts) rather than under
+> `src/mcp/tools/`, so it is intentionally absent from the per-module registry above.
+> See the [`runtime.ts (inline)` section of docs/tools.md](tools.md#runtimets-inline) for
+> the full schema and the conditional-registration gate.
 
 Sock-tool factory infrastructure: [`src/mcp/tools/sock-tool-factory.ts`](../src/mcp/tools/sock-tool-factory.ts) — internal.
 
