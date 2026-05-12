@@ -239,14 +239,13 @@ beforeAll(async () => {
     fleet.server.listen(0, '127.0.0.1', () => resolve());
   });
   fleet.discovery.startAutoRefresh();
-  fleet.healthPoller.start();
+  // Await the poller's initial poll so the suite doesn't race against a
+  // wall-clock guess. start() resolves once the first poll cycle completes.
+  await fleet.healthPoller.start();
 
   const addr = fleet.server.address();
   if (!addr || typeof addr === 'string') throw new Error('unexpected address type');
   baseUrl = `http://127.0.0.1:${addr.port}`;
-
-  // Give the health poller a moment to complete its initial poll
-  await new Promise((r) => setTimeout(r, 150));
 });
 
 afterAll(async () => {

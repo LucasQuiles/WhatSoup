@@ -132,7 +132,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 
 async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingMessage): Promise<void> {
   handler(msg);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 const BOT_JID = '18455943112@s.whatsapp.net';
