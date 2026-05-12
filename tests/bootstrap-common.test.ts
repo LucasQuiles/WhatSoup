@@ -16,6 +16,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+const targetModuleImport = vi.hoisted(() => vi.fn());
+
 // Mock instance-loader before importing bootstrap-common.
 vi.mock('../src/instance-loader.ts', () => ({
   loadInstance: vi.fn(),
@@ -24,6 +26,10 @@ vi.mock('../src/instance-loader.ts', () => ({
 // Provide stub target modules to test the dynamic-import side effect.
 // We mock the auth module so the auth bootstrap path won't have side effects.
 vi.mock('../src/transport/auth.ts', () => ({}));
+vi.mock('../src/transport/auth.ts?bootstrap-common-happy', () => {
+  targetModuleImport();
+  return {};
+});
 
 import { loadInstance } from '../src/instance-loader.ts';
 import { bootstrapCommon } from '../src/bootstrap-common.ts';
@@ -36,6 +42,7 @@ describe('bootstrapCommon', () => {
   beforeEach(() => {
     savedArgv = process.argv.slice();
     mockLoadInstance.mockReset();
+    targetModuleImport.mockReset();
   });
 
   afterEach(() => {
@@ -71,17 +78,17 @@ describe('bootstrapCommon', () => {
 
   it('resolves successfully (returns Promise<void>) on the happy path, with side effects observed', async () => {
     process.argv = ['node', 'bin.ts', 'happy'];
-    const result = await bootstrapCommon('../src/transport/auth.ts', 'whatsoup');
+    const result = await bootstrapCommon('../src/transport/auth.ts?bootstrap-common-happy', 'whatsoup');
     // Promise<void> means the resolved value is undefined…
     expect(result).toBeUndefined();
     // …and the contract of "successful bootstrap" is that loadInstance ran
-    // with the parsed instance name. Asserting BOTH locks the happy-path
-    // exit and the observable side effect together.
+    // with the parsed instance name and the target module import ran.
     expect(mockLoadInstance).toHaveBeenCalledOnce();
     expect(mockLoadInstance).toHaveBeenCalledWith('happy', undefined);
+    expect(targetModuleImport).toHaveBeenCalledOnce();
   });
 
-  it('uses the FIRST non-flag positional after the script as the instance name', async () => {
+  it('uses argv[2] literally as the instance name', async () => {
     // bootstrapCommon reads argv[2] literally — process.argv[0]=node,
     // process.argv[1]=script, process.argv[2]=instanceName.
     process.argv = ['node', 'bin.ts', 'expected-name', 'extra-arg'];
