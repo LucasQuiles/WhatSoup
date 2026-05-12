@@ -513,6 +513,7 @@ export function findPublicSurfaceDrift(
               route.method === httpMethodPath.method && route.pattern.test(probe),
           );
           if (match) {
+            if (cited == null) continue;
             if (match.line !== cited) {
               issues.push({
                 filePath,

@@ -339,6 +339,33 @@ const ROUTES = [
     ]);
   });
 
+  it('passes when an unanchored HTTP row matches a ROUTES entry', () => {
+    const { root, registryPath } = makeFakeRepo();
+    const routesSource = `// stub fleet routes
+const ROUTES = [
+  { method: 'GET',   path: /^\\/api\\/lines$/, handler: 'getLines' },
+] as const;
+`;
+    writeFileSync(path.join(root, 'src/fleet/index.ts'), routesSource, 'utf8');
+    const registry = `# Public surface
+
+## HTTP
+
+| Identifier | Method + Path | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| \`http:fleet.lines.list\` | \`GET /api/lines\` | \`src/fleet/index.ts\` | stable | active | List |
+
+## MCP
+
+| Identifier | Tools | Source | Stability | Status | Notes |
+|---|---|---|---|---|---|
+| \`mcp:tools.messaging\` | 9 | [\`src/mcp/tools/messaging.ts\`](../src/mcp/tools/messaging.ts) | stable | active | x |
+`;
+    writeFileSync(registryPath, registry, 'utf8');
+
+    expect(findPublicSurfaceDrift({ cwd: root })).toEqual([]);
+  });
+
   it('flags a line anchor whose +-5 window does not contain the expected symbol', () => {
     const { root, registryPath } = makeFakeRepo();
     // 30-line filler file, the only meaningful symbol is far from line 2.
