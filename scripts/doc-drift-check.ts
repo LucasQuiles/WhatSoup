@@ -98,6 +98,33 @@ export function findToolRegistrations(cwd: string = process.cwd()): ToolRegistra
     }
   }
 
+  // Inline tool registrations live outside src/mcp/tools/. They are gated on
+  // runtime configuration (e.g. control-plane peers) and call
+  // `this.registry.register({ ... })` directly from a runtime module. The
+  // canonical tool surface — the count documented in docs/tools.md and
+  // docs/public-surface.md — includes these, so doc-drift must count them too.
+  // Inline registrations are listed here explicitly to keep this scan
+  // file-anchored rather than AST-derived.
+  const inlineRegistrationSources: ReadonlyArray<{ relativePath: string; toolName: string }> = [
+    { relativePath: 'src/runtimes/agent/runtime.ts', toolName: 'emit_heal_result' },
+  ];
+
+  const inlineRegistrationPattern = (toolName: string) =>
+    new RegExp(`^\\s*name:\\s*['"]${toolName}['"]`, 'm');
+
+  for (const { relativePath, toolName } of inlineRegistrationSources) {
+    const absolutePath = path.resolve(cwd, relativePath);
+    if (!existsSync(absolutePath)) continue;
+    const text = readFileSync(absolutePath, 'utf8');
+    const match = text.match(inlineRegistrationPattern(toolName));
+    if (!match || match.index === undefined) continue;
+    registrations.push({
+      filePath: normalizeRepoPath(relativePath),
+      line: lineForOffset(text, match.index),
+      name: toolName,
+    });
+  }
+
   return registrations.sort((left, right) => left.filePath.localeCompare(right.filePath) || left.line - right.line);
 }
 

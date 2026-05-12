@@ -1,8 +1,10 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 161 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 162 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 161 documented tools, 160 are always registered at startup and 1 (`knowledge_search`) is conditionally registered only when the instance's Pinecone configuration, credentials, and profiles are usable. Specifically, `knowledge_search` is registered only when all of the following hold:
+> **Conditionally-registered tools.** Of the 162 documented tools, 160 are always registered at startup and 2 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+>
+> **`knowledge_search`** is registered only when all of the following hold:
 >
 > - `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is a non-empty array, and
 > - `memory.pinecone.knowledgeSearch.enabled` is not explicitly `false`, and
@@ -10,7 +12,15 @@ Complete reference for all 161 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the configured Pinecone API key environment variable is set, and
 > - at least one allowed index has a declared knowledge profile and the Pinecone client initializes successfully.
 >
-> The initial gate lives in `src/mcp/register-all.ts` (the `Knowledge search — only when instance config specifies allowed indexes` block), and the credential/profile gate lives in `src/mcp/tools/knowledge.ts`. Instances without usable Pinecone configuration therefore omit `knowledge_search` at runtime and expose the remaining 160; the documented total of 161 reflects the full tool surface available to a fully-configured instance.
+> The initial gate lives in `src/mcp/register-all.ts` (the `Knowledge search — only when instance config specifies allowed indexes` block), and the credential/profile gate lives in `src/mcp/tools/knowledge.ts`.
+>
+> **`emit_heal_result`** is registered only when all of the following hold (see `src/runtimes/agent/runtime.ts`):
+>
+> - `config.controlPeers.size > 0` — the instance has at least one configured control-plane peer (e.g. `loops`), and
+> - the runtime is not in `sandboxPerChat` mode, and
+> - the runtime is not in `sandbox` mode.
+>
+> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 162 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
 
 ## Scope and Replay Policy Glossary
 
@@ -53,7 +63,9 @@ Complete reference for all 161 MCP tools exposed by WhatSoup. Tools are grouped 
 | [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 1 |
 | [substrate.ts](#substratets) | 19 |
-| **Total** | **161** |
+| **Total** | **162** |
+
+> The total above (`162`) reflects the full canonical surface — `161` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline from `src/runtimes/agent/runtime.ts`. The inline registration is documented below under [runtime.ts (inline)](#runtimets-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -3356,3 +3368,51 @@ Update a pending scheduled message. Can change time, text, or recurrence.
 | `Error` | `scheduled_at` is not a future timestamp |
 | `Error` | Cron expression is invalid |
 | `Error` | No fields to update |
+
+---
+
+## runtime.ts (inline)
+
+Control-plane repair tooling registered directly from `src/runtimes/agent/runtime.ts` rather than under `src/mcp/tools/`. Conditional registration: only the repair-issuing role (non-sandboxed Q with at least one configured control peer) exposes this surface; sandboxed repair targets (Loops) do not.
+
+> Uses `scope: global` and `targetMode: caller-supplied`. Tagged `core: false` so absence on instances that fail the gate is tolerated rather than fatal.
+
+---
+
+### emit_heal_result
+
+Signal completion of a repair cycle. Only callable during an active repair session — the call validates that `reportId` matches the runtime's active control report and that a control queue is wired. On `result: 'fixed'` the runtime emits a `HEAL_COMPLETE` control message to the configured `loops` peer; on `result: 'escalate'` it emits `HEAL_ESCALATE` (with the supplied `diagnosis`) instead. The schema lives in [`src/core/heal-protocol.ts`](../src/core/heal-protocol.ts) as `EmitHealResultSchema`.
+
+> **Conditional registration.** Registered only when all of the following hold (gated at the call site in `src/runtimes/agent/runtime.ts`):
+>
+> - `config.controlPeers.size > 0` — the instance has at least one configured control-plane peer, and
+> - the runtime is not in `sandboxPerChat` mode, and
+> - the runtime is not in `sandbox` mode.
+>
+> Instances that fail any of these gates omit this tool at runtime. Tagged `core: false` in the `ToolDeclaration`.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| reportId | string | required | Identifier of the repair report being completed. Must match the runtime's `activeControlReportId`. |
+| errorClass | string | required | Normalized error class string (see `normalizeErrorClass` in `src/core/heal-protocol.ts`). |
+| result | string (enum) | required | One of `fixed` (repair succeeded — emits `HEAL_COMPLETE`) or `escalate` (repair failed or out of scope — emits `HEAL_ESCALATE`). |
+| commitSha | string | optional | Commit SHA of the landed fix when `result: 'fixed'`. Surfaced in the outbound `HEAL_COMPLETE` payload. |
+| diagnosis | string | required | Human-readable summary of what was done (for `fixed`) or why the cycle is being escalated (for `escalate`). |
+
+**Returns:** `{ sent: true, reportId, result }` once the corresponding control message has been queued.
+
+**Errors:**
+
+| Code | Condition |
+|------|-----------|
+| `Error` | No active repair session (`activeControlReportId` is unset) |
+| `Error` | `reportId` does not match the runtime's active repair |
+| `Error` | Control queue not found |

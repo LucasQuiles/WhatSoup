@@ -63,9 +63,15 @@ describe('doc drift check', () => {
       staleDoc,
       currentToolsDoc
         .replace('| [substrate.ts](#substratets) | 19 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **161** |', '| **Total** | **160** |'),
+        .replace('| **Total** | **162** |', '| **Total** | **160** |'),
       'utf8',
     );
+
+    const staleLines = readFileSync(staleDoc, 'utf8').split(/\r?\n/);
+    const substrateLine =
+      staleLines.findIndex((line) => line === '| [substrate.ts](#substratets) | 18 |') + 1;
+    const totalLine =
+      staleLines.findIndex((line) => line === '| **Total** | **160** |') + 1;
 
     expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
       {
@@ -73,7 +79,7 @@ describe('doc drift check', () => {
         claimed: 18,
         filePath: staleDoc,
         kind: 'tool-count',
-        line: 55,
+        line: substrateLine,
         text: '| [substrate.ts](#substratets) | 18 |',
       },
       {
@@ -81,7 +87,7 @@ describe('doc drift check', () => {
         claimed: 160,
         filePath: staleDoc,
         kind: 'tool-count',
-        line: 56,
+        line: totalLine,
         text: '| **Total** | **160** |',
       },
     ]);
