@@ -425,6 +425,7 @@ include `agentOptions` should keep these fields explicit.
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the Claude Code subprocess. |
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
+| `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
 
 #### Session Scopes
 
@@ -467,6 +468,44 @@ Controls which Claude Code plugins are loaded for this instance's sessions. Each
 
 **Context impact:** Plugin agents are eagerly loaded into the system prompt. Disabling heavy plugins like `sdlc-os` (45 agents, ~66K tokens) significantly reduces per-session context overhead.
 
+### Connector mutation policy (#411)
+
+Background: agent instances historically run with `permissions.defaultMode: bypassPermissions` and a wide tool allowlist (`mcp__google-workspace__*`, `mcp__plugin_*`, etc.). Mutation-capable tools (send mail, drive write, calendar mutations, M365 write tools) are gated only by the out-of-tree `claude-guards` hook and by whether `ALLOW_M365_MUTATIONS=1` is set in the parent env. Either gate can be bypassed without the repo noticing, which is the root cause investigated in #411.
+
+To give the repo a real say without breaking existing fleets, two mechanisms are scaffolded:
+
+**1. `REQUIRED_DENY` floor (`src/core/settings-template.ts`).**
+A repo-owned readonly list of deny patterns that `mergeSettingsJson` always unions into the resulting deny array, and that `isValidPermissionsSettings` requires as a subset. Custom `settingsJson` payloads cannot remove a floor entry.
+
+The shipping default is `REQUIRED_DENY = []`. With an empty floor every existing payload is observably unchanged. A follow-up PR (maintainer call) will populate the floor with the mutation-capable patterns once the override surface is named.
+
+**2. `WHATSOUP_CONNECTOR_FAILCLOSED` env flag (`src/runtimes/agent/providers/child-env.ts`).**
+
+- **Unset (default, today's behavior):** `buildBaseChildEnv` propagates `ALLOW_M365_MUTATIONS` to the agent subprocess whenever it is set in the parent env. This is exactly the pre-#411 path; fleets like `mw-bot` that set `ALLOW_M365_MUTATIONS=1` in their launchd plist keep working unchanged.
+- **Set to `"1"` (opt-in):** `buildBaseChildEnv` drops `ALLOW_M365_MUTATIONS` from the child env *unless* the instance has `agentOptions.allowM365Mutations: true`. This converts the env-var gate into a per-instance allowlist that can be audited at config-write time.
+- Any other value of the flag is treated as unset (back-compat).
+
+**How operators enable fail-closed mode (when the time comes):**
+
+```bash
+# 1. In the launchd plist / systemd unit for the WhatSoup parent process:
+export WHATSOUP_CONNECTOR_FAILCLOSED=1
+
+# 2. For each instance that legitimately needs mutation access:
+#    config.json
+{
+  "name": "mw-bot",
+  "type": "agent",
+  "agentOptions": {
+    "sessionScope": "per_chat",
+    "cwd": "...",
+    "allowM365Mutations": true
+  }
+}
+```
+
+Until the maintainer flips the flag in a follow-up PR and populates `REQUIRED_DENY`, both mechanisms are dormant: shipping `REQUIRED_DENY = []` makes the merge a no-op, and the unset flag makes the child-env path identical to before.
+
 ### Validation Rules Summary
 
 The loader enforces these constraints before the process starts:
@@ -480,6 +519,7 @@ The loader enforces these constraints before the process starts:
 - Fleet create/update APIs default omitted `agentOptions` to `sessionScope: per_chat` with a per-instance workspace under the user's home directory.
 - `agent` instances with hand-written `agentOptions` must have a valid `sessionScope`; an empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
+- `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `agent` with `sessionScope: single` must use `accessMode: self_only`.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.

@@ -44,6 +44,14 @@ interface AgentOptions {
   provider?: string;
   /** Provider-specific configuration overrides. */
   providerConfig?: Record<string, unknown>;
+  /**
+   * Opt-in per-instance allowlist for the `ALLOW_M365_MUTATIONS` env var
+   * (#411). Only consulted when the `WHATSOUP_CONNECTOR_FAILCLOSED=1`
+   * env flag is set on the parent process; otherwise unconditional
+   * propagation runs and this field has no effect. See
+   * `docs/configuration.md` for the migration plan.
+   */
+  allowM365Mutations?: boolean;
 }
 
 interface InstanceConfig {

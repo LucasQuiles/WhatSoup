@@ -17,7 +17,7 @@ import type { AgentEvent } from './stream-parser.ts';
 import { parseCodexEvent } from './providers/codex-parser.ts';
 import { parseGeminiAcpEvent, buildInitializeRequest, buildSessionNewRequest, buildSessionPromptRequest } from './providers/gemini-acp-parser.ts';
 import { createOpenCodeParser, type OpenCodeParser } from './providers/opencode-parser.ts';
-import { buildBaseChildEnv } from './providers/child-env.ts';
+import { buildBaseChildEnv, type BuildBaseChildEnvOptions } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
 import { OpenAIApiProvider } from './providers/openai-api.ts';
@@ -91,7 +91,10 @@ export interface SessionManagerOptions {
  * Extend this function when adding new providers: each provider should only receive
  * its own credentials plus the system essentials below.
  */
-export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEnv {
+export function buildChildEnv(
+  provider: string = 'claude-cli',
+  baseOpts?: BuildBaseChildEnvOptions,
+): NodeJS.ProcessEnv {
   if (!isProviderId(provider)) {
     throw new Error(
       `[session-manager:buildChildEnv] unknown provider id: ${JSON.stringify(provider)}. ` +
@@ -99,7 +102,7 @@ export function buildChildEnv(provider: string = 'claude-cli'): NodeJS.ProcessEn
     );
   }
 
-  const env = buildBaseChildEnv();
+  const env = buildBaseChildEnv(baseOpts);
 
   // Provider-specific credentials — each provider only receives the keys it needs.
   switch (provider) {
