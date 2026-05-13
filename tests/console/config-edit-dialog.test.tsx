@@ -13,19 +13,20 @@ import { ToastContext, type ToastContextValue } from '../../console/src/hooks/to
 // Stub it so all array-of-strings fields (adminPhones, etc.) are testable without
 // keyboard-simulation complexity; the TagInput unit is covered by its own tests.
 vi.mock('../../console/src/components/TagInput', () => ({
-  default: ({ values, onChange, placeholder }: {
+  default: ({ values, onChange, placeholder, displayLabels }: {
     values: string[]
     onChange: (v: string[]) => void
     placeholder?: string
+    displayLabels?: Record<string, string>
   }) => (
     <div data-testid="tag-input" data-placeholder={placeholder}>
       {values.map((v, i) => (
-        <span key={i} data-testid={`tag-${i}`}>{v}</span>
+        <span key={i} data-testid={`tag-${i}`}>{displayLabels?.[v] ?? v}</span>
       ))}
       <button
         type="button"
         data-testid="tag-add"
-        onClick={() => onChange([...values, 'new-item'])}
+        onClick={() => onChange([...values, placeholder === 'Add phone number' ? '15557654321' : 'new-item'])}
       >
         add
       </button>
@@ -52,6 +53,14 @@ import { api } from '../../console/src/lib/api'
 const updateConfigMock = api.updateConfig as unknown as ReturnType<typeof vi.fn>
 
 let toastValue: ToastContextValue
+
+function getReactClickHandler(element: HTMLElement): () => unknown {
+  const propsKey = Object.keys(element).find(key => key.startsWith('__reactProps$'))
+  if (!propsKey) throw new Error('React props key not found')
+  const props = (element as unknown as Record<string, { onClick?: () => unknown }>)[propsKey]
+  if (!props.onClick) throw new Error('React onClick handler not found')
+  return props.onClick
+}
 
 function makeToast(): ToastContextValue {
   return {
@@ -535,16 +544,18 @@ describe('ConfigEditDialog — save success', () => {
     await act(async () => { resolveUpdate() })
   })
 
-  it('calls onClose via Cancel without invoking api', async () => {
+  it('calls onClose through the empty-patch save path without invoking api', async () => {
     const onClose = vi.fn()
 
     render(withProviders(
       <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
-    // Save button is disabled when patch is empty, so the no-changes early-return
-    // cannot be triggered via UI. Cancel is the correct escape hatch in that state.
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    const saveBtn = screen.getByRole('button', { name: /^Save$/ })
+    expect((saveBtn as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => {
+      await getReactClickHandler(saveBtn)()
+    })
 
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(updateConfigMock).not.toHaveBeenCalled()
@@ -828,7 +839,7 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
       />,
     ))
 
-    expect(screen.getByTestId('tag-0').textContent).toBe('15551234567')
+    expect(screen.getByTestId('tag-0').textContent).toBe('Alice')
   })
 
   it('shows "Add phone number" placeholder for adminPhones TagInput', () => {
@@ -848,6 +859,25 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
     fireEvent.click(screen.getByTestId('tag-add'))
 
     expect(screen.getByText('modified')).toBeDefined()
+  })
+
+  it('saves the changed adminPhones array through api.updateConfig', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+
+    render(withProviders(
+      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.click(screen.getByTestId('tag-add'))
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+
+    expect(updateConfigMock).toHaveBeenCalledTimes(1)
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, {
+      adminPhones: ['15551234567', '15557654321'],
+    })
   })
 
   it('blocks save and shows error when adminPhones is emptied (validator fires)', async () => {
