@@ -11,6 +11,7 @@ import type {
   OutboundSendCaller,
   OutboundSendsWriter,
 } from './outbound-sends.ts';
+import { isRecord } from '../lib/type-guards.ts';
 
 export type LinkPreviewMode = 'auto' | 'off';
 export type TextSendTransportResult = { transportId?: string | null } | void;
@@ -123,15 +124,12 @@ export function createSendPipeline({
   };
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 export function prepareTextSend(
   input: unknown,
   { chatResolver, profiles }: SendPipelineDeps,
 ): PreparedTextSend {
-  if (!isPlainRecord(input)) {
+  if (!isRecord(input)) {
     throw new InvalidSendRequestError('request body must be a JSON object');
   }
 

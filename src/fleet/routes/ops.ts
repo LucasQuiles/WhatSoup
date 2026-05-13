@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -40,10 +41,6 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
   return true;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function deepMergeRecords(
   base: Record<string, unknown>,
   patch: Record<string, unknown>,
@@ -51,7 +48,7 @@ function deepMergeRecords(
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
     const current = result[key];
-    result[key] = isPlainRecord(current) && isPlainRecord(value)
+    result[key] = isRecord(current) && isRecord(value)
       ? deepMergeRecords(current, value)
       : value;
   }

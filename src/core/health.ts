@@ -9,6 +9,7 @@ import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
+import { isRecord } from '../lib/type-guards.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -108,10 +109,6 @@ function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
 function agentCommandStatus(err: unknown): number {
   const status = (err as { statusCode?: unknown })?.statusCode;
   return typeof status === 'number' && status >= 400 && status < 600 ? status : 500;
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function sendRequestErrorMessage(err: unknown): string {
@@ -234,7 +231,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
           return;
         }
-        if (!isJsonObject(data)) {
+        if (!isRecord(data)) {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ ok: false, error: 'request body must be a JSON object' }));
           return;

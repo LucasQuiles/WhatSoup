@@ -12,6 +12,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import { jsonResponse, requireInstance, parseQueryString, readBody } from '../../lib/http.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import { mcpCall } from '../mcp-client.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 
@@ -40,10 +41,6 @@ interface ProxyOptions {
    * as a second/third argument to `buildArgs`.
    */
   decodeParam?: 'jid';
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function socketCheck(instance: { socketPath?: string | null }, res: ServerResponse): boolean {
@@ -135,7 +132,7 @@ export function respondMcp(
     const unwrapped = unwrapMcpResult(result.result);
     const text = typeof unwrapped === 'string' ? unwrapped : JSON.stringify(unwrapped);
     const status = classifyToolErrorStatus(text);
-    const envelope = isJsonObject(result.result) ? result.result : {};
+    const envelope = isRecord(result.result) ? result.result : {};
     jsonResponse(res, status, {
       error: typeof unwrapped === 'string' ? unwrapped : 'MCP tool reported an error',
       isError: true,
@@ -190,7 +187,7 @@ function mcpWithBody<P extends { name: string }>(
     const raw = await readBody(req);
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { jsonResponse(res, 400, { error: 'Invalid JSON body' }); return; }
-    if (!isJsonObject(parsed)) {
+    if (!isRecord(parsed)) {
       jsonResponse(res, 400, { error: 'JSON body must be an object' });
       return;
     }
@@ -401,7 +398,7 @@ export async function handleSearchContacts(
   const result = await mcpCall(instance.socketPath!, 'search_contacts', { query });
   // search_contacts returns {results, total} — normalize to {contacts} for console
   respondMcp(res, result, 200, (unwrapped) => {
-    const contacts = isJsonObject(unwrapped) ? (unwrapped.results ?? unwrapped.contacts ?? unwrapped) : unwrapped;
+    const contacts = isRecord(unwrapped) ? (unwrapped.results ?? unwrapped.contacts ?? unwrapped) : unwrapped;
     return { contacts: Array.isArray(contacts) ? contacts : [] };
   });
 }
