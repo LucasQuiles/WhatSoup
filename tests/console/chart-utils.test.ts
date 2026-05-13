@@ -32,14 +32,18 @@ describe('chart style constants', () => {
   });
 
   it('TOOLTIP_STYLE exposes the full inline-style block including required CSS-token references', () => {
-    expect(TOOLTIP_STYLE.background).toBe('var(--color-d6)');
-    expect(TOOLTIP_STYLE.color).toBe('var(--color-t2)');
-    expect(TOOLTIP_STYLE.borderStyle).toBe('solid');
-    expect(TOOLTIP_STYLE.borderColor).toBe('var(--b3)');
-    expect(TOOLTIP_STYLE.borderRadius).toBe('var(--radius-sm)');
-    expect(TOOLTIP_STYLE.boxShadow).toBe('var(--shadow-md)');
-    expect(TOOLTIP_STYLE.fontFamily).toBe('var(--font-mono)');
-    expect(TOOLTIP_STYLE.padding).toBe('var(--sp-2) var(--sp-3)');
+    expect(TOOLTIP_STYLE).toEqual({
+      background: 'var(--color-d6)',
+      color: 'var(--color-t2)',
+      borderWidth: 'var(--bw)',
+      borderStyle: 'solid',
+      borderColor: 'var(--b3)',
+      borderRadius: 'var(--radius-sm)',
+      boxShadow: 'var(--shadow-md)',
+      fontSize: 'var(--text-xs)',
+      fontFamily: 'var(--font-mono)',
+      padding: 'var(--sp-2) var(--sp-3)',
+    });
   });
 });
 
