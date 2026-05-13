@@ -5,16 +5,29 @@ import { ToastContext, type ToastVariant, type ToastItem, type ToastContextValue
 
 let nextId = 0
 
+/** Maximum number of toasts displayed simultaneously. When the cap is reached
+ *  the oldest toast is evicted to make room for the new one. This prevents
+ *  unbounded queue growth during rapid error/notification storms. */
+export const MAX_TOASTS = 5
+
 export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<ToastItem[]>([])
 
   const toast = useCallback((variant: ToastVariant, message: string) => {
     const id = nextId++
-    setToasts(prev => [...prev, { id, variant, message }])
+    setToasts(prev => [...prev, { id, variant, message }].slice(-MAX_TOASTS))
   }, [])
 
   const remove = useCallback((id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
+  const dismiss = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
+  const clear = useCallback(() => {
+    setToasts([])
   }, [])
 
   const value: ToastContextValue = {
@@ -22,6 +35,8 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
     success: useCallback((msg: string) => toast('success', msg), [toast]),
     error: useCallback((msg: string) => toast('error', msg), [toast]),
     info: useCallback((msg: string) => toast('info', msg), [toast]),
+    dismiss,
+    clear,
   }
 
   return (
@@ -55,4 +70,3 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
     </ToastContext.Provider>
   )
 }
-

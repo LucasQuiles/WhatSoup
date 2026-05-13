@@ -13,6 +13,8 @@ export interface ToastContextValue {
   success: (message: string) => void
   error: (message: string) => void
   info: (message: string) => void
+  dismiss: (id: number) => void
+  clear: () => void
 }
 
 export const ToastContext = createContext<ToastContextValue | null>(null)

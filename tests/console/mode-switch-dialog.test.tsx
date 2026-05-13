@@ -29,6 +29,8 @@ function makeHarness() {
     success: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
   }
   const onClose = vi.fn()
   const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')

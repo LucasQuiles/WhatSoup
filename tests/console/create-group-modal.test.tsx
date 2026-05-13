@@ -86,6 +86,8 @@ interface ToastSpies extends ToastContextValue {
   error: ReturnType<typeof vi.fn>
   info: ReturnType<typeof vi.fn>
   toast: ReturnType<typeof vi.fn>
+  dismiss: ReturnType<typeof vi.fn>
+  clear: ReturnType<typeof vi.fn>
 }
 
 function makeToast(): ToastSpies {
@@ -94,6 +96,8 @@ function makeToast(): ToastSpies {
     error: vi.fn(),
     info: vi.fn(),
     toast: vi.fn(),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
   }
 }
 
