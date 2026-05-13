@@ -241,7 +241,7 @@ const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participa
 const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
   const quoted = extractQuotedContext(msg.rawMessage)
 
-  if (msg.type !== 'text' || !msg.content) {
+  if (msg.type !== 'text') {
     return (
       <>
         {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
@@ -250,10 +250,12 @@ const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
     )
   }
 
+  // F-043: text-type with null/empty content renders an em-dash placeholder
+  // instead of falling through to RichMedia (which produces an invisible bubble).
   return (
     <>
       {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
-      {formatWhatsAppText(msg.content, highlightQuery)}
+      {msg.content ? formatWhatsAppText(msg.content, highlightQuery) : <em className="text-t5">—</em>}
     </>
   )
 }

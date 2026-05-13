@@ -320,7 +320,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 Pull latest code, rebuild, and restart the fleet server?
               </p>
               <div className="flex justify-end gap-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Cancel</button>
+                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Cancel</button>
                 <button type="button" onClick={startUpdate} className="c-btn c-btn-primary">
                   <Download size={14} />
                   Update
@@ -364,7 +364,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 <span className="text-t2 font-mono text-data">{error}</span>
               </div>
               <div className="flex justify-end">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Close</button>
+                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Close</button>
               </div>
             </div>
           )}
@@ -412,7 +412,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 })}
               </div>
               <div className="flex justify-end gap-[var(--sp-2)] pt-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Skip</button>
+                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Skip</button>
                 <button
                   type="button"
                   onClick={restartSelectedInstances}

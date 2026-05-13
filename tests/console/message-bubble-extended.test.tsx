@@ -69,15 +69,15 @@ describe('text rendering', () => {
     expect(screen.getByText('Hello world')).toBeDefined()
   })
 
-  it('null content on text-type goes through RichMedia not formatWhatsAppText (source surprise)', () => {
-    // SOURCE SURPRISE: MessageContent checks `type !== 'text' || !msg.content`.
-    // A text-type message with null content falls into the RichMedia branch,
-    // not formatWhatsAppText — so the em-dash placeholder is NOT emitted.
-    // isMedia = (type !== 'text') so remains false → no type-badge in footer;
-    // bubble still renders with no crash and shows a timestamp in the footer.
+  it('null content on text-type renders em-dash placeholder (F-043)', () => {
+    // F-043 fix: MessageContent now splits the guard so type=text with null content
+    // renders an em-dash placeholder <em> instead of falling through to RichMedia.
+    // The bubble is visible and carries the right structure.
     render(<MessageBubble msg={msg({ type: 'text', content: null })} />)
-    // No crash — bubble mounted
+    // Bubble is mounted
     expect(document.querySelector('.c-msg-bubble')).toBeDefined()
+    // Em-dash placeholder is rendered
+    expect(screen.getByText('—')).toBeDefined()
     // isMedia is false for type='text' → no type-badge span in the footer
     const footer = document.querySelector('.font-mono') as HTMLElement
     const spans = Array.from(footer.querySelectorAll('span'))
@@ -348,12 +348,27 @@ describe('optimistic message (pk < 0, senderName: You)', () => {
     expect((check as HTMLElement).style.opacity).toBe('var(--opacity-soft)')
   })
 
-  it('detail card shows "pending" for optimistic pk<0', () => {
+  it('detail card shows "sending" for optimistic pk<0 (not -1) (F-044)', () => {
+    // F-044 fix: pk=-2 means optimistic-sending (not the failed sentinel pk=-1).
+    // DetailCard now shows "sending" for pk<0 and "failed" only for pk===-1.
     vi.useFakeTimers()
     render(<MessageBubble msg={outgoing({ pk: -2 })} />)
     fireEvent.mouseEnter(document.querySelector('.relative')!)
     act(() => { vi.advanceTimersByTime(500) })
-    expect(screen.getByText('pending')).toBeDefined()
+    expect(screen.getByText('sending')).toBeDefined()
+    expect(screen.queryByText('pending')).toBeNull()
+  })
+
+  it('detail card shows "failed" for failed-sentinel pk===-1 (F-044)', () => {
+    // F-044 fix: pk=-1 is the dedicated failed-message sentinel.
+    // DetailCard shows "failed" for pk===-1, matching the retry-button gate.
+    vi.useFakeTimers()
+    render(<MessageBubble msg={outgoing({ pk: -1 })} />)
+    fireEvent.mouseEnter(document.querySelector('.relative')!)
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(screen.getByText('failed')).toBeDefined()
+    expect(screen.queryByText('sending')).toBeNull()
+    expect(screen.queryByText('pending')).toBeNull()
   })
 
   it('detail card shows "pk:N" for persisted positive pk', () => {

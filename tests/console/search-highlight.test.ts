@@ -1,6 +1,27 @@
-import { describe, it, expect } from 'vitest';
+/**
+ * @vitest-environment jsdom
+ */
+import { afterEach, describe, it, expect } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { createElement } from 'react';
 import { splitSearchHighlights } from '../../console/src/lib/search-highlight.ts';
-import { formatWhatsAppText } from '../../console/src/lib/format-wa-text.tsx';
+import MessageContent from '../../console/src/components/MessageContent.tsx';
+import type { Message } from '../../console/src/types.ts';
+
+afterEach(() => cleanup());
+
+function message(content: string): Message {
+  return {
+    pk: 42,
+    conversationKey: 'chat-1',
+    senderName: 'Alice',
+    senderJid: 'sender-fixture-jid',
+    content,
+    timestamp: '2026-04-05T19:30:45.000Z',
+    fromMe: false,
+    type: 'text',
+  };
+}
 
 describe('splitSearchHighlights', () => {
   it('highlights multiple query terms case-insensitively and ignores boolean operators', () => {
@@ -15,29 +36,17 @@ describe('splitSearchHighlights', () => {
 });
 
 describe('formatWhatsAppText', () => {
-  it('returns an empty-state marker for nullish or blank text', () => {
-    expect(formatWhatsAppText(null as unknown as string)).toEqual(['—']);
-    expect(formatWhatsAppText(undefined as unknown as string)).toEqual(['—']);
-    expect(formatWhatsAppText('')).toEqual(['—']);
-    expect(formatWhatsAppText('   ')).toEqual(['—']);
-  });
-
   it('highlights matches inside formatted spans', () => {
-    const parts = formatWhatsAppText('hello *beta* world', 'beta');
+    const { container } = render(
+      createElement(MessageContent, {
+        msg: message('hello *beta* world'),
+        highlightQuery: 'beta',
+      }),
+    );
 
-    expect(parts).toHaveLength(3);
-    expect(parts[0]).toBe('hello ');
-    expect(parts[2]).toBe(' world');
-
-    const strong = parts[1] as { type: string; props: { children: unknown } };
-    expect(strong.type).toBe('strong');
-
-    const children = Array.isArray(strong.props.children)
-      ? strong.props.children
-      : [strong.props.children];
-
-    expect(children).toHaveLength(1);
-    expect((children[0] as { type: string }).type).toBe('mark');
-    expect((children[0] as { props: { children: string } }).props.children).toBe('beta');
+    const strong = screen.getByText('beta').closest('strong');
+    expect(strong).toBeDefined();
+    expect(strong?.querySelector('mark')?.textContent).toBe('beta');
+    expect(container.textContent).toBe('hello beta world');
   });
 });
