@@ -182,9 +182,10 @@ export function registerKnowledgeTools(
   if (allowedIndexes.length === 0) return;
 
   const memoryConfig = pineconeMemoryConfig();
-  const apiKey = process.env[memoryConfig.apiKeyEnv] ?? '';
+  const envVarName = memoryConfig.apiKeyEnv;
+  const apiKey = process.env[envVarName] ?? '';
   if (!apiKey) {
-    log.warn({ apiKeyEnv: memoryConfig.apiKeyEnv }, 'Pinecone API key env var not set — knowledge tools will not be registered');
+    log.warn('Pinecone API key env var not set — knowledge tools will not be registered');
     return;
   }
 
