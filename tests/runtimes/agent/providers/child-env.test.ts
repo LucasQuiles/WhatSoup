@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildBaseChildEnv } from '../../../../src/runtimes/agent/providers/child-env.ts';
+import {
+  buildBaseChildEnv,
+  FAILCLOSED_FLAG,
+} from '../../../../src/runtimes/agent/providers/child-env.ts';
 
 const MANAGED_ENV_KEYS = [
   'PATH',
@@ -18,6 +21,7 @@ const MANAGED_ENV_KEYS = [
   'PINECONE_API_KEY',
   'CUSTOM_SECRET',
   'ALLOW_M365_MUTATIONS',
+  'WHATSOUP_CONNECTOR_FAILCLOSED',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -92,26 +96,122 @@ describe('buildBaseChildEnv', () => {
     expect(env.HOME).toBe('/tmp/child-home');
   });
 
-  it("propagates ALLOW_M365_MUTATIONS when set (mw-bot M365 bypass)", () => {
+  it('propagates ALLOW_M365_MUTATIONS when set (mw-bot M365 bypass)', () => {
     resetManagedEnv({
-      PATH: "/usr/bin",
-      HOME: "/tmp/child-home",
-      ALLOW_M365_MUTATIONS: "1",
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ALLOW_M365_MUTATIONS: '1',
     });
 
     const env = buildBaseChildEnv();
 
-    expect(env).toHaveProperty("ALLOW_M365_MUTATIONS", "1");
+    expect(env).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
   });
 
-  it("omits ALLOW_M365_MUTATIONS when not set (default read-only)", () => {
+  it('omits ALLOW_M365_MUTATIONS when not set (default read-only)', () => {
     resetManagedEnv({
-      PATH: "/usr/bin",
-      HOME: "/tmp/child-home",
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
     });
 
     const env = buildBaseChildEnv();
 
-    expect(env).not.toHaveProperty("ALLOW_M365_MUTATIONS");
+    expect(env).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+  });
+});
+
+// ─── #411 fail-closed opt-in flag ─────────────────────────────────────────────
+// Default (flag unset): unconditional propagation, identical to pre-#411.
+// Opt-in (flag = '1'): the per-instance agentOptions.allowM365Mutations gates
+// propagation. Anything else (unset, missing, false) drops the var.
+
+describe('buildBaseChildEnv (#411 WHATSOUP_CONNECTOR_FAILCLOSED gate)', () => {
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(MANAGED_ENV_KEYS.map((key) => [key, process.env[key]]));
+    resetManagedEnv();
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  it('exports the canonical flag name', () => {
+    expect(FAILCLOSED_FLAG).toBe('WHATSOUP_CONNECTOR_FAILCLOSED');
+  });
+
+  it('flag unset: ALLOW_M365_MUTATIONS propagates unconditionally (current default)', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ALLOW_M365_MUTATIONS: '1',
+    });
+
+    // No agentOptions.allowM365Mutations supplied → still propagates,
+    // because the failclosed flag is unset (today's behavior).
+    const env = buildBaseChildEnv();
+    expect(env).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
+
+    // Even with allowM365Mutations: false, propagation continues when
+    // the flag is unset — the opts are simply ignored in default mode.
+    const env2 = buildBaseChildEnv({ allowM365Mutations: false });
+    expect(env2).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
+  });
+
+  it('flag=1 + allowM365Mutations=true: propagates', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+    });
+
+    const env = buildBaseChildEnv({ allowM365Mutations: true });
+
+    expect(env).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
+  });
+
+  it('flag=1 + allowM365Mutations missing: drops the var', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+    });
+
+    const env = buildBaseChildEnv();
+
+    expect(env).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+  });
+
+  it('flag=1 + allowM365Mutations=false: drops the var', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+    });
+
+    const env = buildBaseChildEnv({ allowM365Mutations: false });
+
+    expect(env).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+  });
+
+  it('flag values other than "1" are treated as unset (back-compat)', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: 'true', // not the canonical "1"
+    });
+
+    const env = buildBaseChildEnv();
+
+    expect(env).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
   });
 });

@@ -309,6 +309,20 @@ function validateAgentOptions(
     );
   }
 
+  // allowM365Mutations (#411 scaffold): per-instance opt-in for the
+  // `ALLOW_M365_MUTATIONS` env var when WHATSOUP_CONNECTOR_FAILCLOSED=1.
+  // The flag is off by default so this field is also effectively dormant
+  // until a follow-up PR flips the deny floor + flag.
+  if (
+    opts['allowM365Mutations'] !== undefined &&
+    typeof opts['allowM365Mutations'] !== 'boolean'
+  ) {
+    return err(
+      'agentOptions.allowM365Mutations',
+      'agentOptions.allowM365Mutations must be a boolean when provided',
+    );
+  }
+
   // provider: must be a canonical ID from the shared registry (#447). The
   // session.ts switches throw on unknown IDs, so rejecting drift here gives
   // the operator a clear 400-class error instead of a runtime crash.
