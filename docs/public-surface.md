@@ -243,6 +243,10 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
+| `cli:npm.guard-publication` | `npm run guard:publication` | `package.json` | stable | active | Publication audit guard (default mode) |
+| `cli:npm.guard-publication-all` | `npm run guard:publication:all` | `package.json` | stable | active | Verify tracked internal docs are represented in `docs/publication-audit.md` |
+| `cli:npm.guard-publication-release` | `npm run guard:publication:release` | `package.json` | stable | active | Verify tracked internal docs are public-clean before publication |
+| `cli:npm.guard-publication-staged` | `npm run guard:publication:staged` | `package.json` | stable | active | Publication audit guard for pre-commit use |
 | `cli:npm.guard-pre-push` | `npm run guard:pre-push` | `package.json` | internal | active | Pre-push hook; not part of operator surface but exposed for CI |
 | `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
 | `cli:npm.guard-public-surface-drift` | `npm run guard:public-surface-drift` | `package.json` | stable | active | Verify `docs/public-surface.md` and package.json scripts agree |
