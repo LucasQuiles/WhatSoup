@@ -1,10 +1,10 @@
 /**
  * Behavior tests for console/src/hooks/use-fleet.ts
  *
- * Tests all exported query-option factories and hooks:
+ * Tests all exported query-option factories and hooks (14 describe blocks):
  *   getLinesQueryOptions, getLineQueryOptions, getChatsQueryOptions,
  *   getMessagesQueryOptions, useLines, useLine, useChats, useMessages,
- *   useAccess, useLogs, useTyping, useFeed
+ *   useAccess, useLogs, useTyping, useFeed, computeKpis, query-key-isolation
  *
  * Source surprises:
  *   - useRealtime().connected gates polling: connected=true → refetchInterval=false
@@ -265,6 +265,16 @@ describe('getChatsQueryOptions', () => {
     expect(getChatsQueryOptions('alpha').refetchInterval).toBe(5000);
   });
 
+  it('accepts false to disable polling', () => {
+    const opts = getChatsQueryOptions('alpha', false);
+    expect(opts.refetchInterval).toBe(false);
+  });
+
+  it('accepts a custom interval', () => {
+    const opts = getChatsQueryOptions('alpha', 1000);
+    expect(opts.refetchInterval).toBe(1000);
+  });
+
   it('queryFn calls api.getChats with the correct name', async () => {
     apiMocks.getChats.mockResolvedValue([CHAT_1]);
     const opts = getChatsQueryOptions('alpha');
@@ -297,6 +307,16 @@ describe('getMessagesQueryOptions', () => {
 
   it('uses POLL_MESSAGES (3000) as default', () => {
     expect(getMessagesQueryOptions('alpha', 'ck-001').refetchInterval).toBe(3000);
+  });
+
+  it('accepts false to disable polling', () => {
+    const opts = getMessagesQueryOptions('alpha', 'ck-001', false);
+    expect(opts.refetchInterval).toBe(false);
+  });
+
+  it('accepts a custom interval', () => {
+    const opts = getMessagesQueryOptions('alpha', 'ck-001', 1500);
+    expect(opts.refetchInterval).toBe(1500);
   });
 
   it('queryFn calls api.getMessages with correct args', async () => {
@@ -431,6 +451,15 @@ describe('useChats', () => {
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.error?.message).toBe('forbidden');
   });
+
+  it('disables polling when WS connected', async () => {
+    wsConnected = true;
+    apiMocks.getChats.mockResolvedValue([CHAT_1]);
+    const client = makeClient();
+    const { result } = renderHook(() => useChats('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getChats).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -555,6 +584,14 @@ describe('useLogs', () => {
     expect(result.current.data).toHaveLength(1);
     expect(result.current.data?.[0].level).toBe('info');
     expect(result.current.data?.[0].msg).toBe('connected');
+  });
+
+  it('surfaces API errors', async () => {
+    apiMocks.getLogs.mockRejectedValue(new Error('unauthorized'));
+    const client = makeClient();
+    const { result } = renderHook(() => useLogs('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.message).toBe('unauthorized');
   });
 
   it('disables polling when WS connected', async () => {
