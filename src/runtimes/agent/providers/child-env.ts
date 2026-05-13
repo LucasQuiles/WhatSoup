@@ -61,9 +61,9 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
       XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-      // Per-instance overrides (mw-bot has ALLOW_M365_MUTATIONS=1 in its
-      // launchd plist to bypass the global claude-guards M365 read-only
-      // hook; other instances do not set it and remain read-only).
+      // Per-instance overrides can set ALLOW_M365_MUTATIONS=1 to bypass
+      // external M365 read-only hooks; most instances do not set it and
+      // remain read-only.
       //
       // When WHATSOUP_CONNECTOR_FAILCLOSED=1 (opt-in, #411) the value is
       // suppressed unless agentOptions.allowM365Mutations === true.

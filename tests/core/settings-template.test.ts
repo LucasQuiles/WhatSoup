@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
   defaultSettingsJson,
@@ -7,13 +9,21 @@ import {
   REQUIRED_DENY,
   applyRequiredDeny,
 } from '../../src/core/settings-template.ts';
+import {
+  CONNECTOR_MUTATION_DENY_FIXTURE,
+} from './fixtures/connector-mutation-deny-fixture.ts';
+
+const APPROVED_CONNECTOR_MUTATION_INVENTORY_SHA256 = readFileSync(
+  new URL('./fixtures/connector-mutation-deny-fixture.sha256', import.meta.url),
+  'utf8',
+).trim().split(/\s+/)[0];
 
 describe('defaultSettingsJson', () => {
   it('returns bypassPermissions settings for agent type', () => {
     const settings = defaultSettingsJson('agent');
     expect(settings).not.toBeNull();
     expect(settings!.permissions.defaultMode).toBe('bypassPermissions');
-    // Default deny is the (currently empty) REQUIRED_DENY floor.
+    // Default deny is the REQUIRED_DENY floor.
     expect(settings!.permissions.deny).toEqual([...REQUIRED_DENY]);
   });
 
@@ -144,30 +154,123 @@ describe('isValidPermissionsSettings', () => {
   });
 });
 
+const MUTATION_PREFIXES = [
+  'send-',
+  'create-',
+  'update-',
+  'delete-',
+  'move-',
+  'forward-',
+  'reply-',
+  'add-',
+  'remove-',
+  'mark-',
+  'upload-',
+  'copy-',
+  'cancel-',
+  'restore-',
+  'undo-',
+] as const;
+
+const MUTATION_EXACT = new Set([
+  'rename-drive-item',
+  'respond-to-event',
+  'upsert-dataverse-record',
+  'associate-dataverse-records',
+  'execute-dataverse-action',
+  'execute-dataverse-function',
+  'execute-tool',
+  'batch-dataverse',
+  'graph-batch',
+  'close-workbook-session',
+  'hub-manage-subscription',
+  'hub-recover-delta',
+  'hub-refresh-account',
+]);
+
+function m365ToolName(permission: string): string | null {
+  const prefix = 'mcp__plugin_microsoft_365_microsoft_365__';
+  return permission.startsWith(prefix) ? permission.slice(prefix.length) : null;
+}
+
 // ─── #411 deny-floor mechanism ────────────────────────────────────────────────
-// REQUIRED_DENY ships empty so existing fleets are observably unchanged. These
-// tests exercise the mechanism by feeding arbitrary inputs to applyRequiredDeny
-// and by asserting that the current REQUIRED_DENY value is empty (so the union
-// is a no-op).
+// REQUIRED_DENY is populated from the approved connector mutation inventory.
 
 describe('REQUIRED_DENY (deny-floor scaffold, #411)', () => {
-  it('ships empty so existing fleets see no behavior change', () => {
-    // This is a hard invariant: flipping the floor to non-empty is a
-    // separate maintainer-direction PR. Until that lands the floor MUST
-    // be `[]` so `mw-bot` and any other ALLOW_M365_MUTATIONS=1 fleet
-    // remains operational without code changes.
-    expect(REQUIRED_DENY).toEqual([]);
+  it('matches the approved G-D0 connector mutation fixture', () => {
+    const fixtureHash = createHash('sha256')
+      .update(`${CONNECTOR_MUTATION_DENY_FIXTURE.join('\n')}\n`)
+      .digest('hex');
+    expect(fixtureHash).toBe(APPROVED_CONNECTOR_MUTATION_INVENTORY_SHA256);
+    expect(REQUIRED_DENY).toEqual(CONNECTOR_MUTATION_DENY_FIXTURE);
   });
 
   it('REQUIRED_DENY is a frozen array', () => {
     expect(Object.isFrozen(REQUIRED_DENY)).toBe(true);
   });
+
+  it('contains full permission strings without duplicates', () => {
+    expect(REQUIRED_DENY.length).toBe(120);
+    expect(new Set(REQUIRED_DENY).size).toBe(REQUIRED_DENY.length);
+    for (const permission of REQUIRED_DENY) {
+      expect(permission).toMatch(/^mcp__[^_]+.*__/);
+      expect(permission).not.toMatch(/^(send|create|update|delete|move|reply|forward)-/);
+    }
+  });
+
+  it('covers the approved Google mutation categories', () => {
+    expect(REQUIRED_DENY).toEqual(expect.arrayContaining([
+      'mcp__claude_ai_Gmail__create_draft',
+      'mcp__claude_ai_Gmail__label_message',
+      'mcp__claude_ai_Gmail__unlabel_thread',
+      'mcp__claude_ai_Google_Calendar__create_event',
+      'mcp__claude_ai_Google_Calendar__respond_to_event',
+    ]));
+  });
+
+  it('covers the approved M365 mutation categories', () => {
+    expect(REQUIRED_DENY).toEqual(expect.arrayContaining([
+      'mcp__plugin_microsoft_365_microsoft_365__send-mail',
+      'mcp__plugin_microsoft_365_microsoft_365__create-event',
+      'mcp__plugin_microsoft_365_microsoft_365__delete-drive-item',
+      'mcp__plugin_microsoft_365_microsoft_365__create-list-item',
+      'mcp__plugin_microsoft_365_microsoft_365__add-group-member',
+      'mcp__plugin_microsoft_365_microsoft_365__create-task',
+      'mcp__plugin_microsoft_365_microsoft_365__delete-channel-message',
+      'mcp__plugin_microsoft_365_microsoft_365__update-mail-rule',
+      'mcp__plugin_microsoft_365_microsoft_365__upsert-dataverse-record',
+      'mcp__plugin_microsoft_365_microsoft_365__cancel-booking-appointment',
+      'mcp__plugin_microsoft_365_microsoft_365__create-page',
+      'mcp__plugin_microsoft_365_microsoft_365__delete-online-meeting',
+      'mcp__plugin_microsoft_365_microsoft_365__add-worksheet',
+      'mcp__plugin_microsoft_365_microsoft_365__add-attachment',
+      'mcp__plugin_microsoft_365_microsoft_365__execute-tool',
+      'mcp__plugin_microsoft_365_microsoft_365__graph-batch',
+      'mcp__plugin_microsoft_365_microsoft_365__hub-manage-subscription',
+    ]));
+  });
+
+  it('omits the read-only google-workspace namespace', () => {
+    expect(REQUIRED_DENY.some((permission) => permission.startsWith('mcp__google-workspace__')))
+      .toBe(false);
+  });
+
+  it('fixture M365 mutation-like tools are represented in REQUIRED_DENY', () => {
+    const denySet = new Set(REQUIRED_DENY);
+    for (const permission of CONNECTOR_MUTATION_DENY_FIXTURE) {
+      const toolName = m365ToolName(permission);
+      if (!toolName) continue;
+      const isMutation = MUTATION_EXACT.has(toolName)
+        || MUTATION_PREFIXES.some((prefix) => toolName.startsWith(prefix));
+      expect(isMutation).toBe(true);
+      expect(denySet.has(permission)).toBe(true);
+    }
+  });
 });
 
 describe('applyRequiredDeny (mechanism)', () => {
-  it('is a no-op when REQUIRED_DENY is empty (current shipping default)', () => {
-    expect(applyRequiredDeny([])).toEqual([]);
-    expect(applyRequiredDeny(['mcp__custom__*'])).toEqual(['mcp__custom__*']);
+  it('appends the floor when the caller deny list is empty', () => {
+    expect(applyRequiredDeny([])).toEqual([...REQUIRED_DENY]);
   });
 
   it('preserves caller order and is idempotent across calls', () => {
@@ -187,11 +290,33 @@ describe('applyRequiredDeny (mechanism)', () => {
   });
 });
 
-// Backward-compat proof: with REQUIRED_DENY = [], the merge result for any
-// previously-valid caller payload is observably equivalent to the pre-#411
-// implementation (caller's permissions block unchanged).
-describe('backward compatibility with REQUIRED_DENY=[] (current default)', () => {
-  it('mergeSettingsJson returns the caller deny verbatim when floor is empty', () => {
+describe('populated REQUIRED_DENY enforcement', () => {
+  it('defaultSettingsJson seeds the full deny floor', () => {
+    const settings = defaultSettingsJson('agent')!;
+    expect(settings.permissions.deny).toEqual([...REQUIRED_DENY]);
+  });
+
+  it('isValidPermissionsSettings accepts settings with the full floor', () => {
+    expect(isValidPermissionsSettings({
+      permissions: { allow: ['Bash'], deny: [...REQUIRED_DENY], defaultMode: 'bypassPermissions' },
+    })).toBe(true);
+  });
+
+  it('isValidPermissionsSettings rejects settings missing any floor entry', () => {
+    expect(isValidPermissionsSettings({
+      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
+    })).toBe(false);
+
+    expect(isValidPermissionsSettings({
+      permissions: {
+        allow: ['Bash'],
+        deny: REQUIRED_DENY.slice(1),
+        defaultMode: 'bypassPermissions',
+      },
+    })).toBe(false);
+  });
+
+  it('mergeSettingsJson unions the floor into otherwise-valid custom settings', () => {
     const custom = {
       permissions: {
         allow: ['Bash'],
@@ -200,17 +325,19 @@ describe('backward compatibility with REQUIRED_DENY=[] (current default)', () =>
       },
     };
     const result = mergeSettingsJson('agent', custom);
-    expect(result!.permissions.deny).toEqual(['mcp__one__*', 'mcp__two__*']);
+    expect(result!.permissions.allow).toEqual(['Bash']);
+    expect(result!.permissions.deny).toEqual([
+      'mcp__one__*',
+      'mcp__two__*',
+      ...REQUIRED_DENY,
+    ]);
   });
 
-  it('defaultSettingsJson.deny is empty when floor is empty', () => {
-    const settings = defaultSettingsJson('agent')!;
-    expect(settings.permissions.deny).toEqual([]);
-  });
-
-  it('isValidPermissionsSettings accepts deny:[] when floor is empty', () => {
-    expect(isValidPermissionsSettings({
-      permissions: { allow: ['Bash'], deny: [], defaultMode: 'bypassPermissions' },
-    })).toBe(true);
+  it('broad connector allows remain unchanged', () => {
+    expect(AGENT_DEFAULT_ALLOW).toEqual(expect.arrayContaining([
+      'mcp__plugin_*',
+      'mcp__claude_ai_*',
+      'mcp__google-workspace__*',
+    ]));
   });
 });

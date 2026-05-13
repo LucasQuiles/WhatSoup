@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleConfigUpdate } from '../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
+import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 
 // Mock external deps used by ops.ts
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
@@ -211,8 +212,9 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const settingsPath = path.join(claudeDir, 'settings.json');
     const written = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     expect(written.enabledPlugins).toEqual(plugins);
-    // Permissions should be preserved
+    // Custom allow is preserved; this rewrite also applies the deny floor.
     expect(written.permissions.allow).toEqual(['Bash']);
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
   });
 
   it('does not strip enabledPlugins from persisted config.json', async () => {
@@ -365,6 +367,7 @@ describe('handleConfigUpdate — enabledPlugins via agentOptions', () => {
     const written = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf8'));
     // Should be empty object (reset to global inheritance)
     expect(written.enabledPlugins).toEqual({});
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
   });
 });
 
