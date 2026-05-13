@@ -109,6 +109,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   const abortRef = useRef<AbortController | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hasErroredRef = useRef(false)
 
   // Only reset when the modal opens — NOT when lines changes (that would
   // reset mid-update when the fleet restarts and health poller refetches).
@@ -162,6 +163,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const startUpdate = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'updating' })
+    hasErroredRef.current = false
 
     // Abort controller so handleClose can cancel the in-flight fetch (RES-006)
     const controller = new AbortController()
@@ -177,6 +179,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           const ticket = await getApiTicket('api')
           headers = { 'Authorization': `Bearer ${ticket}` }
         } catch {
+          hasErroredRef.current = true
           dispatch({ type: 'setError', message: 'Update failed: unable to authenticate' })
           return
         }
@@ -190,6 +193,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
         })
 
         if (!response.ok) {
+          hasErroredRef.current = true
           dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
           return
         }
@@ -202,7 +206,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           try {
             const { done, value } = await reader.read()
             if (done) {
-              waitForFleetRestart()
+              if (!hasErroredRef.current) waitForFleetRestart()
               return
             }
             buffer += decoder.decode(value, { stream: true })
@@ -224,19 +228,20 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                   dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
                 }
               } else if (event === 'error') {
+                hasErroredRef.current = true
                 dispatch({ type: 'setError', message: data.message, step: data.step })
               }
             }
             await read()
           } catch {
             // Connection dropped — expected during restart
-            waitForFleetRestart()
+            if (!hasErroredRef.current) waitForFleetRestart()
           }
         }
         await read()
       } catch {
         // Aborted or network error — fleet may be restarting
-        waitForFleetRestart()
+        if (!hasErroredRef.current) waitForFleetRestart()
       }
     })()
   }, [waitForFleetRestart])

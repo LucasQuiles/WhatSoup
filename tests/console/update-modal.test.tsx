@@ -23,7 +23,7 @@ import {
   it,
   vi,
 } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 // ---------------------------------------------------------------------------
 // Mocks — hoisted before component import
@@ -60,6 +60,7 @@ import type { LineInstance } from '../../console/src/types'
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
   mockInvalidateQueries.mockReset()
   mockApiRestart.mockReset()
@@ -136,55 +137,6 @@ function makeHangingStream() {
   return new ReadableStream({ pull() { /* never enqueue or close */ } })
 }
 
-/**
- * Build a stream that emits chunks then hangs (never closes).
- * Use this when the SSE event should persist on-screen without being
- * overwritten by the done-branch calling waitForFleetRestart().
- */
-function makeStreamThenHang(chunks: string[]) {
-  const encoder = new TextEncoder()
-  let idx = 0
-  return new ReadableStream({
-    pull(controller) {
-      if (idx < chunks.length) {
-        controller.enqueue(encoder.encode(chunks[idx++]))
-      }
-      // After chunks are exhausted: neither enqueue nor close — stream hangs.
-    },
-  })
-}
-
-/**
- * Advance to restart-instances phase using real timers.
- * Strategy: empty stream body (done=true immediately) → waitForFleetRestart()
- * fires → setInterval at 2s → getVersion returns new SHA immediately →
- * poll clears on first tick.
- *
- * We use real timers with a poll interval of 2s and jest-style microtask
- * flushing via vi.runAllTimersAsync (not available) — instead we rely on
- * real time: getVersion resolves in a microtask, so the poll will fire
- * within ~2.1s in real time.
- *
- * For speed we advance via real setTimeout with a shorter test by using
- * a workaround: stub setInterval to call immediately.
- */
-async function advanceToRestartInstancesPhase(fetchMock?: () => Response) {
-  // Empty body → reader.done immediately → waitForFleetRestart()
-  const body = makeStreamBody([])
-  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
-    ok: true,
-    body,
-    ...(fetchMock?.() ?? {}),
-  })))
-  // Make getVersion resolve with a NEW sha so the poll clears on first tick
-  mockApiGetVersion.mockResolvedValue({
-    sha: 'newsha999',
-    remoteSha: 'newsha999',
-    updateAvailable: false,
-    checkedAt: '',
-  })
-}
-
 // ---------------------------------------------------------------------------
 // describe: closed state
 // ---------------------------------------------------------------------------
@@ -238,8 +190,10 @@ describe('UpdateModal — confirm phase', () => {
 
   it('renders a Cancel button (text content) in confirm phase', () => {
     render(<UpdateModal {...defaultProps()} />)
-    // aria-label="Close" but visible text is "Cancel"
+    // PR #580 aligned the accessible name with the visible text.
+    const cancelByName = screen.getByRole('button', { name: 'Cancel' })
     const cancelBtn = screen.getByText('Cancel')
+    expect(cancelByName).toBe(cancelBtn)
     expect(cancelBtn.tagName.toLowerCase()).toBe('button')
   })
 
@@ -383,10 +337,8 @@ describe('UpdateModal — error phase', () => {
   })
 
   it('shows error message from SSE error event', async () => {
-    // Stream emits the error chunk then HANGS (does not close) so the error
-    // phase is not overwritten by the done-branch calling waitForFleetRestart().
     const errChunk = 'event: error\ndata: {"message":"git pull failed","step":"pull"}\n\n'
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamThenHang([errChunk]) })))
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([errChunk]) })))
     render(<UpdateModal {...defaultProps()} />)
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
@@ -394,6 +346,8 @@ describe('UpdateModal — error phase', () => {
       const errEl = screen.getByText('git pull failed')
       expect(errEl.tagName.toLowerCase()).toBe('span')
     })
+    expect(screen.queryByText('Waiting for fleet server...')).toBeNull()
+    expect(mockApiGetVersion).not.toHaveBeenCalled()
   })
 
   it('renders a Close button (text) in error phase', async () => {
@@ -429,9 +383,18 @@ describe('UpdateModal — restart-instances phase', () => {
    * → setInterval(2s) → first api.getVersion returns NEW sha → poll clears →
    * dispatch setPhase restart-instances.
    *
-   * Real timers used. Tests await up to 4s for the 2s poll tick.
+   * The production poll waits 2s; capture and invoke the interval callback
+   * directly so these tests verify the transition without real-time sleeps.
    */
   async function renderAndAdvanceToRestartInstances(extraProps: Partial<Parameters<typeof defaultProps>[0]> = {}) {
+    let pollCallback: (() => Promise<void> | void) | undefined
+    vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === 'function') {
+        pollCallback = handler as () => Promise<void> | void
+      }
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([]) })))
     mockApiGetVersion.mockResolvedValue({
       sha: 'newsha999',
@@ -442,9 +405,12 @@ describe('UpdateModal — restart-instances phase', () => {
     render(<UpdateModal {...defaultProps(extraProps)} />)
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
+    await waitFor(() => expect(screen.getByText('Waiting for fleet server...')).toBeDefined())
+    await act(async () => {
+      await pollCallback?.()
+    })
     await waitFor(
       () => expect(screen.getByText('Restart instances with update?')).toBeDefined(),
-      { timeout: 4000 }
     )
   }
 
