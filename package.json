@@ -26,6 +26,7 @@
     "guard:repo:commit-msg": "npm run guard:repo -- --commit-msg",
     "guard:repo:staged": "npm run guard:repo -- --staged",
     "guard:node-pin-consistency": "node --experimental-strip-types scripts/check-node-pin-consistency.ts",
+    "guard:test-integrity": "bash scripts/test-integrity-ci.sh",
     "migrate-memory-config": "node --experimental-strip-types scripts/migrate-memory-config.ts",
     "fleet:rotate-token": "node --experimental-strip-types scripts/fleet-rotate-token.ts",
     "work-index:regen": "node --experimental-strip-types scripts/work-index.ts",
