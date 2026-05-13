@@ -9,10 +9,10 @@ export interface ToastItem {
 }
 
 export interface ToastContextValue {
-  toast: (variant: ToastVariant, message: string) => void
-  success: (message: string) => void
-  error: (message: string) => void
-  info: (message: string) => void
+  toast: (variant: ToastVariant, message: string) => number
+  success: (message: string) => number
+  error: (message: string) => number
+  info: (message: string) => number
   dismiss: (id: number) => void
   clear: () => void
 }

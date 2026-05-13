@@ -232,43 +232,59 @@ describe('ToastProvider', () => {
 
   // ---- dismiss / clear / cap ----
 
-  it('dismiss removes a toast by id', () => {
+  it('dismiss removes a toast by id returned from toast()', () => {
     const { getApi } = renderProvider();
     const api = getApi();
 
-    // Push three toasts; dismiss the middle one via the close button on its
-    // rendered alert (which calls the internal remove(), same path as dismiss()).
-    // Then confirm dismiss() as a public API by clearing state and re-pushing.
+    let betaId: number | undefined;
+
     act(() => {
       api.toast('info', 'alpha');
-      api.toast('success', 'beta');
+      betaId = api.toast('success', 'beta');
       api.toast('error', 'gamma');
     });
 
     expect(screen.getAllByRole('alert')).toHaveLength(3);
+    expect(betaId).toEqual(expect.any(Number));
 
-    // Dismiss "beta" through the rendered close button — verifies the remove path
-    fireEvent.click(within(alertWithText('beta')).getByRole('button', { name: 'Dismiss notification' }));
+    act(() => {
+      api.dismiss(betaId!);
+    });
 
     expect(alertTexts()).toEqual([
       'alphaDismiss notification',
       'gammaDismiss notification',
     ]);
+  });
 
-    // Now exercise dismiss() directly via the public API.
-    // Push a fourth toast and dismiss it programmatically.
-    // We identify its id as the button-click path above confirmed all prior ids
-    // consumed. Clear everything first for a clean slate.
-    act(() => { api.clear(); });
-    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+  it('success, error, and info return ids that can be dismissed', () => {
+    const { getApi } = renderProvider();
+    const api = getApi();
 
-    // Push "delta" — it is the only toast; dismiss via its close button to prove
-    // the id path round-trips through the internal remove() correctly.
-    act(() => { api.toast('info', 'delta'); });
-    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    let savedId: number | undefined;
+    let failedId: number | undefined;
+    let queuedId: number | undefined;
 
-    fireEvent.click(within(alertWithText('delta')).getByRole('button', { name: 'Dismiss notification' }));
-    expect(screen.queryAllByRole('alert')).toHaveLength(0);
+    act(() => {
+      savedId = api.success('saved');
+      failedId = api.error('failed');
+      queuedId = api.info('queued');
+    });
+
+    expect([savedId, failedId, queuedId]).toEqual([
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number),
+    ]);
+
+    act(() => {
+      api.dismiss(failedId!);
+    });
+
+    expect(alertTexts()).toEqual([
+      'savedDismiss notification',
+      'queuedDismiss notification',
+    ]);
   });
 
   it('dismiss is a no-op when id is not found', () => {

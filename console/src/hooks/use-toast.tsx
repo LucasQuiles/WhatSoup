@@ -16,10 +16,7 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const toast = useCallback((variant: ToastVariant, message: string) => {
     const id = nextId++
     setToasts(prev => [...prev, { id, variant, message }].slice(-MAX_TOASTS))
-  }, [])
-
-  const remove = useCallback((id: number) => {
-    setToasts(prev => prev.filter(t => t.id !== id))
+    return id
   }, [])
 
   const dismiss = useCallback((id: number) => {
@@ -61,7 +58,7 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
               <Toast
                 variant={t.variant}
                 message={t.message}
-                onClose={() => remove(t.id)}
+                onClose={() => dismiss(t.id)}
               />
             </motion.div>
           ))}
