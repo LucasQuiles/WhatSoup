@@ -420,14 +420,12 @@ describe('useUpdateCheck — toast notification', () => {
     const toastCtx = makeToastContext()
     const { wrapper } = makeWrapper(toastCtx)
 
-    renderHook(() => useUpdateCheck(), { wrapper })
+    const { result } = renderHook(() => useUpdateCheck(), { wrapper })
 
-    await waitFor(() => expect(toastCtx.info).toHaveBeenCalledTimes(0), {
-      // Give the effect time to fire if it incorrectly fires
-      timeout: 200,
-    })
+    // Wait for the query to fully settle before asserting toast non-fire.
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
-    expect(toastCtx.info).toHaveBeenCalledTimes(0)
+    expect(toastCtx.info).not.toHaveBeenCalled()
     expect(toastCtx.success).not.toHaveBeenCalled()
     expect(toastCtx.error).not.toHaveBeenCalled()
   })
@@ -440,13 +438,12 @@ describe('useUpdateCheck — toast notification', () => {
     const toastCtx = makeToastContext()
     const { wrapper } = makeWrapper(toastCtx)
 
-    renderHook(() => useUpdateCheck(), { wrapper })
+    const { result } = renderHook(() => useUpdateCheck(), { wrapper })
 
-    await waitFor(() => expect(toastCtx.info).toHaveBeenCalledTimes(0), {
-      timeout: 200,
-    })
+    // Wait for the query to reach error state before asserting toast non-fire.
+    await waitFor(() => expect(result.current.isError).toBe(true))
 
-    expect(toastCtx.info).toHaveBeenCalledTimes(0)
+    expect(toastCtx.info).not.toHaveBeenCalled()
   })
 
   it('notifiedRef prevents duplicate toasts across re-renders with same updateAvailable=true data', async () => {
