@@ -125,7 +125,7 @@ describe('getMetricsQueryOptions — enabled gating', () => {
     expect(getMetricsQueryOptions('', '24h').enabled).toBe(false)
   })
 
-  it('is disabled when name is whitespace-only (falsy check is !!name)', async () => {
+  it('is enabled when name is whitespace-only (!!name is truthy for non-empty strings)', async () => {
     // !!name: non-empty whitespace string is truthy — document the actual behaviour
     const { getMetricsQueryOptions } = await import('../../console/src/hooks/use-metrics.js')
     // '   ' is truthy, so enabled should be true (matches !!name semantics)
