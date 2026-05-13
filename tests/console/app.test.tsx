@@ -1,34 +1,9 @@
 /**
- * App.tsx — integration-shape tests.
+ * App.tsx behavior coverage.
  *
- * Tests the routing topology, provider wiring, Suspense/ErrorBoundary
- * placement, and keyboard-shortcut/update-check behaviours declared
- * in console/src/App.tsx.
- *
- * Strategy
- * --------
- * App.tsx is a lean 74-line root (no QueryClientProvider, no BrowserRouter —
- * those live in main.tsx). We render it inside the provider stack it expects
- * (QueryClientProvider → MemoryRouter → ToastProvider) using the same RTL +
- * MemoryRouter-replace pattern as nav-status.test.tsx.
- *
- * Heavy lazy pages (SoupKitchen, LineDetail, Inbox, Ops, UpdateModal) are
- * stubbed at the module level so jsdom never fetches real chunks.
- * Hook dependencies (use-fleet, use-update-check, use-keyboard-shortcuts,
- * use-websocket) are mocked to stable no-op returns so no real API calls
- * or WebSocket connections occur.
- *
- * Source surprises
- * ----------------
- * - All four pages AND UpdateModal are lazy-loaded (5 lazy() calls total).
- * - Nav and KeyboardShortcutsHelp are eagerly imported.
- * - Providers (QueryClientProvider, BrowserRouter, RealtimeProvider, ToastProvider)
- *   all live in main.tsx — App itself has zero provider declarations.
- * - alertCount / unreadCount are derived inline from useLines() data, not from
- *   a separate hook or context.
- * - useKeyboardShortcuts receives only { onHelp } — no onSearch at the App level.
- * - getStaticVersion reads a <meta name="fleet-version"> DOM tag; returns 'unknown'
- *   when absent (no such tag in jsdom).
+ * Tests routing, App-owned count wiring, keyboard shortcut behavior, and
+ * update-check integration while stubbing route pages that are covered in
+ * their own focused tests.
  *
  * @vitest-environment jsdom
  */
@@ -43,46 +18,30 @@ import {
 } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-
-// ---------------------------------------------------------------------------
-// Source text helper — used for structural assertions that don't need DOM
-// ---------------------------------------------------------------------------
-
-const repoRoot = resolve(import.meta.dirname, '../..');
-const appSource = readFileSync(resolve(repoRoot, 'console/src/App.tsx'), 'utf8');
 
 // ---------------------------------------------------------------------------
 // Module-level mocks — must be declared before any dynamic imports
 // ---------------------------------------------------------------------------
 
+let mockLines: Array<{ status: string; unread?: number; name?: string }> | undefined = undefined;
 vi.mock('../../console/src/hooks/use-fleet', () => ({
-  useLines: () => ({ data: undefined }),
+  useLines: () => ({ data: mockLines }),
 }));
 
 // Mutable update-check state so individual tests can override
 let mockUpdateData: Record<string, unknown> | undefined = undefined;
+let mockShowUpdateModal = false;
+let mockStaticVersion = 'unknown';
 const mockOpenUpdateModal = vi.fn();
 const mockCloseUpdateModal = vi.fn();
 vi.mock('../../console/src/hooks/use-update-check', () => ({
   useUpdateCheck: () => ({
     data: mockUpdateData,
-    showUpdateModal: false,
+    showUpdateModal: mockShowUpdateModal,
     openUpdateModal: mockOpenUpdateModal,
     closeUpdateModal: mockCloseUpdateModal,
   }),
-  // Returns 'unknown' (default) — no <meta> tag in jsdom
-  getStaticVersion: () => 'unknown',
-}));
-
-// Capture the onHelp callback that App passes to useKeyboardShortcuts
-// so tests can invoke it directly rather than synthesising keydown events.
-let capturedOnHelp: (() => void) | undefined;
-vi.mock('../../console/src/hooks/use-keyboard-shortcuts', () => ({
-  useKeyboardShortcuts: (handlers: { onHelp?: () => void }) => {
-    capturedOnHelp = handlers?.onHelp;
-  },
+  getStaticVersion: () => mockStaticVersion,
 }));
 
 // Nav renders inside the test tree and calls useRealtime
@@ -105,8 +64,10 @@ vi.mock('../../console/src/pages/Ops', () => ({
   default: () => createElement('div', { 'data-testid': 'page-ops' }, 'Ops'),
 }));
 vi.mock('../../console/src/components/UpdateModal', () => ({
-  default: ({ open }: { open: boolean; onClose: () => void; currentSha: string; lines: unknown[] }) =>
-    open ? createElement('div', { 'data-testid': 'update-modal' }, 'UpdateModal') : null,
+  default: ({ open, currentSha, lines }: { open: boolean; onClose: () => void; currentSha: string; lines: unknown[] }) =>
+    open
+      ? createElement('div', { 'data-testid': 'update-modal' }, `UpdateModal ${currentSha} lines:${lines.length}`)
+      : null,
 }));
 
 // ---------------------------------------------------------------------------
@@ -145,10 +106,12 @@ function renderApp(initialPath = '/') {
 }
 
 beforeEach(() => {
+  mockLines = undefined;
   mockUpdateData = undefined;
+  mockShowUpdateModal = false;
+  mockStaticVersion = 'unknown';
   mockOpenUpdateModal.mockClear();
   mockCloseUpdateModal.mockClear();
-  capturedOnHelp = undefined;
 });
 
 afterEach(() => {
@@ -156,96 +119,7 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// 1. Source-text structural assertions (no DOM — zero-cost)
-// ---------------------------------------------------------------------------
-
-describe('App.tsx source structure', () => {
-  it('imports Routes and Route from react-router-dom', () => {
-    expect(appSource).toContain("from 'react-router-dom'");
-    expect(appSource).toContain('Routes');
-    expect(appSource).toContain('Route');
-  });
-
-  it('all four page routes use lazy() for code splitting', () => {
-    expect(appSource).toContain("lazy(() => import('./pages/SoupKitchen'))");
-    expect(appSource).toContain("lazy(() => import('./pages/LineDetail'))");
-    expect(appSource).toContain("lazy(() => import('./pages/Inbox'))");
-    expect(appSource).toContain("lazy(() => import('./pages/Ops'))");
-  });
-
-  it('UpdateModal is also lazy-loaded (modal code splitting)', () => {
-    expect(appSource).toContain("lazy(() => import('./components/UpdateModal'))");
-  });
-
-  it('each page route is wrapped in an ErrorBoundary', () => {
-    const routeSection = appSource.slice(
-      appSource.indexOf('<Routes>'),
-      appSource.indexOf('</Routes>'),
-    );
-    const boundaryCount = (routeSection.match(/<ErrorBoundary>/g) ?? []).length;
-    expect(boundaryCount).toBe(4);
-  });
-
-  it('wildcard * route redirects to / with Navigate replace', () => {
-    expect(appSource).toContain('path="*"');
-    expect(appSource).toContain('<Navigate to="/" replace />');
-  });
-
-  it('page Routes are inside a Suspense with PageLoader fallback', () => {
-    expect(appSource).toContain('<Suspense fallback={<PageLoader />}>');
-  });
-
-  it('UpdateModal sits in its own Suspense with null fallback', () => {
-    expect(appSource).toContain('<Suspense fallback={null}>');
-    const nullFallbackIdx = appSource.indexOf('fallback={null}');
-    const updateModalIdx = appSource.indexOf('UpdateModal', nullFallbackIdx);
-    expect(updateModalIdx).toBeGreaterThan(nullFallbackIdx);
-  });
-
-  it('calls useKeyboardShortcuts with an onHelp handler', () => {
-    expect(appSource).toContain('useKeyboardShortcuts');
-    expect(appSource).toContain('onHelp');
-  });
-
-  it('KeyboardShortcutsHelp is NOT lazy-loaded (eagerly imported)', () => {
-    expect(appSource).toContain("import { KeyboardShortcutsHelp }");
-    expect(appSource).not.toContain("lazy(() => import('./components/KeyboardShortcutsHelp'))");
-  });
-
-  it('Nav is NOT lazy-loaded (eagerly imported)', () => {
-    expect(appSource).toContain("import Nav from './components/Nav'");
-    expect(appSource).not.toContain("lazy(() => import('./components/Nav'))");
-  });
-
-  it('/lines/:name route uses a dynamic :name param', () => {
-    expect(appSource).toContain('path="/lines/:name"');
-  });
-
-  it('alertCount is derived from lines where status !== "online"', () => {
-    expect(appSource).toContain("l.status !== 'online'");
-    expect(appSource).toContain('alertCount');
-  });
-
-  it('unreadCount is reduced over lines using l.unread', () => {
-    expect(appSource).toContain('unreadCount');
-    expect(appSource).toContain('l.unread');
-  });
-
-  it('PageLoader renders "Loading..." text (JSX text node)', () => {
-    // Source contains the JSX text node — single-quoted in JSX, not a JS string literal
-    expect(appSource).toContain('Loading...');
-  });
-
-  it('PageLoader node is inside a Suspense before Routes', () => {
-    const suspenseIdx = appSource.indexOf('<Suspense fallback={<PageLoader />}>');
-    const routesIdx = appSource.indexOf('<Routes>');
-    expect(suspenseIdx).toBeGreaterThan(0);
-    expect(routesIdx).toBeGreaterThan(suspenseIdx);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 2. DOM rendering — default route
+// 1. DOM rendering — default route
 // ---------------------------------------------------------------------------
 
 describe('App renders — default route /', () => {
@@ -272,7 +146,7 @@ describe('App renders — default route /', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. DOM rendering — each named route
+// 2. DOM rendering — each named route
 // ---------------------------------------------------------------------------
 
 describe('App renders — /inbox route', () => {
@@ -310,7 +184,7 @@ describe('App renders — /lines/:name route', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Wildcard / unknown route redirect
+// 3. Wildcard / unknown route redirect
 // ---------------------------------------------------------------------------
 
 describe('App — wildcard redirect', () => {
@@ -324,7 +198,7 @@ describe('App — wildcard redirect', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. ErrorBoundary catches per-route errors
+// 4. ErrorBoundary catches per-route errors
 // ---------------------------------------------------------------------------
 
 describe('App — ErrorBoundary catches route errors', () => {
@@ -366,7 +240,7 @@ describe('App — ErrorBoundary catches route errors', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. KeyboardShortcutsHelp modal toggle
+// 5. KeyboardShortcutsHelp modal toggle
 // ---------------------------------------------------------------------------
 
 describe('App — KeyboardShortcutsHelp modal', () => {
@@ -377,15 +251,9 @@ describe('App — KeyboardShortcutsHelp modal', () => {
     });
   });
 
-  it('App passes an onHelp callback to useKeyboardShortcuts', async () => {
+  it('pressing ? opens the keyboard shortcuts dialog', async () => {
     await act(async () => { renderApp('/'); });
-    // The mock captures the handlers object; onHelp must be a function
-    expect(typeof capturedOnHelp).toBe('function');
-  });
-
-  it('invoking the onHelp callback opens the keyboard shortcuts dialog', async () => {
-    await act(async () => { renderApp('/'); });
-    await act(async () => { capturedOnHelp?.(); });
+    await act(async () => { fireEvent.keyDown(document, { key: '?' }); });
     await waitFor(() => {
       const dialog = screen.getByRole('dialog');
       expect(dialog.getAttribute('aria-modal')).toBe('true');
@@ -394,10 +262,8 @@ describe('App — KeyboardShortcutsHelp modal', () => {
 
   it('clicking the backdrop closes the dialog (onClose prop)', async () => {
     await act(async () => { renderApp('/'); });
-    // Open
-    await act(async () => { capturedOnHelp?.(); });
+    await act(async () => { fireEvent.keyDown(document, { key: '?' }); });
     await waitFor(() => screen.getByRole('dialog'));
-    // Close via backdrop click (onClose prop)
     const dialog = screen.getByRole('dialog');
     const backdrop = dialog.parentElement!;
     await act(async () => { fireEvent.click(backdrop); });
@@ -405,13 +271,30 @@ describe('App — KeyboardShortcutsHelp modal', () => {
       expect(screen.queryByRole('dialog')).toBeNull();
     });
   });
+
+  it('number shortcuts navigate between App routes', async () => {
+    await act(async () => { renderApp('/'); });
+    await waitFor(() => screen.getByTestId('page-soup-kitchen'));
+
+    await act(async () => { fireEvent.keyDown(document, { key: '2' }); });
+    await waitFor(() => {
+      expect(screen.getByTestId('page-inbox')).toBeDefined();
+      expect(screen.queryByTestId('page-soup-kitchen')).toBeNull();
+    });
+
+    await act(async () => { fireEvent.keyDown(document, { key: '3' }); });
+    await waitFor(() => {
+      expect(screen.getByTestId('page-ops')).toBeDefined();
+      expect(screen.queryByTestId('page-inbox')).toBeNull();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
-// 7. Update-available integration
+// 6. Nav counts and update-available integration
 // ---------------------------------------------------------------------------
 
-describe('App — update check integration', () => {
+describe('App — nav counts and update check integration', () => {
   it('does not render UpdateModal when no update data', async () => {
     mockUpdateData = undefined;
     await act(async () => { renderApp('/'); });
@@ -425,14 +308,48 @@ describe('App — update check integration', () => {
     });
   });
 
+  it('derives Nav alert and unread counts from line data', async () => {
+    mockLines = [
+      { name: 'primary', status: 'online', unread: 2 },
+      { name: 'sandbox', status: 'degraded', unread: 3 },
+      { name: 'operator', status: 'unreachable' },
+    ];
+
+    await act(async () => { renderApp('/'); });
+
+    await waitFor(() => {
+      expect(screen.getByText('2 alerts')).toBeDefined();
+      expect(screen.getByText('5')).toBeDefined();
+    });
+  });
+
+  it('line detail route keeps Soup Kitchen active in Nav', async () => {
+    await act(async () => { renderApp('/lines/primary-line'); });
+
+    await waitFor(() => screen.getByTestId('page-line-detail'));
+    const soupLink = screen.getByText('Soup Kitchen').closest('a');
+    expect(soupLink?.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('static version is shown in Nav when update data has not loaded', async () => {
+    mockStaticVersion = 'static-sha';
+
+    await act(async () => { renderApp('/'); });
+
+    await waitFor(() => {
+      expect(screen.getByText('vstatic-sha')).toBeDefined();
+    });
+  });
+
   it('update sha from query data overrides static version in Nav', async () => {
+    mockStaticVersion = 'static-sha';
     mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
     await act(async () => { renderApp('/'); });
     await waitFor(() => {
       const btn = screen.getByRole('button');
-      // Nav renders: "live-sha → new-sha" inside the update button
       expect(btn.textContent).toContain('live-sha');
       expect(btn.textContent).toContain('new-sha');
+      expect(btn.textContent).not.toContain('static-sha');
     });
   });
 
@@ -442,5 +359,20 @@ describe('App — update check integration', () => {
     await waitFor(() => screen.getByRole('button'));
     fireEvent.click(screen.getByRole('button'));
     expect(mockOpenUpdateModal).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders UpdateModal with the current sha and line list when open', async () => {
+    mockShowUpdateModal = true;
+    mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
+    mockLines = [
+      { name: 'primary', status: 'online', unread: 1 },
+      { name: 'sandbox', status: 'degraded' },
+    ];
+
+    await act(async () => { renderApp('/'); });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('update-modal').textContent).toBe('UpdateModal live-sha lines:2');
+    });
   });
 });
