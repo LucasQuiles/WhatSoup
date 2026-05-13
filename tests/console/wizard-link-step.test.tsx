@@ -390,10 +390,8 @@ describe('LinkStep — server-sent error event', () => {
     })
 
     expect(screen.getByText('Authentication failed')).toBeDefined()
-    // parseAuthErrorMessage('') returns 'Connection lost'; component falls back
-    // to the hardcoded message only when errorMsg is empty.
-    const msg = screen.getByText(/Connection lost|unexpected error/)
-    expect(msg.textContent).toMatch(/Connection lost|unexpected error/)
+    expect(screen.getByText('Connection lost')).toBeDefined()
+    expect(screen.queryByText(/unexpected error/)).toBeNull()
   })
 
   it('closes the EventSource on a server-sent error event', async () => {
