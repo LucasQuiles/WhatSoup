@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { chmodSync, mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { writePermissionsSettings } from '../../src/core/workspace.ts';
+import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 
 describe('writePermissionsSettings', () => {
   let tmpDirs: string[] = [];
@@ -36,6 +37,7 @@ describe('writePermissionsSettings', () => {
 
     const written = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(written.permissions.allow).toEqual(['Bash', 'Read']);
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
     expect(written.permissions.defaultMode).toBe('bypassPermissions');
   });
 
@@ -65,6 +67,7 @@ describe('writePermissionsSettings', () => {
     // Both hooks and permissions should be present
     expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('/path/to/hook.sh');
     expect(written.permissions.allow).toEqual(['Bash']);
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
   });
 
   it('tightens an existing settings.json file to private mode', () => {
@@ -168,6 +171,7 @@ describe('writePermissionsSettings', () => {
 
     const written = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(written.permissions.allow).toEqual(['NewTool']);
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
     expect(written.hooks).toEqual({ PreToolUse: [] });
     expect(written.env).toEqual({ SOME_VAR: 'value' });
   });
@@ -190,6 +194,7 @@ describe('writePermissionsSettings', () => {
     const written = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(written.enabledPlugins).toEqual({ 'sdlc-os@sdlc-os-dev': false, 'tmup@tmup-dev': true });
     expect(written.permissions.allow).toEqual(['Bash']);
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
   });
 
   it('does not write enabledPlugins key when not provided', () => {
@@ -206,7 +211,7 @@ describe('writePermissionsSettings', () => {
     expect(written).toEqual({
       permissions: {
         allow: ['Bash'],
-        deny: [],
+        deny: REQUIRED_DENY,
         defaultMode: 'bypassPermissions',
       },
     });
@@ -225,5 +230,6 @@ describe('writePermissionsSettings', () => {
 
     const written = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(written.permissions.allow).toEqual(['Bash']);
+    expect(written.permissions.deny).toEqual(REQUIRED_DENY);
   });
 });

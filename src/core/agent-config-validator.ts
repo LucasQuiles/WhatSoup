@@ -309,10 +309,9 @@ function validateAgentOptions(
     );
   }
 
-  // allowM365Mutations (#411 scaffold): per-instance opt-in for the
+  // allowM365Mutations (#411): per-instance opt-in for propagating the
   // `ALLOW_M365_MUTATIONS` env var when WHATSOUP_CONNECTOR_FAILCLOSED=1.
-  // The flag is off by default so this field is also effectively dormant
-  // until a follow-up PR flips the deny floor + flag.
+  // The REQUIRED_DENY floor is enforced separately in settings templates.
   if (
     opts['allowM365Mutations'] !== undefined &&
     typeof opts['allowM365Mutations'] !== 'boolean'

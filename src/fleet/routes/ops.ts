@@ -15,7 +15,7 @@ import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 import { configRoot, dataRoot, stateRoot, repoRoot } from '../paths.ts';
 import { writePermissionsSettings } from '../../core/workspace.ts';
-import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
+import { applyRequiredDeny, defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
 import type { PermissionsSettings } from '../../core/settings-template.ts';
 import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
 import { validateInstanceConfig } from '../../core/agent-config-validator.ts';
@@ -530,7 +530,13 @@ export async function handleConfigUpdate(
           let existingPerms = defaultSettingsJson('agent')!.permissions;
           try {
             const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-            if (existing.permissions) existingPerms = existing.permissions;
+            if (existing.permissions) {
+              const permissions = existing.permissions as PermissionsSettings['permissions'];
+              existingPerms = {
+                ...permissions,
+                deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
+              };
+            }
           } catch { /* use defaults */ }
           writePermissionsSettings(claudeDir, {
             permissions: existingPerms,

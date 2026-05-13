@@ -17,7 +17,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { defaultSettingsJson, type PermissionsSettings } from './settings-template.ts';
+import {
+  applyRequiredDeny,
+  defaultSettingsJson,
+  type PermissionsSettings,
+} from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 import { createChildLogger } from '../logger.ts';
@@ -201,7 +205,11 @@ export function writePermissionsSettings(
       }
     }
 
-    const merged: Record<string, unknown> = { ...existing, permissions: settings.permissions };
+    const mergedPermissions = {
+      ...settings.permissions,
+      deny: applyRequiredDeny(settings.permissions.deny),
+    };
+    const merged: Record<string, unknown> = { ...existing, permissions: mergedPermissions };
     if (settings.enabledPlugins !== undefined) {
       // null or {} = reset to global inheritance; non-empty object = override
       merged.enabledPlugins = settings.enabledPlugins ?? {};
@@ -217,7 +225,8 @@ export function writePermissionsSettings(
  * Ensure a settings.json with a permissions block exists in claudeDir.
  * - If settings.json doesn't exist, writes the default for the instance type.
  * - If settings.json exists but has no permissions block, adds the default.
- * - If settings.json already has a permissions block, does nothing (preserves custom settings).
+ * - If settings.json already has a permissions block, leaves it alone unless another
+ *   config-driven rewrite is needed.
  * - For non-agent types, does nothing.
  *
  * This is the safety-net called from AgentRuntime.start() to prevent
@@ -243,6 +252,13 @@ export function ensurePermissionsSettings(
         // Apply enabledPlugins from config — always overwrite to stay in sync
         if (enabledPlugins) {
           existing.enabledPlugins = enabledPlugins;
+          if (existing.permissions && typeof existing.permissions === 'object') {
+            const permissions = existing.permissions as PermissionsSettings['permissions'];
+            existing.permissions = {
+              ...permissions,
+              deny: applyRequiredDeny(Array.isArray(permissions.deny) ? permissions.deny : []),
+            };
+          }
           writePrivateFileSync(settingsPath, JSON.stringify(existing, null, 2));
         }
         if (existing.permissions) return; // Already has permissions — don't overwrite

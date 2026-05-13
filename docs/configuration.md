@@ -338,7 +338,7 @@ npm run migrate-memory-config
 Migrate one instance with a backup:
 
 ```bash
-npm run migrate-memory-config -- --instance mw-bot --write
+npm run migrate-memory-config -- --instance example-agent --write
 ```
 
 The migrator only reads and writes `config.json`. It does not touch `tokens.env`, `auth/`, `bot.db`, provider keychains, or WhatsApp session credentials, so a successful config migration does not require a QR re-auth.
@@ -470,22 +470,26 @@ Controls which Claude Code plugins are loaded for this instance's sessions. Each
 
 ### Connector mutation policy (#411)
 
-Background: agent instances historically run with `permissions.defaultMode: bypassPermissions` and a wide tool allowlist (`mcp__google-workspace__*`, `mcp__plugin_*`, etc.). Mutation-capable tools (send mail, drive write, calendar mutations, M365 write tools) are gated only by the out-of-tree `claude-guards` hook and by whether `ALLOW_M365_MUTATIONS=1` is set in the parent env. Either gate can be bypassed without the repo noticing, which is the root cause investigated in #411.
+Background: agent instances historically run with `permissions.defaultMode: bypassPermissions` and a wide tool allowlist (`mcp__google-workspace__*`, `mcp__plugin_*`, etc.). Mutation-capable tools (send mail, drive write, calendar mutations, M365 write tools) were gated only by out-of-tree hooks and by whether `ALLOW_M365_MUTATIONS=1` is set in the parent env. Either gate can be bypassed without the repo noticing, which is the root cause investigated in #411.
 
-To give the repo a real say without breaking existing fleets, two mechanisms are scaffolded:
+To give the repo a real say without rewriting existing on-disk settings, two mechanisms are active:
 
 **1. `REQUIRED_DENY` floor (`src/core/settings-template.ts`).**
 A repo-owned readonly list of deny patterns that `mergeSettingsJson` always unions into the resulting deny array, and that `isValidPermissionsSettings` requires as a subset. Custom `settingsJson` payloads cannot remove a floor entry.
 
-The shipping default is `REQUIRED_DENY = []`. With an empty floor every existing payload is observably unchanged. A follow-up PR (maintainer call) will populate the floor with the mutation-capable patterns once the override surface is named.
+The floor is populated with full permission strings for the mutation-capable connector tools approved in the #411 inventory. It covers Gmail and Google Calendar mutation tools exposed through the `mcp__claude_ai_*` namespace, Microsoft 365 mail, calendar, file, list, contact, group, task, chat, channel, Dataverse, Booking, OneNote, meeting, workbook, attachment, dynamic execution, batch, and subscription mutation tools. The read-only `mcp__google-workspace__*` namespace is intentionally not denied.
+
+The source of truth is `REQUIRED_DENY`; this document describes categories only. New defaults, merged settings, and repaired settings receive the floor. Existing `.claude/settings.json` files that are not rewritten keep their current contents.
 
 **2. `WHATSOUP_CONNECTOR_FAILCLOSED` env flag (`src/runtimes/agent/providers/child-env.ts`).**
 
-- **Unset (default, today's behavior):** `buildBaseChildEnv` propagates `ALLOW_M365_MUTATIONS` to the agent subprocess whenever it is set in the parent env. This is exactly the pre-#411 path; fleets like `mw-bot` that set `ALLOW_M365_MUTATIONS=1` in their launchd plist keep working unchanged.
+- **Unset (default, today's behavior):** `buildBaseChildEnv` propagates `ALLOW_M365_MUTATIONS` to the agent subprocess whenever it is set in the parent env. This is exactly the pre-#411 child-env path; existing parent-process opt-ins keep working unchanged.
 - **Set to `"1"` (opt-in):** `buildBaseChildEnv` drops `ALLOW_M365_MUTATIONS` from the child env *unless* the instance has `agentOptions.allowM365Mutations: true`. This converts the env-var gate into a per-instance allowlist that can be audited at config-write time.
 - Any other value of the flag is treated as unset (back-compat).
 
-**How operators enable fail-closed mode (when the time comes):**
+`WHATSOUP_CONNECTOR_FAILCLOSED` only controls child-env propagation of `ALLOW_M365_MUTATIONS`. It does not gate the `REQUIRED_DENY` floor.
+
+**How operators enable fail-closed child-env propagation:**
 
 ```bash
 # 1. In the launchd plist / systemd unit for the WhatSoup parent process:
@@ -494,7 +498,7 @@ export WHATSOUP_CONNECTOR_FAILCLOSED=1
 # 2. For each instance that legitimately needs mutation access:
 #    config.json
 {
-  "name": "mw-bot",
+  "name": "mutation-enabled-agent",
   "type": "agent",
   "agentOptions": {
     "sessionScope": "per_chat",
@@ -503,8 +507,6 @@ export WHATSOUP_CONNECTOR_FAILCLOSED=1
   }
 }
 ```
-
-Until the maintainer flips the flag in a follow-up PR and populates `REQUIRED_DENY`, both mechanisms are dormant: shipping `REQUIRED_DENY = []` makes the merge a no-op, and the unset flag makes the child-env path identical to before.
 
 ### Validation Rules Summary
 

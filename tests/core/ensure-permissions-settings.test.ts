@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ensurePermissionsSettings } from '../../src/core/workspace.ts';
+import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
 
 describe('ensurePermissionsSettings', () => {
   let tmpDirs: string[] = [];
@@ -52,6 +53,7 @@ describe('ensurePermissionsSettings', () => {
     const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     // Should NOT overwrite — custom settings preserved
     expect(settings.permissions.allow).toEqual(['CustomTool']);
+    expect(settings.permissions.deny).toEqual(['BlockedTool']);
   });
 
   it('adds permissions to existing settings.json that only has hooks', () => {
@@ -95,7 +97,7 @@ describe('ensurePermissionsSettings', () => {
     expect(existsSync(join(claudeDir, 'settings.json'))).toBe(true);
   });
 
-  it('always overwrites enabledPlugins from config even if already set', () => {
+  it('always overwrites enabledPlugins from config and applies the deny floor', () => {
     const cwd = makeTmp();
     const claudeDir = join(cwd, '.claude');
     mkdirSync(claudeDir, { recursive: true });
@@ -112,8 +114,9 @@ describe('ensurePermissionsSettings', () => {
 
     const settings = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(settings.enabledPlugins).toEqual(updated);
-    // Permissions should NOT be overwritten
+    // Custom allow remains, but the repo-owned deny floor is applied because this path rewrites settings.
     expect(settings.permissions.allow).toEqual(['Bash']);
+    expect(settings.permissions.deny).toEqual(REQUIRED_DENY);
   });
 
   it('writes enabledPlugins alongside defaults when no settings.json exists', () => {

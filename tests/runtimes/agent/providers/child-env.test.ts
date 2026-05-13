@@ -96,7 +96,7 @@ describe('buildBaseChildEnv', () => {
     expect(env.HOME).toBe('/tmp/child-home');
   });
 
-  it('propagates ALLOW_M365_MUTATIONS when set (mw-bot M365 bypass)', () => {
+  it('propagates ALLOW_M365_MUTATIONS when set by an opted-in instance', () => {
     resetManagedEnv({
       PATH: '/usr/bin',
       HOME: '/tmp/child-home',
