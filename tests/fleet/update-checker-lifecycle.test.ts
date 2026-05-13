@@ -89,6 +89,20 @@ describe('UpdateChecker — start() / stop() lifecycle', () => {
     const checker = new UpdateChecker('/tmp/fake');
     expect(() => checker.stop()).not.toThrow();
   });
+
+  it('start() unrefs the interval handle so it does not pin the event loop', () => {
+    // Use real timers so we get a genuine Node.js Timeout object with hasRef().
+    vi.useRealTimers();
+    const checker = new UpdateChecker('/tmp/fake');
+    vi.spyOn(checker, 'checkNow').mockResolvedValue({} as any);
+
+    checker.start();
+    const timer = (checker as unknown as { timer: NodeJS.Timeout | null }).timer;
+    expect(timer).not.toBeNull();
+    // hasRef() === false means the timer will not keep the event loop alive.
+    expect(timer!.hasRef()).toBe(false);
+    checker.stop();
+  });
 });
 
 describe('UpdateChecker — checkNow() local rev-parse failure', () => {
