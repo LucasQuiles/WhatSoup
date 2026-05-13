@@ -111,7 +111,7 @@ Reference docs:
 | Concept | Path |
 | --- | --- |
 | Per-instance SQLite DB | `~/.local/share/whatsoup/instances/<name>/bot.db` |
-| Fleet token file | `~/.config/whatsoup/fleet-token` |
+| Fleet token file | `~/.config/whatsoup/fleet-tokens.json` (`active`) |
 | Fleet logs | `~/.local/share/whatsoup/fleet-{stdout,stderr}.log` |
 | mw-mind bridge logs | `~/.local/share/mw-mind/whatsapp-bridge-{stdout,stderr}.log` |
 | mw-mind WhatSoup MCP proxy | `/Users/mw/LAB/WhatSoup/deploy/mcp/whatsoup-proxy.ts` |
@@ -173,8 +173,9 @@ polled instance is unreachable. If that name is not expected, add
 
 - Always `export PATH=/opt/homebrew/bin:$PATH` before `npm`/`npx`/`node`
   commands over SSH so the pre-commit hook can resolve `npx lint-staged`.
-- Untracked `scripts/p36-*` probes are Phase 3 investigation artifacts —
-  do not delete. See `mwlab-transcription-pinecone.md`.
+- The legacy `scripts/p36-*` evidence probes have been removed; the
+  productionized path is `npm run backfill-enrichment -- --strict`. See
+  `mwlab-transcription-pinecone.md`.
 - `artifacts/plan-hardening/…` is the run-scoped evidence root for this
   plan family. Covered by `.gitignore`.
 

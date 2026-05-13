@@ -1,12 +1,19 @@
 // src/core/types.ts
 // Shared types for the core layer.
 
+import type { Readable } from 'node:stream';
+
+export type OutboundMediaSource =
+  | { buffer: Buffer; stream?: never; url?: never }
+  | { stream: Readable; buffer?: never; url?: never }
+  | { url: string; buffer?: never; stream?: never };
+
 export type OutboundMedia =
-  | { type: 'image'; buffer: Buffer; caption?: string; mimetype?: string; viewOnce?: boolean }
-  | { type: 'document'; buffer: Buffer; filename: string; mimetype: string; caption?: string }
-  | { type: 'audio'; buffer: Buffer; mimetype: string; ptt?: boolean; seconds?: number }
-  | { type: 'video'; buffer: Buffer; caption?: string; mimetype?: string; ptv?: boolean; gifPlayback?: boolean; viewOnce?: boolean }
-  | { type: 'sticker'; buffer: Buffer; mimetype?: string; isAnimated?: boolean };
+  | ({ type: 'image'; caption?: string; mimetype?: string; viewOnce?: boolean } & OutboundMediaSource)
+  | ({ type: 'document'; filename: string; mimetype: string; caption?: string } & OutboundMediaSource)
+  | ({ type: 'audio'; mimetype: string; ptt?: boolean; seconds?: number } & OutboundMediaSource)
+  | ({ type: 'video'; caption?: string; mimetype?: string; ptv?: boolean; gifPlayback?: boolean; viewOnce?: boolean } & OutboundMediaSource)
+  | ({ type: 'sticker'; mimetype?: string; isAnimated?: boolean } & OutboundMediaSource);
 
 export interface SubmissionReceipt {
   waMessageId: string | null;

@@ -2,25 +2,59 @@
 // WebSocket server for real-time console updates.
 // Design: invalidation-first — small events trigger React Query refetch.
 // Exception: typing_update pushes full state (too latency-sensitive for refetch).
+//
+// Auth model (issue #237):
+//   - Preferred: short-lived ?ticket=<...> validated against the in-process
+//     ticket store. The browser fetches the ticket via POST /api/ws-ticket
+//     (Bearer auth) so the root fleet token never travels in a URL.
+//   - Legacy: ?token=<fleetToken> still works for one rollout cycle; it
+//     emits a one-shot deprecation warning per server instance so operators
+//     can spot tooling that hasn't migrated yet.
 
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
 import { URL } from 'node:url';
-import { timingSafeEqual } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import type { TicketStore } from './ws-ticket.ts';
 
 const log = createChildLogger('fleet:ws');
 
+function describeAuthRejectUrl(rawUrl: string | undefined): {
+  path: string;
+  hasTicket: boolean;
+  hasLegacyToken: boolean;
+} {
+  try {
+    const url = new URL(rawUrl ?? '', 'http://localhost');
+    return {
+      path: url.pathname,
+      hasTicket: url.searchParams.has('ticket'),
+      hasLegacyToken: url.searchParams.has('token'),
+    };
+  } catch {
+    return { path: '<invalid>', hasTicket: false, hasLegacyToken: false };
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Event types — matches Phase 4 spec consensus
+// Event types — matches the realtime/WebSocket spec consensus
 // ---------------------------------------------------------------------------
 
 /** Invalidation events — trigger React Query refetch on the client. */
 export interface WsInvalidationEvent {
-  type: 'instance_status' | 'message_received' | 'chat_updated' | 'log_entry' | 'feed_event' | 'access_changed';
+  type:
+    | 'instance_status'
+    | 'message_received'
+    | 'chat_updated'
+    | 'log_entry'
+    | 'feed_event'
+    | 'access_changed'
+    | 'lid_conflict';
   instance: string;
   /** Optional conversation key for scoped invalidation. */
   conversationKey?: string;
+  /** Optional LID for lid_conflict invalidations. */
+  lid?: string;
   /** Optional message pk for precise cache updates. */
   messagePk?: number;
 }
@@ -40,19 +74,29 @@ export type WsEvent = WsInvalidationEvent | WsTypingEvent;
 // FleetWebSocketServer
 // ---------------------------------------------------------------------------
 
+export interface FleetWsAuthDeps {
+  /** Ticket store; ticket-mode connections are validated through this. */
+  ticketStore: TicketStore;
+  /** Signing keys to accept for ticket HMAC validation (active + accept[]). */
+  ticketValidKeys: () => readonly string[];
+  /** Verifier for the legacy `?token=` path. */
+  verifyLegacyToken: (token: string) => boolean;
+}
+
 export class FleetWebSocketServer {
   private wss: WebSocketServer;
   private clients = new Set<WebSocket>();
-  private expectedToken: string;
+  private authDeps: FleetWsAuthDeps;
+  private legacyWarningEmitted = false;
 
-  constructor(httpServer: HttpServer, expectedToken: string) {
-    this.expectedToken = expectedToken;
+  constructor(httpServer: HttpServer, authDeps: FleetWsAuthDeps) {
+    this.authDeps = authDeps;
     this.wss = new WebSocketServer({ noServer: true });
 
     // Handle upgrade requests with auth
     httpServer.on('upgrade', (req: IncomingMessage, socket, head) => {
       if (!this.authenticate(req)) {
-        log.warn({ url: req.url }, 'ws_auth_rejected');
+        log.warn(describeAuthRejectUrl(req.url), 'ws_auth_rejected');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
@@ -113,17 +157,28 @@ export class FleetWebSocketServer {
   }
 
   // ---------------------------------------------------------------------------
-  // Auth — ?token= query parameter (browser WebSocket can't send headers)
+  // Auth — query parameter only (browser WebSocket can't send headers)
+  //   - ?ticket=<...>  preferred; HMAC-signed, single-use, ~60s TTL
+  //   - ?token=<...>   legacy; emits a one-shot deprecation log per server
   // ---------------------------------------------------------------------------
 
   private authenticate(req: IncomingMessage): boolean {
-    if (!this.expectedToken) return false;
     try {
       const url = new URL(req.url ?? '', 'http://localhost');
-      const token = url.searchParams.get('token');
-      if (!token) return false;
-      if (token.length !== this.expectedToken.length) return false;
-      return timingSafeEqual(Buffer.from(token), Buffer.from(this.expectedToken));
+      const ticket = url.searchParams.get('ticket');
+      if (ticket) {
+        return this.authDeps.ticketStore.redeem(ticket, this.authDeps.ticketValidKeys());
+      }
+      const legacyToken = url.searchParams.get('token');
+      if (legacyToken) {
+        const ok = this.authDeps.verifyLegacyToken(legacyToken);
+        if (ok && !this.legacyWarningEmitted) {
+          this.legacyWarningEmitted = true;
+          log.warn({ legacy: 'ws-token-in-url' }, 'ws_legacy_token_path');
+        }
+        return ok;
+      }
+      return false;
     } catch {
       return false;
     }

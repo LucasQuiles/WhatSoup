@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock child_process before importing the module
-vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 import { lookupCredential, detectKeyringBackend, _resetBackendCache } from '../../src/lib/keyring.ts';
 import { execFileSync } from 'node:child_process';

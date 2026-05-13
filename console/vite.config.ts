@@ -1,15 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { attachFleetTokenAuth } from './vite.proxy-auth.ts'
 
-// Read fleet token for dev proxy auth injection
-let fleetToken = ''
-try {
-  fleetToken = readFileSync(join(homedir(), '.config/whatsoup/fleet-token'), 'utf-8').trim()
-} catch { /* no token file — proxy will forward without auth */ }
+// Token is read per-request (see configure hooks below) so dev sessions
+// pick up rotations without restarting Vite.
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -23,8 +18,8 @@ export default defineConfig({
       '/api/lines': {
         target: 'http://127.0.0.1:9099',
         changeOrigin: true,
-        headers: fleetToken ? { 'Authorization': `Bearer ${fleetToken}` } : {},
         configure: (proxy) => {
+          attachFleetTokenAuth(proxy)
           // Disable response buffering for SSE streams
           proxy.on('proxyRes', (proxyRes) => {
             const ct = proxyRes.headers['content-type'] ?? ''
@@ -38,7 +33,9 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:9099',
         changeOrigin: true,
-        headers: fleetToken ? { 'Authorization': `Bearer ${fleetToken}` } : {},
+        configure: (proxy) => {
+          attachFleetTokenAuth(proxy)
+        },
       },
     },
   },

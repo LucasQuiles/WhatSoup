@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { PassThrough } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   handleSend,
@@ -13,9 +14,11 @@ import {
   handleRestart,
   handleConfigUpdate,
   handleCreateLine,
+  handleAuth,
 } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
+import { repoRoot } from '../../../src/fleet/paths.ts';
 
 // Mock mcpCall and proxyToInstance
 vi.mock('../../../src/fleet/mcp-client.ts', () => ({
@@ -41,7 +44,7 @@ const { existsSync: actualExistsSync } = actualFs;
 
 import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -71,6 +74,33 @@ function mockRes(): ServerResponse & { _status: number; _headers: Record<string,
     },
     end(data?: string) {
       if (data) res._body = data;
+    },
+  };
+  return res as any;
+}
+
+function mockSseRes(): ServerResponse & {
+  _status: number;
+  _headers: Record<string, string>;
+  _chunks: string[];
+  _ended: boolean;
+} {
+  const res = {
+    _status: 0,
+    _headers: {} as Record<string, string>,
+    _chunks: [] as string[],
+    _ended: false,
+    writeHead(status: number, headers?: Record<string, string>) {
+      res._status = status;
+      if (headers) Object.assign(res._headers, headers);
+    },
+    write(chunk: string) {
+      res._chunks.push(chunk);
+      return true;
+    },
+    end(data?: string) {
+      if (data) res._chunks.push(data);
+      res._ended = true;
     },
   };
   return res as any;
@@ -113,6 +143,18 @@ function mockServiceManager() {
   };
 }
 
+function fakeChildProcess() {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    kill: ReturnType<typeof vi.fn>;
+  };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = vi.fn();
+  return child;
+}
+
 function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
   return {
     discovery: {
@@ -124,6 +166,54 @@ function makeDeps(overrides: Partial<OpsDeps> = {}): OpsDeps {
     ...overrides,
   };
 }
+
+// ---------------------------------------------------------------------------
+// handleAuth
+// ---------------------------------------------------------------------------
+
+describe('handleAuth', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  afterEach(() => {
+    vi.mocked(fs.existsSync).mockImplementation(actualExistsSync);
+  });
+
+  it('spawns bootstrap-auth with process.execPath, an absolute script path, and repoRoot cwd', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    expect(deps.serviceManager.stop).toHaveBeenCalledWith('test-line');
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
+        'test-line',
+      ],
+      expect.objectContaining({
+        cwd: repoRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    );
+
+    child.emit('exit', 0);
+    expect(res._ended).toBe(true);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // handleSend
@@ -158,7 +248,10 @@ describe('handleSend', () => {
 
     expect(mcpCall).toHaveBeenCalledWith('/state/test-line/whatsoup.sock', 'send_message', { chatJid: '123@s.whatsapp.net', text: 'hi' });
     expect(res._status).toBe(200);
-    expect(JSON.parse(res._body).success).toBe(true);
+    // After issue #257 parity fix, the response is the unwrapped MCP tool
+    // result (the `result` payload), not the raw McpCallResult wrapper, so
+    // the body now exposes the tool's own shape (`{ sent: true }`).
+    expect(JSON.parse(res._body).sent).toBe(true);
   });
 
   it('routes agent instances through proxyToInstance', async () => {
@@ -827,7 +920,9 @@ describe('handleCreateLine', () => {
       mockReq(JSON.stringify({
         name,
         type: 'chat',
-        adminPhones: ['test-admin-id'],
+        // Real-shaped phone — the shared validator (added for #244/#249)
+        // now rejects unparseable strings that normalize to empty.
+        adminPhones: ['18459780919'],
         healthPort: 3201,
       })),
       res,

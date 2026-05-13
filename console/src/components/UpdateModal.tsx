@@ -1,7 +1,7 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, getFleetToken } from '../lib/api'
+import { api, getApiTicket, getFleetToken } from '../lib/api'
 import type { LineInstance } from '../types'
 
 interface UpdateModalProps {
@@ -109,6 +109,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   const abortRef = useRef<AbortController | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // hasErroredRef is set synchronously when a terminal error is dispatched so
+  // that async closures can check it before React re-renders (F-058).
+  const hasErroredRef = useRef(false)
 
   // Only reset when the modal opens — NOT when lines changes (that would
   // reset mid-update when the fleet restarts and health poller refetches).
@@ -162,68 +165,92 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const startUpdate = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'updating' })
-
-    const token = getFleetToken()
-    const headers: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {}
+    // Reset error flag for this update run (F-058).
+    hasErroredRef.current = false
 
     // Abort controller so handleClose can cancel the in-flight fetch (RES-006)
     const controller = new AbortController()
     abortRef.current = controller
 
-    fetch('/api/update', {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-    }).then(response => {
-      if (!response.ok) {
-        dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
-        return
+    // Audience-scoped ticket (#313): mint an api-audience ticket rather than
+    // sending the root meta-tag token directly. In dev (no meta-tag) skip
+    // the header and let the proxy handle auth.
+    void (async () => {
+      let headers: Record<string, string> = {}
+      if (getFleetToken()) {
+        try {
+          const ticket = await getApiTicket('api')
+          headers = { 'Authorization': `Bearer ${ticket}` }
+        } catch {
+          hasErroredRef.current = true
+          dispatch({ type: 'setError', message: 'Update failed: unable to authenticate' })
+          return
+        }
       }
 
-      const reader = response.body!.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
+      try {
+        const response = await fetch('/api/update', {
+          method: 'POST',
+          headers,
+          signal: controller.signal,
+        })
 
-      const read = (): Promise<void> => reader.read().then(({ done, value }) => {
-        if (done) {
-          // Connection closed — fleet is restarting
-          waitForFleetRestart()
+        if (!response.ok) {
+          hasErroredRef.current = true
+          dispatch({ type: 'setError', message: `Update failed: ${response.status}` })
           return
         }
 
-        buffer += decoder.decode(value, { stream: true })
-        const chunks = buffer.split('\n\n')
-        buffer = chunks.pop()! // keep incomplete chunk
+        const reader = response.body!.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
 
-        for (const block of chunks) {
-          const eventMatch = block.match(/^event: (\w+)/)
-          const dataMatch = block.match(/^data: (.+)$/m)
-          if (!eventMatch || !dataMatch) continue
-
-          const event = eventMatch[1]
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SSE stream JSON has no typed schema; expires 2026-07-01
-          const data = JSON.parse(dataMatch[1]) as any
-
-          if (event === 'progress') {
-            dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
-            if (data.step === 'restart' && data.status === 'running') {
-              dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
+        const read = async (): Promise<void> => {
+          try {
+            const { done, value } = await reader.read()
+            if (done) {
+              // F-058: only enter fleet-restart polling if the stream did not
+              // already signal a terminal error; preserve the error phase.
+              if (!hasErroredRef.current) waitForFleetRestart()
+              return
             }
-          } else if (event === 'error') {
-            dispatch({ type: 'setError', message: data.message, step: data.step })
+            buffer += decoder.decode(value, { stream: true })
+            const chunks = buffer.split('\n\n')
+            buffer = chunks.pop()!
+
+            for (const block of chunks) {
+              const eventMatch = block.match(/^event: (\w+)/)
+              const dataMatch = block.match(/^data: (.+)$/m)
+              if (!eventMatch || !dataMatch) continue
+
+              const event = eventMatch[1]
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SSE stream JSON has no typed schema; expires 2026-07-01
+              const data = JSON.parse(dataMatch[1]) as any
+
+              if (event === 'progress') {
+                dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
+                if (data.step === 'restart' && data.status === 'running') {
+                  dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
+                }
+              } else if (event === 'error') {
+                // Set ref before dispatch so the done-branch check (F-058) sees
+                // the flag synchronously in the same microtask.
+                hasErroredRef.current = true
+                dispatch({ type: 'setError', message: data.message, step: data.step })
+              }
+            }
+            await read()
+          } catch {
+            // Connection dropped — expected during restart; skip if already errored (F-058).
+            if (!hasErroredRef.current) waitForFleetRestart()
           }
         }
-
-        return read()
-      }).catch(() => {
-        // Connection dropped — expected during restart
-        waitForFleetRestart()
-      })
-
-      return read()
-    }).catch(() => {
-      waitForFleetRestart()
-    })
+        await read()
+      } catch {
+        // Aborted or network error — fleet may be restarting; skip if already errored (F-058).
+        if (!hasErroredRef.current) waitForFleetRestart()
+      }
+    })()
   }, [waitForFleetRestart])
 
   const restartSelectedInstances = useCallback(async () => {
@@ -305,7 +332,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 Pull latest code, rebuild, and restart the fleet server?
               </p>
               <div className="flex justify-end gap-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Cancel</button>
+                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Cancel</button>
                 <button type="button" onClick={startUpdate} className="c-btn c-btn-primary">
                   <Download size={14} />
                   Update
@@ -349,7 +376,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 <span className="text-t2 font-mono text-data">{error}</span>
               </div>
               <div className="flex justify-end">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Close</button>
+                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Close</button>
               </div>
             </div>
           )}
@@ -397,7 +424,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 })}
               </div>
               <div className="flex justify-end gap-[var(--sp-2)] pt-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">Skip</button>
+                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Skip</button>
                 <button
                   type="button"
                   onClick={restartSelectedInstances}

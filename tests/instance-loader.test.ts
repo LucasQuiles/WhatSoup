@@ -299,6 +299,24 @@ describe('loadInstance — error: chat missing systemPrompt', () => {
 });
 
 describe('loadInstance — error: missing adminPhones', () => {
+  it('throws when name is absent', () => {
+    const { name: _omit, ...noName } = minimalChat;
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', noName);
+    expect(() => loadInstance('test-chat')).toThrow(/name/i);
+  });
+
+  it('throws when type is absent', () => {
+    const { type: _omit, ...noType } = minimalChat;
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', noType);
+    expect(() => loadInstance('test-chat')).toThrow(/type/i);
+  });
+
+  it('throws when accessMode is absent', () => {
+    const { accessMode: _omit, ...noAccessMode } = minimalChat;
+    writeInstance(path.join(tmpDir, 'config'), 'test-chat', noAccessMode);
+    expect(() => loadInstance('test-chat')).toThrow(/accessMode/i);
+  });
+
   it('throws when adminPhones is absent', () => {
     const { adminPhones: _omit, ...noAdmin } = minimalChat;
     writeInstance(path.join(tmpDir, 'config'), 'test-chat', noAdmin);

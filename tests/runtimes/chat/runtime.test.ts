@@ -70,13 +70,24 @@ vi.mock('../../../src/runtimes/chat/media/processor.ts', () => ({
   processMedia: vi.fn(),
 }));
 
-// Mock EnrichmentPoller so start/shutdown tests don't create real intervals
+// Mock EnrichmentPoller so start/shutdown tests don't create real intervals.
+// Factory runs before variable init due to vi.mock hoisting, so we stash the
+// spies on globalThis and expose typed accessors below. Each constructed
+// instance reuses the same spies so tests can assert across the lifecycle
+// without having to capture the instance returned by `new EnrichmentPoller(...)`.
 vi.mock('../../../src/runtimes/chat/enrichment/poller.ts', () => {
+  const start = vi.fn();
+  const stop = vi.fn();
+  (globalThis as any).__enrichmentPollerStart = start;
+  (globalThis as any).__enrichmentPollerStop = stop;
+  (globalThis as any).__enrichmentPollerInstances = [] as unknown[];
   class EnrichmentPoller {
     lastRunAt: string | null = null;
-    start = vi.fn();
-    stop = vi.fn();
-    constructor(..._args: unknown[]) {}
+    start = start;
+    stop = stop;
+    constructor(..._args: unknown[]) {
+      ((globalThis as any).__enrichmentPollerInstances as unknown[]).push(this);
+    }
   }
   return { EnrichmentPoller };
 });
@@ -123,6 +134,15 @@ function mockLogError(): ReturnType<typeof vi.fn> {
 }
 function mockLogInfo(): ReturnType<typeof vi.fn> {
   return (globalThis as any).__logInfo;
+}
+function mockEnrichmentPollerStart(): ReturnType<typeof vi.fn> {
+  return (globalThis as any).__enrichmentPollerStart;
+}
+function mockEnrichmentPollerStop(): ReturnType<typeof vi.fn> {
+  return (globalThis as any).__enrichmentPollerStop;
+}
+function mockEnrichmentPollerInstances(): unknown[] {
+  return (globalThis as any).__enrichmentPollerInstances ?? [];
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +273,7 @@ beforeEach(() => {
   mockLogError()?.mockClear();
   mockLogInfo()?.mockClear();
   (globalThis as any).__queueTasks = [];
+  (globalThis as any).__enrichmentPollerInstances = [];
   setHappyPathDefaults();
 });
 
@@ -926,18 +947,39 @@ describe('Runtime interface', () => {
     expect(snap.details).toHaveProperty('enrichmentLastRunAt');
   });
 
-  it('start() starts the enrichment poller', async () => {
+  it('start() calls EnrichmentPoller.start() exactly once', async () => {
     const { handler } = makeHandler();
+    // Constructor wires the poller; start() should drive it.
+    expect(mockEnrichmentPollerInstances()).toHaveLength(1);
+    expect(mockEnrichmentPollerStart()).not.toHaveBeenCalled();
     await handler.start();
-    // EnrichmentPoller is mocked — just verify start() resolves cleanly
-    await expect(Promise.resolve()).resolves.toBeUndefined();
+    expect(mockEnrichmentPollerStart()).toHaveBeenCalledTimes(1);
   });
 
-  it('shutdown() stops the enrichment poller', async () => {
+  it('shutdown() calls EnrichmentPoller.stop() exactly once', async () => {
     const { handler } = makeHandler();
+    await handler.start();
+    expect(mockEnrichmentPollerStop()).not.toHaveBeenCalled();
     await handler.shutdown();
-    // EnrichmentPoller is mocked — just verify shutdown() resolves cleanly
-    await expect(Promise.resolve()).resolves.toBeUndefined();
+    expect(mockEnrichmentPollerStop()).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start the enrichment poller when enableEnrichment is false', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const pinecone = makePinecone();
+    const primary = makePrimaryProvider();
+    const fallback = makeFallbackProvider();
+    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+      enableEnrichment: false,
+    });
+    await handler.start();
+    await handler.shutdown();
+    // Constructor short-circuits poller creation, so neither spy fires and
+    // no instance is registered.
+    expect(mockEnrichmentPollerInstances()).toHaveLength(0);
+    expect(mockEnrichmentPollerStart()).not.toHaveBeenCalled();
+    expect(mockEnrichmentPollerStop()).not.toHaveBeenCalled();
   });
 });
 

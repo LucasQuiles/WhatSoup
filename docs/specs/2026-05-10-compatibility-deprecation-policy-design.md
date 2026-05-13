@@ -166,6 +166,10 @@ The boolean fields enable downstream tooling (CI, release dashboards, deprecatio
 
 ## 9. Public-surface registry
 
+> **Registry:** [`docs/public-surface.md`](../public-surface.md). The bootstrap (advisory)
+> baseline is in place per §9.3; the v1.0.0 cut promotes it to source-of-truth and switches
+> §9.4 CI linting from advisory to required.
+
 The registry is the source of truth for "what's public." It lives at `docs/public-surface.md` and is the manifest of every documented public artifact.
 
 ### 9.1 Registry entry shape

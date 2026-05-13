@@ -33,6 +33,14 @@ function makeMessenger(
   } as unknown as Messenger;
 }
 
+function destroyCapturedMediaStreams(messenger: Messenger): void {
+  for (const [, media] of vi.mocked(messenger.sendMedia).mock.calls) {
+    const stream = (media as OutboundMedia & { stream?: { destroy?: () => void; on?: (event: 'error', listener: () => void) => void } }).stream;
+    stream?.on?.('error', () => {});
+    stream?.destroy?.();
+  }
+}
+
 /**
  * Send a newline-terminated JSON request to the bridge and collect one
  * newline-terminated JSON response.
@@ -134,6 +142,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  destroyCapturedMediaStreams(messenger);
   bridge();
 });
 
@@ -183,6 +192,10 @@ describe('bridge request handling', () => {
       '15551234567@s.whatsapp.net',
       expect.objectContaining({ type: 'image', mimetype: 'image/png' }),
     );
+    const media = vi.mocked(messenger.sendMedia).mock.calls[0]?.[1] as OutboundMedia & { stream?: NodeJS.ReadableStream };
+    expect(media.stream).toBeDefined();
+    expect('buffer' in media).toBe(false);
+    media.stream?.destroy?.();
   });
 
   it('infers document type for .pdf extension', async () => {

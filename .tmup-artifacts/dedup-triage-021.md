@@ -1,5 +1,10 @@
 # Dedup consolidation triage (task 021)
 
+> Policy: this artifact is historical evidence and issue-conversion input, not
+> live backlog truth. Any still-actionable item must be promoted to a GitHub
+> issue or an indexed `docs/sdlc` / `docs/superpowers` artifact before it is
+> treated as active work. See `docs/canonical-status-policy.md`.
+
 Date checked: 2026-04-05
 Repo: /home/q/LAB/WhatSoup
 Task: dedup-consolidation-20260404

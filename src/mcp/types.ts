@@ -46,6 +46,17 @@ export interface ToolDeclaration {
   targetMode: TargetMode;
   /** Controls how this tool call is replayed on recovery. Defaults to 'unsafe'. */
   replayPolicy?: 'safe' | 'unsafe' | 'read_only';
+  /**
+   * Whether this tool is required for a healthy boot. Default `true`.
+   *
+   * Modules whose registration is opt-in or vendor-gated (e.g. the Pinecone-backed
+   * `knowledge_search`) should set `core: false` so that registration failures are
+   * logged and skipped instead of aborting boot. Core tools (messaging, chat
+   * management, search, etc.) must register successfully — a failure inside any
+   * core module surfaces as a fatal error from `registerAllTools` so the host
+   * never silently ships a partial toolset.
+   */
+  core?: boolean;
   handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
 }
 

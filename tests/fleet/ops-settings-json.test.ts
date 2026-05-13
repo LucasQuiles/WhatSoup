@@ -15,35 +15,19 @@ import type { DiscoveredInstance } from '../../src/fleet/discovery.ts';
 // Mock external deps used by ops.ts
 vi.mock('../../src/fleet/mcp-client.ts', () => ({ mcpCall: vi.fn() }));
 vi.mock('../../src/fleet/http-proxy.ts', () => ({ proxyToInstance: vi.fn() }));
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], cb: Function) => cb(null, '')),
-  spawn: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-function mockReq(body = ''): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/';
-  (stream as any).method = 'PATCH';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
+import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: '',
-    writeHead(status: number) { res._status = status; },
-    end(data?: string) { if (data) res._body = data; },
-  };
-  return res as any;
+function mockReq(body = ''): IncomingMessage {
+  return helperMockReq({ body, method: 'PATCH' });
 }
 
 let tmpDirs: string[] = [];

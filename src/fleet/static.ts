@@ -22,7 +22,7 @@ const MIME_TYPES: Record<string, string> = {
  * @param getVersion — function returning current version (called per-request so it stays fresh
  *   after git pull updates the code without restarting the fleet server).
  */
-export function createStaticHandler(distDir: string, fleetToken?: string, getVersion?: () => string) {
+export function createStaticHandler(distDir: string, fleetToken?: string | (() => string), getVersion?: () => string) {
   return (req: IncomingMessage, res: ServerResponse): boolean => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
@@ -32,10 +32,23 @@ export function createStaticHandler(distDir: string, fleetToken?: string, getVer
     const safePath = path.normalize(url).replace(/^(\.\.[/\\])+/, '');
     let filePath = path.join(distDir, safePath);
 
-    // Helper: serve HTML with token injection when applicable
-    const version = getVersion?.();
-    const serveHtml = (htmlPath: string) =>
-      (fleetToken && version) ? serveHtmlWithMeta(htmlPath, fleetToken, version, res) : serveFile(htmlPath, res);
+    // Helper: serve HTML with token injection when applicable.
+    // Token/version resolution is deferred into this branch so that JS/CSS/404
+    // paths never invoke the (possibly throwing) lazy token lookup. A corrupt
+    // fleet-tokens.json must not break static asset delivery (issue #316).
+    const serveHtml = (htmlPath: string) => {
+      let token: string | undefined;
+      let version: string | undefined;
+      try {
+        token = typeof fleetToken === 'function' ? fleetToken() : fleetToken;
+        version = getVersion?.();
+      } catch {
+        // Lazy token lookup failed (e.g. corrupt token file). Serve the HTML
+        // without meta injection — degraded but functional.
+        return serveFile(htmlPath, res);
+      }
+      return (token && version) ? serveHtmlWithMeta(htmlPath, token, version, res) : serveFile(htmlPath, res);
+    };
 
     // Try exact file first
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {

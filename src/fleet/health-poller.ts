@@ -58,10 +58,16 @@ export class HealthPoller {
     }
   }
 
-  start(): void {
-    this.poll(); // initial poll
+  /**
+   * Start polling. Returns a Promise that resolves once the initial poll
+   * completes, so callers (especially tests) can await deterministic readiness
+   * instead of sleeping. Subsequent polls are fire-and-forget on the interval.
+   */
+  start(): Promise<void> {
+    const initial = this.poll(); // initial poll
     this.pollInterval = setInterval(() => this.poll(), this.intervalMs);
     this.pollInterval.unref();
+    return initial;
   }
 
   stop(): void {

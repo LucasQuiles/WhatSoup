@@ -22,7 +22,7 @@ import {
   accumulateTokensWithEvent,
   backfillSessionProvider,
 } from './session-db.ts';
-import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
 import {
@@ -43,7 +43,7 @@ import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
 import { matchImperative, extractImperativeTarget } from '../../core/substrate/inline-extractor.ts';
 import { createBead } from '../../core/substrate/beads.ts';
-import { writeFileSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { ToolRegistry } from '../../mcp/registry.ts';
@@ -1331,7 +1331,7 @@ export class AgentRuntime implements Runtime {
           '../../../deploy/mcp/whatsoup-proxy.ts',
         );
         const mcpConfig = generateMcpConfigFile('claude-cli', socketPath, mcpServerScript);
-        writeFileSync(join(agentCwd, '.mcp.json'), JSON.stringify(mcpConfig, null, 2));
+        writePrivateFileSync(join(agentCwd, '.mcp.json'), JSON.stringify(mcpConfig, null, 2));
         log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
       } catch (err) {
         if (this.globalSocketServer) {
@@ -1642,6 +1642,9 @@ export class AgentRuntime implements Runtime {
 
     // Register emit_heal_result MCP tool (once, for control-plane repair completion).
     // Only on non-sandboxed instances (Q) — sandboxed instances (Loops) are repair targets, not repairers.
+    // Tagged `core: false` because this registration is conditional on configured control peers;
+    // see `src/mcp/types.ts` for the contract — non-core tools must tolerate absence on instances
+    // that do not meet the gate (no control peers, sandbox mode, or per-chat sandbox).
     if (config.controlPeers.size > 0 && !this.sandboxPerChat && !this.sandbox) {
       this.registry.register({
         name: 'emit_heal_result',
@@ -1650,6 +1653,7 @@ export class AgentRuntime implements Runtime {
         scope: 'global',
         targetMode: 'caller-supplied',
         replayPolicy: 'unsafe',
+        core: false,
         handler: async (params) => {
           const parsed = EmitHealResultSchema.parse(params);
 

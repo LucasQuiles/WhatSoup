@@ -16,6 +16,7 @@ import {
 } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import { config } from '../config.ts';
+import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 
 // ---------------------------------------------------------------------------
 // Lock check
@@ -93,20 +94,20 @@ async function startSocket(): Promise<void> {
 
     if (connection === 'close') {
       const statusCode: number | undefined = (lastDisconnect?.error as any)?.output?.statusCode;
+      const action = decideDisconnectAction(statusCode);
 
-      if (statusCode === DisconnectReason.loggedOut) {
+      if (action.type === 'exit') {
         clearTimeout(timeoutHandle);
         console.error('Logged out — delete the auth directory and re-run this script.');
         process.exit(1);
       }
 
-      if (statusCode === DisconnectReason.restartRequired) {
+      if (action.type === 'reconnect' && action.reason === 'restart-required') {
         console.error('Restart required — reconnecting...');
         try { sock.end(undefined); } catch { /* best-effort */ }
         await startSocket();
         return;
       }
-
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? `unknown(${statusCode})`) : 'unknown';
       console.error(`Connection closed during auth: ${reason} — reconnecting...`);
       try { sock.end(undefined); } catch { /* best-effort */ }

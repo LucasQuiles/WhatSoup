@@ -1,73 +1,45 @@
-# React + TypeScript + Vite
+# WhatSoup Fleet Console
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React/Vite console for operating the embedded WhatSoup fleet server. The app is built into the repository-level `dist/` directory and served by the fleet server alongside `/api/*`.
 
-Currently, two official plugins are available:
+## Commands
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Run from the repository root unless noted:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm --prefix console ci
+npm --prefix console run dev
+npm --prefix console run build
+npm --prefix console run lint
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+`npm --prefix console run build` runs `tsc -b` and `vite build`, then writes the production SPA to `dist/`. The root release verification uses this build output for the fleet server's static handler.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Development Proxy
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+`npm --prefix console run dev` starts Vite and proxies `/api/*` to the local fleet server at `http://127.0.0.1:9099`.
+
+The dev proxy reads the fleet token from the local WhatSoup config and injects it as a Bearer token for proxied API requests. Start the fleet server separately before using live data:
+
+```bash
+npm run fleet
+npm --prefix console run dev
 ```
+
+The `/api/lines/*/auth` Server-Sent Events path keeps buffering disabled in the proxy so QR/auth events stream to the browser immediately.
+
+## Production Serving
+
+In production, the fleet server serves:
+
+- `dist/index.html` and static assets for the console UI
+- `/api/*` routes from `src/fleet/index.ts`
+- WebSocket updates from the fleet WebSocket server
+
+The production static handler injects fleet metadata into served HTML so the console API client can authenticate browser requests back to the same fleet origin.
+
+## Mock Fallback
+
+The API client in `src/lib/api.ts` probes `/api/lines`. If the fleet server is unavailable, it falls back to `src/mock-data.ts` so design and demo views still render. This fallback is expected during UI iteration, but operational testing should run with the fleet server online.
+
+Mock fallback applies to read-oriented console surfaces. Mutating operations should be validated against a running local fleet server.

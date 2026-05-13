@@ -6,20 +6,23 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import { createFleetServer, loadOrCreateFleetToken } from './index.ts';
+import { createFleetServer } from './index.ts';
+import { loadOrCreateFleetTokens } from './token-storage.ts';
 
 const port = parseInt(process.argv[2] ?? '9099', 10);
 
 // Open a throwaway in-memory DB — the standalone server doesn't have a "self" instance
 const db = new DatabaseSync(':memory:');
 
-const fleetToken = await loadOrCreateFleetToken();
-console.log(`Fleet token: ${fleetToken.slice(0, 8)}...`);
+const tokens = await loadOrCreateFleetTokens();
+console.log(`Fleet token: ${tokens.active.slice(0, 8)}...`);
 
 const server = createFleetServer({
   db,
   selfName: '__standalone__',
-  fleetToken,
+  fleetToken: tokens.active,
+  acceptTokens: tokens.accept,
+  getFleetTokens: loadOrCreateFleetTokens,
   getSelfHealth: () => ({ status: 'healthy', standalone: true }),
 });
 

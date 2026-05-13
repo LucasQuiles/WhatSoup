@@ -1,4 +1,5 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
+import { Readable } from 'node:stream';
 import type { Messenger, OutboundMedia } from '../../src/core/types.ts';
 
 describe('OutboundMedia type', () => {
@@ -24,6 +25,13 @@ describe('OutboundMedia type', () => {
     const media: OutboundMedia = { type: 'video', buffer: Buffer.from(''), caption: 'clip' };
     expectTypeOf(media).toMatchTypeOf<OutboundMedia>();
     expect(media).toMatchObject({ type: 'video', caption: 'clip' });
+  });
+
+  it('image variant can use a stream source instead of a buffer', () => {
+    const media: OutboundMedia = { type: 'image', stream: Readable.from(['image']), mimetype: 'image/png' };
+    expectTypeOf(media).toMatchTypeOf<OutboundMedia>();
+    expect(media).toMatchObject({ type: 'image', mimetype: 'image/png' });
+    media.stream.destroy();
   });
 });
 

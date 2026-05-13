@@ -1,11 +1,32 @@
+/// <reference types="vite/client" />
+
 /**
  * Fleet API client with mock data fallback.
  *
- * - In production: fleet server serves both the SPA and /api/* routes
- * - In dev mode: Vite proxies /api/* to the fleet server
- * - Fallback: if fleet server is unreachable, returns mock data so the
- *   console always renders (useful for design iteration and demos)
+ * - In production: fleet server serves both the SPA and /api/* routes.
+ *   Mock fallback is DISABLED by default so real API/auth failures surface
+ *   as errors instead of silently masquerading as healthy mock data
+ *   (closes #420). Set `VITE_MOCK_MODE=1` at build time to opt back in
+ *   for demos / design environments.
+ * - In dev mode: Vite proxies /api/* to the fleet server and mock
+ *   fallback auto-activates when the fleet is unreachable, so UI work
+ *   doesn't require a running fleet.
  */
+
+/**
+ * True when mock-data fallback should auto-activate on fleet probe
+ * failure or thrown API errors.
+ *
+ * Dev builds keep the legacy auto-activate behavior for convenience.
+ * Production builds require explicit opt-in via `VITE_MOCK_MODE=1` so
+ * a misbehaving fleet (or a stale auth ticket) cannot silently degrade
+ * the console to mock data.
+ */
+function mockFallbackEnabled(): boolean {
+  const env = import.meta.env;
+  if (!env?.PROD) return true;
+  return env.VITE_MOCK_MODE === '1';
+}
 
 import type {
   AccessEntry,
@@ -25,24 +46,100 @@ import type {
 
 const API_BASE = '';
 
-/** Read the fleet token from the meta tag injected by the production server. */
+/** Read the root fleet token from the meta tag injected by the production server. */
 export function getFleetToken(): string | null {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]');
   return meta?.content || null;
 }
 
-/** Build auth headers — Bearer token in production, empty in dev (proxy handles it). */
-function authHeaders(): Record<string, string> {
+// ---------------------------------------------------------------------------
+// Audience-scoped tickets (#313)
+//
+// The root meta-tag token is the bootstrap credential and is used ONLY to
+// mint short-lived tickets via POST /api/auth-ticket. Every other call --
+// HTTP API or EventSource -- threads a ticket of the matching audience so
+// the root token never leaves the bootstrap path.
+// ---------------------------------------------------------------------------
+
+type TicketAudience = 'api' | 'sse';
+
+function rootAuthHeaders(): Record<string, string> {
   const token = getFleetToken();
   return token ? { 'Authorization': `Bearer ${token}` } : {};
 }
 
+async function mintTicket(audience: TicketAudience): Promise<string> {
+  // Bootstrap: present the root token to the dedicated mint endpoint and
+  // immediately discard it from the request shape. The browser still has
+  // the meta-tag (a v1 limitation called out in the issue), but it never
+  // travels anywhere except this one path.
+  const res = await fetch(`${API_BASE}/api/auth-ticket`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...rootAuthHeaders(),
+    },
+    body: JSON.stringify({ audience }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) {
+    throw new Error(`auth-ticket ${audience} ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json() as { ticket?: unknown; expiresIn?: unknown };
+  if (typeof data.ticket !== 'string' || data.ticket.length === 0) {
+    throw new Error(`auth-ticket ${audience}: malformed server response`);
+  }
+  return data.ticket;
+}
+
+/**
+ * Mint a fresh audience-scoped ticket. Server-side tickets are single-use:
+ * sharing a fulfilled ticket across API calls causes the second redemption
+ * to fail with 401.
+ *
+ * Exported for callers (e.g. EventSource bootstrap in `LinkStep`) that
+ * need the raw ticket string.
+ */
+export async function getApiTicket(audience: TicketAudience = 'api'): Promise<string> {
+  return mintTicket(audience);
+}
+
+/** Test helper kept stable for existing imports. */
+export function clearTicketCache(): void {
+}
+
+/**
+ * Build auth headers for the HTTP API.
+ *
+ * In production we mint and thread an `api`-audience ticket. In dev or when
+ * no root token is available (the SPA is being served standalone), we omit
+ * the header and let the Vite proxy / mock fallback handle the request.
+ */
+async function authHeaders(): Promise<Record<string, string>> {
+  if (!getFleetToken()) return {};
+  try {
+    const ticket = await getApiTicket('api');
+    return { 'Authorization': `Bearer ${ticket}` };
+  } catch (err) {
+    // Mint failed (network, 401, server down). In production we surface
+    // the failure so the UI can render a real error state instead of
+    // degrading to an unauthenticated request that masquerades as
+    // healthy. Dev / mock-mode builds tolerate the failure and let the
+    // surrounding fetch fall through to mock data (#420).
+    if (!mockFallbackEnabled()) {
+      throw err;
+    }
+    return {};
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const auth = await authHeaders();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders(),
+      ...auth,
       ...init?.headers,
     },
     signal: init?.signal ?? AbortSignal.timeout(5000),
@@ -72,9 +169,10 @@ async function checkFleetAvailable(): Promise<boolean> {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
       try {
+        const auth = await authHeaders();
         const res = await fetch(`${API_BASE}/api/lines`, {
           signal: controller.signal,
-          headers: authHeaders(),
+          headers: auth,
         });
         fleetAvailable = res.ok;
       } finally {
@@ -91,6 +189,13 @@ async function checkFleetAvailable(): Promise<boolean> {
 }
 
 async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
+  // In production builds without explicit opt-in, bypass the mock
+  // fallback entirely so real failures surface to the UI (#420). We
+  // still run the API call directly; we just don't swallow its errors
+  // or substitute mock data when the availability probe trips.
+  if (!mockFallbackEnabled()) {
+    return apiFn();
+  }
   const available = await checkFleetAvailable();
   if (!available) return mockFn();
   try {
@@ -201,7 +306,7 @@ export const api = {
       `/api/lines/${encodeURIComponent(name)}/messages/search?q=${encodeURIComponent(query)}${conversationKey ? `&conversation_key=${encodeURIComponent(conversationKey)}` : ''}`
     ).then(normalizeSearchResponse),
   saveContact: (name: string, contact: { jid: string; firstName?: string; lastName?: string }) =>
-    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
+    apiFetch<{ saved: boolean }>(`/api/lines/${encodeURIComponent(name)}/contacts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(contact),
@@ -222,7 +327,7 @@ export const api = {
   getTyping: () => withFallback(
     () => apiFetch<{ instance: string; jid: string; since: number }[]>('/api/typing'),
     async () => (await loadMockData()).getTyping(),
-  ).catch(() => []),
+  ),
 
   // ── Write operations ──
 
@@ -236,7 +341,7 @@ export const api = {
     apiFetch<{ deleted: string }>(`/api/lines/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   sendMessage: (name: string, chatJid: string, text: string) =>
-    apiFetch<{ success: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
+    apiFetch<{ sent: boolean }>(`/api/lines/${encodeURIComponent(name)}/send`, {
       method: 'POST',
       body: JSON.stringify({ chatJid, text }),
     }),
@@ -386,4 +491,21 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ mode }),
     }),
+
+  /**
+   * Mint a single-use WebSocket ticket (#237). The fleet server signs the
+   * ticket with the active fleet token; the browser then opens the WS as
+   * `wss://host/ws?ticket=<ticket>`. The root token never travels in the URL.
+   */
+  getWsTicket: async () => {
+    const res = await fetch(`${API_BASE}/api/ws-ticket`, {
+      method: 'POST',
+      headers: rootAuthHeaders(),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      throw new Error(`API ${res.status}: ${await res.text()}`);
+    }
+    return await res.json() as { ticket: string; expiresIn: number };
+  },
 };

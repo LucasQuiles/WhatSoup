@@ -194,10 +194,12 @@ describe('DockerSupervisorServiceManager', () => {
     const onError = vi.fn();
 
     mgr.startFire('test-instance', onError);
-    await new Promise((resolve) => setImmediate(resolve));
+    // startFire schedules start() then routes its result to onError via a
+    // .then/.catch chain. Wait until onError is invoked rather than draining a
+    // fixed number of microtasks.
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(null));
 
     expect(startSpy).toHaveBeenCalledWith('test-instance');
-    expect(onError).toHaveBeenCalledWith(null);
   });
 
   it('startFire invokes onError with Error when start() rejects', async () => {
@@ -207,9 +209,9 @@ describe('DockerSupervisorServiceManager', () => {
     const onError = vi.fn();
 
     mgr.startFire('test-instance', onError);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(onError).toHaveBeenCalledWith(err);
+    // Wait until the rejection has propagated through the .catch chain into
+    // onError; no fixed microtask drain.
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(err));
   });
 });
 

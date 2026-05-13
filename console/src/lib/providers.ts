@@ -1,6 +1,19 @@
 // ---------------------------------------------------------------------------
-//  Provider constants — hardcoded to match backend ProviderDescriptors
-//  See: src/runtimes/agent/providers/types.ts
+//  Provider constants — kept in lockstep with the backend registry.
+//
+//  Single source of truth (backend):
+//    src/runtimes/agent/providers/index.ts → PROVIDER_IDS (#447)
+//
+//  Backend descriptor shape:
+//    src/runtimes/agent/providers/types.ts → ProviderDescriptor
+//
+//  DRIFT NOTE: This file cannot directly import from the backend module
+//  because the console is bundled separately (Vite root differs). Whenever
+//  PROVIDER_IDS changes, mirror the entry HERE and add the matching display
+//  metadata. The console build is fast; a missing/stale entry surfaces as
+//  a "Unknown provider" tile in the UI, not as a silent runtime alias —
+//  the backend validator (agent-config-validator.ts) is the enforcement
+//  point that rejects unknown IDs.
 // ---------------------------------------------------------------------------
 
 export interface ProviderDef {

@@ -483,7 +483,7 @@ export class PineconeMemory {
 
     const startMs = Date.now();
     try {
-      // Phase 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
+      // Step 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
       let response: Awaited<ReturnType<typeof doSearch>>;
       try {
         response = await doSearch();
@@ -497,7 +497,7 @@ export class PineconeMemory {
       const hits = response.result.hits ?? [];
       let mapped = hits.map(fromPineconeHitEntity);
 
-      // Phase 2: client-side rerank with truncated text to stay within token limits
+      // Step 2: client-side rerank with truncated text to stay within token limits
       if (config.pineconeRerank && mapped.length > 0) {
         try {
           const rerankResult = await this.client.inference.rerank({

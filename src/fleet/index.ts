@@ -1,10 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
-import { jsonResponse, checkBearerAuth, parseRoute, parseQueryString } from '../lib/http.ts';
+import { jsonResponse, parseRoute, parseQueryString, readBody, extractBearer } from '../lib/http.ts';
 import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
@@ -27,20 +25,45 @@ import {
   handleGetGroupRequests, handleGroupRequestsUpdate,
 } from './routes/mcp-proxy.ts';
 import { UpdateChecker } from './update-checker.ts';
-import { xdgDir } from './paths.ts';
+import { compareLidUpdatedAt, importLidMappings, type FleetMappingInput } from '../core/lid-resolver.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { FleetWebSocketServer } from './websocket-server.ts';
 import type { FleetRealtimePublisher } from './realtime-publisher.ts';
+import { publishLidConflict } from './realtime-publisher.ts';
 import { FleetRealtimeEventPoller } from './realtime-event-poller.ts';
-
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+import {
+  loadOrCreateFleetTokens as loadOrCreateFleetTokensImpl,
+  verifyFleetToken as verifyFleetTokenImpl,
+  type FleetTokensFile,
+} from './token-storage.ts';
+import { createTicketStore as createWsTicketStore, TICKET_TTL_MS, type TicketStore } from './ws-ticket.ts';
+import {
+  createTicketStore as createAuthTicketStore,
+  isTicketAudience,
+  type TicketStore as AuthTicketStore,
+  type TicketAudience,
+} from './auth-ticket.ts';
+import { repoRoot } from './paths.ts';
 
 const log = createChildLogger('fleet');
+
+export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
 
 export interface FleetDeps {
   db: DatabaseSync;
   selfName: string;
+  /**
+   * Active fleet token (signs new WS tickets, accepted as Bearer).
+   *
+   * For rotation continuity, pass also `acceptTokens`: any prior tokens
+   * that should still validate. Both shapes are accepted to keep tests and
+   * callers from churning during the rollout.
+   */
   fleetToken: string;
+  /** Optional historic tokens still accepted (cap honored at storage layer). */
+  acceptTokens?: string[];
+  /** Optional request-time token source used by the standalone server after CLI rotation. */
+  getFleetTokens?: () => { active: string; accept: readonly string[] };
   getSelfHealth: () => Record<string, unknown>;
 }
 
@@ -230,25 +253,22 @@ const handlers: { [K in RouteKey]: RouteHandler<K> } = {
 // Fleet token management
 // ---------------------------------------------------------------------------
 
-/** Load or create the fleet token at ~/.config/whatsoup/fleet-token */
-export async function loadOrCreateFleetToken(): Promise<string> {
-  const tokenPath = path.join(
-    xdgDir('XDG_CONFIG_HOME', '.config'),
-    'whatsoup',
-    'fleet-token',
-  );
+/**
+ * Load (or create) the rotatable fleet-tokens file.
+ *
+ * The persistence layer lives in `./token-storage.ts`. This re-export keeps the
+ * public surface centralized so callers don't reach into the internal module.
+ */
+export async function loadOrCreateFleetTokens(): Promise<FleetTokensFile> {
+  return loadOrCreateFleetTokensImpl();
+}
 
-  try {
-    const raw = fs.readFileSync(tokenPath, 'utf-8').trim();
-    if (!/^[0-9a-f]{64}$/.test(raw)) throw new Error('fleet-token file is corrupt — regenerating');
-    return raw;
-  } catch {
-    const token = crypto.randomBytes(32).toString('hex');
-    fs.mkdirSync(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tokenPath, token, { mode: 0o600 });
-    log.info({ tokenPath }, 'generated new fleet token');
-    return token;
-  }
+/**
+ * Back-compat shim: returns just the active token. Prefer
+ * `loadOrCreateFleetTokens` to also propagate the accept list.
+ */
+export async function loadOrCreateFleetToken(): Promise<string> {
+  return (await loadOrCreateFleetTokensImpl()).active;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,28 +331,185 @@ const ROUTES = [
 // L5: Cross-instance LID mapping sync handlers
 // ---------------------------------------------------------------------------
 
+type LidMappingObservation = {
+  lid: string;
+  phone_jid: string;
+  updated_at: string;
+  instance: string;
+};
+
+type LidMappingInstance = {
+  instance: string;
+  updated_at: string;
+};
+
+type UnifiedLidMapping = {
+  lid: string;
+  phone_jid: string;
+  instances: LidMappingInstance[];
+};
+
+type ConflictResolutionReason = 'freshest' | 'tied-deterministic';
+
+type ConflictResolution = {
+  phone_jid: string;
+  source_instance: string;
+  reason: ConflictResolutionReason;
+};
+
+type ConflictingLidMapping = {
+  lid: string;
+  phones: Array<{
+    phone_jid: string;
+    instances: LidMappingInstance[];
+  }>;
+  /**
+   * Deterministic resolution preview (#251 §3.3). Mirrors `writeLidMapping`
+   * in `freshness-gated` mode: parsed max `updated_at` wins; on tie,
+   * alphabetical `phone_jid` wins with reason `tied-deterministic`.
+   * `source_instance` is the instance whose observation provided the winning
+   * phone's max `updated_at`; on a within-phone tie, alphabetically-first
+   * instance.
+   */
+  resolution: ConflictResolution;
+};
+
+/**
+ * Compute the deterministic resolution for a conflicting LID. The conflict's
+ * `phones` array is assumed already sorted alphabetically by phone_jid and
+ * each phone's `instances` is assumed already sorted via `compareLidInstances`
+ * (instance name ascending then updated_at ascending).
+ */
+function resolveConflict(phones: ConflictingLidMapping['phones']): ConflictResolution {
+  // Per phone, derive the maximum observed updated_at + the instance that
+  // provided it. On within-phone tie, pick the alphabetically-first instance.
+  const perPhone = phones.map(({ phone_jid, instances }) => {
+    let maxAt = '';
+    let maxInst = '';
+    for (const inst of instances) {
+      const byFreshness = maxAt === '' ? 1 : compareLidUpdatedAt(inst.updated_at, maxAt);
+      if (byFreshness > 0) {
+        maxAt = inst.updated_at;
+        maxInst = inst.instance;
+      } else if (byFreshness === 0 && (maxInst === '' || inst.instance < maxInst)) {
+        maxInst = inst.instance;
+      }
+    }
+    return { phone_jid, maxAt, maxInst };
+  });
+
+  // Find the overall freshest phone(s).
+  const overallMax = perPhone.reduce(
+    (acc, p) => (acc === '' || compareLidUpdatedAt(p.maxAt, acc) > 0 ? p.maxAt : acc),
+    '',
+  );
+  const tied = perPhone.filter(p => compareLidUpdatedAt(p.maxAt, overallMax) === 0);
+
+  if (tied.length === 1) {
+    return {
+      phone_jid: tied[0].phone_jid,
+      source_instance: tied[0].maxInst,
+      reason: 'freshest',
+    };
+  }
+
+  // Tied: alphabetically-first phone wins.
+  const winner = tied.toSorted((a, b) => a.phone_jid.localeCompare(b.phone_jid))[0];
+  return {
+    phone_jid: winner.phone_jid,
+    source_instance: winner.maxInst,
+    reason: 'tied-deterministic',
+  };
+}
+
+function compareLidInstances(a: LidMappingInstance, b: LidMappingInstance): number {
+  return a.instance.localeCompare(b.instance) || a.updated_at.localeCompare(b.updated_at);
+}
+
+function buildConflictExplicitLidMappings(observations: LidMappingObservation[]): {
+  unified: UnifiedLidMapping[];
+  conflicts: ConflictingLidMapping[];
+} {
+  const byLid = new Map<string, Map<string, LidMappingInstance[]>>();
+  for (const obs of observations) {
+    let byPhone = byLid.get(obs.lid);
+    if (!byPhone) {
+      byPhone = new Map<string, LidMappingInstance[]>();
+      byLid.set(obs.lid, byPhone);
+    }
+
+    let instances = byPhone.get(obs.phone_jid);
+    if (!instances) {
+      instances = [];
+      byPhone.set(obs.phone_jid, instances);
+    }
+    instances.push({ instance: obs.instance, updated_at: obs.updated_at });
+  }
+
+  const unified: UnifiedLidMapping[] = [];
+  const conflicts: ConflictingLidMapping[] = [];
+  for (const [lid, byPhone] of [...byLid.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const phones = [...byPhone.entries()].sort(([a], [b]) => a.localeCompare(b));
+    if (phones.length === 1) {
+      const [phone_jid, instances] = phones[0];
+      unified.push({
+        lid,
+        phone_jid,
+        instances: instances.toSorted(compareLidInstances),
+      });
+      continue;
+    }
+
+    const sortedPhones = phones.map(([phone_jid, instances]) => ({
+      phone_jid,
+      instances: instances.toSorted(compareLidInstances),
+    }));
+    conflicts.push({
+      lid,
+      phones: sortedPhones,
+      resolution: resolveConflict(sortedPhones),
+    });
+  }
+
+  return { unified, conflicts };
+}
+
 /** GET /api/lid-mappings — export all LID mappings from all instances. */
 function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): void {
   try {
     const instances = [...deps.discovery.getInstances().values()];
     const allMappings: Array<{ lid: string; phone_jid: string; instance: string }> = [];
+    const observations: LidMappingObservation[] = [];
     const seen = new Set<string>();
 
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+        return db.prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings').all() as Array<{
+          lid: string;
+          phone_jid: string;
+          updated_at: string;
+        }>;
       });
       if (result.ok) {
         for (const m of result.data) {
+          observations.push({ ...m, instance: inst.name });
           if (!seen.has(m.lid)) {
             seen.add(m.lid);
-            allMappings.push({ ...m, instance: inst.name });
+            allMappings.push({ lid: m.lid, phone_jid: m.phone_jid, instance: inst.name });
           }
         }
       }
     }
 
-    jsonResponse(res, 200, { mappings: allMappings, count: allMappings.length });
+    const { unified, conflicts } = buildConflictExplicitLidMappings(observations);
+
+    jsonResponse(res, 200, {
+      mappings: allMappings,
+      count: allMappings.length,
+      unified,
+      conflicts,
+      conflict_count: conflicts.length,
+    });
   } catch (err) {
     log.error({ err }, 'L5: failed to export LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
@@ -343,53 +520,129 @@ function handleGetLidMappings(_req: IncomingMessage, res: ServerResponse, deps: 
 async function handleSyncLidMappings(_req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
   try {
     const instances = [...deps.discovery.getInstances().values()];
-    const allMappings = new Map<string, string>(); // lid → phone_jid
 
-    // Phase 1: Collect union of all mappings from every instance
+    // Step 1: collect every instance's (lid, phone_jid, updated_at) so the
+    // freshness gate in writeLidMapping can compare cross-instance observation
+    // times correctly. The pre-#251 path used a Map<lid,phone> which silently
+    // dropped staleness signal.
+    const observations: FleetMappingInput[] = [];
     for (const inst of instances) {
       const result = deps.dbReader.query(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        return db.prepare('SELECT lid, phone_jid FROM lid_mappings').all() as Array<{ lid: string; phone_jid: string }>;
+        return db
+          .prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings')
+          .all() as Array<{ lid: string; phone_jid: string; updated_at: string }>;
       });
       if (result.ok) {
         for (const m of result.data) {
-          allMappings.set(m.lid, m.phone_jid);
+          observations.push({
+            lid: m.lid,
+            phone_jid: m.phone_jid,
+            updated_at: m.updated_at,
+            source_instance: inst.name,
+          });
         }
       }
     }
 
-    // Phase 2: Write the union set into every instance's DB (needs writable access)
+    // Step 2: write into every instance via the unified seam (strict freshness
+    // gate on L5). Keep `results` backward-compatible as imported-count/-1 and
+    // expose richer counters separately.
     const results: Record<string, number> = {};
+    const details: Record<
+      string,
+      {
+        imported: number;
+        flipped: number;
+        noop: number;
+        conflicts: number;
+        skipped?: boolean;
+        reason?: string;
+        schemaVersion?: number;
+        error?: string;
+      }
+    > = {};
+    const skippedInstances: Array<{ instance: string; schemaVersion: number; required: number; reason: string }> = [];
     for (const inst of instances) {
-      const insertResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (db: DatabaseSync) => {
-        // Wrap in a transaction — without this, each INSERT is a separate WAL write
-        // which is both slow and creates contention with the running instance.
-        db.prepare('BEGIN').run();
-        try {
-          const stmt = db.prepare(
-            `INSERT OR IGNORE INTO lid_mappings (lid, phone_jid, updated_at)
-             VALUES (?, ?, datetime('now'))`,
-          );
-          let imported = 0;
-          for (const [lid, phoneJid] of allMappings) {
-            const r = stmt.run(lid, phoneJid);
-            if ((r as any).changes > 0) imported++;
-          }
-          db.prepare('COMMIT').run();
-          return imported;
-        } catch (err) {
-          db.prepare('ROLLBACK').run();
-          throw err;
+      const writeResult = deps.dbReader.queryWrite(inst.name, inst.dbPath, (rawDb: DatabaseSync) => {
+        const schemaVersion = readSchemaMigrationVersion(rawDb);
+        if (schemaVersion < 25) {
+          return {
+            imported: 0,
+            flipped: 0,
+            noop: 0,
+            conflicts: [],
+            skipped: true,
+            reason: 'schema_migration_below_25',
+            schemaVersion,
+          } as const;
         }
+
+        // Build a minimal Database-shaped facade so importLidMappings can
+        // operate on the underlying raw handle without us instantiating a
+        // full Database instance against a path we don't own here.
+        const dbFacade = { raw: rawDb } as unknown as import('../core/database.ts').Database;
+        return { ...importLidMappings(dbFacade, observations), schemaVersion };
       });
-      results[inst.name] = insertResult.ok ? insertResult.data : -1;
+      if (writeResult.ok) {
+        const r = writeResult.data;
+        results[inst.name] = r.imported;
+        details[inst.name] = {
+          imported: r.imported,
+          flipped: r.flipped,
+          noop: r.noop,
+          conflicts: r.conflicts.length,
+          schemaVersion: r.schemaVersion,
+          ...(r.skipped ? { skipped: true, reason: r.reason } : {}),
+        };
+        // Surface every freshness-rejected write so consoles can refetch
+        // the mappings panel (#251). `r.conflicts` is the array of writes
+        // that lost the gate on this peer.
+        if (!r.skipped) {
+          for (const c of r.conflicts) {
+            publishLidConflict(deps.realtime, inst.name, c.lid);
+          }
+        }
+        if (r.skipped) {
+          skippedInstances.push({
+            instance: inst.name,
+            schemaVersion: r.schemaVersion,
+            required: 25,
+            reason: r.reason,
+          });
+        }
+      } else {
+        results[inst.name] = -1;
+        details[inst.name] = {
+          imported: 0,
+          flipped: 0,
+          noop: 0,
+          conflicts: 0,
+          error: writeResult.error,
+        };
+      }
     }
 
-    const totalMappings = allMappings.size;
-    log.info({ totalMappings, results }, 'L5: cross-instance LID sync completed');
-    jsonResponse(res, 200, { totalMappings, results });
+    const totalMappings = observations.length;
+    log.info({ totalMappings, results, details, skippedInstances }, 'L5: cross-instance LID sync completed');
+    jsonResponse(res, 200, { totalMappings, results, details, skippedInstances });
   } catch (err) {
     log.error({ err }, 'L5: failed to sync LID mappings');
     jsonResponse(res, 500, { error: 'internal error' });
+  }
+}
+
+function readSchemaMigrationVersion(rawDb: DatabaseSync): number {
+  try {
+    const row = rawDb
+      .prepare('SELECT MAX(version) AS version FROM schema_migrations')
+      .get() as { version: number | null } | undefined;
+    return typeof row?.version === 'number' ? row.version : 0;
+  } catch (err) {
+    const message = (err as Error).message;
+    if (message.includes('no such table: schema_migrations')) {
+      return 0;
+    }
+    throw err;
   }
 }
 
@@ -422,12 +675,60 @@ export function createFleetServer(deps: FleetDeps) {
     const s = updateChecker.getState().sha;
     return (s && s !== 'unknown') ? s : startupSha;
   };
-  const staticHandler = createStaticHandler(distDir, deps.fleetToken, getVersion);
+  function getTokenSet(): { active: string; accept: readonly string[] } {
+    return deps.getFleetTokens?.() ?? { active: deps.fleetToken, accept: deps.acceptTokens ?? [] };
+  }
+
+  const staticHandler = createStaticHandler(distDir, () => getTokenSet().active, getVersion);
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
   const serviceManager = createServiceManager();
   const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, serviceManager, log, updateChecker };
+
+  // ---- Auth helpers (rotation-aware) -----------------------------------
+  function verifyToken(candidate: string | null | undefined): boolean {
+    if (!candidate) return false;
+    return verifyFleetTokenImpl(candidate, getTokenSet());
+  }
+  const ticketStore: TicketStore = createWsTicketStore();
+  // Audience-scoped store for HTTP and SSE tickets (#313). The WS path keeps
+  // using `ticketStore` above so call sites do not need to care about the
+  // shared audience-scoped implementation.
+  const apiTicketStore: AuthTicketStore = createAuthTicketStore();
+
+  /**
+   * Audience-scoped HTTP/SSE auth gate (#313).
+   *
+   * Two acceptance paths during the deprecation window:
+   *   (a) the root fleet token via Bearer or `?token=` query (legacy)
+   *   (b) an audience-scoped ticket via `?ticket=` query or Bearer header
+   *
+   * Audience is derived from the route shape:
+   *   - SSE endpoints (currently `/api/lines/:name/auth`) require audience='sse'
+   *   - everything else under `/api/*` accepts audience='api'
+   *   - the ticket-vending endpoint itself is anchored to the root token (the
+   *     bootstrap credential) and is gated separately.
+   */
+  function audienceForPath(pathname: string): TicketAudience {
+    // Currently the only SSE endpoint is `/api/lines/:name/auth`.
+    if (/^\/api\/lines\/[^/]+\/auth$/.test(pathname)) return 'sse';
+    return 'api';
+  }
+
+  function verifyApiTicketCandidate(candidate: string | undefined | null, audience: TicketAudience): boolean {
+    if (!candidate) return false;
+    const tokenSet = getTokenSet();
+    const validKeys = [tokenSet.active, ...tokenSet.accept];
+    return apiTicketStore.redeem(candidate, audience, validKeys);
+  }
+
+  // Deprecation warning state for legacy `?token=<root>` HTTP API auth.
+  // Mirrors `ws_legacy_token_path` on the WebSocket path (#393): one-shot
+  // per server lifetime so a misbehaving caller hitting many endpoints does
+  // not spam logs. The legacy path itself remains functional until the
+  // removal date above.
+  let httpLegacyTokenWarningEmitted = false;
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -436,11 +737,78 @@ export function createFleetServer(deps: FleetDeps) {
 
     // API routes require auth
     if (pathname.startsWith('/api/')) {
-      // Accept Bearer header or ?token= query param (EventSource can't set headers)
-      const queryToken = parseQueryString(url).token ?? '';
-      const tokenMatch = queryToken.length === deps.fleetToken.length &&
-        crypto.timingSafeEqual(Buffer.from(queryToken), Buffer.from(deps.fleetToken));
-      if (!checkBearerAuth(req, deps.fleetToken) && !tokenMatch) {
+      const query = parseQueryString(url);
+      const queryToken = query.token ?? '';
+      const queryTicket = query.ticket ?? '';
+      const bearer = extractBearer(req);
+
+      // Bootstrap ticket endpoints accept ONLY the root fleet token via
+      // Authorization. They intentionally do not accept `?token=` because
+      // these POST routes do not have EventSource's header limitation.
+      if (method === 'POST' && pathname === '/api/auth-ticket') {
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        let body: unknown = null;
+        try {
+          const raw = await readBody(req, 1024);
+          if (raw && raw.length > 0) body = JSON.parse(raw);
+        } catch {
+          jsonResponse(res, 400, { error: 'invalid body' });
+          return;
+        }
+        const audience = (body as { audience?: unknown } | null)?.audience;
+        if (!isTicketAudience(audience) || audience === 'ws') {
+          jsonResponse(res, 400, { error: 'audience must be "api" or "sse"' });
+          return;
+        }
+        const { ticket, expiresIn } = apiTicketStore.issue(getTokenSet().active, audience);
+        jsonResponse(res, 200, { ticket, audience, expiresIn });
+        return;
+      }
+
+      // Legacy WS ticket vending remains a root-token bootstrap path. Do
+      // this before the generic API ticket gate so an `api`-audience ticket
+      // cannot be exchanged for WebSocket capability.
+      if (method === 'POST' && pathname === '/api/ws-ticket') {
+        if (!verifyToken(bearer)) {
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        try { await readBody(req, 1024); } catch { /* ignore -- body is optional */ }
+        const { ticket, expiresIn } = ticketStore.issue(getTokenSet().active);
+        jsonResponse(res, 200, { ticket, expiresIn });
+        return;
+      }
+
+      const audience = audienceForPath(pathname);
+      // Accept (a) root token via Bearer/?token=, OR (b) audience-scoped
+      // ticket via ?ticket=. Bearer header may also carry a ticket so
+      // browsers don't have to special-case the HTTP API client; we try
+      // both interpretations and accept the first success.
+      const bearerRootOk = verifyToken(bearer);
+      const queryRootOk = !bearerRootOk && verifyToken(queryToken);
+      const rootOk = bearerRootOk || queryRootOk;
+      // Deprecation warning for legacy `?token=<root>` HTTP API auth (#393).
+      // Emit only when authentication actually succeeded via the query path,
+      // never on Bearer. One-shot per server lifetime — mirrors the WebSocket
+      // `ws_legacy_token_path` warning shape.
+      if (queryRootOk && !httpLegacyTokenWarningEmitted) {
+        httpLegacyTokenWarningEmitted = true;
+        log.warn({ legacy: 'http-token-in-url', path: pathname, removeAfter: HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE }, 'http_legacy_token_path');
+      }
+      const ticketCandidates: string[] = [];
+      if (queryTicket) ticketCandidates.push(queryTicket);
+      if (bearer && !rootOk) ticketCandidates.push(bearer);
+      let ticketOk = false;
+      for (const cand of ticketCandidates) {
+        if (verifyApiTicketCandidate(cand, audience)) {
+          ticketOk = true;
+          break;
+        }
+      }
+      if (!rootOk && !ticketOk) {
         jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
@@ -478,15 +846,33 @@ export function createFleetServer(deps: FleetDeps) {
 
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err) => {
-      log.error({ err }, 'unhandled fleet request error');
+      const raw = (err as { statusCode?: unknown })?.statusCode;
+      const status =
+        typeof raw === 'number' && raw >= 400 && raw < 600 ? raw : 500;
+      const message =
+        status === 500 ? 'internal error' : (err as Error)?.message ?? 'error';
+      if (status === 500) {
+        log.error({ err }, 'unhandled fleet request error');
+      } else {
+        log.warn({ err, status }, 'fleet request rejected');
+      }
       try {
-        jsonResponse(res, 500, { error: 'internal error' });
+        jsonResponse(res, status, { error: message });
       } catch { /* response already started */ }
     });
   });
 
-  // WebSocket server for real-time console updates
-  const wsServer = new FleetWebSocketServer(server, deps.fleetToken);
+  // WebSocket server for real-time console updates.
+  // Auth: ticket-first (HMAC tickets minted via POST /api/ws-ticket); legacy
+  // `?token=<active>` still works for one rollout cycle.
+  const wsServer = new FleetWebSocketServer(server, {
+    ticketStore,
+    ticketValidKeys: () => {
+      const tokenSet = getTokenSet();
+      return [tokenSet.active, ...tokenSet.accept];
+    },
+    verifyLegacyToken: (token) => verifyToken(token),
+  });
 
   // Now that wsServer exists, wire the deferred publisher
   realtimePublish = (event) => wsServer.broadcast(event);
@@ -521,6 +907,8 @@ export function createFleetServer(deps: FleetDeps) {
       healthPoller.stop();
       discovery.stop();
       updateChecker.stop();
+      ticketStore.stop();
+      apiTicketStore.stop();
       wsServer.close();
       server.close();
     },

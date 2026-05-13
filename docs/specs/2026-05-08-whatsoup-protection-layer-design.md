@@ -88,9 +88,13 @@ A protection policy is a YAML document that declares, for one deployment:
 | `collectors` | Which collector packs to load, with per-pack configuration. |
 | `evaluators` | Which evaluators to enable; rule overrides. |
 | `mute_constraints` | Maximum mute duration, mute domains that cannot be suppressed (alerting protection always wins), mutes requiring extra confirmation. |
-| `actions` | Per-rule action: `observe`, `alert`, `block`, `propose_fix`, `remediate`. The remediate set is closed and operator-approved. |
+| `actions` | Per-rule action: `observe`, `alert`, `propose_fix`, `meta_alert`, `block`, `remediate`. `block`/`remediate` are reserved at runtime today (see §6.5); when enabled, the remediate set is closed and operator-approved. |
 | `transport` | Where alerts go (primary alert sink, fallbacks, meta-alert sink). Identifiers are stable (canonical chat identity), not human labels. |
 | `extends` | Optional parent profile (`development`, `personal-strict`, `production`, `customer-managed`). |
+
+#### 5.1.1 Always-on `alerting` domain
+
+The `alerting` domain is self-protection: it covers the engine's own credentials, baseline-HMAC integrity, and transport-failure escalation. It is always-on by construction and cannot be disabled from policy. `tools/whatsoup_guard/src/runner.ts:298-301` short-circuits `isDomainEnabled('alerting')` to `true`, and `tools/whatsoup_guard/src/policy/runtime.ts:46-50` rejects `domains.alerting.enabled: false` at policy-load time with `alerting self-protection must fail closed`. Operators may still tune severity for the domain; they may not disable it.
 
 ### 5.2 Profile inheritance
 
@@ -138,12 +142,12 @@ Evaluators            — apply policy rules, produce drift/info events with sev
        ↓
 Event Ledger          — append-only record (sqlite + jsonl); source of truth for everything else
        ↓
-Alert Sinks + Actions — primary, fallback, meta-alert; observe / alert / block / propose / remediate
+Alert Sinks + Actions — primary, fallback, meta-alert; observe / alert / propose_fix / meta_alert (block/remediate are schema-reserved and runtime-rejected)
 ```
 
 ### 6.1 Collectors
 
-A **collector pack** is a versioned module that observes one slice of state and returns canonical JSON. Packs are independent, drop-in, and live under `tools/whatsoup_guard/collectors/<pack>/`. Initial packs:
+A **collector pack** is a versioned module that observes one slice of state and returns canonical JSON. Packs are independent, drop-in, and live under `tools/whatsoup_guard/src/collector/`. Initial packs:
 
 | Pack | Domain coverage |
 |---|---|
@@ -177,23 +181,33 @@ Append-only events table backed by SQLite for query and JSONL for streaming. Eve
 
 `fingerprint = sha256(probe_id || canonical_diff)`, with `canonical_diff` stripped of timestamps and ephemeral state, so the same drift produces the same fingerprint on every cycle.
 
-Events the ledger records (non-exhaustive): `drift`, `drift_dedup`, `drift_muted`, `probe_error`, `baseline_integrity_fail`, `alert_delivery_succeeded`, `alert_delivery_failed`, `alert_delivery_failed_all`, `mute_set`, `mute_expire`, `heartbeat`, `self_secret_widened`.
+Events the ledger records (complete shipped set; see `tools/whatsoup_guard/src/types.ts:9-16`):
+
+`drift`, `drift_dedup`, `drift_muted`, `probe_error`, `baseline_integrity_fail`, `alert_delivery_succeeded`, `alert_delivery_failed`, `alert_delivery_failed_all`, `mute_set`, `mute_expire`, `heartbeat`, `jsonl_mirror_failed`, `self_secret_widened`, `alert_token_aging`, `cycle_refused`, `cycle_failed`.
+
+Operator-visible semantics for the four extras beyond the original draft:
+
+- `jsonl_mirror_failed` — the SQLite event was appended but the JSONL mirror write failed; durability budget is degraded for that event.
+- `alert_token_aging` — the alert-sink credential is approaching expiry; routed through `credential.token_aging` to whatever action the policy declares.
+- `cycle_refused` — the engine refused to evaluate this cycle because a `crit` self-protection event (e.g. `self_secret_widened`) tripped fail-closed.
+- `cycle_failed` — the cycle CLI caught an uncaught error before completing; ledgered as a terminal cycle outcome.
 
 The ledger is the truth source. Alert content is derivable from the ledger; the ledger is never derivable from alerts.
 
 ### 6.5 Actions
 
-Five action types, declared per rule in policy:
+Six action types, declared per rule in policy:
 
 | Action | Behaviour |
 |---|---|
 | `observe` | Event lands in the ledger only. No alert, no remediation. Used for low-signal change tracking. |
 | `alert` | Event lands in the ledger and is dispatched to the alert sink chain. Default for most drift. |
 | `propose_fix` | Same as `alert`, with a copy-pasteable fix command in the alert body. The engine never runs it. |
-| `block` | For pre-action collectors only (`repo.api_routes` on commit, etc.) — blocks the action that would produce the drift. Reserved capability; not used by all collectors. |
-| `remediate` | Engine invokes a single, fixed, root-owned wrapper script that restores the declared state. Allowlisted only. Both alert sink and the host owner are notified. |
+| `meta_alert` | Event is routed to the external meta-alert transport (`metaAlertSinks`) rather than the primary alert chain. Used for transport-failure escalation; see §7.1. |
+| `block` | For pre-action collectors only (`repo.api_routes` on commit, etc.) — blocks the action that would produce the drift. **Declared in the schema but currently rejected by the policy runtime** (`tools/whatsoup_guard/src/policy/runtime.ts:52-58`); reserved for a future revision. |
+| `remediate` | Engine invokes a single, fixed, root-owned wrapper script that restores the declared state. Allowlisted only. Both alert sink and the host owner are notified. **Declared in the schema but currently rejected by the policy runtime** (`tools/whatsoup_guard/src/policy/runtime.ts:52-58`); reserved for a future revision. |
 
-The remediation allowlist is part of policy, not part of engine code. A profile with no `remediate` actions performs zero mutations. `customer-managed` is such a profile.
+In v1 the runtime accepts `observe`, `alert`, `propose_fix`, and `meta_alert`. `block` and `remediate` are part of the schema for forward compatibility and load-time validation but a policy declaring them at any key will fail closed with `unsupported policy action`. The remediation allowlist remains part of policy, not engine code, so when `remediate` is enabled a profile with no `remediate` actions still performs zero mutations. `customer-managed` is such a profile.
 
 ## 7. Alerting and meta-alerting
 
@@ -209,7 +223,7 @@ The remediation allowlist is part of policy, not part of engine code. A profile 
 Rules:
 
 - The local durable log is audit trail, not delivery. An alert that lands only on disk emits `alert_delivery_failed_all`.
-- The external meta-alert channel is reserved for the watchdog. Mixing it with normal drift alerts burns its signal value.
+- The external meta-alert channel is reserved primarily for the watchdog (heartbeat silence, transport-failure detection from outside the engine). It is also reachable from inside the engine via the `meta_alert` policy action for events that signal the primary transport itself is broken — most notably `alerting.transport_failed` (raised when `alert_delivery_failed_all` is ledgered). Both paths land on the same `metaAlertSinks` array (`tools/whatsoup_guard/src/runner.ts:612-615`). Routine drift must not be wired to `meta_alert`; doing so burns the channel's signal value.
 - Critical-severity alerts retry the primary sink with bounded backoff before falling through. Lower severities are single-shot and fall through.
 - The external meta-alert channel is profile-gated. `production` requires it; `development` typically disables it.
 
@@ -228,7 +242,7 @@ Targets are addressed by stable identifier (canonical chat identity, hash, ID). 
 
 ### 7.4 Alert content shape
 
-A single alert maps to a single drift event maps to a single fingerprint. No bundles. Alert bodies always include: severity, scope ID, probe ID, structural diff, action taken (`observe` / `alert` / `propose_fix:<command>` / `remediate:APPLIED` / `remediate:FAILED`), fingerprint, copy-pasteable mute command, event ID.
+A single alert maps to a single drift event maps to a single fingerprint. No bundles. Alert bodies always include: severity, scope ID, probe ID, structural diff, action taken (`observe` / `alert` / `propose_fix:<command>` / `meta_alert`), fingerprint, copy-pasteable mute command, event ID. Runtime v1 never emits remediation result labels because `block` and `remediate` policies fail closed during runtime config construction.
 
 ### 7.5 Storm guard
 
@@ -279,7 +293,7 @@ The engine self-checks its own credentials on every cycle: alert-sink bearer tok
 
 ## 9. Deployment profiles
 
-Four reusable profiles ship with the protection layer. Each is a policy YAML in `tools/whatsoup_guard/profiles/`.
+Four reusable profiles ship with the protection layer. Each is a policy YAML in `tools/whatsoup_guard/src/policy/profiles/`.
 
 ### 9.1 `development`
 
@@ -377,9 +391,13 @@ deployment_roles:
       groups_only: allowed
 
 actions:
-  exposure.unauthenticated_mutation:    remediate
-  exposure.public_funnel_internal:      remediate
-  exposure.firewall_disabled:           remediate
+  # v1 supports `observe`, `alert`, `propose_fix`, `meta_alert`.
+  # `block` / `remediate` are reserved in the schema (see policy/runtime.ts:52-58)
+  # and will be enabled in a future revision; until then the entries below use
+  # `alert` so the example loads as-is.
+  exposure.unauthenticated_mutation:    alert
+  exposure.public_funnel_internal:      alert
+  exposure.firewall_disabled:           alert
   capability.role_violation:            alert
   credential.file_mode_widened:         alert
   credential.token_aging:               propose_fix

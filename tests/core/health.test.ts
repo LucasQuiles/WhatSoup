@@ -317,6 +317,16 @@ describe('POST /send — Authorization header check', () => {
     expect(status).toBe(401);
   });
 
+  it('returns 401 for multibyte malformed Bearer tokens without crashing', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'a'.repeat(10);
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hi' });
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: `Bearer ${'é'.repeat(10)}`,
+    });
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+  });
+
   it('proceeds (200) when correct Bearer token is provided', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello' });
@@ -649,6 +659,81 @@ describe('POST /agent/compact', () => {
     expect(status).toBe(400);
     expect(JSON.parse(body)).toMatchObject({ ok: false, error: 'request body must be a JSON object' });
     expect(handleAgentCommand).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /typing — Authorization header check (issue #389)
+// ---------------------------------------------------------------------------
+
+describe('GET /typing — Authorization header check', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    const presenceCache = {
+      getAll: () => new Map<string, { status: string; updatedAt: number }>([
+        ['15550100001@s.whatsapp.net', { status: 'composing', updatedAt: 1700000000000 }],
+        ['15550100002@s.whatsapp.net', { status: 'available', updatedAt: 1700000001000 }],
+      ]).entries(),
+    };
+    const deps = makeDeps(db, {
+      connectionManager: {
+        botJid: '15550199000@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        presenceCache,
+      } as unknown as ConnectionManager,
+    });
+    ({ server, port } = await buildTestServer(deps));
+  });
+
+  afterEach(async () => {
+    db.close();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('returns 401 when WHATSOUP_HEALTH_TOKEN is set and Authorization header is missing', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const { status, body } = await httpReq(port, '/typing', 'GET');
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+  });
+
+  it('returns 401 when Bearer token does not match', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const { status } = await httpReq(port, '/typing', 'GET', undefined, {
+      authorization: 'Bearer wrong-token',
+    });
+    expect(status).toBe(401);
+  });
+
+  it('returns 401 when no WHATSOUP_HEALTH_TOKEN is set', async () => {
+    const { status, body } = await httpReq(port, '/typing', 'GET', undefined, {
+      authorization: 'Bearer any-token',
+    });
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+  });
+
+  it('returns 200 with composing payload when Bearer token matches', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+    const { status, body } = await httpReq(port, '/typing', 'GET', undefined, {
+      authorization: 'Bearer secret-token',
+    });
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(Array.isArray(json.composing)).toBe(true);
+    expect(json.composing).toEqual([
+      { jid: '15550100001@s.whatsapp.net', since: 1700000000000 },
+    ]);
   });
 });
 

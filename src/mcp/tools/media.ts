@@ -2,7 +2,7 @@
 // Media sending tool with filesystem boundary enforcement.
 
 import { z } from 'zod';
-import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { createReadStream, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
@@ -58,6 +58,12 @@ const EXTENSION_MAP: Record<string, { type: OutboundMedia['type']; mime: string 
 };
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
+
+function destroyOutboundMediaStream(media: OutboundMedia): void {
+  if (media.stream === undefined) return;
+  media.stream.on('error', () => {});
+  media.stream.destroy();
+}
 
 // ---------------------------------------------------------------------------
 // Register media tools
@@ -148,18 +154,6 @@ export function registerMediaTools(
         };
       }
 
-      // ── Read file ─────────────────────────────────────────────────────
-      // TODO(SP8): Future optimization — stream file to Baileys instead of
-      // reading the entire file into memory. Blocked on inconsistent Baileys
-      // stream support; revisit when upstream stabilizes.
-
-      let buffer: Buffer;
-      try {
-        buffer = readFileSync(resolved);
-      } catch (err) {
-        return { error: `Cannot read file: ${filePath}` };
-      }
-
       // ── Build OutboundMedia ───────────────────────────────────────────
 
       let media: OutboundMedia;
@@ -169,23 +163,28 @@ export function registerMediaTools(
 
       switch (effectiveType) {
         case 'image':
-          media = { type: 'image', buffer, caption, mimetype: mime, viewOnce };
+          media = { type: 'image', stream: createReadStream(resolved), caption, mimetype: mime, viewOnce };
           break;
         case 'document':
-          media = { type: 'document', buffer, filename: basename, mimetype: mime, caption };
+          media = { type: 'document', stream: createReadStream(resolved), filename: basename, mimetype: mime, caption };
           break;
         case 'audio':
-          media = { type: 'audio', buffer, mimetype: mime, ptt, seconds };
+          media = { type: 'audio', stream: createReadStream(resolved), mimetype: mime, ptt, seconds };
           break;
         case 'video':
-          media = { type: 'video', buffer, caption, mimetype: mime, ptv, gifPlayback, viewOnce };
+          media = { type: 'video', stream: createReadStream(resolved), caption, mimetype: mime, ptv, gifPlayback, viewOnce };
           break;
         case 'sticker':
-          media = { type: 'sticker', buffer, mimetype: mime, isAnimated };
+          media = { type: 'sticker', stream: createReadStream(resolved), mimetype: mime, isAnimated };
           break;
       }
 
-      await connection.sendMedia(chatJid, media);
+      try {
+        await connection.sendMedia(chatJid, media);
+      } catch (err) {
+        destroyOutboundMediaStream(media);
+        throw err;
+      }
 
       return {
         sent: true,

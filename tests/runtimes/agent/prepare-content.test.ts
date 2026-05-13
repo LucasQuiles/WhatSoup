@@ -25,9 +25,12 @@ vi.mock('../../../src/logger.ts', () => ({
 }));
 
 // Mock Baileys — downloadMediaMessage is imported dynamically inside the download fn
-vi.mock('@whiskeysockets/baileys', () => ({
-  downloadMediaMessage: vi.fn(async () => Buffer.from('media-bytes')),
-}));
+vi.mock('@whiskeysockets/baileys', async () => {
+  const { baileysMediaMock } = await import('../../helpers/baileys-mock.ts');
+  const m = baileysMediaMock();
+  m.downloadMediaMessage.mockImplementation(async () => Buffer.from('media-bytes'));
+  return m;
+});
 
 // Mock media-download module: writeTempFile returns a predictable path
 vi.mock('../../../src/core/media-download.ts', () => ({
@@ -116,6 +119,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
   provisionWorkspace: vi.fn(() => '/tmp/test.sock'),
   writeSandboxArtifacts: vi.fn(),
   ensurePermissionsSettings: vi.fn(),
+  writePrivateFileSync: vi.fn(),
 }));
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({

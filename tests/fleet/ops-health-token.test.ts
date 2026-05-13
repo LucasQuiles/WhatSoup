@@ -14,32 +14,10 @@ vi.mock('../../src/lib/keyring.ts', () => ({
 
 const mockedLookupCredential = vi.mocked(lookupCredential);
 
-function mockReq(body = ''): IncomingMessage {
-  const stream = new PassThrough() as unknown as IncomingMessage;
-  (stream as any).headers = {};
-  (stream as any).url = '/api/lines';
-  (stream as any).method = 'POST';
-  process.nextTick(() => {
-    (stream as unknown as PassThrough).write(body);
-    (stream as unknown as PassThrough).end();
-  });
-  return stream;
-}
+import { mockReq as helperMockReq, mockRes } from '../helpers/http-mocks.ts';
 
-function mockRes(): ServerResponse & { _status: number; _headers: Record<string, string>; _body: string } {
-  const res = {
-    _status: 0,
-    _headers: {} as Record<string, string>,
-    _body: '',
-    writeHead(status: number, headers?: Record<string, string>) {
-      res._status = status;
-      if (headers) Object.assign(res._headers, headers);
-    },
-    end(data?: string) {
-      if (data) res._body = data;
-    },
-  };
-  return res as ServerResponse & { _status: number; _headers: Record<string, string>; _body: string };
+function mockReq(body = ''): IncomingMessage {
+  return helperMockReq({ body, method: 'POST', url: '/api/lines' });
 }
 
 function fileMode(filePath: string): number {

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 vi.mock('node:os', () => ({
   userInfo: vi.fn(() => ({

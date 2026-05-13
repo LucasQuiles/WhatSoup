@@ -237,14 +237,13 @@ beforeAll(async () => {
     fleet.server.listen(0, '127.0.0.1', () => resolve());
   });
   fleet.discovery.startAutoRefresh();
-  fleet.healthPoller.start();
+  // Await the poller's initial poll so the suite doesn't race against a
+  // wall-clock guess. start() resolves once the first poll cycle completes.
+  await fleet.healthPoller.start();
 
   const addr = fleet.server.address();
   if (!addr || typeof addr === 'string') throw new Error('unexpected address type');
   baseUrl = `http://127.0.0.1:${addr.port}`;
-
-  // Give the health poller a moment to complete its initial poll
-  await new Promise((r) => setTimeout(r, 150));
 });
 
 afterAll(async () => {
@@ -620,5 +619,23 @@ describe('fleet integration -- DB error resilience', () => {
     expect(status).toBe(200);
     expect(body.dbStats).not.toBeNull();
     expect(body.dbStats.messageCount).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. Request body size guard — top-level catch honors statusCode (#250)
+// ---------------------------------------------------------------------------
+
+describe('fleet integration -- body size guard', () => {
+  it('POST with body over 64 KiB returns 413, not 500', async () => {
+    const big = 'x'.repeat(128 * 1024); // 128 KiB > 64 KiB readBody default
+    const res = await fetch(`${baseUrl}/api/lines/${INST_A}/mark-read`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: big,
+    });
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/too large/i);
   });
 });

@@ -1,104 +1,222 @@
 /**
- * SoupKitchen page — component-level tests.
+ * SoupKitchen page — behavior tests.
  *
- * Since no DOM environment (jsdom/happy-dom) is configured, these tests
- * exercise the same logic paths the SoupKitchen component uses:
- *   - KPI-based filtering
- *   - Mode-based filtering
- *   - Search filtering
- *   - Alert message derivation (unreachable vs degraded, auth_expired)
- *   - Mode count aggregation
- *   - KPI toggle (idempotent deselect)
- *   - Structural verification of component composition
+ * Renders the real component under jsdom + Testing Library and asserts on
+ * observable DOM (text content, aria states, classNames that encode user-
+ * visible state) rather than scanning source strings or re-implementing
+ * internals in a parallel helper. The previous version of this file matched
+ * substrings against the SoupKitchen source and replicated its filter / alert
+ * / mode-count logic; both patterns gave green checks even when the component
+ * stopped emitting the matched markup. Tracked in issue #454.
+ *
+ * Tests against real exported helpers (computeKpis, deriveFleetMessageSparklines,
+ * text-utils) are kept as-is — they pin contracts the component depends on.
+ *
+ * @vitest-environment jsdom
  */
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';
+
+// Hoisted hook mocks — must be declared before component import so the
+// `vi.mock` factories below can wire them in without forward-reference TDZ
+// issues. Each entry is a vi.fn whose return value we tune per-test.
+const useLinesMock = vi.hoisted(() => vi.fn());
+const useFeedMock = vi.hoisted(() => vi.fn());
+const useFleetMetricsMock = vi.hoisted(() => vi.fn());
+const navigateMock = vi.hoisted(() => vi.fn());
+
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>();
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
+
+vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../console/src/hooks/use-fleet')>();
+  return {
+    ...actual,
+    useLines: useLinesMock,
+    useFeed: useFeedMock,
+  };
+});
+
+vi.mock('../../console/src/hooks/use-metrics', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../console/src/hooks/use-metrics')>();
+  return {
+    ...actual,
+    useFleetMetrics: useFleetMetricsMock,
+  };
+});
+
+// `framer-motion` issues a `prefers-reduced-motion` MediaQueryList probe that
+// jsdom doesn't implement. Stub it so motion.div renders without warnings.
+beforeEach(() => {
+  if (typeof window !== 'undefined' && !window.matchMedia) {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }),
+    });
+  }
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
+import SoupKitchen from '../../console/src/pages/SoupKitchen';
 import { computeKpis } from '../../console/src/lib/compute-kpis';
 import { deriveFleetMessageSparklines } from '../../console/src/lib/metrics-sparklines';
 import { displayInstanceName, formatPhone, formatCompact } from '../../console/src/lib/text-utils';
-import type { LineInstance, Mode, Status, FeedEvent } from '../../console/src/types';
-
-const repoRoot = resolve(import.meta.dirname, '../..');
-const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8');
+import type { FeedEvent, FleetMetrics, LineInstance, Mode } from '../../console/src/types';
 
 // ---------------------------------------------------------------------------
-// Test data factories
+// Test data factories + render helper
 // ---------------------------------------------------------------------------
 
 function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
   return {
-    name: 'test-line', phone: '+15550001234', mode: 'passive', status: 'online',
-    accessMode: 'open', healthPort: 9100, uptime: '2h', messagesTotal: 50,
-    health: null, heartbeat: [], lastActive: new Date().toISOString(), error: null,
+    name: 'test-line',
+    phone: '+15550001234',
+    mode: 'passive',
+    status: 'online',
+    accessMode: 'open',
+    healthPort: 9100,
+    uptime: '2h',
+    messagesTotal: 50,
+    health: null,
+    heartbeat: [],
+    lastActive: new Date().toISOString(),
+    error: null,
     ...overrides,
   };
 }
 
-// Replicate the filter logic from SoupKitchen exactly
-type KpiFilter = 'connected' | 'attention' | 'unread' | 'agent' | 'sent' | 'received' | 'media' | null;
+interface RenderOptions {
+  lines?: LineInstance[];
+  feed?: FeedEvent[];
+  linesError?: Error | null;
+  feedError?: Error | null;
+  fleetMetrics?: Partial<FleetMetrics> | null;
+}
 
-function filterLines(
-  lines: LineInstance[],
-  activeKpi: KpiFilter,
-  modeFilter: Mode | 'all',
-  search: string,
-): LineInstance[] {
-  let result = lines;
+function renderPage(opts: RenderOptions = {}) {
+  const lines = opts.lines ?? [];
+  const feed = opts.feed ?? [];
 
-  if (activeKpi === 'connected')
-    result = result.filter((l) => l.status === 'online');
-  else if (activeKpi === 'attention')
-    result = result.filter((l) => l.status === 'unreachable' || l.status === 'degraded' || l.error);
-  else if (activeKpi === 'unread')
-    result = result.filter((l) => (l.unread ?? 0) > 0);
-  else if (activeKpi === 'agent')
-    result = result.filter((l) => l.mode === 'agent');
-  else if (activeKpi === 'sent')
-    result = result.filter((l) => (l.messageStats?.sent ?? 0) > 0);
-  else if (activeKpi === 'received')
-    result = result.filter((l) => (l.messageStats?.received ?? 0) > 0);
-  else if (activeKpi === 'media')
-    result = result.filter((l) => {
-      const s = l.messageStats;
-      return s ? (s.images + s.audio + s.documents) > 0 : false;
-    });
+  useLinesMock.mockReturnValue({
+    data: lines,
+    isError: Boolean(opts.linesError),
+    error: opts.linesError ?? null,
+  });
+  useFeedMock.mockReturnValue({
+    data: feed,
+    isError: Boolean(opts.feedError),
+    error: opts.feedError ?? null,
+  });
+  useFleetMetricsMock.mockReturnValue({
+    data: opts.fleetMetrics ?? undefined,
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
 
-  if (modeFilter !== 'all')
-    result = result.filter((l) => l.mode === modeFilter);
+  const toastValue: ToastContextValue = {
+    toast: vi.fn(),
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
+  };
 
-  if (search.trim()) {
-    const q = search.toLowerCase();
-    result = result.filter(
-      (l) => l.name.toLowerCase().includes(q) || (l.phone ?? '').toLowerCase().includes(q),
-    );
+  return render(
+    <ToastContext.Provider value={toastValue}>
+      <MemoryRouter>
+        <SoupKitchen />
+      </MemoryRouter>
+    </ToastContext.Provider>,
+  );
+}
+
+function getKpiCard(label: string): HTMLElement {
+  // KPI labels live inside the .c-label span on each card. There are two
+  // "Unread" hits — one in the KPI strip and one in the table column header
+  // — so we filter to the label class to pick the KPI hit unambiguously.
+  const candidates = screen.getAllByText(label).filter((el) => el.className.includes('c-label'));
+  if (candidates.length !== 1) {
+    throw new Error(`Expected 1 KPI label for "${label}", found ${candidates.length}`);
   }
-
-  return result;
+  const card = candidates[0].closest('button');
+  if (!card) throw new Error(`KPI card "${label}" has no enclosing button`);
+  return card as HTMLElement;
 }
 
-// Replicate alert derivation from SoupKitchen
-function deriveAlerts(lines: LineInstance[]) {
-  return lines
-    .filter((l) => l.status === 'unreachable' || l.status === 'degraded')
-    .map((l) => ({
-      line: l.name,
-      message:
-        l.status === 'unreachable'
-          ? l.lastSessionStatus === 'auth_expired' ? 'auth expired' : 'connection lost'
-          : 'degraded',
-    }));
+/** Mode pills live in the toolbar — anchor on "All" (only one in DOM). */
+function getModePill(label: string): HTMLElement {
+  const pillsContainer = screen.getByText('All').parentElement as HTMLElement;
+  return within(pillsContainer).getByText(label).closest('button') as HTMLElement;
 }
 
-// Replicate mode count aggregation from SoupKitchen
-function computeModeCounts(lines: LineInstance[]) {
-  const counts: Record<Mode | 'all', number> = { all: lines.length, passive: 0, chat: 0, agent: 0 };
-  for (const l of lines) counts[l.mode]++;
-  return counts;
+/** Table body — scoped queries here ignore the KPI strip, alert banner, etc. */
+function tableBody(): HTMLElement {
+  const headerCell = screen.getByRole('columnheader', { name: /^Mode\b/ });
+  const tbody = headerCell.closest('table')!.querySelector('tbody');
+  if (!tbody) throw new Error('SoupKitchen table has no tbody');
+  return tbody as HTMLElement;
+}
+
+function tableRows(): HTMLTableRowElement[] {
+  return Array.from(tableBody().querySelectorAll('tr'));
+}
+
+function tableCell(row: HTMLElement, index: number): HTMLElement {
+  const cell = row.querySelectorAll('td')[index];
+  if (!cell) throw new Error(`missing table cell at index ${index}`);
+  return cell as HTMLElement;
+}
+
+/** AlertBanner — anchor on the "N alert(s)" badge text. */
+function alertBanner(): HTMLElement | null {
+  const badge = screen.queryByText(/^\d+ alerts?$/);
+  if (!badge) return null;
+  // Walk up to the banner root (the outer flex container).
+  return badge.closest('div[style*="--s-crit-wash"]') ?? (badge.parentElement?.parentElement as HTMLElement);
+}
+
+/**
+ * Return the list of line names visible in the instance table, preserving
+ * the order produced by the component. Scoped to <tbody> so AlertBanner and
+ * ModeBadge labels can't bleed in.
+ */
+function visibleTableLineNames(lines: LineInstance[]): string[] {
+  const known = new Map(lines.map((line) => [displayInstanceName(line.name), line.name]));
+  return tableRows()
+    .map((row) => {
+      const lineCell = tableCell(row, 1);
+      for (const [displayName, rawName] of known) {
+        if (within(lineCell).queryByText(displayName)) return rawName;
+      }
+      return undefined;
+    })
+    .filter((name): name is string => name !== undefined);
 }
 
 // ---------------------------------------------------------------------------
-// 1. Loading state — structural verification
+// 1. Loading / empty state
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen loading state', () => {
@@ -117,11 +235,8 @@ describe('SoupKitchen loading state', () => {
   });
 
   it('shows "No instances match" when filtered list is empty', () => {
-    const filtered = filterLines([], null, 'all', '');
-    expect(filtered).toHaveLength(0);
-    // The component renders "No instances match the current filters" for empty filtered list
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain('No instances match the current filters');
+    renderPage({ lines: [] });
+    expect(screen.getByText('No instances match the current filters')).toBeDefined();
   });
 
   it('defaults fleet metrics sparklines to undefined when no data', () => {
@@ -170,59 +285,78 @@ describe('SoupKitchen KPI cards with data', () => {
     expect(kpis.agentSessions).toBe(2);
   });
 
-  it('renders all 7 KPI cards in the component source', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    const kpiLabels = [
-      'Lines Connected', 'Need Attention', 'Messages Sent',
-      'Messages Received', 'Agent Sessions', 'Unread', 'Media Processed',
+  it('renders all 7 KPI cards with the expected labels', () => {
+    renderPage({ lines });
+    const expected = [
+      'Lines Connected',
+      'Need Attention',
+      'Messages Sent',
+      'Messages Received',
+      'Agent Sessions',
+      'Unread',
+      'Media Processed',
     ];
-    for (const label of kpiLabels) {
-      expect(source).toContain(`label="${label}"`);
+    for (const label of expected) {
+      // getKpiCard throws if the label isn't found exactly once on a KPI card,
+      // which is exactly the contract we want here.
+      expect(getKpiCard(label)).toBeDefined();
     }
   });
 
-  it('passes sparkData to Messages Sent and Messages Received KPI cards', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain('sparkData={messageSparklines?.outbound}');
-    expect(source).toContain('sparkData={messageSparklines?.inbound}');
+  it('renders the computed KPI values on the cards', () => {
+    renderPage({ lines });
+    expect(within(getKpiCard('Lines Connected')).getByText('2')).toBeDefined();
+    expect(within(getKpiCard('Need Attention')).getByText('2')).toBeDefined();
+    expect(within(getKpiCard('Messages Sent')).getByText('170')).toBeDefined();
+    expect(within(getKpiCard('Messages Received')).getByText('310')).toBeDefined();
+    expect(within(getKpiCard('Agent Sessions')).getByText('2')).toBeDefined();
+    expect(within(getKpiCard('Media Processed')).getByText('21')).toBeDefined();
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3. Instance cards / table from fleet health
+// 3. Instance table rendering — real component DOM
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen instance table rendering', () => {
   const lines: LineInstance[] = [
-    makeLine({ name: 'primary-line', mode: 'passive', status: 'online', phone: '+15551234567',
-      chatCounts: { chats: 42, groups: 8 }, unread: 3, messageStats: { sent: 10, received: 20, images: 0, audio: 0, documents: 0 } }),
-    makeLine({ name: 'operator-agent', mode: 'agent', status: 'online', phone: '+15559876543',
-      chatCounts: { chats: 15, groups: 2 }, unread: 0, messageStats: { sent: 200, received: 150, images: 5, audio: 1, documents: 2 },
-      totalSessions: 47, tokenUsage: { input: 125000, output: 45000 } }),
+    makeLine({
+      name: 'primary-line', mode: 'passive', status: 'online', phone: '+15551234567',
+      chatCounts: { chats: 42, groups: 8 }, unread: 3,
+      messageStats: { sent: 10, received: 20, images: 0, audio: 0, documents: 0 },
+    }),
+    makeLine({
+      name: 'operator-agent', mode: 'agent', status: 'online', phone: '+15559876543',
+      chatCounts: { chats: 15, groups: 2 }, unread: 0,
+      messageStats: { sent: 200, received: 150, images: 5, audio: 1, documents: 2 },
+      totalSessions: 47, tokenUsage: { input: 125000, output: 45000 },
+    }),
   ];
 
-  it('filtered list includes all lines when no filter active', () => {
-    const filtered = filterLines(lines, null, 'all', '');
-    expect(filtered).toHaveLength(2);
+  it('renders one row per line under "no filter" defaults', () => {
+    renderPage({ lines });
+    const rows = screen.getAllByRole('row');
+    // 1 header row + 2 data rows
+    expect(rows.length).toBe(3);
   });
 
-  it('table has all expected column headers', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    const columns = ['Mode', 'Line', 'Chats', 'Groups', 'Unread', 'Sent', 'Recv', 'Tokens', 'Sessions', 'Tags', 'Active'];
-    for (const col of columns) {
-      expect(source).toContain(`label: "${col}"`);
+  it('renders all expected column headers', () => {
+    renderPage({ lines });
+    const expected = ['Mode', 'Line', 'Chats', 'Groups', 'Unread', 'Sent', 'Recv', 'Tokens', 'Sessions', 'Provider', 'Tags', 'Active'];
+    for (const col of expected) {
+      expect(screen.getByRole('columnheader', { name: new RegExp(`^${col}\\b`) })).toBeDefined();
     }
   });
 
   it('displays instance name via displayInstanceName', () => {
     expect(displayInstanceName('primary-line')).toBe('primary-line');
-    expect(displayInstanceName('A')).toBe('A'); // single letter gets uppercased
+    expect(displayInstanceName('A')).toBe('A');
     expect(displayInstanceName('a')).toBe('A');
   });
 
   it('formats phone numbers for display', () => {
     expect(formatPhone('+15551234567')).toMatch(/555/);
-    expect(formatPhone('unknown')).toBe('\u2014'); // em dash
+    expect(formatPhone('unknown')).toBe('—');
   });
 
   it('formats compact token counts', () => {
@@ -232,204 +366,329 @@ describe('SoupKitchen instance table rendering', () => {
     expect(formatCompact(2450000)).toBe('2.5M');
   });
 
-  it('shows sessions column only for agent mode lines', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    // Verify the conditional rendering: agent lines show totalSessions, others show dash
-    expect(source).toContain("line.mode === 'agent'");
-    expect(source).toContain('line.totalSessions ?? 0');
+  it('shows totalSessions for agent-mode rows and em-dash for non-agent rows', () => {
+    renderPage({ lines });
+    // operator-agent (agent mode) should expose its totalSessions value
+    const agentRow = screen.getByText(displayInstanceName('operator-agent')).closest('tr') as HTMLElement;
+    expect(tableCell(agentRow, 8).textContent).toBe('47');
+
+    // primary-line (passive mode) should show em-dash in the Sessions column.
+    const passiveRow = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    expect(tableCell(passiveRow, 8).textContent).toBe('—');
+    // And the passive row must NOT contain "47"
+    expect(within(passiveRow).queryByText('47')).toBeNull();
+  });
+
+  it('navigates to /lines/<name> when a row is clicked', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.click(row);
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+    expect(navigateMock).toHaveBeenCalledWith('/lines/primary-line');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 4. Error state handling
+// 4. Error / alert state handling
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen error state handling', () => {
-  it('derives alert for unreachable line with connection lost message', () => {
+  it('renders an AlertBanner with "connection lost" for an unreachable line', () => {
     const lines = [makeLine({ name: 'down-line', status: 'unreachable', lastSessionStatus: null })];
-    const alerts = deriveAlerts(lines);
-    expect(alerts).toEqual([{ line: 'down-line', message: 'connection lost' }]);
+    renderPage({ lines });
+    const banner = alertBanner();
+    expect(banner).not.toBeNull();
+    expect(screen.getByText('1 alert')).toBeDefined();
+    expect(within(banner!).getByText('connection lost')).toBeDefined();
+    expect(within(banner!).getByText('down-line')).toBeDefined();
   });
 
-  it('derives alert for unreachable line with auth_expired message', () => {
+  it('renders "auth expired" for an unreachable line with lastSessionStatus auth_expired', () => {
     const lines = [makeLine({ name: 'expired-line', status: 'unreachable', lastSessionStatus: 'auth_expired' })];
-    const alerts = deriveAlerts(lines);
-    expect(alerts).toEqual([{ line: 'expired-line', message: 'auth expired' }]);
+    renderPage({ lines });
+    const banner = alertBanner();
+    expect(banner).not.toBeNull();
+    expect(within(banner!).getByText('auth expired')).toBeDefined();
+    expect(within(banner!).getByText('expired-line')).toBeDefined();
   });
 
-  it('derives alert for degraded line', () => {
+  it('renders "degraded" for a degraded line', () => {
     const lines = [makeLine({ name: 'slow-line', status: 'degraded' })];
-    const alerts = deriveAlerts(lines);
-    expect(alerts).toEqual([{ line: 'slow-line', message: 'degraded' }]);
+    renderPage({ lines });
+    const banner = alertBanner();
+    expect(banner).not.toBeNull();
+    expect(within(banner!).getByText('degraded')).toBeDefined();
+    expect(within(banner!).getByText('slow-line')).toBeDefined();
   });
 
-  it('produces no alerts for healthy lines', () => {
-    const lines = [makeLine({ status: 'online' }), makeLine({ status: 'online' })];
-    const alerts = deriveAlerts(lines);
-    expect(alerts).toHaveLength(0);
+  it('renders no AlertBanner when all lines are healthy', () => {
+    const lines = [makeLine({ name: 'a', status: 'online' }), makeLine({ name: 'b', status: 'online' })];
+    renderPage({ lines });
+    expect(screen.queryByText(/\d+ alerts?$/)).toBeNull();
+    expect(screen.queryByText('connection lost')).toBeNull();
+    expect(screen.queryByText('degraded')).toBeNull();
   });
 
-  it('produces multiple alerts for mixed statuses', () => {
+  it('renders one alert entry per unhealthy line with the right message', () => {
     const lines = [
-      makeLine({ name: 'a', status: 'unreachable', lastSessionStatus: 'auth_expired' }),
-      makeLine({ name: 'b', status: 'degraded' }),
-      makeLine({ name: 'c', status: 'online' }),
-      makeLine({ name: 'd', status: 'unreachable', lastSessionStatus: null }),
+      makeLine({ name: 'alert-a', status: 'unreachable', lastSessionStatus: 'auth_expired' }),
+      makeLine({ name: 'alert-b', status: 'degraded' }),
+      makeLine({ name: 'alert-c', status: 'online' }),
+      makeLine({ name: 'alert-d', status: 'unreachable', lastSessionStatus: null }),
     ];
-    const alerts = deriveAlerts(lines);
-    expect(alerts).toHaveLength(3);
-    expect(alerts[0]).toEqual({ line: 'a', message: 'auth expired' });
-    expect(alerts[1]).toEqual({ line: 'b', message: 'degraded' });
-    expect(alerts[2]).toEqual({ line: 'd', message: 'connection lost' });
+    renderPage({ lines });
+    expect(screen.getByText('3 alerts')).toBeDefined();
+    const banner = alertBanner();
+    expect(banner).not.toBeNull();
+    expect(within(banner!).getByText('auth expired')).toBeDefined();
+    expect(within(banner!).getByText('degraded')).toBeDefined();
+    expect(within(banner!).getByText('connection lost')).toBeDefined();
+    // Healthy line 'alert-c' should NOT appear in the banner (it still
+    // renders as a table row).
+    expect(within(banner!).queryByText('alert-c')).toBeNull();
+    // And the three unhealthy ones should all be linked from the banner.
+    expect(within(banner!).getByText('alert-a')).toBeDefined();
+    expect(within(banner!).getByText('alert-b')).toBeDefined();
+    expect(within(banner!).getByText('alert-d')).toBeDefined();
   });
 
-  it('applies error row styling for unreachable lines (structural)', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain('line.status === "unreachable"');
-    expect(source).toContain('s-crit-wash');
-    expect(source).toContain('s-warn-wash');
+  it('applies error wash class on unreachable rows and warn wash on degraded rows', () => {
+    const lines = [
+      makeLine({ name: 'row-down', status: 'unreachable' }),
+      makeLine({ name: 'row-slow', status: 'degraded' }),
+      makeLine({ name: 'row-fine', status: 'online' }),
+    ];
+    renderPage({ lines });
+    const body = tableBody();
+    const downRow = within(body).getByText('row-down').closest('tr') as HTMLElement;
+    const slowRow = within(body).getByText('row-slow').closest('tr') as HTMLElement;
+    const fineRow = within(body).getByText('row-fine').closest('tr') as HTMLElement;
+    expect(downRow.className).toContain('s-crit-wash');
+    expect(slowRow.className).toContain('s-warn-wash');
+    expect(fineRow.className).not.toContain('s-crit-wash');
+    expect(fineRow.className).not.toContain('s-warn-wash');
   });
 
-  it('renders AlertBanner component with derived alerts', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain('<AlertBanner alerts={alerts}');
+  it('renders a fleet-load-error row instead of the empty-filtered placeholder when the lines query fails', () => {
+    renderPage({
+      lines: [],
+      linesError: new Error('upstream 502'),
+    });
+    expect(screen.getByText(/Unable to load fleet data: upstream 502/)).toBeDefined();
+    expect(screen.queryByText('No instances match the current filters')).toBeNull();
+  });
+
+  it('renders a fleet-load-error row when the feed query fails even if lines succeeded', () => {
+    renderPage({
+      lines: [makeLine({ name: 'visible-line' })],
+      feedError: new Error('feed offline'),
+    });
+    expect(screen.getByText(/Unable to load fleet data: feed offline/)).toBeDefined();
   });
 });
 
 // ---------------------------------------------------------------------------
-// 5. KPI filter + Mode filter + Search filter interaction
+// 5. KPI filter + Mode filter + Search filter — behavior under render
 // ---------------------------------------------------------------------------
 
-describe('SoupKitchen filter logic', () => {
+describe('SoupKitchen filter behavior', () => {
   const lines: LineInstance[] = [
-    makeLine({ name: 'alpha', status: 'online', mode: 'passive', unread: 5, messagesToday: 10, messageStats: { sent: 6, received: 4, images: 0, audio: 0, documents: 0 } }),
-    makeLine({ name: 'bravo', status: 'online', mode: 'agent', unread: 0, messagesToday: 0, messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 } }),
-    makeLine({ name: 'charlie', status: 'degraded', mode: 'chat', unread: 2, messagesToday: 3, messageStats: { sent: 2, received: 1, images: 0, audio: 0, documents: 0 } }),
-    makeLine({ name: 'delta', status: 'unreachable', mode: 'passive', unread: 0, messagesToday: 0, messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 } }),
-    makeLine({ name: 'echo', status: 'online', mode: 'agent', unread: 0, messagesToday: 7, phone: '+15559999999', messageStats: { sent: 4, received: 3, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'alpha',   status: 'online',      mode: 'passive', unread: 5, messageStats: { sent: 6, received: 4, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'bravo',   status: 'online',      mode: 'agent',   unread: 0, messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'charlie', status: 'degraded',    mode: 'chat',    unread: 2, messageStats: { sent: 2, received: 1, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'delta',   status: 'unreachable', mode: 'passive', unread: 0, messageStats: { sent: 0, received: 0, images: 0, audio: 0, documents: 0 } }),
+    makeLine({ name: 'echo',    status: 'online',      mode: 'agent',   unread: 0, phone: '+15559999999', messageStats: { sent: 4, received: 3, images: 0, audio: 0, documents: 0 } }),
   ];
 
-  // KPI filters
-  it('filters by "connected" KPI — online only', () => {
-    const result = filterLines(lines, 'connected', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['alpha', 'bravo', 'echo']);
+  it('renders all lines by default', () => {
+    renderPage({ lines });
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
   });
 
-  it('filters by "attention" KPI — degraded + unreachable', () => {
-    const result = filterLines(lines, 'attention', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['charlie', 'delta']);
+  it('sorts by line name and exposes aria-sort direction', () => {
+    renderPage({ lines });
+    const lineHeader = screen.getByRole('columnheader', { name: /^Line\b/ });
+
+    fireEvent.click(lineHeader);
+    expect(lineHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(lines)).toEqual(['echo', 'delta', 'charlie', 'bravo', 'alpha']);
+
+    fireEvent.click(lineHeader);
+    expect(lineHeader.getAttribute('aria-sort')).toBe('ascending');
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
   });
 
-  it('filters by "unread" KPI — lines with unread > 0', () => {
-    const result = filterLines(lines, 'unread', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['alpha', 'charlie']);
+  it('sorts unread counts numerically and reverses direction on repeat click', () => {
+    const unreadLines = [
+      makeLine({ name: 'one-unread', unread: 1 }),
+      makeLine({ name: 'ten-unread', unread: 10 }),
+      makeLine({ name: 'two-unread', unread: 2 }),
+    ];
+    renderPage({ lines: unreadLines });
+    const unreadHeader = screen.getByRole('columnheader', { name: /^Unread\b/ });
+
+    fireEvent.click(unreadHeader);
+    expect(unreadHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
+
+    fireEvent.click(unreadHeader);
+    expect(unreadHeader.getAttribute('aria-sort')).toBe('ascending');
+    expect(visibleTableLineNames(unreadLines)).toEqual(['one-unread', 'two-unread', 'ten-unread']);
   });
 
-  it('filters by "agent" KPI — agent mode lines only', () => {
-    const result = filterLines(lines, 'agent', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['bravo', 'echo']);
+  it('clicking "Lines Connected" KPI filters to online lines only', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Lines Connected'));
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'echo']);
+    expect(getKpiCard('Lines Connected').getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('filters by "sent" KPI — lines with messageStats.sent > 0', () => {
-    const result = filterLines(lines, 'sent', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['alpha', 'charlie', 'echo']);
+  it('clicking "Need Attention" KPI filters to degraded + unreachable lines', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Need Attention'));
+    expect(visibleTableLineNames(lines)).toEqual(['charlie', 'delta']);
   });
 
-  it('filters by "received" KPI — lines with messageStats.received > 0', () => {
-    const result = filterLines(lines, 'received', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['alpha', 'charlie', 'echo']);
+  it('clicking "Unread" KPI filters to lines with unread > 0', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Unread'));
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'charlie']);
   });
 
-  it('filters by "media" KPI — lines with media messages > 0', () => {
+  it('clicking "Agent Sessions" KPI filters to agent-mode lines', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Agent Sessions'));
+    expect(visibleTableLineNames(lines)).toEqual(['bravo', 'echo']);
+  });
+
+  it('clicking "Messages Sent" KPI filters to lines with sent > 0', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Messages Sent'));
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'charlie', 'echo']);
+  });
+
+  it('clicking "Messages Received" KPI filters to lines with received > 0', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Messages Received'));
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'charlie', 'echo']);
+  });
+
+  it('clicking "Media Processed" KPI filters to lines with media > 0', () => {
     const mediaLines = [
       makeLine({ name: 'has-media', messageStats: { sent: 0, received: 0, images: 3, audio: 0, documents: 0 } }),
-      makeLine({ name: 'no-media', messageStats: { sent: 5, received: 3, images: 0, audio: 0, documents: 0 } }),
-      makeLine({ name: 'has-docs', messageStats: { sent: 1, received: 1, images: 0, audio: 0, documents: 2 } }),
+      makeLine({ name: 'no-media',  messageStats: { sent: 5, received: 3, images: 0, audio: 0, documents: 0 } }),
+      makeLine({ name: 'has-docs',  messageStats: { sent: 1, received: 1, images: 0, audio: 0, documents: 2 } }),
     ];
-    const result = filterLines(mediaLines, 'media', 'all', '');
-    expect(result.map(l => l.name)).toEqual(['has-media', 'has-docs']);
-  });
-
-  // Mode filters
-  it('filters by passive mode', () => {
-    const result = filterLines(lines, null, 'passive', '');
-    expect(result.map(l => l.name)).toEqual(['alpha', 'delta']);
-  });
-
-  it('filters by chat mode', () => {
-    const result = filterLines(lines, null, 'chat', '');
-    expect(result.map(l => l.name)).toEqual(['charlie']);
-  });
-
-  it('filters by agent mode', () => {
-    const result = filterLines(lines, null, 'agent', '');
-    expect(result.map(l => l.name)).toEqual(['bravo', 'echo']);
-  });
-
-  // Combined KPI + mode filters
-  it('combines KPI and mode filters', () => {
-    const result = filterLines(lines, 'connected', 'agent', '');
-    expect(result.map(l => l.name)).toEqual(['bravo', 'echo']);
-  });
-
-  it('combined attention + passive yields only unreachable passive line', () => {
-    const result = filterLines(lines, 'attention', 'passive', '');
-    expect(result.map(l => l.name)).toEqual(['delta']);
-  });
-
-  // Search
-  it('filters by name search (case insensitive)', () => {
-    const result = filterLines(lines, null, 'all', 'ALPHA');
-    expect(result.map(l => l.name)).toEqual(['alpha']);
-  });
-
-  it('filters by phone search', () => {
-    const result = filterLines(lines, null, 'all', '9999');
-    expect(result.map(l => l.name)).toEqual(['echo']);
-  });
-
-  it('combines all three filters', () => {
-    const result = filterLines(lines, 'connected', 'agent', 'echo');
-    expect(result.map(l => l.name)).toEqual(['echo']);
-  });
-
-  it('returns empty when no lines match combined filters', () => {
-    const result = filterLines(lines, 'attention', 'agent', '');
-    expect(result).toHaveLength(0);
-  });
-
-  it('ignores whitespace-only search', () => {
-    const result = filterLines(lines, null, 'all', '   ');
-    expect(result).toHaveLength(5);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 6. Mode counts
-// ---------------------------------------------------------------------------
-
-describe('SoupKitchen mode counts', () => {
-  const lines: LineInstance[] = [
-    makeLine({ mode: 'passive' }),
-    makeLine({ mode: 'passive' }),
-    makeLine({ mode: 'agent' }),
-    makeLine({ mode: 'chat' }),
-    makeLine({ mode: 'agent' }),
-  ];
-
-  it('counts all modes correctly', () => {
-    const counts = computeModeCounts(lines);
-    expect(counts).toEqual({ all: 5, passive: 2, agent: 2, chat: 1 });
-  });
-
-  it('handles empty lines', () => {
-    const counts = computeModeCounts([]);
-    expect(counts).toEqual({ all: 0, passive: 0, agent: 0, chat: 0 });
+    renderPage({ lines: mediaLines });
+    fireEvent.click(getKpiCard('Media Processed'));
+    expect(visibleTableLineNames(mediaLines)).toEqual(['has-media', 'has-docs']);
   });
 
   it('renders mode filter pills for all, passive, chat, agent', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain('"all", "passive", "chat", "agent"');
+    renderPage({ lines });
+    // Scoped to the toolbar pill container — ModeBadge labels in rows are not
+    // candidates here.
+    expect(getModePill('All')).toBeDefined();
+    expect(getModePill('passive')).toBeDefined();
+    expect(getModePill('chat')).toBeDefined();
+    expect(getModePill('agent')).toBeDefined();
+  });
+
+  it('clicking the passive mode pill filters to passive lines', () => {
+    renderPage({ lines });
+    fireEvent.click(getModePill('passive'));
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'delta']);
+  });
+
+  it('clicking the chat mode pill filters to chat lines', () => {
+    renderPage({ lines });
+    fireEvent.click(getModePill('chat'));
+    expect(visibleTableLineNames(lines)).toEqual(['charlie']);
+  });
+
+  it('clicking the agent mode pill filters to agent lines', () => {
+    renderPage({ lines });
+    fireEvent.click(getModePill('agent'));
+    expect(visibleTableLineNames(lines)).toEqual(['bravo', 'echo']);
+  });
+
+  it('combines KPI + mode filters (connected ∩ agent)', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Lines Connected'));
+    fireEvent.click(getModePill('agent'));
+    expect(visibleTableLineNames(lines)).toEqual(['bravo', 'echo']);
+  });
+
+  it('combines attention KPI + passive mode (just the unreachable passive line)', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Need Attention'));
+    fireEvent.click(getModePill('passive'));
+    expect(visibleTableLineNames(lines)).toEqual(['delta']);
+  });
+
+  it('search input filters by name case-insensitively', () => {
+    renderPage({ lines });
+    fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: 'ALPHA' } });
+    expect(visibleTableLineNames(lines)).toEqual(['alpha']);
+  });
+
+  it('search input filters by phone substring', () => {
+    renderPage({ lines });
+    fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: '9999' } });
+    expect(visibleTableLineNames(lines)).toEqual(['echo']);
+  });
+
+  it('combines KPI + mode + search filters', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Lines Connected'));
+    fireEvent.click(getModePill('agent'));
+    fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: 'echo' } });
+    expect(visibleTableLineNames(lines)).toEqual(['echo']);
+  });
+
+  it('shows empty-filter placeholder when combined filters match nothing', () => {
+    renderPage({ lines });
+    fireEvent.click(getKpiCard('Need Attention'));
+    fireEvent.click(getModePill('agent'));
+    expect(screen.getByText('No instances match the current filters')).toBeDefined();
+  });
+
+  it('ignores whitespace-only search input', () => {
+    renderPage({ lines });
+    fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: '   ' } });
+    expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Mode-pill count badges
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen mode counts', () => {
+  it('renders each mode pill with the correct count badge', () => {
+    const lines = [
+      makeLine({ name: 'p1', mode: 'passive' }),
+      makeLine({ name: 'p2', mode: 'passive' }),
+      makeLine({ name: 'a1', mode: 'agent' }),
+      makeLine({ name: 'c1', mode: 'chat' }),
+      makeLine({ name: 'a2', mode: 'agent' }),
+    ];
+    renderPage({ lines });
+    expect(within(getModePill('All')).getByText('5')).toBeDefined();
+    expect(within(getModePill('passive')).getByText('2')).toBeDefined();
+    expect(within(getModePill('chat')).getByText('1')).toBeDefined();
+    expect(within(getModePill('agent')).getByText('2')).toBeDefined();
+  });
+
+  it('omits the count badge on every mode pill when there are no lines', () => {
+    renderPage({ lines: [] });
+    // FilterPill suppresses the badge span when count === 0, so each pill
+    // contains only its label text node. Asserting the absence of any digit
+    // pins that suppression to user-visible output.
+    expect(getModePill('All').textContent).toBe('All');
+    expect(getModePill('passive').textContent).toBe('passive');
+    expect(getModePill('chat').textContent).toBe('chat');
+    expect(getModePill('agent').textContent).toBe('agent');
   });
 });
 
@@ -438,20 +697,49 @@ describe('SoupKitchen mode counts', () => {
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen KPI toggle', () => {
-  function toggleKpi(prev: KpiFilter, key: KpiFilter): KpiFilter {
-    return prev === key ? null : key;
-  }
+  const lines = [
+    makeLine({ name: 'on1', status: 'online' }),
+    makeLine({ name: 'on2', status: 'online' }),
+    makeLine({ name: 'down', status: 'unreachable' }),
+  ];
 
-  it('selects a KPI on first click', () => {
-    expect(toggleKpi(null, 'connected')).toBe('connected');
+  it('first click on a KPI activates it (aria-pressed=true)', () => {
+    renderPage({ lines });
+    const card = getKpiCard('Lines Connected');
+    expect(card.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(card);
+    expect(card.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('deselects the same KPI on second click', () => {
-    expect(toggleKpi('connected', 'connected')).toBeNull();
+  it('second click on the same KPI deactivates it and restores the full list', () => {
+    renderPage({ lines });
+    const card = getKpiCard('Lines Connected');
+    fireEvent.click(card);
+    expect(card.getAttribute('aria-pressed')).toBe('true');
+    // The unreachable line should be filtered out of the table body. The
+    // AlertBanner still names it, so we scope the query to <tbody>.
+    expect(within(tableBody()).queryByText('down')).toBeNull();
+
+    fireEvent.click(card);
+    expect(card.getAttribute('aria-pressed')).toBe('false');
+    // All three rows visible again
+    expect(within(tableBody()).queryByText('down')).not.toBeNull();
+    expect(within(tableBody()).queryByText('on1')).not.toBeNull();
+    expect(within(tableBody()).queryByText('on2')).not.toBeNull();
   });
 
-  it('switches to a different KPI', () => {
-    expect(toggleKpi('connected', 'attention')).toBe('attention');
+  it('clicking a different KPI switches activation', () => {
+    renderPage({ lines });
+    const connected = getKpiCard('Lines Connected');
+    const attention = getKpiCard('Need Attention');
+
+    fireEvent.click(connected);
+    expect(connected.getAttribute('aria-pressed')).toBe('true');
+    expect(attention.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(attention);
+    expect(connected.getAttribute('aria-pressed')).toBe('false');
+    expect(attention.getAttribute('aria-pressed')).toBe('true');
   });
 });
 
@@ -463,8 +751,8 @@ describe('SoupKitchen sparkline integration', () => {
   it('derives sparkline data from fleet metrics messageVolume', () => {
     const messageVolume = [
       { bucket: '2026-04-05T00:00:00Z', inbound: 10, outbound: 20, media: 2 },
-      { bucket: '2026-04-05T01:00:00Z', inbound: 5, outbound: 40, media: 4 },
-      { bucket: '2026-04-05T02:00:00Z', inbound: 0, outbound: 0, media: 0 },
+      { bucket: '2026-04-05T01:00:00Z', inbound: 5,  outbound: 40, media: 4 },
+      { bucket: '2026-04-05T02:00:00Z', inbound: 0,  outbound: 0,  media: 0 },
     ];
     const sparklines = deriveFleetMessageSparklines(messageVolume);
     expect(sparklines).toBeDefined();
@@ -473,76 +761,58 @@ describe('SoupKitchen sparkline integration', () => {
     expect(sparklines!.media).toEqual([0.5, 1, 0]);
   });
 
-  it('passes useFleetMetrics with chartRange state (default 24h)', () => {
-    const source = read('console/src/pages/SoupKitchen.tsx');
-    expect(source).toContain("useFleetMetrics(chartRange)");
-    expect(source).toContain('useState<MetricsRange>("24h")');
+  it('calls useFleetMetrics with the default "24h" range on first render', () => {
+    renderPage({ lines: [] });
+    expect(useFleetMetricsMock).toHaveBeenCalled();
+    expect(useFleetMetricsMock.mock.calls[0][0]).toBe('24h');
+  });
+
+  it('switches the metrics range when the 7d range pill is clicked', () => {
+    renderPage({ lines: [] });
+    fireEvent.click(screen.getByText('7d'));
+    // The most recent invocation should pass '7d'
+    const lastCall = useFleetMetricsMock.mock.calls.at(-1);
+    expect(lastCall?.[0]).toBe('7d');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 9. Component structural composition
+// 9. Component structural composition — observable rendering
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen structural composition', () => {
-  const source = read('console/src/pages/SoupKitchen.tsx');
-
-  it('imports and uses required hooks', () => {
-    expect(source).toContain('useLines');
-    expect(source).toContain('useFeed');
-    expect(source).toContain('useFleetMetrics');
-    expect(source).toContain('useNavigate');
-  });
-
-  it('imports required components', () => {
-    expect(source).toContain("import KpiCard from");
-    expect(source).toContain("import AlertBanner from");
-    expect(source).toContain("import ActivityFeed from");
-    expect(source).toContain("import ModeBadge from");
-    expect(source).toContain("import FilterPill from");
-    expect(source).toContain("import LineTags from");
-  });
-
   it('renders the Instances heading', () => {
-    expect(source).toContain('Instances');
+    renderPage({ lines: [] });
+    expect(screen.getByRole('heading', { name: 'Instances' })).toBeDefined();
+  });
+
+  it('renders the Metrics heading', () => {
+    renderPage({ lines: [] });
+    expect(screen.getByRole('heading', { name: 'Metrics' })).toBeDefined();
   });
 
   it('renders a search input for lines', () => {
-    expect(source).toContain('placeholder="Search lines..."');
+    renderPage({ lines: [] });
+    expect(screen.getByPlaceholderText('Search lines...')).toBeDefined();
+    expect(screen.getByLabelText('Search lines')).toBeDefined();
   });
 
-  it('renders the Add Line button with wizard', () => {
-    expect(source).toContain('Add Line');
-    expect(source).toContain('AddLineWizard');
-    expect(source).toContain('setShowAddWizard(true)');
+  it('renders the Add Line button', () => {
+    renderPage({ lines: [] });
+    expect(screen.getByRole('button', { name: /Add Line/ })).toBeDefined();
   });
 
-  it('uses class-based layout primitives instead of inline style props', () => {
-    expect(source).toContain('className="flex flex-col flex-1 min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"');
-    expect(source).toContain('className="c-card flex-shrink-0 grid grid-cols-7 gap-[var(--sp-2)] p-[var(--sp-2)]"');
-    expect(source).toContain('className="flex flex-1 min-h-0 gap-[var(--sp-3)]"');
-    expect(source).toContain('className="c-card flex flex-col min-h-0 overflow-hidden basis-0 grow-[3]"');
-    expect(source).toContain('className="c-card flex flex-col min-h-0 overflow-hidden basis-0 flex-1 min-w-[var(--feed-min-w)]"');
-    // Dynamic chart expansion uses inline style for runtime-computed flex/opacity/minWidth
-    // Only allowed in the chart row expansion containers
-    const styleMatches = (source.match(/style=\{\{/g) ?? []).length;
-    expect(styleMatches).toBeLessThanOrEqual(3); // 3 chart expansion containers
+  it('renders activity feed events from the useFeed hook', () => {
+    const feed: FeedEvent[] = [
+      { time: '12:00', mode: 'passive', text: 'feed-event-one' },
+      { time: '12:01', mode: 'agent',   text: 'feed-event-two' },
+    ];
+    renderPage({ lines: [], feed });
+    expect(screen.getByText(/feed-event-one/)).toBeDefined();
+    expect(screen.getByText(/feed-event-two/)).toBeDefined();
   });
 
-  it('navigates to line detail on row click', () => {
-    expect(source).toContain('navigate(`/lines/${line.name}`)');
-  });
-
-  it('renders ActivityFeed in sidebar', () => {
-    expect(source).toContain('<ActivityFeed events={feed}');
-  });
-
-  it('lazy-loads AddLineWizard with Suspense', () => {
-    expect(source).toContain('lazy(() => import');
-    expect(source).toContain('<Suspense');
-  });
-
-  it('is exported as default', async () => {
+  it('is exported as a default React function component', async () => {
     const mod = await import('../../console/src/pages/SoupKitchen');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');

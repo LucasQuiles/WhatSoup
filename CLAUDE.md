@@ -1,10 +1,10 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, 161 MCP tools.
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, 162 MCP tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, and `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer; see `docs/tools.md`).
 
 ## Quick Reference
 
-- **Language:** TypeScript (Node >= 23.10, native strip-types, no build step)
+- **Language:** TypeScript (Node `>=24.0.0 <26`, pinned at `24.15.0` via `.nvmrc` / `package.json#volta.node` / `package.json#packageManager`; native `--experimental-strip-types`, no build step)
 - **Test:** `npm test` (vitest, 10s timeout)
 - **Typecheck:** `npm run typecheck`
 - **Lint:** None configured yet (follow existing code style)
@@ -16,7 +16,7 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 - `src/mcp/` — MCP tool registry, socket server, tool implementations
 - `src/runtimes/agent/` — Claude Code agent subprocess management
 - `src/runtimes/chat/` — Direct LLM API chat (Chat Bot)
-- `deploy/` — systemd units, hooks, proxy scripts
+- `deploy/` — systemd units (Linux), launchd plists (macOS, generated under `deploy:launchd.generated`), Docker assets, hooks, proxy scripts; `src/fleet/platform.ts` auto-detects `linux-systemd` / `macos-launchd` / `docker` / `linux-no-systemd` and routes service control through the matching backend
 
 ## Key Concepts
 
@@ -27,7 +27,7 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 
 ## Instance Model
 
-Four independent processes via systemd template unit (`whatsoup@<name>.service`):
+Four independent processes managed by the platform-appropriate service manager — `systemctl --user` against the systemd template unit (`whatsoup@<name>.service`) on Linux, `launchctl` against per-instance plists (`com.whatsoup.<instance>.plist`, generated via `deploy:launchd.generated`) on macOS, or in-process supervision under Docker; `src/fleet/platform.ts` picks the backend:
 - `primary-line` — passive MCP-only line for manual oversight (tier: global, no auto-response)
 - `operator-agent` — full-access autonomous agent (tier: global)
 - `sandbox-agent` — sandboxed per-chat agent (tier: chat-scoped per workspace)
@@ -54,7 +54,7 @@ Key files:
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
-- `docs/tools.md` — complete MCP tool API reference (161 tools, 20 modules)
+- `docs/tools.md` — complete MCP tool API reference (162 tools — 161 across 20 modules under `src/mcp/tools/*.ts` plus 1 inline registration in `src/runtimes/agent/runtime.ts`; 160 always-registered + 2 conditionally-registered)
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms
 - `docs/security-handoffs/` — open security handoffs that belong to the WhatSoup application lifecycle

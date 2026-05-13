@@ -12,6 +12,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import { jsonResponse, requireInstance, parseQueryString, readBody } from '../../lib/http.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import { mcpCall } from '../mcp-client.ts';
 import type { FleetDiscovery } from '../discovery.ts';
 
@@ -33,10 +34,13 @@ type McpProxyHandler<P extends Record<string, string> = { name: string }> = (
 interface ProxyOptions {
   timeout?: number;
   successCode?: number;
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  /**
+   * When set, the named path param is `decodeURIComponent`'d before
+   * `buildArgs` runs. Malformed percent-encoding produces a 400 instead of
+   * letting the `URIError` bubble up as a 500. The decoded value is passed
+   * as a second/third argument to `buildArgs`.
+   */
+  decodeParam?: 'jid';
 }
 
 function socketCheck(instance: { socketPath?: string | null }, res: ServerResponse): boolean {
@@ -45,6 +49,34 @@ function socketCheck(instance: { socketPath?: string | null }, res: ServerRespon
     return false;
   }
   return true;
+}
+
+/**
+ * Decode a `:jid` path parameter, returning `{ ok: false }` for malformed
+ * percent-encoding so the caller can respond 400 instead of letting a
+ * `URIError` escape to the top-level error funnel (which would mask the
+ * client-side bug as a 500). See issue #258.
+ */
+function decodeJidParam(rawJid: string): { ok: true; jid: string } | { ok: false; error: string } {
+  try {
+    return { ok: true, jid: decodeURIComponent(rawJid) };
+  } catch {
+    return { ok: false, error: 'invalid jid: malformed percent-encoding' };
+  }
+}
+
+/**
+ * Run `decodeJidParam` and, on failure, write a 400 response and return null.
+ * On success returns the decoded jid string. Consolidates the short-circuit
+ * idiom used by all 13 group routes.
+ */
+function decodeJidOr400(rawJid: string, res: ServerResponse): string | null {
+  const decoded = decodeJidParam(rawJid);
+  if (!decoded.ok) {
+    jsonResponse(res, 400, { error: decoded.error });
+    return null;
+  }
+  return decoded.jid;
 }
 
 /** Unwrap MCP tool result envelope — extracts JSON from content[0].text if present. */
@@ -61,44 +93,107 @@ function unwrapMcpResult(raw: unknown): unknown {
   return raw;
 }
 
+/**
+ * Heuristic: classify a tool-error message as validation-shaped (caller-side
+ * fix possible — 422) versus handler/internal failure (server-side — 500).
+ *
+ * Patterns sourced from `src/mcp/registry.ts` (Zod validation, unknown tool,
+ * missing-parameter guards, cross-conversation guard) and from the sanitized
+ * handler-throw path. See issue #257 remediation.
+ */
+const VALIDATION_RE =
+  /invalid parameters|requires .* parameter|unknown tool|not available|does not match|must be|is required|not allowed|cross-conversation|not found/i;
+
+function classifyToolErrorStatus(text: string): 422 | 500 {
+  return VALIDATION_RE.test(text) ? 422 : 500;
+}
+
+/**
+ * Send a response derived from a `mcpCall` result. Centralizes the mapping
+ * for MCP tool envelopes (`isError: true`) onto HTTP status codes so every
+ * proxy handler — body-less, with-body, and the legacy custom routes — gives
+ * console callers a consistent failure channel.
+ *
+ * Exported so other modules that call `mcpCall` directly (e.g. routes/ops.ts
+ * for `send_message` and `add_or_edit_contact`) can route their responses
+ * through the same status-code mapping. See issue #257 parity follow-up.
+ */
+export function respondMcp(
+  res: ServerResponse,
+  result: { success: boolean; result?: unknown; error?: string; toolError?: boolean },
+  successCode = 200,
+  successBody?: (unwrapped: unknown) => unknown,
+): void {
+  if (!result.success) {
+    jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    return;
+  }
+  if (result.toolError) {
+    const unwrapped = unwrapMcpResult(result.result);
+    const text = typeof unwrapped === 'string' ? unwrapped : JSON.stringify(unwrapped);
+    const status = classifyToolErrorStatus(text);
+    const envelope = isRecord(result.result) ? result.result : {};
+    jsonResponse(res, status, {
+      error: typeof unwrapped === 'string' ? unwrapped : 'MCP tool reported an error',
+      isError: true,
+      ...envelope,
+    });
+    return;
+  }
+  const unwrapped = unwrapMcpResult(result.result);
+  jsonResponse(res, successCode, successBody ? successBody(unwrapped) : unwrapped);
+}
+
 /** Factory for body-less handlers (GET, DELETE, POST without payload). Args derived from path params only. */
 function mcpProxy<P extends { name: string }>(
   toolName: string,
-  buildArgs?: (params: P) => Record<string, unknown>,
+  buildArgs?: (params: P, decodedJid: string) => Record<string, unknown>,
   options?: ProxyOptions,
 ): McpProxyHandler<P> {
   return async (_req, res, deps, params) => {
     const instance = requireInstance(deps.discovery, params.name, res);
     if (!instance) return;
     if (!socketCheck(instance, res)) return;
-    const args = buildArgs ? buildArgs(params) : {};
+    let decodedJid = '';
+    if (options?.decodeParam === 'jid') {
+      const rawJid = (params as unknown as { jid?: string }).jid ?? '';
+      const decoded = decodeJidOr400(rawJid, res);
+      if (decoded === null) return;
+      decodedJid = decoded;
+    }
+    const args = buildArgs ? buildArgs(params, decodedJid) : {};
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
-    if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
-    else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    respondMcp(res, result, options?.successCode ?? 200);
   };
 }
 
 /** Factory for handlers with JSON body — reads body, merges with path params. */
 function mcpWithBody<P extends { name: string }>(
   toolName: string,
-  buildArgs?: (parsed: Record<string, unknown>, params: P) => Record<string, unknown>,
+  buildArgs?: (parsed: Record<string, unknown>, params: P, decodedJid: string) => Record<string, unknown>,
   options?: ProxyOptions,
 ): McpProxyHandler<P> {
   return async (req, res, deps, params) => {
     const instance = requireInstance(deps.discovery, params.name, res);
     if (!instance) return;
     if (!socketCheck(instance, res)) return;
+    let decodedJid = '';
+    if (options?.decodeParam === 'jid') {
+      const rawJid = (params as unknown as { jid?: string }).jid ?? '';
+      const decoded = decodeJidOr400(rawJid, res);
+      if (decoded === null) return;
+      decodedJid = decoded;
+    }
     const raw = await readBody(req);
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { jsonResponse(res, 400, { error: 'Invalid JSON body' }); return; }
-    if (!isJsonObject(parsed)) {
+    if (!isRecord(parsed)) {
       jsonResponse(res, 400, { error: 'JSON body must be an object' });
       return;
     }
-    const args = buildArgs ? buildArgs(parsed, params) : parsed;
+    const args = buildArgs ? buildArgs(parsed, params, decodedJid) : parsed;
     const result = await mcpCall(instance.socketPath!, toolName, args, options?.timeout);
-    if (result.success) jsonResponse(res, options?.successCode ?? 200, unwrapMcpResult(result.result));
-    else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+    respondMcp(res, result, options?.successCode ?? 200);
   };
 }
 
@@ -122,8 +217,7 @@ export async function handleGetScheduled(
   if (qs.status) args.status = qs.status;
 
   const result = await mcpCall(instance.socketPath!, 'list_scheduled', args);
-  if (result.success) jsonResponse(res, 200, unwrapMcpResult(result.result));
-  else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+  respondMcp(res, result);
 }
 
 // POST /api/lines/:name/scheduled — create a new scheduled message.
@@ -158,17 +252,23 @@ export async function handleCancelScheduled(
   if (!instance) return;
 
   const qs = parseQueryString(req.url);
-  const messageId = qs.id;
-  if (!messageId) {
+  const rawId = qs.id;
+  if (!rawId) {
     jsonResponse(res, 400, { error: 'id query parameter is required' });
+    return;
+  }
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0) {
+    jsonResponse(res, 400, { error: 'id query parameter must be a positive integer' });
     return;
   }
 
   if (!socketCheck(instance, res)) return;
 
-  const result = await mcpCall(instance.socketPath!, 'cancel_scheduled', { messageId });
-  if (result.success) jsonResponse(res, 200, { cancelled: true, messageId });
-  else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+  const result = await mcpCall(instance.socketPath!, 'cancel_scheduled', { id });
+  // On clean success, the legacy route fabricates { cancelled, id } for the console
+  // contract; on tool error or transport failure, respondMcp surfaces the real status.
+  respondMcp(res, result, 200, () => ({ cancelled: true, id }));
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +281,8 @@ export const handleGetGroups = mcpProxy('list_groups', undefined, { timeout: 15_
 // GET /api/lines/:name/groups/:jid — get group metadata.
 export const handleGetGroupDetail = mcpProxy<{ name: string; jid: string }>(
   'get_group_metadata',
-  p => ({ jid: decodeURIComponent(p.jid) }),
-  { timeout: 15_000 },
+  (_p, jid) => ({ jid }),
+  { timeout: 15_000, decodeParam: 'jid' },
 );
 
 // POST /api/lines/:name/groups — create a new group.
@@ -191,73 +291,85 @@ export const handleCreateGroup = mcpWithBody('group_create', undefined, { succes
 // DELETE /api/lines/:name/groups/:jid — leave a group.
 export const handleLeaveGroup = mcpProxy<{ name: string; jid: string }>(
   'group_leave',
-  p => ({ id: decodeURIComponent(p.jid) }),
+  (_p, jid) => ({ id: jid }),
+  { decodeParam: 'jid' },
 );
 
 // PUT /api/lines/:name/groups/:jid/subject — update group subject.
 export const handleUpdateGroupSubject = mcpWithBody<{ name: string; jid: string }>(
   'group_update_subject',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // PUT /api/lines/:name/groups/:jid/description — update group description.
 export const handleUpdateGroupDescription = mcpWithBody<{ name: string; jid: string }>(
   'group_update_description',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // POST /api/lines/:name/groups/:jid/participants — add/remove/promote/demote participants.
 export const handleGroupParticipants = mcpWithBody<{ name: string; jid: string }>(
   'group_participants_update',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // PUT /api/lines/:name/groups/:jid/settings — update group settings (announcement/locked).
 export const handleGroupSettings = mcpWithBody<{ name: string; jid: string }>(
   'group_settings_update',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // GET /api/lines/:name/groups/:jid/invite — get group invite link.
 export const handleGetGroupInvite = mcpProxy<{ name: string; jid: string }>(
   'get_group_invite_link',
-  p => ({ jid: decodeURIComponent(p.jid) }),
+  (_p, jid) => ({ jid }),
+  { decodeParam: 'jid' },
 );
 
 // POST /api/lines/:name/groups/:jid/invite/revoke — revoke group invite link.
 export const handleRevokeGroupInvite = mcpProxy<{ name: string; jid: string }>(
   'group_revoke_invite',
-  p => ({ jid: decodeURIComponent(p.jid) }),
+  (_p, jid) => ({ jid }),
+  { decodeParam: 'jid' },
 );
 
 // PUT /api/lines/:name/groups/:jid/ephemeral — toggle ephemeral messages.
 export const handleGroupEphemeral = mcpWithBody<{ name: string; jid: string }>(
   'group_toggle_ephemeral',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // PUT /api/lines/:name/groups/:jid/member-add-mode — set who can add members.
 export const handleGroupMemberAddMode = mcpWithBody<{ name: string; jid: string }>(
   'group_member_add_mode',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // PUT /api/lines/:name/groups/:jid/join-approval — set join approval mode.
 export const handleGroupJoinApproval = mcpWithBody<{ name: string; jid: string }>(
   'group_join_approval_mode',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // GET /api/lines/:name/groups/:jid/requests — list pending join requests.
 export const handleGetGroupRequests = mcpProxy<{ name: string; jid: string }>(
   'group_request_participants_list',
-  p => ({ jid: decodeURIComponent(p.jid) }),
+  (_p, jid) => ({ jid }),
+  { decodeParam: 'jid' },
 );
 
 // POST /api/lines/:name/groups/:jid/requests — approve/reject join requests.
 export const handleGroupRequestsUpdate = mcpWithBody<{ name: string; jid: string }>(
   'group_request_participants_update',
-  (b, p) => ({ ...b, jid: decodeURIComponent(p.jid) }),
+  (b, _p, jid) => ({ ...b, jid }),
+  { decodeParam: 'jid' },
 );
 
 // ---------------------------------------------------------------------------
@@ -284,11 +396,9 @@ export async function handleSearchContacts(
   if (!socketCheck(instance, res)) return;
 
   const result = await mcpCall(instance.socketPath!, 'search_contacts', { query });
-  if (result.success) {
-    // search_contacts returns {results, total} — normalize to {contacts} for console
-    const unwrapped = unwrapMcpResult(result.result);
-    const contacts = isJsonObject(unwrapped) ? (unwrapped.results ?? unwrapped.contacts ?? unwrapped) : unwrapped;
-    jsonResponse(res, 200, { contacts: Array.isArray(contacts) ? contacts : [] });
-  }
-  else jsonResponse(res, 502, { error: result.error ?? 'MCP call failed' });
+  // search_contacts returns {results, total} — normalize to {contacts} for console
+  respondMcp(res, result, 200, (unwrapped) => {
+    const contacts = isRecord(unwrapped) ? (unwrapped.results ?? unwrapped.contacts ?? unwrapped) : unwrapped;
+    return { contacts: Array.isArray(contacts) ? contacts : [] };
+  });
 }

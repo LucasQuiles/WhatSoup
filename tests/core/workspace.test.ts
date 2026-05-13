@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { existsSync, mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync, lstatSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { chatJidToWorkspace, provisionWorkspace } from '../../src/core/workspace.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
@@ -105,6 +105,45 @@ describe('provisionWorkspace', () => {
     expect(() => provisionWorkspace(makeOpts(workspacePath, instanceCwd))).toThrow(/directory.*symlink/);
     expect(existsSync(join(targetDir, 'sandbox-policy.json'))).toBe(false);
     expect(existsSync(join(targetDir, 'settings.json'))).toBe(false);
+  });
+
+  it('.mcp.json is written with mode 0600', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    provisionWorkspace(makeOpts(workspacePath, instanceCwd));
+
+    const mcpPath = join(workspacePath, '.mcp.json');
+    const stat = statSync(mcpPath);
+    expect(stat.mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses to write .mcp.json through a pre-existing symlink', () => {
+    const workspacePath = makeTmp();
+    const decoy = makeTmp();
+    const instanceCwd = makeTmp();
+    const decoyTarget = join(decoy, 'attacker-target');
+    // Create symlink at the .mcp.json path pointing to an attacker-controlled file
+    symlinkSync(decoyTarget, join(workspacePath, '.mcp.json'));
+
+    expect(() => provisionWorkspace(makeOpts(workspacePath, instanceCwd))).toThrow();
+    // The symlink target was never created
+    expect(existsSync(decoyTarget)).toBe(false);
+  });
+
+  it('rewriting .mcp.json preserves mode 0600 and replaces content', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    const opts = makeOpts(workspacePath, instanceCwd);
+    provisionWorkspace(opts);
+
+    const opts2 = { ...opts, mcpServerPath: '/new/path/to/proxy.ts' };
+    provisionWorkspace(opts2);
+
+    const mcpPath = join(workspacePath, '.mcp.json');
+    const stat = statSync(mcpPath);
+    expect(stat.mode & 0o777).toBe(0o600);
+    const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+    expect(mcp.mcpServers.whatsoup.args).toContain('/new/path/to/proxy.ts');
   });
 
   it('sandbox-policy.json has workspacePath in allowedPaths, inherits bash/allowedTools/allowedMcpTools from input', () => {

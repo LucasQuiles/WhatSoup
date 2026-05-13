@@ -121,6 +121,7 @@ vi.mock('../../../src/config.ts', () => ({
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
+    mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [],
   },
 }));
@@ -142,6 +143,7 @@ vi.mock('../../../src/core/workspace.ts', () => ({
   provisionWorkspace: vi.fn(() => '/tmp/workspace/.claude/whatsoup.sock'),
   writeSandboxArtifacts: vi.fn(),
   ensurePermissionsSettings: vi.fn(),
+  writePrivateFileSync: vi.fn(),
 }));
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({

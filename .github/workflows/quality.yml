@@ -9,24 +9,41 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.x', '25.x']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup Node
+      # Local dev uses .nvmrc (single version for fast iteration);
+      # CI runs a matrix to validate the engines range declared in package.json.
+      - name: Setup Node ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Typecheck scripts/
+        run: npm run typecheck:scripts
+
+      - name: Typecheck (all)
+        run: npm run typecheck:all
+
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
+
+      - name: Test integrity baseline check
+        run: npm run guard:test-integrity
 
       - name: Repo hygiene commit-message smoke
         run: |
@@ -36,6 +53,12 @@ jobs:
 
       - name: Documentation drift guard
         run: npm run guard:doc-drift
+
+      - name: Public surface drift guard
+        run: npm run guard:public-surface-drift
+
+      - name: Work index coverage guard
+        run: npm run guard:work-index
 
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks

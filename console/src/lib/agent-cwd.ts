@@ -1,6 +1,6 @@
 const FALLBACK_AGENT_NAME = 'new-agent';
 
-function slugAgentWorkspaceName(name: string): string {
+export function slugAgentWorkspaceName(name: string): string {
   return name
     .toLowerCase()
     .replace(/\s+/g, '-')

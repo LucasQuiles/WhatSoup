@@ -198,11 +198,21 @@ journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|qu
 
 The `GET /health` endpoint requires no authentication.
 
-The `POST /send` endpoint requires a `Bearer` token:
+Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
+
+- `POST /send` — send a text message to a chat
+- `POST /agent/compact` — run runtime compaction without WhatsApp ingest
+- `POST /heal` — inject a Type 3 service-crash repair report
+- `POST /access` — allow or block a contact/group
+- `POST /mark-read` — clear unread count and emit `chatModify`
+
+All five fail closed with `401` when the token is missing or wrong. Supply it on every mutation request:
 ```
 Authorization: Bearer <WHATSOUP_HEALTH_TOKEN>
 ```
-The token comes from the `WHATSOUP_HEALTH_TOKEN` environment variable. If unset, all `/send` calls return 401.
+The token comes from the `WHATSOUP_HEALTH_TOKEN` environment variable (or the `health.token` config field). See [`docs/configuration.md`](configuration.md#health-server) for the canonical statement.
+
+Note: this is the per-line health-server token. The fleet-server audience-scoped ticket system (introduced in #313) is a separate auth layer for the fleet API and is not covered here.
 
 ### Send Request Format
 
@@ -521,7 +531,7 @@ grep '"enabled"' ~/.config/whatsoup/instances/q/config.json
 }
 ```
 
-See `docs/configuration.md` — [operationTracker](#operationtracker) for the full reference.
+See `docs/configuration.md` — [operationTracker](configuration.md#operationtracker) for the full reference.
 
 ---
 
@@ -839,7 +849,7 @@ sqlite3 "$DB" \
 Use the alias through fleet:
 
 ```bash
-TOKEN=$(cat ~/.config/whatsoup/fleet-token)
+TOKEN=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync(process.env.HOME + '/.config/whatsoup/fleet-tokens.json', 'utf8')).active)")
 curl --fail-with-body -sS -X POST "http://127.0.0.1:9099/api/lines/$INSTANCE/send" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
@@ -887,7 +897,7 @@ journalctl --user -u whatsoup@$INSTANCE -n 50
 Use a profile through fleet:
 
 ```bash
-TOKEN=$(cat ~/.config/whatsoup/fleet-token)
+TOKEN=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync(process.env.HOME + '/.config/whatsoup/fleet-tokens.json', 'utf8')).active)")
 curl --fail-with-body -sS -X POST "http://127.0.0.1:9099/api/lines/$INSTANCE/send" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \

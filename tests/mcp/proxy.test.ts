@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { existsSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { waitForSocket } from '../helpers/wait-for.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROXY_PATH = join(__dirname, '../../deploy/mcp/whatsoup-proxy.ts');
@@ -132,21 +133,7 @@ function collectFirstLine(
 /**
  * Wait for socket file to appear.
  */
-function waitForSocket(socketPath: string, timeoutMs = 2000): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (existsSync(socketPath)) {
-        resolve();
-      } else if (Date.now() - start > timeoutMs) {
-        reject(new Error(`Socket ${socketPath} never appeared`));
-      } else {
-        setTimeout(check, 10);
-      }
-    };
-    check();
-  });
-}
+
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -168,12 +155,14 @@ describe('whatsoup-proxy', () => {
       proxy = null;
     }
     if (server) {
+      // close() callback fires after the server is fully closed and all
+      // connections have drained — deterministic teardown, no wall-clock wait.
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = null;
     }
     try { unlinkSync(socketPath); } catch { /* already gone */ }
-    // Brief pause to let OS release the socket
-    await new Promise((r) => setTimeout(r, 30));
+    // No socket-release sleep needed: server.close() has completed and each
+    // test uses its own socket path.
   });
 
   it('relays JSON-RPC from stdin to socket and response back to stdout', async () => {

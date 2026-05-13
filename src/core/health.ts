@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { config } from '../config.ts';
+import { safeStringEqual } from '../fleet/safe-compare.ts';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
@@ -8,6 +9,7 @@ import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
+import { isRecord } from '../lib/type-guards.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -25,15 +27,21 @@ import { normalizeErrorClass } from './heal-protocol.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
 import type { ConnectionStateSnapshot } from '../transport/connection.ts';
+import { readBody } from '../lib/http.ts';
 
 const log = createChildLogger('health');
 
-/** Timing-safe bearer token comparison to prevent timing attacks. */
+/**
+ * Timing-safe bearer token comparison to prevent timing attacks.
+ *
+ * Uses the shared `safeStringEqual` helper so a multibyte / malformed
+ * `Authorization` header — e.g. `'Bearer ' + 'é'.repeat(N)` — returns
+ * `false` instead of throwing a `RangeError` up the HTTP handler stack
+ * (see #405). Pre-fix this could crash the request before the 401 reply.
+ */
 function verifyBearer(header: string | undefined, expectedToken: string | undefined): boolean {
   if (!expectedToken || !header) return false;
-  const expected = `Bearer ${expectedToken}`;
-  if (header.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+  return safeStringEqual(header, `Bearer ${expectedToken}`);
 }
 
 export interface HealthDeps {
@@ -45,7 +53,7 @@ export interface HealthDeps {
   runtime?: Runtime;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
-  // Phase 1: instance identity for control-plane fleet discovery
+  // Instance identity for control-plane fleet discovery
   instanceName: string;
   instanceType: string;  // 'chat' | 'agent' | 'passive'
   accessMode: string;
@@ -101,10 +109,6 @@ function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
 function agentCommandStatus(err: unknown): number {
   const status = (err as { statusCode?: unknown })?.statusCode;
   return typeof status === 'number' && status >= 400 && status < 600 ? status : 500;
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function sendRequestErrorMessage(err: unknown): string {
@@ -227,7 +231,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
           return;
         }
-        if (!isJsonObject(data)) {
+        if (!isRecord(data)) {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ ok: false, error: 'request body must be a JSON object' }));
           return;
@@ -280,9 +284,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
         if (!requireAuth(req, res)) return;
 
-        // Parse body
         let rawBody = '';
-        for await (const chunk of req) rawBody += chunk;
+        try {
+          rawBody = await readBody(req);
+        } catch (err) {
+          res.writeHead(agentCommandStatus(err), jsonHeaders);
+          res.end(JSON.stringify({ error: (err as Error).message }));
+          return;
+        }
+
         let data: Record<string, unknown>;
         try {
           data = JSON.parse(rawBody) as Record<string, unknown>;
@@ -492,6 +502,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
     // ── GET /typing — return JIDs currently composing from presence cache ──
     if (req.url === '/typing' && req.method === 'GET') {
+      if (!requireAuth(req, res)) return;
       const cache = deps.connectionManager.presenceCache;
       const composing: { jid: string; since: number }[] = [];
       // presenceCache.entries is private — expose via a method

@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 161 MCP tools. No build step. Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 162 MCP tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, and `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer). No build step. Probably too many MCP tools.
 
 ## What It Does
 
@@ -60,7 +60,9 @@ Unified message inbox with chat list, message bubbles, send/reply, contact manag
 
 ### WebSocket Realtime
 
-The fleet server broadcasts invalidation events over WebSocket. The console subscribes and automatically refetches stale data — no polling delay for messages, chat updates, log changes, access changes, or typing indicators. Falls back to polling when WebSocket is disconnected.
+The fleet server broadcasts invalidation events over WebSocket. The console subscribes and automatically refetches stale data — no polling delay for messages, chat updates, log changes, access changes, or LID-mapping conflicts. Falls back to polling when WebSocket is disconnected.
+
+The invalidation event types are `instance_status`, `message_received`, `chat_updated`, `log_entry`, `feed_event`, `access_changed`, and `lid_conflict`. `lid_conflict` is emitted when fleet sync detects two instances disagree on a `lid → phone_jid` mapping; the conflicting LID is carried in the event's `lid` field, and console clients refetch the `/api/lid-mappings` panel. Typing indicators travel on a separate channel: the latency-sensitive `typing_update` event ships full state inline so clients update directly without a refetch round-trip.
 
 ```bash
 # Development
@@ -74,17 +76,27 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 
 ### Host deployment (systemd / launchd)
 
-- **Node.js >= 23.10** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
+- **Node.js >= 24.0** — native `--experimental-strip-types`, no transpilation (`node -v` to check)
 - **Linux with systemd** — user units for process management (`systemctl --user`); enable lingering for headless servers: `loginctl enable-linger $USER`
-- **GNOME Keyring** (`libsecret-tools`) or environment variables for API keys — `npm run setup` checks both
+- **macOS with launchd** — per-user `LaunchAgents` plists for the fleet and each instance; see the [macOS subsection](#macos-launchd) below
+- **GNOME Keyring** (`libsecret-tools`) on Linux, macOS Keychain on Darwin, or environment variables for API keys — the Linux setup script checks GNOME Keyring; the macOS runbook covers Keychain-backed secrets
 - **ffmpeg** — video frame extraction in chat mode (optional)
+
+WhatSoup auto-detects the host platform via `src/fleet/platform.ts` (`linux-systemd`, `macos-launchd`, `docker`, or `linux-no-systemd`) and routes service control (`start`/`stop`/`restart`) through the matching backend — `systemctl --user` on Linux, `launchctl` on macOS, in-process supervision under Docker. The same Fleet API endpoints work everywhere.
+
+#### macOS (launchd)
+
+- **Canonical operator runbook:** [docs/runbooks/macos-launchd-deployment.md](docs/runbooks/macos-launchd-deployment.md) — plist patterns (`com.whatsoup.<instance>.plist`, `com.whatsoup.fleet.plist`), Keychain-backed secrets, `PATH` handling for Homebrew Node, and per-instance health-token files.
+- **Service template:** `deploy/whatsoup@.service` is the systemd template; the matching launchd plists are generated per-instance under the `deploy:launchd.generated` public surface (see [docs/public-surface.md](docs/public-surface.md) — regeneration is non-destructive by policy).
+- **Platform-detection seam:** `src/fleet/platform.ts` is the single source of truth for which service manager runs — override with `WHATSOUP_DOCKER=1` to force the supervisor path inside containers.
+- The [Quick Start](#quick-start) below targets Linux/systemd as the primary path; macOS operators should follow the runbook for plist installation and `launchctl kickstart` lifecycle checks after `npm ci`.
 
 ### Docker deployment
 
 - **Docker** with Compose V2 (`docker compose version`)
 - No Node.js, systemd, or keyring required — the image bundles everything
 
-> **Pinned dependencies:** Due to the increase in recent supply chain attacks, all dependency versions in `package.json` are pinned to exact versions known to be safe at time of release. This minimizes the risk of compromised packages being pulled in by WhatSoup. If you choose to unpin or update these, do so at your own risk and with due diligence. Pinned versions will be updated in future releases with known good sources.
+> **Dependency policy:** Production and dev dependencies in `package.json` and `console/package.json` use caret-range constraints; reproducibility is enforced by the committed `package-lock.json` files, which pin every direct and transitive version. Always use `npm ci` (not `npm install`) in CI and on fresh checkouts so the lockfile is honored exactly. Lockfile updates are reviewed before merge as the supply-chain boundary.
 
 ## Quick Start
 
@@ -92,7 +104,7 @@ cd console && npm run build        # Outputs to dist/, served by fleet server
 # 1. Clone and install
 git clone https://github.com/LucasQuiles/WhatSoup.git
 cd WhatSoup
-npm install
+npm ci
 
 # 2. Run setup (installs systemd unit, wrapper scripts, builds console)
 npm run setup
@@ -138,7 +150,7 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 src/
   core/           DB, access control, messages, durability engine, JID handling
   transport/      Baileys v7 — auth, reconnection, parsing, event routing
-  mcp/            Tool registry (161 tools), Unix socket server, 20 tool modules
+  mcp/            Tool registry (162 documented tools; 160 always registered + 2 conditional), Unix socket server, 20 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
@@ -170,7 +182,7 @@ deploy/
 
 ## Fleet API
 
-The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
+The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the root fleet token as a Bearer token, legacy `?token=`, or a short-lived API/SSE ticket; ticket-minting routes require the root fleet token as a Bearer token.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -180,8 +192,10 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `DELETE` | `/api/lines/:name` | Delete an instance (stop + cleanup) |
 | `PATCH` | `/api/lines/:name/config` | Update instance configuration |
 | `GET` | `/api/lines/:name/auth` | SSE stream for QR code authentication |
-| `POST` | `/api/lines/:name/restart` | Restart systemd unit |
-| `POST` | `/api/lines/:name/stop` | Stop systemd unit |
+| `POST` | `/api/auth-ticket` | Mint a short-lived API or SSE auth ticket from the root bearer token |
+| `POST` | `/api/ws-ticket` | Mint a short-lived WebSocket ticket from the root bearer token |
+| `POST` | `/api/lines/:name/restart` | Restart service/unit |
+| `POST` | `/api/lines/:name/stop` | Stop service/unit |
 | `POST` | `/api/lines/:name/send` | Send a message through the instance |
 | `POST` | `/api/lines/:name/access` | Update access control |
 | `POST` | `/api/lines/:name/mark-read` | Mark a conversation as read |
@@ -194,8 +208,57 @@ The fleet server exposes a REST API on `127.0.0.1:9099` with Bearer token auth.
 | `GET` | `/api/metrics` | Fleet-wide aggregated metrics |
 | `GET` | `/api/feed` | Activity feed (all instances) |
 | `GET` | `/api/typing` | Currently typing indicators |
+| `GET` | `/api/lines/:name/messages/search` | Full-text search messages for an instance |
+| `GET` | `/api/lines/:name/contacts/search` | Search saved contacts for an instance |
+| `GET` | `/api/directories/check?path=...` | Check whether a home-directory path exists and is writable |
+| `GET` | `/api/lines/:name/exists` | Probe whether an instance is registered |
+| `GET` | `/api/lines/:name/scheduled` | List scheduled messages, optionally filtered by `?status=` |
+| `POST` | `/api/lines/:name/scheduled` | Schedule a new message |
+| `DELETE` | `/api/lines/:name/scheduled` | Cancel a scheduled message by `?id=` query parameter |
+| `GET` | `/api/lines/:name/scheduled/:id` | Get a single scheduled message |
+| `PUT` | `/api/lines/:name/scheduled/:id` | Update a scheduled message |
+| `DELETE` | `/api/lines/:name/scheduled/:id` | Cancel a single scheduled message |
+| `GET` | `/api/lines/:name/groups` | List groups for an instance |
+| `POST` | `/api/lines/:name/groups` | Create a new group |
+| `GET` | `/api/lines/:name/groups/:jid` | Get group detail |
+| `DELETE` | `/api/lines/:name/groups/:jid` | Leave a group |
+| `PUT` | `/api/lines/:name/groups/:jid/subject` | Update group subject |
+| `PUT` | `/api/lines/:name/groups/:jid/description` | Update group description |
+| `POST` | `/api/lines/:name/groups/:jid/participants` | Add/remove/promote/demote participants |
+| `PUT` | `/api/lines/:name/groups/:jid/settings` | Update group settings (announce/locked) |
+| `GET` | `/api/lines/:name/groups/:jid/invite` | Fetch the group's invite code |
+| `POST` | `/api/lines/:name/groups/:jid/invite/revoke` | Revoke and rotate the invite code |
+| `PUT` | `/api/lines/:name/groups/:jid/ephemeral` | Set ephemeral (disappearing-message) duration |
+| `PUT` | `/api/lines/:name/groups/:jid/member-add-mode` | Toggle who can add members |
+| `PUT` | `/api/lines/:name/groups/:jid/join-approval` | Toggle join-approval requirement |
+| `GET` | `/api/lines/:name/groups/:jid/requests` | List pending join requests |
+| `POST` | `/api/lines/:name/groups/:jid/requests` | Approve or reject pending join requests |
+| `GET` | `/api/lid-mappings` | List cross-instance LID to phone JID mappings |
+| `POST` | `/api/lid-mappings/sync` | Sync LID mappings from another instance |
+| `GET` | `/api/version` | Report fleet server build version |
+| `POST` | `/api/update` | Trigger a fleet self-update |
 
-The fleet token is stored at `~/.config/whatsoup/fleet-token` (auto-generated on first run).
+The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` plus a short accept-list for rotated tokens (auto-generated on first run). Existing `~/.config/whatsoup/fleet-token` files are migrated on first read and left in place for rollback.
+
+### Legacy authentication (deprecated)
+
+Passing the root fleet token via the `?token=<root>` query parameter is **deprecated** and scheduled for removal after **2026-06-30**. The legacy path still works today, but every successful query-token authentication emits a one-shot `http_legacy_token_path` warning on the fleet server with `removeAfter: "2026-06-30"` (matching the existing `ws_legacy_token_path` warning on the WebSocket path). Query-string credentials leak into access logs, browser history, and HTTP `Referer` headers, which is why the console has already migrated off this path.
+
+External scripts and integrations should obtain a short-lived audience-scoped ticket via `POST /api/auth-ticket` using the root token as a Bearer credential:
+
+```bash
+# 1. Mint an api-audience ticket (root Bearer required)
+TICKET=$(curl -sS -X POST "http://127.0.0.1:9099/api/auth-ticket" \
+  -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"audience":"api"}' | jq -r .ticket)
+
+# 2. Use the ticket as a Bearer credential on subsequent API requests
+curl -sS "http://127.0.0.1:9099/api/lines" \
+  -H "Authorization: Bearer $TICKET"
+```
+
+Tickets are single-use, audience-scoped (`api` or `sse`), and expire quickly; mint a fresh one per logical operation. Bearer authentication with the root token itself remains supported and does not trigger the deprecation warning. Removal plan: keep warning-only compatibility through 2026-06-30, then remove root-token `?token=` acceptance from generic `/api/*` routes while keeping audience-scoped `?ticket=` support for SSE constraints and Bearer support for root-token bootstrap routes.
 
 `POST /api/lines/:name/send` accepts exactly one target: raw `chatJid` or alias `to`. Aliases resolve through that instance's private `chatAliases` config and `chat_aliases` table. Requests may also pass a named send `profile`.
 
@@ -276,7 +339,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 |----------|-------------|
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 161 tools with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 162 tools (160 always-registered + 2 conditionally-registered) with scopes, parameters, replay policies |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |
 

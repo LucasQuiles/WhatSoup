@@ -1,13 +1,18 @@
 // tests/mcp/register-all.test.ts
 // TDD test for the standalone registerAllTools function.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
+
+// Baseline tool count for a non-Pinecone build.
+// Bumped from a loose `>= 100` to an exact baseline so a missing module is detected.
+// 160 always-registered + 1 conditional `knowledge_search` when Pinecone is configured.
+const BASELINE_TOOL_COUNT = 160;
 
 // ---------------------------------------------------------------------------
 // Minimal ConnectionManager mock — mirrors what tool-registration.test.ts uses
@@ -24,7 +29,11 @@ function makeConnection(): ConnectionManager {
 }
 
 describe('registerAllTools', () => {
-  it('registers >= 100 tools on a ToolRegistry', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('registers the exact baseline tool count on a non-Pinecone build', () => {
     const db = new Database(':memory:');
     db.open();
     const registry = new ToolRegistry();
@@ -33,16 +42,97 @@ describe('registerAllTools', () => {
     registerAllTools(registry, connection, db);
 
     const tools = registry.listTools({ tier: 'global' });
-    expect(tools.length).toBeGreaterThanOrEqual(100);
-    expect(tools.some((tool) => tool.name === 'cleanup_media')).toBe(true);
-    expect(tools.some((tool) => tool.name === 'post_status')).toBe(true);
-    expect(tools.some((tool) => tool.name === 'list_statuses')).toBe(true);
-    expect(tools.some((tool) => tool.name === 'schedule_message')).toBe(true);
-    expect(tools.some((tool) => tool.name === 'list_scheduled')).toBe(true);
-    expect(tools.some((tool) => tool.name === 'cancel_scheduled')).toBe(true);
-    expect(tools.some((tool) => tool.name === 'read_outbound_sends')).toBe(true);
+    // Exact count, not a loose lower-bound — a silently-dropped module must surface here.
+    expect(tools.length).toBe(BASELINE_TOOL_COUNT);
 
     db.raw.close();
+  });
+
+  it('always registers the critical inventory by name', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    registerAllTools(registry, connection, db);
+
+    const tools = registry.listTools({ tier: 'global' });
+    const names = new Set(tools.map((t) => t.name));
+
+    // Critical tools — if any of these are missing the harness is unusable.
+    const criticalInventory = [
+      'send_message',
+      'send_media',
+      'list_messages',
+      'list_chats',
+      'cleanup_media',
+      'post_status',
+      'list_statuses',
+      'schedule_message',
+      'list_scheduled',
+      'cancel_scheduled',
+      'read_outbound_sends',
+    ];
+    for (const name of criticalInventory) {
+      expect(names.has(name), `critical tool "${name}" missing from registry`).toBe(true);
+    }
+
+    db.raw.close();
+  });
+
+  it('re-throws when a core tool module fails to register (fail-closed)', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Force a core module — chat-management — to throw during registration.
+    const chatMgmt = await import('../../src/mcp/tools/chat-management.ts');
+    vi.spyOn(chatMgmt, 'registerChatManagementTools').mockImplementation(() => {
+      throw new Error('synthetic core failure: chat-management broke');
+    });
+
+    expect(() => registerAllTools(registry, connection, db)).toThrow(
+      /chat-management|core/i,
+    );
+
+    db.raw.close();
+  });
+
+  it('logs and continues when an optional tool module fails to register', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Force the optional knowledge module to throw, with Pinecone enabled so the path executes.
+    const knowledgeMod = await import('../../src/mcp/tools/knowledge.ts');
+    vi.spyOn(knowledgeMod, 'registerKnowledgeTools').mockImplementation(() => {
+      throw new Error('synthetic optional failure: pinecone unreachable');
+    });
+
+    // Configure Pinecone so the knowledge branch is reached.
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...(original ?? {}),
+      pinecone: {
+        ...((original as { pinecone?: object } | undefined)?.pinecone ?? {}),
+        allowedIndexes: ['mw-mind'],
+      },
+    };
+
+    try {
+      expect(() => registerAllTools(registry, connection, db)).not.toThrow();
+      // Core tools still registered.
+      const tools = registry.listTools({ tier: 'global' });
+      expect(tools.some((t) => t.name === 'send_message')).toBe(true);
+      // Knowledge tool absent because optional module threw.
+      expect(tools.some((t) => t.name === 'knowledge_search')).toBe(false);
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
   });
 
   it('registers tools with no duplicate names', () => {
@@ -59,6 +149,72 @@ describe('registerAllTools', () => {
     expect(uniqueNames.size).toBe(names.length);
 
     db.raw.close();
+  });
+
+  // Issue #510: callback-path failures inside a core module must also fail closed.
+  // The shared `register` helper passed to Pattern 2/3 modules previously swallowed
+  // throws from `registry.register(tool)` (e.g. duplicate-name collisions), so a
+  // core callback module would appear to register successfully even though tools
+  // were silently dropped. The fix threads the parent module's `core` flag into
+  // the helper so callback failures re-throw and surface to the runModule aggregator.
+  it('fails closed when a core callback module hits a registry.register failure', () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Pre-register a tool that chat-management (core, callback-path) will later
+    // attempt to register, forcing registry.register to throw on duplicate.
+    registry.register({
+      name: 'list_messages',
+      description: 'stale duplicate to force registry collision',
+      inputSchema: { type: 'object', properties: {} },
+      scope: 'global',
+      replayPolicy: 'reject',
+      handler: async () => ({ ok: true }),
+    } as unknown as ToolDeclaration);
+
+    expect(() => registerAllTools(registry, connection, db)).toThrow(
+      /chat-management|core/i,
+    );
+
+    db.raw.close();
+  });
+
+  it('tolerates a callback-path registry failure from an optional module', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const registry = new ToolRegistry();
+    const connection = makeConnection();
+
+    // Pre-register the tool name that knowledge (optional, callback-path) will emit
+    // so registry.register throws on duplicate when the optional module runs.
+    registry.register({
+      name: 'knowledge_search',
+      description: 'stale duplicate to force optional collision',
+      inputSchema: { type: 'object', properties: {} },
+      scope: 'global',
+      replayPolicy: 'reject',
+      handler: async () => ({ ok: true }),
+    } as unknown as ToolDeclaration);
+
+    // Configure Pinecone so the knowledge branch runs.
+    const cfgMod = await import('../../src/config.ts');
+    const original = cfgMod.config.memory;
+    (cfgMod.config as { memory?: unknown }).memory = {
+      ...(original ?? {}),
+      pinecone: {
+        ...((original as { pinecone?: object } | undefined)?.pinecone ?? {}),
+        allowedIndexes: ['mw-mind'],
+      },
+    };
+
+    try {
+      expect(() => registerAllTools(registry, connection, db)).not.toThrow();
+    } finally {
+      (cfgMod.config as { memory?: unknown }).memory = original;
+      db.raw.close();
+    }
   });
 
   // Gap #4: every tool has an explicit scope and replayPolicy (no relying on defaults)

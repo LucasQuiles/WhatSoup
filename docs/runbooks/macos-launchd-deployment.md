@@ -144,7 +144,7 @@ the blast radius.
 | Concept | Path |
 | --- | --- |
 | Per-instance SQLite DB | `~/.local/share/whatsoup/instances/<instance>/bot.db` |
-| Fleet token file | `~/.config/whatsoup/fleet-token` |
+| Fleet token file | `~/.config/whatsoup/fleet-tokens.json` (`active`) |
 | Fleet logs | `~/.local/share/whatsoup/fleet-{stdout,stderr}.log` |
 | Instance logs | `~/.config/whatsoup/instances/<instance>/{stdout,stderr}.log` |
 | Optional bridge logs | deployment-owned path, usually under `~/.local/share/whatsoup/` |

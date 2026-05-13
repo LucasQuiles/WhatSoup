@@ -4,6 +4,7 @@
 import { EventEmitter } from 'node:events';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Readable } from 'node:stream';
 
 import {
   makeWASocket,
@@ -27,6 +28,7 @@ import { bareNumber, isLidJid } from '../core/jid-constants.ts';
 import { formatMentions, buildLidMappings, ContactsDirectory } from '../core/mentions.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
+import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
 
@@ -73,6 +75,12 @@ function resolveTypingState(state: TypingState): 'composing' | 'recording' | 'pa
   if (state === true) return 'composing';
   if (state === false) return 'paused';
   return state;
+}
+
+function mediaUpload(media: OutboundMedia): Buffer | { stream: Readable } | { url: string } {
+  if (media.stream !== undefined) return { stream: media.stream };
+  if (media.url !== undefined) return { url: media.url };
+  return media.buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,12 +381,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
     this.log.info({ chatJid, mediaType: media.type }, 'Sending media');
+    const upload = mediaUpload(media);
 
     let result;
     switch (media.type) {
       case 'image':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          image: media.buffer,
+          image: upload,
           caption: media.caption,
           mimetype: media.mimetype,
           viewOnce: media.viewOnce,
@@ -386,7 +395,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'document':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          document: media.buffer,
+          document: upload,
           fileName: media.filename,
           mimetype: media.mimetype,
           caption: media.caption,
@@ -394,7 +403,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'audio':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          audio: media.buffer,
+          audio: upload,
           mimetype: media.mimetype,
           ptt: media.ptt,
           seconds: media.seconds,
@@ -402,7 +411,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'video':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          video: media.buffer,
+          video: upload,
           caption: media.caption,
           mimetype: media.mimetype,
           ptv: media.ptv,
@@ -412,7 +421,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         break;
       case 'sticker':
         result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          sticker: media.buffer,
+          sticker: upload,
           mimetype: media.mimetype ?? 'image/webp',
           isAnimated: media.isAnimated,
         }), 'sendMedia:sticker');
@@ -846,34 +855,36 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.sock = null;
       this.clearIdentity();
 
-      if (statusCode === DisconnectReason.loggedOut) {
+      let restartRequiredCount = 0;
+      if (statusCode === DisconnectReason.restartRequired) {
+        const now = Date.now();
+        this.restartRequiredTimestamps.push(now);
+        this.restartRequiredTimestamps = this.restartRequiredTimestamps.filter(t => now - t < 60_000);
+        restartRequiredCount = this.restartRequiredTimestamps.length;
+      }
+
+      const action = decideDisconnectAction(statusCode, { restartRequiredCount });
+
+      if (action.type === 'exit') {
         this.setConnectionState('disconnected');
         this.log.error('Logged out — re-authenticate with the auth CLI');
-        // Do NOT reconnect; credentials are invalid
         return;
       }
 
-      if (statusCode === DisconnectReason.restartRequired) {
-        // Rate-limit restartRequired: if 10+ in under 60s, treat as flapping and use backoff
-        const now = Date.now();
-        this.restartRequiredTimestamps.push(now);
-        // Keep only timestamps from the last 60 seconds
-        this.restartRequiredTimestamps = this.restartRequiredTimestamps.filter(t => now - t < 60_000);
-
-        if (this.restartRequiredTimestamps.length >= 10) {
-          this.log.warn(
-            { count: this.restartRequiredTimestamps.length },
-            'restartRequired flapping detected (%d in <60s) — using backoff reconnect',
-            this.restartRequiredTimestamps.length,
-          );
-          this.restartRequiredTimestamps = [];
-          if (!this.shuttingDown) {
-            this.scheduleReconnect();
-          }
-          return;
+      if (action.reason === 'restart-required-flapping') {
+        this.log.warn(
+          { count: action.count },
+          'restartRequired flapping detected (%d in <60s) — using backoff reconnect',
+          action.count,
+        );
+        this.restartRequiredTimestamps = [];
+        if (!this.shuttingDown) {
+          this.scheduleReconnect();
         }
+        return;
+      }
 
-        // Normal case: Baileys signals a clean internal restart — reconnect immediately
+      if (action.reason === 'restart-required') {
         if (!this.shuttingDown) {
           this.setConnectionState('reconnecting');
           void this.connect();
@@ -1251,4 +1262,3 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 // ---------------------------------------------------------------------------
 import { unwrapMessage, MEDIA_CONTENT_TYPES, parseIncomingMessage } from '../core/message-parser.ts';
 export { unwrapMessage, MEDIA_CONTENT_TYPES, parseIncomingMessage };
-

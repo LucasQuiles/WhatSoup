@@ -134,7 +134,7 @@ The 2026-04-17 incident where `fact_export_queue` was absent from live bot.db be
 Operator-invoked retroactive enrichment of messages with `enrichment_processed_at IS NULL`. Preferred invocation:
 
 ```bash
-npx tsx scripts/backfill-enrichment.ts --strict --provider {anthropic|openai} --run-id <id>
+npm run backfill-enrichment -- --strict --provider {anthropic|openai} --run-id <id>
 ```
 
 ### What `--strict` changes
@@ -200,7 +200,7 @@ OPENAI_BASE_URL="http://localhost:11434/v1"
 EXTRACTION_MODEL=gemma3:27b
 VALIDATION_MODEL=gemma3:27b
 WHATSOUP_API_TIMEOUT_MS=60000 \
-  npx tsx scripts/backfill-enrichment.ts --strict --provider openai --instance mw-bot
+  npm run backfill-enrichment -- --strict --provider openai --instance mw-bot
 ```
 
 Only `gemma3:27b` has been proven viable in the default 30s `apiTimeoutMs`. `qwen2.5:72b` and `qwen3:32b-tuned` have both timed out at cold-load — set `WHATSOUP_API_TIMEOUT_MS=60000` (or higher; value is in ms) before invoking the script if using them. The env var overrides the built-in `config.apiTimeoutMs` default without a code edit.

@@ -1,11 +1,11 @@
 # WhatSoup Configuration Reference
 
 WhatSoup is configured through two complementary mechanisms: environment variables for
-infrastructure-level settings, and per-instance `instance.json` files for runtime behavior.
-In multi-instance mode, `instance.json` values take precedence over environment variables.
+infrastructure-level settings, and per-instance `config.json` files for runtime behavior.
+In multi-instance mode, `config.json` values take precedence over environment variables.
 Both take precedence over built-in defaults.
 
-**Resolution order:** canonical `memory.*` in `instance.json` > legacy flat aliases in `instance.json` > environment variable > built-in default
+**Resolution order:** canonical `memory.*` in `config.json` > legacy flat aliases in `config.json` > environment variable > built-in default
 
 ---
 
@@ -15,12 +15,14 @@ Both take precedence over built-in defaults.
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances. **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so Claude Code uses Max/Pro subscription billing instead. |
-| `OPENAI_API_KEY` | string | OpenAI API key. Preferred for cloud audio transcription and used for LLM fallback in `chat` instances. Local transcription fallbacks can run without it when installed. |
-| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. Required only when the instance uses Pinecone-backed memory/search. |
+| `ANTHROPIC_API_KEY` | string | Anthropic API key. Required for `chat` instances — the `whatsoup` launcher hard-fails on startup if missing (`deploy/whatsoup:101`). **Not set** for `agent`/`passive` instances — the wrapper script explicitly unsets it so the agent runtime uses its subscription billing path instead of the API. |
+| `OPENAI_API_KEY` | string | OpenAI API key. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:102`). Used for transcription fallbacks (`src/runtimes/chat/providers/openai-whisper.ts`) and the LLM retry path (`src/runtimes/chat/runtime.ts:318,362`). For `agent` instances it is soft-optional (used for Whisper voice-note transcription when present); `passive` instances do not call any LLM APIs. |
+| `PINECONE_API_KEY` | string | Default Pinecone API key env var. Instances can point at a different BYOK env var with `memory.pinecone.apiKeyEnv`. **Required for `chat` instances** — the launcher hard-fails on startup if missing (`deploy/whatsoup:103`), and `loadContext` is invoked per inbound message (`src/runtimes/chat/runtime.ts:201`) so a missing key burns the 5s timeout on every message. Soft-optional for `agent` instances (needed only when the instance declares `pineconeAllowedIndexes` for the `knowledge_search` MCP tool). |
 
 These three keys are loaded from GNOME Keyring by the `whatsoup` wrapper script and exported
 before the process starts. They are never written to disk.
+
+> **Instance-type summary:** `chat` instances require **all three** keys (Anthropic, OpenAI, Pinecone) — startup aborts otherwise. `agent` instances require none at the launcher level; OpenAI and Pinecone are loaded best-effort and used only when the corresponding feature is exercised. `passive` instances require none.
 
 ### Models
 
@@ -31,7 +33,7 @@ before the process starts. They are never written to disk.
 | `VALIDATION_MODEL` | string | `claude-haiku-4-5` | Model for validation and lightweight classification. |
 | `FALLBACK_MODEL` | string | `gpt-5.4` | OpenAI fallback when the primary model is unavailable. |
 
-All four can be overridden per-instance via `instance.json` `models` object.
+All four can be overridden per-instance via `config.json` `models` object.
 
 ### Conversation
 
@@ -44,7 +46,7 @@ All four can be overridden per-instance via `instance.json` `models` object.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `instance.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
+| `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 
 ### Storage Paths (single-instance / legacy mode only)
 
@@ -123,11 +125,11 @@ The `config` volume is critical — losing it requires re-scanning the QR code f
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `instance.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
+| `INSTANCE_CONFIG` | JSON string | Serialized instance config injected by `instance-loader.ts`. Contains the full parsed and validated `config.json` plus resolved `paths`. **Not set manually** — managed by the bootstrap process. |
 
 ---
 
-## Instance Configuration (instance.json)
+## Instance Configuration (config.json)
 
 Each instance is a JSON file at:
 
@@ -144,6 +146,7 @@ into place during deployment.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `enabled` | boolean | no | `true` | Fleet opt-out switch. Set to `false` to keep the config on disk while taking the instance out of fleet rotation — discovery skips it, ops routes ignore its `healthPort`, and no polling or proxying occurs. Any other value (including absent) leaves the instance enabled. See note below.[^enabled] |
 | `name` | string | yes | — | Instance name. Must match the directory name. Validated by the loader. |
 | `type` | string | yes | — | Instance type: `chat`, `agent`, or `passive`. |
 | `adminPhones` | string[] | yes | — | Non-empty array of phone numbers with admin access. All elements must be non-empty strings. |
@@ -167,6 +170,8 @@ into place during deployment.
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only, brief text for warnings. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
+
+[^enabled]: Enforcement sites: [`src/fleet/discovery.ts:94`](../src/fleet/discovery.ts) (fleet scan skip), [`src/fleet/routes/ops.ts:767`](../src/fleet/routes/ops.ts) (port-in-use scan), [`src/fleet/routes/ops.ts:788`](../src/fleet/routes/ops.ts) (existing-port map for PATCH conflict checks).
 
 ### Access Modes
 
@@ -411,10 +416,12 @@ include `agentOptions` should keep these fields explicit.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `per_chat` via fleet API | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
+| `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
-| `sandbox` | object | no | — | Sandbox constraints applied via Claude Code hooks. See [sandbox](#agentoptions-sandbox). |
+| `sandbox` | object | no | — | Sandbox constraints applied via agent enforcement hooks. See [sandbox](#agentoptionssandbox). |
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the Claude Code subprocess. |
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
@@ -485,7 +492,7 @@ In multi-instance mode, each instance gets isolated directories under the standa
 
 ```
 $XDG_CONFIG_HOME/whatsoup/instances/<name>/   (default: ~/.config/...)
-  config.json       — instance.json (the file you edit)
+  config.json       — per-instance configuration (the file you edit)
   auth/             — Baileys WhatsApp auth credentials
 
 $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
@@ -613,18 +620,35 @@ bot persona.
 
 Migrations are applied automatically at startup by `src/core/database.ts`. Each migration is recorded in the `schema_migrations` table and is never re-applied.
 
+All migration sources are in `src/core/database.ts` unless noted otherwise.
+
 | Version | Description |
 |---------|-------------|
-| 1 | Full schema DDL (messages, chats, contacts, access_list, rate_limits, etc.) |
-| 2 | Durability tables (durability_queue, recovery_log) |
-| 3 | Chat sync tables (Wave 2) |
-| 4 | Labels tables (Wave 6) |
-| 5 | `raw_message` column on messages for `forward_message` support |
-| 6 | Blocklist and LID mapping persistence |
-| 7 | `groups` table for group metadata persistence |
-| 9 | `decryption_failures` table |
-| 10 | Self-healing control plane tables |
-| 11 | Token usage tracking: `input_tokens` + `output_tokens` on `messages`; `total_input_tokens` + `total_output_tokens` on `agent_sessions`. Uses `ALTER TABLE ... ADD COLUMN` with existence checks (idempotent). Chat runtime persists tokens per LLM response; agent runtime captures them from Claude Code stream result events. |
+| 1 | Full schema DDL — `messages`, `contacts`, `access_list`, `agent_sessions`, `rate_limits`, `enrichment_runs` (`MIGRATION_1`) |
+| 2 | Durability tables: `inbound_events`, `outbound_ops`, `tool_calls`, `session_checkpoints`, `recovery_runs` (`MIGRATION_2`) |
+| 3 | Chat sync tables, Wave 2 (`MIGRATION_3`) |
+| 4 | Labels tables, Wave 6 (`MIGRATION_4`) |
+| 5 | `messages.raw_message` column for `forward_message` support (idempotent ALTER) |
+| 6 | Blocklist and LID mapping persistence (`MIGRATION_6`) |
+| 7 | `groups` table for group metadata persistence (`MIGRATION_7`) |
+| 8 | `messages.enrichment_retries` column — persist enrichment retry counters across restarts (previously in-memory only) |
+| 9 | `decryption_failures` table + unresolved / conversation indexes (`MIGRATION_9`) |
+| 10 | Self-healing control plane tables: `control_messages`, `heal_reports`, `pending_heal_reports` (`MIGRATION_10`) |
+| 11 | Token usage tracking — `input_tokens`/`output_tokens`/`model_used` on `messages`; `total_input_tokens`/`total_output_tokens` on `agent_sessions`. Idempotent ALTERs. Chat runtime persists tokens per LLM response; agent runtime captures them from agent stream result events. |
+| 12 | `messages.media_path` column + partial index `idx_messages_media_path` for media-bearing rows |
+| 13 | `messages.content_text` column + rebuilt FTS triggers (insert / update / soft-delete / delete) to index `content_text` instead of `content` |
+| 14 | `scheduled_messages` table + `idx_scheduled_pending` for the dispatcher |
+| 15 | `metrics_hourly` rollup table + bucket index |
+| 16 | `scheduled_messages.media_blob` column for inline media payloads |
+| 17 | `scheduled_messages` recurrence columns (`chat_name`, `recurrence`, `next_run_at`, `run_count`) + `idx_scheduled_next_run` |
+| 18 | `agent_token_events` table + `agent_sessions.ended_at` column + expression indexes for unixepoch queries + backfill of terminal sessions (`MIGRATION_18`) |
+| 19 | `agent_sessions.provider` column — which LLM provider drove the session |
+| 20 | `fact_export_queue` for the WhatsApp → mw-mind fact export pipeline (`MIGRATION_20`) |
+| 21 | `chat_aliases` table — operator-friendly alias → `chat_jid` lookups (`MIGRATION_21`) |
+| 22 | `outbound_sends` audit table + indexes (created_at, status, chat, alias) for the unified send pipeline (`MIGRATION_22`) |
+| 23 | Substrate schema: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs` (`MIGRATION_23` in `src/core/substrate/schema.ts`) |
+| 24 | `messages.updated_at` column + backfill + touch triggers on insert and content-changing updates |
+| 25 | `lid_mappings_history` retained audit table + indexes — first-seen rows and LID → phone flips are recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
 
 ---
 
@@ -634,8 +658,8 @@ The `GET /api/lines` and `GET /api/lines/:name` endpoints expose two config fiel
 
 | Field | Source | Description |
 |-------|--------|-------------|
-| `models` | `instance.json` → `models` object | Model overrides (conversation/extraction/validation/fallback), or `null` if not set in config. |
-| `sandboxPerChat` | `instance.json` → `agentOptions.sandboxPerChat` | `true` when per-chat workspace provisioning is active; `false` otherwise. |
+| `models` | `config.json` → `models` object | Model overrides (conversation/extraction/validation/fallback), or `null` if not set in config. |
+| `sandboxPerChat` | `config.json` → `agentOptions.sandboxPerChat` | `true` when per-chat workspace provisioning is active; `false` otherwise. |
 
 These are read-only in the API and used by the console (`LineTags` component) to display sandbox and fallback badges on fleet rows.
 

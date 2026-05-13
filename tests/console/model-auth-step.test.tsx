@@ -1,0 +1,263 @@
+/**
+ * ModelAuthStep — passive/chat/agent view dispatch, tabbed models, API key input toggle & errors.
+ * @vitest-environment jsdom
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+
+const ModelAuthStep = (await import('../../console/src/components/wizard/ModelAuthStep')).default
+
+interface RenderOpts {
+  data?: Record<string, unknown>
+  errors?: Record<string, string>
+}
+
+function renderStep(opts: RenderOpts = {}) {
+  const onChange = vi.fn<(patch: Record<string, unknown>) => void>()
+  const view = render(
+    <ModelAuthStep
+      data={opts.data ?? {}}
+      onChange={onChange}
+      errors={opts.errors ?? {}}
+    />,
+  )
+  return { onChange, ...view }
+}
+
+afterEach(() => cleanup())
+
+describe('ModelAuthStep — view dispatch by data.type', () => {
+  it('renders the passive view (no inputs, no tabs) when type=passive', () => {
+    renderStep({ data: { type: 'passive' } })
+
+    expect(screen.getByText(/Passive lines don.+require a model configuration/)).toBeDefined()
+    expect(screen.queryByRole('tab', { name: 'Anthropic' })).toBeNull()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.queryByPlaceholderText(/sk-ant-/)).toBeNull()
+  })
+
+  it('renders the agent view (auth-method radios + tabs) when type=agent', () => {
+    renderStep({ data: { type: 'agent' } })
+
+    expect(screen.getByText('Anthropic Auth')).toBeDefined()
+    expect(screen.getByRole('radio', { name: /API Key/ })).toBeDefined()
+    expect(screen.getByRole('radio', { name: /Existing Claude session/ })).toBeDefined()
+    expect(screen.getByRole('tab', { name: 'Anthropic' })).toBeDefined()
+    expect(screen.getByRole('tab', { name: 'OpenAI' })).toBeDefined()
+  })
+
+  it('falls back to the chat view (tabs without auth-method radios) for unknown or missing type', () => {
+    renderStep({ data: {} })
+
+    expect(screen.getByRole('tab', { name: 'Anthropic' })).toBeDefined()
+    expect(screen.getByRole('tab', { name: 'OpenAI' })).toBeDefined()
+    expect(screen.queryByText('Anthropic Auth')).toBeNull()
+    expect(screen.queryByRole('radio', { name: /Existing Claude session/ })).toBeNull()
+  })
+})
+
+describe('ModelAuthStep — chat view: Anthropic tab is active by default', () => {
+  it('shows all three Anthropic role selects with default-model values', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    expect(screen.getByText('Conversation')).toBeDefined()
+    expect(screen.getByText('Extraction')).toBeDefined()
+    expect(screen.getByText('Validation')).toBeDefined()
+    const selects = screen.getAllByRole('combobox')
+    expect(selects.length).toBeGreaterThanOrEqual(3)
+    // Conversation default = claude-sonnet-4-6; haiku is in the option list for the others.
+    expect((selects[0] as HTMLSelectElement).value).toBe('claude-sonnet-4-6')
+    expect((selects[1] as HTMLSelectElement).value).toBe('claude-haiku-4-5-20251001')
+  })
+
+  it('exposes an Anthropic API Key input with sk-ant placeholder masked by default', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const apiInput = screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement
+    expect(apiInput).toBeDefined()
+    expect(apiInput.type).toBe('password')
+  })
+
+  it('marks the Anthropic tab aria-selected=true and OpenAI tab aria-selected=false', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    expect(screen.getByRole('tab', { name: 'Anthropic' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('tab', { name: 'OpenAI' }).getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('disables the Local tab as "coming soon"', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const local = screen.getByRole('button', { name: 'Local' }) as HTMLButtonElement
+    expect(local.disabled).toBe(true)
+    expect(local.getAttribute('title')).toBe('Coming soon')
+  })
+})
+
+describe('ModelAuthStep — chat view: switching tabs', () => {
+  it('reveals the OpenAI panel with optional "None" first option after clicking the OpenAI tab', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+
+    expect(screen.getByText('Fallback / Conversation')).toBeDefined()
+    const openaiKey = screen.getByPlaceholderText('sk-...') as HTMLInputElement
+    expect(openaiKey).toBeDefined()
+    // OpenAI selects default to '' and offer a "None" option.
+    const selects = screen.getAllByRole('combobox') as HTMLSelectElement[]
+    expect(selects[0].value).toBe('')
+    expect(within(selects[0]).getByText('None')).toBeDefined()
+  })
+
+  it('hides the Anthropic API key input when the OpenAI tab is active', () => {
+    renderStep({ data: { type: 'chat', apiKey: 'sk-ant-abc' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+
+    expect(screen.queryByPlaceholderText('sk-ant-...')).toBeNull()
+    expect(screen.getByPlaceholderText('sk-...')).toBeDefined()
+  })
+})
+
+describe('ModelAuthStep — chat view: change events bubble to onChange', () => {
+  it('emits a models patch (with all roles preserved) when an Anthropic select changes', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+
+    const conversation = screen.getAllByRole('combobox')[0] as HTMLSelectElement
+    fireEvent.change(conversation, { target: { value: 'claude-opus-4-6' } })
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    const patch = onChange.mock.calls[0][0] as { models: Record<string, string> }
+    expect(patch.models.conversation).toBe('claude-opus-4-6')
+    // Other defaults are spread in.
+    expect(patch.models.extraction).toBe('claude-haiku-4-5-20251001')
+    expect(patch.models.validation).toBe('claude-haiku-4-5-20251001')
+  })
+
+  it('emits an apiKey patch when the Anthropic key input receives input', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+
+    const input = screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'sk-ant-new' } })
+
+    expect(onChange).toHaveBeenCalledWith({ apiKey: 'sk-ant-new' })
+  })
+
+  it('emits an openaiKey patch (not apiKey) when the OpenAI key input receives input', () => {
+    const { onChange } = renderStep({ data: { type: 'chat' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+    const openaiInput = screen.getByPlaceholderText('sk-...') as HTMLInputElement
+    fireEvent.change(openaiInput, { target: { value: 'OPENAI_FAKE_X' } })
+
+    expect(onChange).toHaveBeenCalledWith({ openaiKey: 'OPENAI_FAKE_X' })
+  })
+})
+
+describe('ModelAuthStep — ApiKeyInput visibility toggle', () => {
+  it('flips the Anthropic key input from password to text when the eye button is clicked, and back', () => {
+    renderStep({ data: { type: 'chat', apiKey: 'sk-ant-secret' } })
+
+    const input = screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement
+    expect(input.type).toBe('password')
+
+    // The toggle button is the eye/eye-off button adjacent to the input — it is the only
+    // <button> inside the Anthropic key row that has no name and no role attribute.
+    const toggle = input.parentElement!.querySelector('button') as HTMLButtonElement
+    expect(toggle).toBeTruthy()
+
+    fireEvent.click(toggle)
+    expect(input.type).toBe('text')
+
+    fireEvent.click(toggle)
+    expect(input.type).toBe('password')
+  })
+})
+
+describe('ModelAuthStep — ApiKeyInput error rendering', () => {
+  it('renders the Anthropic apiKey error message when errors.apiKey is set', () => {
+    renderStep({ data: { type: 'chat' }, errors: { apiKey: 'Anthropic key required' } })
+
+    expect(screen.getByText('Anthropic key required')).toBeDefined()
+  })
+
+  it('renders the OpenAI key error only after switching to the OpenAI tab', () => {
+    renderStep({ data: { type: 'chat' }, errors: { openaiKey: 'OpenAI key invalid' } })
+
+    expect(screen.queryByText('OpenAI key invalid')).toBeNull()
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+    expect(screen.getByText('OpenAI key invalid')).toBeDefined()
+  })
+})
+
+describe('ModelAuthStep — agent view: auth-method switching', () => {
+  it('defaults to api_key checked when data.authMethod is absent', () => {
+    renderStep({ data: { type: 'agent' } })
+
+    expect((screen.getByRole('radio', { name: /API Key/ }) as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByRole('radio', { name: /Existing Claude session/ }) as HTMLInputElement).checked).toBe(false)
+    expect(screen.queryByText(/Requires active Claude CLI login/)).toBeNull()
+    // Anthropic key visible in api_key mode.
+    expect(screen.getByPlaceholderText('sk-ant-...')).toBeDefined()
+  })
+
+  it('emits {authMethod: "oauth"} and shows the CLI-login banner when the oauth radio is selected', () => {
+    const { onChange } = renderStep({ data: { type: 'agent' } })
+
+    fireEvent.click(screen.getByRole('radio', { name: /Existing Claude session/ }))
+
+    expect(onChange).toHaveBeenCalledWith({ authMethod: 'oauth' })
+  })
+
+  it('hides the Anthropic API key input and shows the CLI-login banner when authMethod=oauth is committed in data', () => {
+    renderStep({ data: { type: 'agent', authMethod: 'oauth' } })
+
+    expect((screen.getByRole('radio', { name: /Existing Claude session/ }) as HTMLInputElement).checked).toBe(true)
+    expect(screen.getByText(/Requires active Claude CLI login on this machine/)).toBeDefined()
+    expect(screen.queryByPlaceholderText('sk-ant-...')).toBeNull()
+    // OpenAI key is still reachable from the OpenAI tab — auth-method only gates Anthropic.
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+    expect(screen.getByPlaceholderText('sk-...')).toBeDefined()
+  })
+
+  it('emits {authMethod: "api_key"} when toggling back from oauth', () => {
+    const { onChange } = renderStep({ data: { type: 'agent', authMethod: 'oauth' } })
+
+    fireEvent.click(screen.getByRole('radio', { name: /API Key/ }))
+
+    expect(onChange).toHaveBeenCalledWith({ authMethod: 'api_key' })
+  })
+})
+
+describe('ModelAuthStep — committed data is reflected (controlled inputs)', () => {
+  it('reflects committed apiKey, openaiKey, and per-role model values from data', () => {
+    renderStep({
+      data: {
+        type: 'chat',
+        apiKey: 'sk-ant-committed',
+        openaiKey: 'OPENAI_FAKE_COMMITTED',
+        models: {
+          conversation: 'claude-opus-4-6',
+          extraction: 'claude-sonnet-4-6',
+          validation: 'claude-opus-4-6',
+          fallback: 'gpt-4.1',
+          openaiExtraction: 'gpt-4.1-mini',
+          openaiValidation: 'gpt-4.1-nano',
+        },
+      },
+    })
+
+    expect((screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement).value).toBe('sk-ant-committed')
+    const anthSelects = screen.getAllByRole('combobox') as HTMLSelectElement[]
+    expect(anthSelects[0].value).toBe('claude-opus-4-6')
+    expect(anthSelects[1].value).toBe('claude-sonnet-4-6')
+    expect(anthSelects[2].value).toBe('claude-opus-4-6')
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+    const openaiSelects = screen.getAllByRole('combobox') as HTMLSelectElement[]
+    expect(openaiSelects[0].value).toBe('gpt-4.1')
+    expect(openaiSelects[1].value).toBe('gpt-4.1-mini')
+    expect(openaiSelects[2].value).toBe('gpt-4.1-nano')
+    expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('OPENAI_FAKE_COMMITTED')
+  })
+})

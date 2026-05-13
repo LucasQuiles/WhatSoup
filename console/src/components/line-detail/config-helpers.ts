@@ -1,5 +1,8 @@
 // Config helpers — build entries dynamically from real instance config
 import { validatePhone } from '../../lib/validation'
+import { isRecord } from '../../lib/type-guards'
+
+export { isRecord }
 
 export const CONFIG_EXCLUDE_KEYS = new Set(['name', 'type', 'paths', 'healthPort'])
 
@@ -12,10 +15,6 @@ export type AgentOptionFieldType = 'string' | 'path' | 'boolean' | 'enum' | 'arr
 export interface AgentOptionFieldDefinition {
   type: AgentOptionFieldType
   enum?: string[]
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export function getValueAtPath(source: unknown, keyPath: string): unknown {

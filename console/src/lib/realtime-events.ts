@@ -3,15 +3,24 @@
 // ---------------------------------------------------------------------------
 
 import type { QueryKey } from '@tanstack/react-query';
+import { isRecord } from './type-guards';
 
 // ---------------------------------------------------------------------------
 // WS event types (mirrors server contract)
 // ---------------------------------------------------------------------------
 
 export interface WsInvalidationEvent {
-  type: 'instance_status' | 'message_received' | 'chat_updated' | 'log_entry' | 'feed_event' | 'access_changed';
+  type:
+    | 'instance_status'
+    | 'message_received'
+    | 'chat_updated'
+    | 'log_entry'
+    | 'feed_event'
+    | 'access_changed'
+    | 'lid_conflict';
   instance: string;
   conversationKey?: string;
+  lid?: string;
   messagePk?: number;
 }
 
@@ -37,11 +46,8 @@ const INVALIDATION_TYPES = new Set<WsInvalidationEvent['type']>([
   'log_entry',
   'feed_event',
   'access_changed',
+  'lid_conflict',
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -94,6 +100,7 @@ export function parseWsEvent(data: unknown): WsEvent | null {
     instance: parsed.instance,
   };
   if (typeof parsed.conversationKey === 'string') event.conversationKey = parsed.conversationKey;
+  if (typeof parsed.lid === 'string') event.lid = parsed.lid;
   if (typeof parsed.messagePk === 'number' && Number.isFinite(parsed.messagePk)) event.messagePk = parsed.messagePk;
   return event;
 }
@@ -102,11 +109,35 @@ export function parseWsEvent(data: unknown): WsEvent | null {
 // URL construction
 // ---------------------------------------------------------------------------
 
-/** Build a WebSocket URL from the current page location and fleet token. */
-export function getFleetWebSocketUrl(location: { protocol: string; host: string }, token: string | null): string | null {
-  if (!token) return null;
+/**
+ * Fetcher contract for {@link getFleetWebSocketUrl}. The real implementation
+ * is the console's `apiFetch`, but tests supply a stub so they can assert
+ * the request shape without standing up a server.
+ */
+export type TicketFetcher = () => Promise<{ ticket: string; expiresIn: number }>;
+
+/**
+ * Build a WebSocket URL by minting a short-lived ticket via the HTTP API.
+ *
+ * The previous implementation embedded the root fleet token in the URL,
+ * which leaked through devtools, page source, and proxy logs. Issue #237.
+ * Returns `null` when the ticket fetch fails (e.g. unauthenticated) so the
+ * caller can fall back to its polling path.
+ */
+export async function getFleetWebSocketUrl(
+  location: { protocol: string; host: string },
+  fetchTicket: TicketFetcher,
+): Promise<string | null> {
+  let ticket: string;
+  try {
+    const result = await fetchTicket();
+    ticket = result.ticket;
+  } catch {
+    return null;
+  }
+  if (typeof ticket !== 'string' || ticket.length === 0) return null;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.host}/ws?token=${encodeURIComponent(token)}`;
+  return `${protocol}//${location.host}/ws?ticket=${encodeURIComponent(ticket)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +161,8 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
       return [['feed']];
     case 'access_changed':
       return [['access', instance]];
+    case 'lid_conflict':
+      return [['lid-mappings']];
     default:
       return [];
   }

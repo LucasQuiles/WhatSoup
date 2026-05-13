@@ -4,18 +4,25 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { configRoot as fleetConfigRoot, instancePaths, type InstancePaths } from './fleet/paths.ts';
+import {
+  validateInstanceConfig,
+  VALID_TYPES as _VALID_TYPES,
+  VALID_ACCESS_MODES as _VALID_ACCESS_MODES,
+  VALID_SESSION_SCOPES as _VALID_SESSION_SCOPES,
+} from './core/agent-config-validator.ts';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type InstanceType = 'chat' | 'agent' | 'passive';
-type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
-type SessionScope = 'single' | 'shared' | 'per_chat';
+export type InstanceType = 'chat' | 'agent' | 'passive';
+export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
+export type SessionScope = 'single' | 'shared' | 'per_chat';
 
-export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
-export const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(['self_only', 'allowlist', 'open_dm', 'groups_only']);
-export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set(['single', 'shared', 'per_chat']);
+// Canonical enum sets live in the shared validator; re-export for back-compat.
+export const VALID_TYPES = _VALID_TYPES;
+export const VALID_ACCESS_MODES = _VALID_ACCESS_MODES;
+export const VALID_SESSION_SCOPES = _VALID_SESSION_SCOPES;
 
 interface AgentOptionsSandbox {
   allowedPaths?: unknown;
@@ -71,157 +78,15 @@ interface InstanceConfig {
 // ---------------------------------------------------------------------------
 
 function validateInstance(raw: Record<string, unknown>, name: string, authOnly = false): void {
-  // Name match
-  if (raw['name'] !== name) {
-    throw new Error(
-      `Instance name mismatch: expected "${name}" but config.json has "${String(raw['name'])}"`,
-    );
-  }
-
-  // Valid type
-  if (!VALID_TYPES.has(String(raw['type']))) {
-    throw new Error(
-      `Invalid type "${String(raw['type'])}": must be one of ${[...VALID_TYPES].join(', ')}`,
-    );
-  }
-
-  // Valid accessMode
-  if (!VALID_ACCESS_MODES.has(String(raw['accessMode']))) {
-    throw new Error(
-      `Invalid accessMode "${String(raw['accessMode'])}": must be one of ${[...VALID_ACCESS_MODES].join(', ')}`,
-    );
-  }
-
-  // adminPhones must be non-empty array
-  if (
-    !Array.isArray(raw['adminPhones']) ||
-    (raw['adminPhones'] as unknown[]).length === 0
-  ) {
-    throw new Error('adminPhones must be a non-empty array of phone numbers');
-  }
-
-  // adminPhones elements must be non-empty strings
-  const instancePath = name;
-  const phones = raw['adminPhones'] as unknown[];
-  if (phones.some((p: unknown) => typeof p !== 'string' || (p as string).trim() === '')) {
-    throw new Error(`adminPhones must contain only non-empty strings in ${instancePath}`);
-  }
-
-  const chatAliases = raw['chatAliases'];
-  if (chatAliases !== undefined) {
-    if (typeof chatAliases !== 'object' || chatAliases === null || Array.isArray(chatAliases)) {
-      throw new Error('chatAliases must be an object of alias -> chatJid strings');
-    }
-    const normalizedAliases = new Set<string>();
-    for (const [alias, chatJid] of Object.entries(chatAliases as Record<string, unknown>)) {
-      const normalizedAlias = alias.trim();
-      if (normalizedAlias === '' || typeof chatJid !== 'string' || chatJid.trim() === '') {
-        throw new Error('chatAliases must contain only non-empty alias -> chatJid strings');
-      }
-      if (normalizedAliases.has(normalizedAlias)) {
-        throw new Error(`chatAliases contains duplicate alias after trimming: ${normalizedAlias}`);
-      }
-      normalizedAliases.add(normalizedAlias);
-    }
-  }
-
-  // Auth-only mode: skip runtime validation (agentOptions, systemPrompt, etc.)
-  // Used by bootstrap-auth.ts which only needs paths + WhatsApp connection config
-  if (authOnly) return;
-
-  // Agent access mode gate — CON-007
-  if (raw['type'] === 'agent') {
-    const agentOpts = raw['agentOptions'];
-    if (agentOpts !== undefined && agentOpts !== null) {
-      // agentOptions present: validate its shape first
-      if (typeof agentOpts !== 'object' || Array.isArray(agentOpts)) {
-        throw new Error('agentOptions must be an object');
-      }
-      const opts = agentOpts as Record<string, unknown>;
-
-      // @check CHK-061 // @traces CON-007.AC-02
-      // sessionScope is required
-      if (!VALID_SESSION_SCOPES.has(String(opts['sessionScope'] ?? ''))) {
-        throw new Error(
-          `agentOptions.sessionScope is required and must be one of ${[...VALID_SESSION_SCOPES].join(', ')}`,
-        );
-      }
-
-      // cwd is optional — empty/missing means "use homedir() at runtime"
-      if (opts['cwd'] !== undefined && typeof opts['cwd'] !== 'string') {
-        throw new Error('agentOptions.cwd must be a string when provided');
-      }
-
-      // instructionsPath is optional but must be a string when present
-      if (opts['instructionsPath'] !== undefined && typeof opts['instructionsPath'] !== 'string') {
-        throw new Error('agentOptions.instructionsPath must be a string');
-      }
-
-      // pluginDirs is optional but must be an array of strings when present
-      if (opts['pluginDirs'] !== undefined) {
-        if (!Array.isArray(opts['pluginDirs']) || !opts['pluginDirs'].every((d: unknown) => typeof d === 'string')) {
-          throw new Error('agentOptions.pluginDirs must be an array of strings');
-        }
-      }
-
-      // sandboxPerChat requires sessionScope 'per_chat'
-      if (opts['sandboxPerChat'] === true && opts['sessionScope'] !== 'per_chat') {
-        throw new Error('agentOptions.sandboxPerChat requires sessionScope "per_chat"');
-      }
-
-      // provider is optional but must be a non-empty string when present
-      if (opts['provider'] !== undefined) {
-        if (typeof opts['provider'] !== 'string' || (opts['provider'] as string).trim() === '') {
-          throw new Error('agentOptions.provider must be a non-empty string when provided');
-        }
-      }
-
-      // providerConfig is optional but must be a plain object when present
-      if (opts['providerConfig'] !== undefined) {
-        if (typeof opts['providerConfig'] !== 'object' || Array.isArray(opts['providerConfig']) || opts['providerConfig'] === null) {
-          throw new Error('agentOptions.providerConfig must be an object when provided');
-        }
-
-        // providerConfig.budget is optional; when present it must be a plain object
-        const pc = opts['providerConfig'] as Record<string, unknown>;
-        if (pc['budget'] !== undefined) {
-          if (typeof pc['budget'] !== 'object' || Array.isArray(pc['budget']) || pc['budget'] === null) {
-            throw new Error('agentOptions.providerConfig.budget must be an object when provided');
-          }
-        }
-      }
-
-      // @check CHK-060 // @traces CON-007.AC-01
-      // sessionScope:"shared" and "per_chat" permit any valid access mode; "single" still requires self_only
-      if (opts['sessionScope'] === 'shared' || opts['sessionScope'] === 'per_chat') {
-        // Any valid access mode is acceptable — already validated above
-      } else {
-        // sessionScope is "single": requires self_only
-        if (raw['accessMode'] !== 'self_only') {
-          throw new Error(`Agent instances require accessMode "self_only", got "${raw['accessMode']}"`);
-        }
-      }
-    } else {
-      // No agentOptions: existing rule — requires self_only
-      if (raw['accessMode'] !== 'self_only') {
-        throw new Error(`Agent instances require accessMode "self_only", got "${raw['accessMode']}"`);
-      }
-    }
-  }
-
-  // Chat requires systemPrompt
-  if (raw['type'] === 'chat' && !raw['systemPrompt']) {
-    throw new Error('Chat instances must have a non-empty systemPrompt');
-  }
-
-  // Passive: no systemPrompt, self_only access only
-  if (raw['type'] === 'passive') {
-    if (raw['systemPrompt']) {
-      throw new Error('Passive instances must not have a systemPrompt');
-    }
-    if (raw['accessMode'] !== 'self_only') {
-      throw new Error(`Passive instances require accessMode "self_only", got "${raw['accessMode']}"`);
-    }
+  // Defense-in-depth: the same shared validator runs here, on PATCH, and on
+  // CREATE. Drift between sites (#244, #249) is what bricks instances.
+  const error = validateInstanceConfig(raw, {
+    name,
+    mode: 'load',
+    authOnly,
+  });
+  if (error) {
+    throw new Error(error.message);
   }
 }
 

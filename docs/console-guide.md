@@ -90,7 +90,28 @@ The header shows the instance name, mode badge, phone number, uptime, port, mess
 
 ![Line Detail — Logs](screenshots/line-detail-logs.png)
 
-**Metrics** — Performance metrics (Phase 2 — coming soon).
+**Metrics** — Performance charts for this instance, scoped by a range selector (24h, 7d, 30d) and exportable as CSV.
+
+![Line Detail — Metrics](screenshots/line-detail-metrics.png)
+
+Four charts render when data is available:
+
+- **Message Volume** — Bar chart of inbound, outbound, and media counts per time bucket.
+- **Active Hours Heatmap** — Range-aware activity view: 24h renders a collapsed hourly bar chart, 7d renders a day-by-hour heatmap, and 30d renders a date-by-hour heatmap when daily data is available or a weekly pattern heatmap otherwise.
+- **Tokens** — LLM input/output token usage over time, broken down by provider (toggle in the Tokens/Sessions tab strip).
+- **Sessions** — Active and newly started agent sessions over time, broken down by provider.
+
+Below the charts, the tab also shows static cards for cumulative **Token Usage** (input/output totals with a proportion bar) and **Model Configuration** (each configured model role returned for the line, such as conversation, extraction, validation, and fallback when present).
+
+The CSV export button (top-right of the range selector) downloads Message Volume buckets as `<line>-<range>.csv` with `bucket`, `inbound`, and `outbound` columns. Media counts are charted but not included in the CSV export.
+
+Empty, loading, and error states each render an `EmptyState` panel: a loading panel while the request is in flight, an error panel with a Retry action when the request fails, and a "No metrics data" panel when the instance has not yet processed any messages.
+
+Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) with the fleet-wide aggregate available at `GET /api/metrics?range=24h|7d|30d` for the Soup Kitchen view.
+
+**Scheduled** — Queue of scheduled messages for this instance. The header bar shows the total count and a "New Scheduled Message" button that opens the composer modal. Each row exposes Cancel, Edit, and Duplicate actions; pending and processing messages sort to the top by send time, with sent / failed / cancelled rows below in reverse chronological order. The list polls every 30 s. Empty, loading, and error states each render an `EmptyState` panel. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by `GET/POST/DELETE /api/lines/:name/scheduled` (list, create, cancel-all) and `GET/PUT/DELETE /api/lines/:name/scheduled/:id` (fetch, update, cancel one) — see the Fleet API table in the README.
+
+**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. The list polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the Fleet API table in the README.
 
 ### Add Line Wizard
 
@@ -118,13 +139,18 @@ The console uses 60+ CSS custom properties and 40+ ESLint rules enforcing token 
 
 ## Mock Mode
 
-When the fleet server is unreachable, the console automatically falls back to built-in mock data. This is useful for:
+When the fleet server is unreachable, the console can fall back to built-in mock data. This is useful for:
 
 - **Design iteration** — Work on the UI without running any WhatsApp instances
 - **Demos** — Show the console to others without exposing real data
 - **Development** — Test components with predictable, consistent data
 
-Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds. All read operations use mock data; write operations (send message, restart, delete) require a live fleet server.
+**Activation rules (closes #420):**
+
+- **Development builds** (`npm run dev`) — Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds.
+- **Production builds** (`npm run build`) — Mock mode is **disabled by default**. Real fleet/auth failures surface as errors so the UI can render a true unhealthy state instead of masquerading as healthy mock data. To opt back in for demos or static showcase builds, set the Vite env var `VITE_MOCK_MODE=1` at build time (e.g. `VITE_MOCK_MODE=1 npm run build`).
+
+When mock mode is active, most read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. A few read endpoints intentionally still hit the live API: `searchMessages`, `getScheduledById`, `checkExists`, `checkDirectory`, and `getVersion`. Write operations always require a live fleet server.
 
 ## Development
 
@@ -134,4 +160,4 @@ cd console && npm run build        # Build to dist/, served by fleet server
 cd console && npm run lint         # ESLint with token enforcement rules
 ```
 
-The dev server proxies `/api/*` requests to the fleet server at `http://127.0.0.1:9099` with automatic Bearer token injection from `~/.config/whatsoup/fleet-token`.
+The dev server proxies `/api/*` requests to the fleet server at `http://127.0.0.1:9099` with automatic Bearer token injection from `~/.config/whatsoup/fleet-tokens.json` (`active`). It falls back to the legacy `~/.config/whatsoup/fleet-token` file only when the rotatable token file is absent.

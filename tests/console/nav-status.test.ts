@@ -35,18 +35,24 @@ describe('realtime provider exports', () => {
 });
 
 describe('WS URL construction', () => {
-  it('uses wss: for https: pages', () => {
-    const url = getFleetWebSocketUrl({ protocol: 'https:', host: 'app.example.com' }, 'token123');
+  const okFetcher = () => Promise.resolve({ ticket: 'tkt', expiresIn: 60 });
+
+  it('uses wss: for https: pages', async () => {
+    const url = await getFleetWebSocketUrl({ protocol: 'https:', host: 'app.example.com' }, okFetcher);
     expect(url).toMatch(/^wss:\/\//);
   });
 
-  it('uses ws: for http: pages', () => {
-    const url = getFleetWebSocketUrl({ protocol: 'http:', host: 'localhost:9099' }, 'token123');
+  it('uses ws: for http: pages', async () => {
+    const url = await getFleetWebSocketUrl({ protocol: 'http:', host: 'localhost:9099' }, okFetcher);
     expect(url).toMatch(/^ws:\/\//);
   });
 
-  it('returns null without a token', () => {
-    expect(getFleetWebSocketUrl({ protocol: 'http:', host: 'localhost' }, null)).toBeNull();
+  it('returns null when the ticket fetcher rejects', async () => {
+    const url = await getFleetWebSocketUrl(
+      { protocol: 'http:', host: 'localhost' },
+      () => Promise.reject(new Error('unauthenticated')),
+    );
+    expect(url).toBeNull();
   });
 });
 

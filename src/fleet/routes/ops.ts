@@ -4,18 +4,22 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
 import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('fleet:ops');
 import { mcpCall } from '../mcp-client.ts';
+import { respondMcp } from './mcp-proxy.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import type { FleetDiscovery } from '../discovery.ts';
-import { configRoot, dataRoot, stateRoot } from '../paths.ts';
+import { configRoot, dataRoot, stateRoot, repoRoot } from '../paths.ts';
 import { writePermissionsSettings } from '../../core/workspace.ts';
 import { defaultSettingsJson, mergeSettingsJson } from '../../core/settings-template.ts';
 import type { PermissionsSettings } from '../../core/settings-template.ts';
 import { VALID_TYPES, VALID_ACCESS_MODES, VALID_SESSION_SCOPES } from '../../instance-loader.ts';
+import { validateInstanceConfig } from '../../core/agent-config-validator.ts';
+import type { ValidationError as ConfigValidationError } from '../../core/agent-config-validator.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
@@ -37,10 +41,6 @@ function validateInstanceName(name: string, res: ServerResponse): boolean {
   return true;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function deepMergeRecords(
   base: Record<string, unknown>,
   patch: Record<string, unknown>,
@@ -48,7 +48,7 @@ function deepMergeRecords(
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
     const current = result[key];
-    result[key] = isPlainRecord(current) && isPlainRecord(value)
+    result[key] = isRecord(current) && isRecord(value)
       ? deepMergeRecords(current, value)
       : value;
   }
@@ -57,6 +57,7 @@ function deepMergeRecords(
 
 interface PrivateWriteOptions {
   exclusive?: boolean;
+  mode?: number;
 }
 
 function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
@@ -75,8 +76,9 @@ function assertPrivateDirectorySync(dirPath: string): void {
   }
 }
 
-function writePrivateFileSync(filePath: string, data: string, options: PrivateWriteOptions = {}): void {
+function writePrivateFileSync(filePath: string, data: string | Buffer, options: PrivateWriteOptions = {}): void {
   assertPrivateDirectorySync(path.dirname(filePath));
+  const mode = options.mode ?? 0o600;
 
   try {
     const stat = fs.lstatSync(filePath);
@@ -100,15 +102,16 @@ function writePrivateFileSync(filePath: string, data: string, options: PrivateWr
     (options.exclusive ? fs.constants.O_EXCL : 0);
   let fd: number | undefined;
   try {
-    fd = fs.openSync(filePath, flags, 0o600);
+    fd = fs.openSync(filePath, flags, mode);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) {
       throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
     }
-    fs.fchmodSync(fd, 0o600);
+    fs.fchmodSync(fd, mode);
     fs.ftruncateSync(fd, 0);
-    fs.writeFileSync(fd, data, { encoding: 'utf-8' });
-    fs.fchmodSync(fd, 0o600);
+    if (typeof data === 'string') fs.writeFileSync(fd, data, { encoding: 'utf-8' });
+    else fs.writeFileSync(fd, data);
+    fs.fchmodSync(fd, mode);
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -136,12 +139,12 @@ export async function handleSend(
   // Validate target shape + normalize JID in request body.
   // chatJid xor to: callers must commit to exactly one. Both -> 400; neither -> 400.
   //
-  // Architectural note (P1-D, deviation from phase1-design.md Decision 3):
+  // Architectural note (docs/tools.md#send_message and src/core/send-pipeline.ts):
   // We do NOT add a `chatResolver` field to OpsDeps. Aliases live in per-instance
-  // DBs (Decisions 1+2) and the fleet has no per-instance DB connection. Honoring
-  // the literal design would require Map<line, ChatResolver> + new infrastructure
-  // for fleet-side instance DB connections. Instead, the fleet validates xor and
-  // forwards the body verbatim; the per-instance MCP `send_message` tool (P1-E)
+  // DBs and the fleet has no per-instance DB connection. Fleet-side alias
+  // resolution would require Map<line, ChatResolver> + new infrastructure for
+  // fleet-side instance DB connections. Instead, the fleet validates xor and
+  // forwards the body verbatim; the per-instance MCP `send_message` tool
   // resolves the alias against its own DB. Defense in depth: fleet xor protects
   // HTTP callers; MCP xor protects direct-MCP callers. Instance returns its own
   // error (propagated as 502) when an alias is unknown.
@@ -201,12 +204,17 @@ export async function handleSend(
       if (socketStat) {
         const parsed = JSON.parse(fixedBody);
         const result = await mcpCall(instance.socketPath, 'send_message', parsed);
-        if (result.success) {
+        // Publish realtime events only on a fully clean tool envelope —
+        // transport failure (`success: false`) and tool-level error
+        // (`toolError: true`) must NOT fan out a "message received" signal.
+        if (result.success && !result.toolError) {
           publishMessageReceived(deps.realtime, params.name);
           publishChatUpdated(deps.realtime, params.name);
           publishFeedEvent(deps.realtime, params.name);
         }
-        jsonResponse(res, result.success ? 200 : 502, result);
+        // Route through `respondMcp` so `isError: true` envelopes map to
+        // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
+        respondMcp(res, result, 200);
         return;
       }
     } catch { /* fall through to HTTP */ }
@@ -333,7 +341,9 @@ export async function handleSaveContact(
   if (instance.socketPath && fs.existsSync(instance.socketPath)) {
     try {
       const result = await mcpCall(instance.socketPath, 'add_or_edit_contact', contactParams);
-      jsonResponse(res, result.success ? 200 : 502, result);
+      // Route through `respondMcp` so `isError: true` envelopes map to
+      // 4xx/5xx like the dedicated MCP proxy routes (issue #257 parity).
+      respondMcp(res, result, 200);
       return;
     } catch { /* fall through to HTTP proxy */ }
   }
@@ -427,7 +437,9 @@ export async function handleConfigUpdate(
   // sibling namespaces, BYOK key-env settings, or project guards.
   const merged = deepMergeRecords(existing, patch);
 
-  // Validate cwd path traversal (same guard as handleCreateLine)
+  // --- Shape/normalization that must run BEFORE the shared validator ---
+  // 1. agentOptions defaulting + cwd traversal check (paths are inherently
+  //    filesystem-aware; the shared validator only does type/range/enum).
   if (merged.type === 'agent') {
     if (merged.agentOptions == null) {
       merged.agentOptions = defaultAgentOptions(params.name);
@@ -439,42 +451,38 @@ export async function handleConfigUpdate(
     if (resolveAndValidateAgentCwd(params.name, merged.agentOptions as Record<string, unknown>, res) === null) return;
   }
 
-  // Validate numeric bounds if present in patch
-  if (!validateNumericBounds(patch, res)) return;
-
-  // Validate accessMode if patched
-  if (patch.accessMode !== undefined) {
-    if (!VALID_ACCESS_MODES.has(patch.accessMode as string)) {
-      jsonResponse(res, 400, { error: `accessMode must be one of: ${[...VALID_ACCESS_MODES].join(', ')}` });
-      return;
-    }
-  }
-
-  // Validate and normalize adminPhones if patched
+  // 2. Normalize adminPhones if patched so the validator sees E.164.
   if (patch.adminPhones !== undefined) {
-    if (!Array.isArray(patch.adminPhones) || patch.adminPhones.length === 0 || !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())) {
+    if (
+      !Array.isArray(patch.adminPhones) ||
+      patch.adminPhones.length === 0 ||
+      !patch.adminPhones.every((p: unknown) => typeof p === 'string' && (p as string).trim())
+    ) {
       jsonResponse(res, 400, { error: 'adminPhones must be a non-empty array of strings' });
       return;
     }
     merged.adminPhones = normalizeAdminPhones(patch.adminPhones as string[]);
   }
 
-  // Cross-field constraint: sessionScope "single" requires accessMode "self_only"
-  const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
-  if (mergedAo?.sessionScope === 'single' && merged.accessMode !== 'self_only') {
-    jsonResponse(res, 400, { error: 'sessionScope "single" requires accessMode "self_only"' });
-    return;
+  // --- Shared validator: closes #244 + #249 PATCH validation gaps ---
+  // Runs on the post-merge view so partial patches are checked against the
+  // assembled config, not the bare patch. Mirrors loader + CREATE.
+  {
+    const validationError = validateInstanceConfig(merged, {
+      name: params.name,
+      mode: 'patch',
+      existingHealthPorts: existingHealthPortMap(params.name),
+      originalType: existing.type,
+    });
+    if (validationError) {
+      if (!emitValidationError(validationError, res)) return;
+    }
   }
 
-  // Validate pluginDirs paths are within home directory
+  // pluginDirs home-confinement is fs-aware (not in the shared validator).
+  const mergedAo = merged.agentOptions as Record<string, unknown> | undefined;
   if (Array.isArray(mergedAo?.pluginDirs)) {
     if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) return;
-  }
-
-  // Write CLAUDE.md BEFORE committing config.json so both succeed or neither does
-  if (patch.claudeMd && typeof patch.claudeMd === 'string' && (patch.claudeMd as string).length > 32_768) {
-    jsonResponse(res, 400, { error: 'claudeMd exceeds maximum size (32KB)' });
-    return;
   }
   if (patch.claudeMd && merged.type === 'agent') {
     const ao = merged.agentOptions as Record<string, unknown> | undefined;
@@ -760,9 +768,71 @@ function usedHealthPorts(): number[] {
   return ports;
 }
 
+/**
+ * Build a name -> healthPort map by scanning the config root.
+ * Excludes the named instance so a self-PATCH that doesn't change the port
+ * isn't flagged as a duplicate against itself.
+ */
+function existingHealthPortMap(excludeName?: string): ReadonlyMap<string, number> {
+  const map = new Map<string, number>();
+  const root = configRoot();
+  let entries: string[];
+  try { entries = fs.readdirSync(root); } catch { return map; }
+  for (const n of entries) {
+    if (n === excludeName) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(root, n, 'config.json'), 'utf-8'));
+      if (raw.enabled === false) continue;
+      if (typeof raw.healthPort === 'number') map.set(n, raw.healthPort);
+    } catch { /* skip unreadable */ }
+  }
+  return map;
+}
+
+/** Map a ValidationError to the HTTP response and return false to halt the handler. */
+function emitValidationError(err: ConfigValidationError, res: ServerResponse): boolean {
+  jsonResponse(res, err.status ?? 400, { error: err.message });
+  return false;
+}
+
+
+/**
+ * Record of a file written during create that may need to be rolled back.
+ * For files that pre-existed in user-supplied cwds (e.g. CLAUDE.md / settings.json
+ * inside an existing project's `.claude/`), we capture the prior contents and
+ * restore them on rollback rather than deleting user data. Files we created
+ * fresh are removed.
+ */
+interface ExtraRecord {
+  path: string;
+  existed: boolean;
+  priorContents?: Buffer;
+  priorMode?: number;
+}
+
+function snapshotExtra(filePath: string): ExtraRecord {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw privateWriteError('refusing to snapshot private file through symlink', 'ELOOP');
+    }
+    if (!stat.isFile()) {
+      throw privateWriteError('refusing to snapshot non-regular private file', 'EINVAL');
+    }
+    return {
+      path: filePath,
+      existed: true,
+      priorContents: fs.readFileSync(filePath),
+      priorMode: stat.mode & 0o7777,
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    return { path: filePath, existed: false };
+  }
+}
 
 /** Remove directories/files created during a partial instance creation. */
-function cleanupPartial(name: string, extraPaths?: string[]): void {
+function cleanupPartial(name: string, extras?: ExtraRecord[]): void {
   const dirs = [
     path.join(configRoot(), name),
     path.join(dataRoot(name)),
@@ -771,9 +841,17 @@ function cleanupPartial(name: string, extraPaths?: string[]): void {
   for (const d of dirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
   }
-  if (extraPaths) {
-    for (const p of extraPaths) {
-      try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
+  if (extras) {
+    for (const e of extras) {
+      try {
+        if (e.existed && e.priorContents !== undefined) {
+          writePrivateFileSync(e.path, e.priorContents, { mode: e.priorMode ?? 0o600 });
+        } else if (!e.existed) {
+          // File did not exist before create — remove the one we wrote.
+          // Never recursive: extras are files, not directories.
+          fs.rmSync(e.path, { force: true });
+        }
+      } catch { /* swallow — cleanup must never throw */ }
     }
   }
 }
@@ -916,8 +994,23 @@ export async function handleCreateLine(
   }
   config = migrateLegacyMemoryConfig(config, { removeLegacy: true }).config;
 
+  // --- Shared validator: defense-in-depth before writing to disk ---
+  // CREATE has already done inline shape checks above; this catches any field
+  // that slips through (e.g. invalid instructionsPath in agentOptions, oversize
+  // claudeMd, malformed providerConfig) and keeps CREATE/PATCH/loader aligned.
+  {
+    const validationError = validateInstanceConfig(
+      { ...config, claudeMd: body.claudeMd },
+      { name, mode: 'create', existingHealthPorts: existingHealthPortMap(name) },
+    );
+    if (validationError) {
+      jsonResponse(res, validationError.status ?? 400, { error: validationError.message });
+      return;
+    }
+  }
+
   // --- Create directories ---
-  const createdExtras: string[] = [];
+  const createdExtras: ExtraRecord[] = [];
   try {
     fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { mode: 0o700 });
@@ -957,8 +1050,9 @@ export async function handleCreateLine(
       const claudeDir = path.join(cwd, '.claude');
       ensureHomeConfinedDirectory(claudeDir);
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+      const claudeMdSnapshot = snapshotExtra(claudeMdPath);
+      createdExtras.push(claudeMdSnapshot);
       writePrivateFileSync(claudeMdPath, body.claudeMd as string);
-      createdExtras.push(claudeMdPath);
     }
 
     // --- Write settings.json for agent instances ---
@@ -974,8 +1068,10 @@ export async function handleCreateLine(
         if (ao.enabledPlugins && typeof ao.enabledPlugins === 'object') {
           settings.enabledPlugins = ao.enabledPlugins as Record<string, boolean>;
         }
+        const settingsPath = path.join(claudeDir, 'settings.json');
+        const settingsSnapshot = snapshotExtra(settingsPath);
+        createdExtras.push(settingsSnapshot);
         writePermissionsSettings(claudeDir, settings);
-        createdExtras.push(path.join(claudeDir, 'settings.json'));
       }
     }
 
@@ -1042,8 +1138,15 @@ export async function handleAuth(
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
   // and does not process untrusted input, so full env inheritance is acceptable.
-  const child = spawn('node', ['--experimental-strip-types', 'src/bootstrap-auth.ts', params.name], {
-    cwd: process.cwd(),
+  // Resolve bootstrap-auth against the repo root, not `process.cwd()`.
+  // Under systemd the fleet unit ships with no `WorkingDirectory=`, so cwd
+  // is the service user's `$HOME` and a relative script path ENOENTs (#419).
+  const child = spawn(process.execPath, [
+    '--experimental-strip-types',
+    path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
+    params.name,
+  ], {
+    cwd: repoRoot,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

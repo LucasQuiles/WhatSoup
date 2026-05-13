@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export type DocDriftKind = 'tool-count' | 'module-count';
+export type DocDriftKind = 'tool-count' | 'module-count' | 'migration-history';
 
 export interface DocDriftIssue {
   filePath: string;
@@ -11,6 +11,7 @@ export interface DocDriftIssue {
   claimed: number;
   actual: number;
   text: string;
+  expected?: string;
 }
 
 export interface DocDriftOptions {
@@ -46,6 +47,12 @@ const moduleClaimPatterns = [
 const toolsTableHeaderPattern = /^\|\s*Module\s*\|\s*Tools\s*\|/;
 const toolsTableModuleRowPattern = /^\|\s*\[([^|\]]+\.ts)\]\([^)]*\)\s*\|\s*(\d+)\s*\|/;
 const toolsTableTotalRowPattern = /^\|\s*\*\*Total\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|/;
+const migrationHistoryHeaderPattern = /^## Database Migration History\s*$/;
+const migrationHistoryRowPattern = /^\|\s*(\d+)\s*\|\s*(.+?)\s*\|$/;
+const migrationRequiredFragments = new Map<number, string[]>([
+  [1, ['`messages`', '`contacts`', '`access_list`', '`agent_sessions`', '`rate_limits`', '`enrichment_runs`']],
+  [2, ['`inbound_events`', '`outbound_ops`', '`tool_calls`', '`session_checkpoints`', '`recovery_runs`']],
+]);
 
 function normalizeRepoPath(filePath: string): string {
   return filePath.split(path.sep).join('/').replace(/^\.\//, '');
@@ -91,6 +98,33 @@ export function findToolRegistrations(cwd: string = process.cwd()): ToolRegistra
     }
   }
 
+  // Inline tool registrations live outside src/mcp/tools/. They are gated on
+  // runtime configuration (e.g. control-plane peers) and call
+  // `this.registry.register({ ... })` directly from a runtime module. The
+  // canonical tool surface — the count documented in docs/tools.md and
+  // docs/public-surface.md — includes these, so doc-drift must count them too.
+  // Inline registrations are listed here explicitly to keep this scan
+  // file-anchored rather than AST-derived.
+  const inlineRegistrationSources: ReadonlyArray<{ relativePath: string; toolName: string }> = [
+    { relativePath: 'src/runtimes/agent/runtime.ts', toolName: 'emit_heal_result' },
+  ];
+
+  const inlineRegistrationPattern = (toolName: string) =>
+    new RegExp(`^\\s*name:\\s*['"]${toolName}['"]`, 'm');
+
+  for (const { relativePath, toolName } of inlineRegistrationSources) {
+    const absolutePath = path.resolve(cwd, relativePath);
+    if (!existsSync(absolutePath)) continue;
+    const text = readFileSync(absolutePath, 'utf8');
+    const match = text.match(inlineRegistrationPattern(toolName));
+    if (!match || match.index === undefined) continue;
+    registrations.push({
+      filePath: normalizeRepoPath(relativePath),
+      line: lineForOffset(text, match.index),
+      name: toolName,
+    });
+  }
+
   return registrations.sort((left, right) => left.filePath.localeCompare(right.filePath) || left.line - right.line);
 }
 
@@ -99,22 +133,117 @@ export function findRegisterModuleImports(cwd: string = process.cwd()): ModuleIm
   const text = readFileSync(registerAllPath, 'utf8');
   const filePath = normalizeRepoPath(path.relative(cwd, registerAllPath));
   const imports: ModuleImport[] = [];
-  const importPattern = /^import\s+\{[^}]*\}\s+from\s+['"](\.\/tools\/[^'"]+\.ts)['"];?$/gm;
+  // Accept both named and namespace imports of ./tools/*.ts modules. Namespace
+  // imports (`import * as foo from './tools/x.ts'`) are required for some test
+  // surfaces (vi.spyOn on the module binding) so the canonical-module-count
+  // count must include them.
+  const namedImportPattern = /^import\s+\{[^}]*\}\s+from\s+['"](\.\/tools\/[^'"]+\.ts)['"];?$/gm;
+  const namespaceImportPattern = /^import\s+\*\s+as\s+\w+\s+from\s+['"](\.\/tools\/[^'"]+\.ts)['"];?$/gm;
+  const seen = new Set<string>();
 
   // Module count is derived from register-all.ts imports because that file is
   // the canonical runtime wiring point for tool modules, including conditional
   // modules such as knowledge search.
-  for (const match of text.matchAll(importPattern)) {
-    const modulePath = match[1];
-    if (!modulePath) continue;
-    imports.push({
-      filePath,
-      line: lineForOffset(text, match.index ?? 0),
-      modulePath,
-    });
+  for (const pattern of [namedImportPattern, namespaceImportPattern]) {
+    for (const match of text.matchAll(pattern)) {
+      const modulePath = match[1];
+      if (!modulePath || seen.has(modulePath)) continue;
+      seen.add(modulePath);
+      imports.push({
+        filePath,
+        line: lineForOffset(text, match.index ?? 0),
+        modulePath,
+      });
+    }
   }
 
   return imports;
+}
+
+function findMigrationRegistryVersions(cwd: string): number[] {
+  const databasePath = path.resolve(cwd, 'src/core/database.ts');
+  const text = readFileSync(databasePath, 'utf8');
+  const versions = [...text.matchAll(/^\s*\[(\d+),/gm)]
+    .map((match) => Number(match[1]))
+    .filter(Number.isInteger)
+    .sort((left, right) => left - right);
+  return versions;
+}
+
+function checkMigrationHistoryTable(
+  filePath: string,
+  lines: string[],
+  expectedVersions: number[],
+): DocDriftIssue[] {
+  const headerIndex = lines.findIndex((line) => migrationHistoryHeaderPattern.test(line));
+  if (headerIndex < 0) return [];
+
+  const issues: DocDriftIssue[] = [];
+  const rows = new Map<number, { line: number; text: string }>();
+
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    const lineText = lines[index] ?? '';
+    if (index > headerIndex + 1 && lineText.startsWith('## ')) break;
+
+    const row = lineText.match(migrationHistoryRowPattern);
+    if (!row) continue;
+
+    const version = Number(row[1]);
+    if (!Number.isInteger(version)) continue;
+    rows.set(version, { line: index + 1, text: lineText });
+  }
+
+  const expectedSet = new Set(expectedVersions);
+  const actualVersions = [...rows.keys()].sort((left, right) => left - right);
+
+  for (const expectedVersion of expectedVersions) {
+    if (!rows.has(expectedVersion)) {
+      issues.push({
+        filePath,
+        line: headerIndex + 1,
+        kind: 'migration-history',
+        claimed: 0,
+        actual: expectedVersion,
+        text: lines[headerIndex] ?? '',
+        expected: `migration history row for version ${expectedVersion}`,
+      });
+    }
+  }
+
+  for (const actualVersion of actualVersions) {
+    if (!expectedSet.has(actualVersion)) {
+      const row = rows.get(actualVersion);
+      issues.push({
+        filePath,
+        line: row?.line ?? headerIndex + 1,
+        kind: 'migration-history',
+        claimed: actualVersion,
+        actual: 0,
+        text: row?.text ?? '',
+        expected: 'no row for an unregistered migration version',
+      });
+    }
+  }
+
+  for (const [version, requiredFragments] of migrationRequiredFragments) {
+    const row = rows.get(version);
+    if (!row) continue;
+    for (const fragment of requiredFragments) {
+      if (!row.text.includes(fragment)) {
+        issues.push({
+          filePath,
+          line: row.line,
+          kind: 'migration-history',
+          claimed: version,
+          actual: version,
+          text: row.text,
+          expected: `migration ${version} row to mention ${fragment}`,
+        });
+      }
+    }
+  }
+
+  return issues;
 }
 
 export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
@@ -123,6 +252,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const registrations = findToolRegistrations(cwd);
   const toolCount = registrations.length;
   const moduleCount = findRegisterModuleImports(cwd).length;
+  const migrationVersions = findMigrationRegistryVersions(cwd);
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
     const moduleName = path.basename(registration.filePath);
@@ -137,6 +267,8 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
     const lines = text.split(/\r?\n/);
     const toolsTableHeaderIndex = lines.findIndex((line) => toolsTableHeaderPattern.test(line));
     const toolsTableModules = new Set<string>();
+
+    issues.push(...checkMigrationHistoryTable(filePath, lines, migrationVersions));
 
     lines.forEach((lineText, index) => {
       if (claimContextPattern.test(lineText)) {
@@ -255,8 +387,9 @@ Options:
 
 function printIssues(issues: DocDriftIssue[]): void {
   for (const issue of issues) {
+    const expected = issue.expected ? ` expected="${issue.expected}"` : '';
     console.error(
-      `${issue.filePath}:${issue.line} ${issue.kind} drift: claimed=${issue.claimed} actual=${issue.actual} text="${issue.text}"`,
+      `${issue.filePath}:${issue.line} ${issue.kind} drift: claimed=${issue.claimed} actual=${issue.actual}${expected} text="${issue.text}"`,
     );
   }
 }
@@ -267,8 +400,15 @@ export function run(
   env: NodeJS.ProcessEnv = process.env,
 ): DocDriftIssue[] {
   if (env.WHATSOUP_SKIP_DOC_DRIFT === '1') {
-    console.warn('doc drift check skipped via WHATSOUP_SKIP_DOC_DRIFT=1');
-    return [];
+    const inCi = env.CI === 'true' || Boolean(env.GITHUB_ACTIONS);
+    if (inCi) {
+      console.warn(
+        'WHATSOUP_SKIP_DOC_DRIFT=1 ignored: CI/GITHUB_ACTIONS detected; doc drift check will run (this skip is for local dev only)',
+      );
+    } else {
+      console.warn('doc drift check skipped via WHATSOUP_SKIP_DOC_DRIFT=1');
+      return [];
+    }
   }
 
   const args = parseArgs(argv);

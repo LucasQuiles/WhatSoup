@@ -7,7 +7,7 @@ import { useLines, useFeed } from "../hooks/use-fleet";
 import { useFleetMetrics } from "../hooks/use-metrics";
 import { computeKpis } from "../lib/compute-kpis";
 import { deriveFleetMessageSparklines, deriveFleetSessionSparklines } from "../lib/metrics-sparklines";
-import type { Mode, MetricsRange } from "../types";
+import type { FeedEvent, LineInstance, Mode, MetricsRange } from "../types";
 import type { ChartKey } from "../components/ChartPanel";
 import KpiCard from "../components/KpiCard";
 import AlertBanner from "../components/AlertBanner";
@@ -54,6 +54,8 @@ const modeTextClass: Record<Mode, string> = {
 };
 
 const RANGE_OPTIONS: MetricsRange[] = ['24h', '7d', '30d'];
+const EMPTY_LINES: LineInstance[] = [];
+const EMPTY_FEED: FeedEvent[] = [];
 
 function chartColStyle(key: ChartKey, expanded: ChartKey | null) {
   if (expanded !== null && expanded !== key) {
@@ -63,9 +65,15 @@ function chartColStyle(key: ChartKey, expanded: ChartKey | null) {
 }
 
 const SoupKitchen: FC = () => {
-  const { data: lines = [] } = useLines();
-  const { data: feed = [] } = useFeed();
+  const { data: lineData, isError: linesError, error: linesQueryError } = useLines();
+  const { data: feedData, isError: feedError, error: feedQueryError } = useFeed();
   const navigate = useNavigate();
+
+  const lines = lineData ?? EMPTY_LINES;
+  const feed = feedData ?? EMPTY_FEED;
+  const fleetLoadError = linesError || feedError;
+  const fleetLoadErrorMessage =
+    linesQueryError?.message ?? feedQueryError?.message ?? "Unable to load fleet data";
 
   const [activeKpi, setActiveKpi] = useState<KpiFilter>(null);
   const [expandedChart, setExpandedChart] = useState<ChartKey | null>(null);
@@ -497,7 +505,14 @@ const SoupKitchen: FC = () => {
                     </tr>
                   );
                 })}
-                {filtered.length === 0 && (
+                {fleetLoadError && (
+                  <tr>
+                    <td colSpan={12} className="text-center text-s-crit font-sans py-12 text-data">
+                      Unable to load fleet data: {fleetLoadErrorMessage}
+                    </td>
+                  </tr>
+                )}
+                {!fleetLoadError && filtered.length === 0 && (
                   <tr>
                     <td colSpan={12} className="text-center text-t5 font-sans py-12 text-data">
                       No instances match the current filters

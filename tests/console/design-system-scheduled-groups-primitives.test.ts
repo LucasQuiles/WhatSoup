@@ -72,4 +72,10 @@ describe('scheduled/groups design-system primitives', () => {
     expect(eslint).toContain('Hardcoded hex color')
     expect(eslint).toContain('Border edge shorthand in style')
   })
+
+  it('keeps eslint autofix guidance free of invisible characters', () => {
+    const eslint = read('console/eslint.config.js')
+
+    expect(eslint).not.toMatch(/[\u200B-\u200D\uFEFF]/)
+  })
 })

@@ -112,5 +112,9 @@ export function isDurableEventKind(kind: InboundEvent['kind']): boolean {
     case 'group-update':
     case 'button-press':
       return false;
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
   }
 }

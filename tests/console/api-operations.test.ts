@@ -84,24 +84,45 @@ describe('api write operations', () => {
 });
 
 describe('api auth headers', () => {
-  it('sends the fleet token on availability probes and fallback-backed reads', async () => {
+  it('mints an api-audience ticket and threads it on availability probes and fallback-backed reads (#313)', async () => {
     stubFleetToken('fleet-token-123');
-    const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
+    // Sequence: mint -> probe -> mint -> read. Tickets are single-use, so the
+    // fallback-backed read cannot reuse the availability probe credential.
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-abc', audience: 'api', expiresIn: 60 }))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-def', audience: 'api', expiresIn: 60 }))
+      .mockResolvedValueOnce(jsonResponse([]));
     vi.stubGlobal('fetch', fetch);
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
 
     await expect(freshApi.getLines()).resolves.toEqual([]);
 
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines');
+    // 4 calls total: mint + probe + mint + read.
+    expect(fetch).toHaveBeenCalledTimes(4);
+
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
     expect(headersFor(fetchInit(fetch, 0))).toEqual({
-      Authorization: 'Bearer fleet-token-123',
-    });
-    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
-    expect(headersFor(fetchInit(fetch, 1))).toEqual({
       'Content-Type': 'application/json',
       Authorization: 'Bearer fleet-token-123',
+    });
+
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 1))).toEqual({
+      Authorization: 'Bearer api-ticket-abc',
+    });
+
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/auth-ticket');
+    expect(headersFor(fetchInit(fetch, 2))).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer fleet-token-123',
+    });
+
+    expect(fetch.mock.calls[3]?.[0]).toBe('/api/lines');
+    expect(headersFor(fetchInit(fetch, 3))).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer api-ticket-def',
     });
   });
 
@@ -123,7 +144,7 @@ describe('api auth headers', () => {
     });
   });
 
-  it('clears the availability probe timeout when fetch rejects', async () => {
+  it('clears the availability probe timeout when fetch rejects (dev/mock-mode fallback path)', async () => {
     stubFleetToken(null);
     const fetch = vi.fn().mockRejectedValue(new Error('offline'));
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
@@ -131,27 +152,33 @@ describe('api auth headers', () => {
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
 
+    // In dev (vitest default), withFallback degrades to mock data when
+    // the availability probe rejects — verifying the legacy convenience
+    // path still works for design iteration.
     await expect(freshApi.getLines()).resolves.toEqual(expect.any(Array));
 
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('sends the fleet token on write requests', async () => {
+  it('threads the api-audience ticket (not the root token) on write requests (#313)', async () => {
     stubFleetToken('fleet-token-123');
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-xyz', audience: 'api', expiresIn: 60 }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'ok', instance: 'line-a' }));
     vi.stubGlobal('fetch', fetch);
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
 
     await expect(freshApi.restart('line-a')).resolves.toEqual({ status: 'ok', instance: 'line-a' });
 
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines/line-a/restart');
-    expect(fetchInit(fetch, 0).method).toBe('POST');
-    expect(headersFor(fetchInit(fetch, 0))).toEqual({
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines/line-a/restart');
+    expect(fetchInit(fetch, 1).method).toBe('POST');
+    expect(headersFor(fetchInit(fetch, 1))).toEqual({
       'Content-Type': 'application/json',
-      Authorization: 'Bearer fleet-token-123',
+      Authorization: 'Bearer api-ticket-xyz',
     });
   });
 
@@ -170,6 +197,92 @@ describe('api auth headers', () => {
     expect(headersFor(fetchInit(fetch, 0))).toEqual({
       'Content-Type': 'application/json',
     });
+  });
+});
+
+describe('api production mock-fallback gating (#420)', () => {
+  it('does NOT fall back to mock data when checkFleetAvailable rejects in PROD without opt-in', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '');
+    stubFleetToken(null);
+    const fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    // Production without explicit opt-in: errors propagate so the UI
+    // surfaces a real error state instead of mock data.
+    await expect(freshApi.getLines()).rejects.toThrow(/offline/);
+  });
+
+  it('does NOT fall back to mock data when apiFn throws in PROD without opt-in', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '');
+    stubFleetToken(null);
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+      text: async () => 'service unavailable',
+    } as Response);
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getLines()).rejects.toThrow(/API 503/);
+  });
+
+  it('authHeaders surfaces ticket-mint failures in PROD without opt-in', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '');
+    stubFleetToken('fleet-token-123');
+    // Auth-ticket mint returns 401 — in PROD this must throw instead
+    // of falling through to a bare-token (unauthenticated) request.
+    const fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+      text: async () => 'unauthorized',
+    } as Response);
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getLines()).rejects.toThrow(/auth-ticket api 401/);
+    // Critical: we must NOT have proceeded to /api/lines with a bare
+    // token — the mint failure short-circuits the request.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
+  });
+
+  it('getTyping surfaces production API failures instead of returning an empty list', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '');
+    stubFleetToken(null);
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+      text: async () => 'service unavailable',
+    } as Response);
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getTyping()).rejects.toThrow(/API 503/);
+  });
+
+  it('honors VITE_MOCK_MODE=1 opt-in to restore mock fallback in PROD', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '1');
+    stubFleetToken(null);
+    const fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    // With explicit opt-in, the legacy mock fallback re-engages.
+    await expect(freshApi.getLines()).resolves.toEqual(expect.any(Array));
   });
 });
 

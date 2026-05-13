@@ -260,6 +260,17 @@ describe('POST /heal', () => {
     expect(JSON.parse(body)).toMatchObject({ error: 'invalid JSON' });
   });
 
+  // ── 7.2.7b  oversized body — 64 KB cap ───────────────────────────────────
+
+  it('returns 413 when body exceeds 64 KB', async () => {
+    const oversized = JSON.stringify({ type: 'service_crash', pad: 'x'.repeat(70 * 1024) });
+    const { status, body } = await httpReq(port, '/heal', 'POST', oversized, {
+      authorization: `Bearer ${TOKEN}`,
+    });
+    expect(status).toBe(413);
+    expect(JSON.parse(body)).toMatchObject({ error: 'request body too large' });
+  });
+
   // ── 7.2.8  runtime dispatch ──────────────────────────────────────────────
 
   it('calls handleControlTurn on the runtime when present', async () => {

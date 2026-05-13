@@ -20,16 +20,15 @@ errors=0
 if command -v node &>/dev/null; then
   node_version="$(node -v | sed 's/^v//')"
   node_major="${node_version%%.*}"
-  node_minor="${node_version#*.}"; node_minor="${node_minor%%.*}"
-  if [ "$node_major" -gt 23 ] || { [ "$node_major" -eq 23 ] && [ "$node_minor" -ge 10 ]; }; then
-    echo "  ✓ Node.js $node_version (>= 23.10 required)"
+  if [ "$node_major" -ge 24 ]; then
+    echo "  ✓ Node.js $node_version (>= 24.0 required)"
   else
-    echo "  ✗ Node.js $node_version found — version 23.10+ required"
+    echo "  ✗ Node.js $node_version found — version 24.0+ required"
     echo "    Install: https://nodejs.org/ or use nvm/fnm"
     errors=$((errors + 1))
   fi
 else
-  echo "  ✗ Node.js not found — version 23.10+ required"
+  echo "  ✗ Node.js not found — version 24.0+ required"
   echo "    Install: https://nodejs.org/ or use nvm/fnm"
   errors=$((errors + 1))
 fi
@@ -74,13 +73,11 @@ fi
 echo ""
 
 # ── Step 2: Install dependencies ────────────────────────────────────
+# Matches .github/workflows/quality.yml install step exactly so local
+# setup, CI, and Docker all reproduce the pinned lockfile tree.
 echo "[2/6] Installing dependencies..."
-if [ ! -d "$REPO_ROOT/node_modules" ]; then
-  (cd "$REPO_ROOT" && npm install --silent 2>/dev/null)
-  echo "  ✓ Root dependencies installed"
-else
-  echo "  ✓ Root dependencies already installed"
-fi
+(cd "$REPO_ROOT" && npm ci)
+echo "  ✓ Root dependencies installed"
 
 # ── Step 3: Install wrapper scripts ─────────────────────────────────
 echo "[3/6] Installing wrapper scripts to $BIN_DIR..."
@@ -108,9 +105,11 @@ echo "  ✓ whatsoup@.service installed"
 echo "  ✓ whatsoup-fleet.service installed"
 
 # ── Step 5: Build console ───────────────────────────────────────────
+# Matches .github/workflows/quality.yml console-install + console-build
+# exactly. stderr is left visible so peer-dep / build failures surface.
 echo "[5/6] Building fleet console..."
 if [ -f "$REPO_ROOT/console/package.json" ]; then
-  (cd "$REPO_ROOT/console" && npm install --silent 2>/dev/null && npx vite build 2>/dev/null)
+  (cd "$REPO_ROOT/console" && npm ci && npm run build)
   echo "  ✓ Console built to dist/"
 else
   echo "  ⚠ Console not found — skipping build"
