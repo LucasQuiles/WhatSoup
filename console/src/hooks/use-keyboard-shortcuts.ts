@@ -19,7 +19,7 @@ interface ShortcutHandlers {
  * Shortcuts:
  * - Cmd/Ctrl+K → Focus search input (calls onSearch)
  * - Escape → Close modals / clear search (browser-native for modals)
- * - 1-4 → Navigate to pages (only when no input focused)
+ * - 1-3 → Navigate to pages (only when no input focused)
  *   1 = SoupKitchen, 2 = Inbox, 3 = Ops
  */
 export function useKeyboardShortcuts(handlers: ShortcutHandlers = {}) {

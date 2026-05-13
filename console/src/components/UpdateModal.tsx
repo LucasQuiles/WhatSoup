@@ -109,6 +109,8 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   const abortRef = useRef<AbortController | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // hasErroredRef is set synchronously when a terminal error is dispatched so
+  // that async closures can check it before React re-renders (F-058).
   const hasErroredRef = useRef(false)
 
   // Only reset when the modal opens — NOT when lines changes (that would
@@ -163,6 +165,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
 
   const startUpdate = useCallback(() => {
     dispatch({ type: 'setPhase', phase: 'updating' })
+    // Reset error flag for this update run (F-058).
     hasErroredRef.current = false
 
     // Abort controller so handleClose can cancel the in-flight fetch (RES-006)
@@ -206,6 +209,8 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
           try {
             const { done, value } = await reader.read()
             if (done) {
+              // F-058: only enter fleet-restart polling if the stream did not
+              // already signal a terminal error; preserve the error phase.
               if (!hasErroredRef.current) waitForFleetRestart()
               return
             }
@@ -228,19 +233,21 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                   dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
                 }
               } else if (event === 'error') {
+                // Set ref before dispatch so the done-branch check (F-058) sees
+                // the flag synchronously in the same microtask.
                 hasErroredRef.current = true
                 dispatch({ type: 'setError', message: data.message, step: data.step })
               }
             }
             await read()
           } catch {
-            // Connection dropped — expected during restart
+            // Connection dropped — expected during restart; skip if already errored (F-058).
             if (!hasErroredRef.current) waitForFleetRestart()
           }
         }
         await read()
       } catch {
-        // Aborted or network error — fleet may be restarting
+        // Aborted or network error — fleet may be restarting; skip if already errored (F-058).
         if (!hasErroredRef.current) waitForFleetRestart()
       }
     })()
