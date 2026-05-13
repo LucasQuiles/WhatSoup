@@ -18,7 +18,7 @@
  *  - Modal state / toast effect: renderHook with per-test QueryClient + ToastContext.
  *  - Async query settlement: waitFor (not wall-clock sleeps, not fake timers).
  *  - getStaticVersion: stub document.querySelector.
- *  - Constants / query shape: synchronous assertions on well-known values.
+ *  - Query shape: observe the QueryClient entry configured by the hook.
  *
  * @vitest-environment jsdom
  */
@@ -34,7 +34,7 @@ import { renderHook, act, cleanup, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement, type ReactNode } from 'react'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
-import type { useUpdateCheck } from '../../console/src/hooks/use-update-check'
+import type { UpdateState, useUpdateCheck } from '../../console/src/hooks/use-update-check'
 
 // ---------------------------------------------------------------------------
 // Module mocks — declared before any dynamic imports of the hook.
@@ -57,9 +57,7 @@ afterEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CHECK_INTERVAL_MS = 60 * 60 * 1000 // 3 600 000 ms — mirrors source constant
-
-function makeUpdateState(updateAvailable: boolean) {
+function makeUpdateState(updateAvailable: boolean): UpdateState {
   return {
     sha: 'abc123def456abc123def456abc123de',
     remoteSha: updateAvailable
@@ -422,9 +420,8 @@ describe('useUpdateCheck — toast notification', () => {
 
     const { result } = renderHook(() => useUpdateCheck(), { wrapper })
 
-    // Wait for the query to fully settle before asserting toast non-fire.
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
+    await waitFor(() => expect(result.current.data?.updateAvailable).toBe(false))
+    expect(result.current.isSuccess).toBe(true)
     expect(toastCtx.info).not.toHaveBeenCalled()
     expect(toastCtx.success).not.toHaveBeenCalled()
     expect(toastCtx.error).not.toHaveBeenCalled()
@@ -440,9 +437,8 @@ describe('useUpdateCheck — toast notification', () => {
 
     const { result } = renderHook(() => useUpdateCheck(), { wrapper })
 
-    // Wait for the query to reach error state before asserting toast non-fire.
     await waitFor(() => expect(result.current.isError).toBe(true))
-
+    expect(result.current.data).toBeUndefined()
     expect(toastCtx.info).not.toHaveBeenCalled()
   })
 
@@ -469,13 +465,14 @@ describe('useUpdateCheck — toast notification', () => {
 
   it('notifiedRef resets to false when updateAvailable flips to false, allowing a future re-notification', async () => {
     // Source: if (query.data && !query.data.updateAvailable) { notifiedRef.current = false }
-    // Pattern: no-update → ref=false (stays); update → toast fires (ref→true);
-    //          no-update → ref=false; update again → toast fires again.
+    // Pattern: update -> toast fires (ref true); no-update -> ref false;
+    //          update again -> toast fires again.
     const { api } = await import('../../console/src/lib/api')
 
-    // First fetch: no update
     ;(api.getVersion as Mock)
+      .mockResolvedValueOnce(makeUpdateState(true))
       .mockResolvedValueOnce(makeUpdateState(false))
+      .mockResolvedValueOnce(makeUpdateState(true))
 
     const { useUpdateCheck } = await import('../../console/src/hooks/use-update-check.js')
     const toastCtx = makeToastContext()
@@ -489,22 +486,22 @@ describe('useUpdateCheck — toast notification', () => {
       )
     }
 
-    renderHook(() => useUpdateCheck(), { wrapper: Wrapper })
+    const { result } = renderHook(() => useUpdateCheck(), { wrapper: Wrapper })
 
-    // Wait for first fetch to complete (no update, ref stays false)
-    await waitFor(() => expect(api.getVersion as Mock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(result.current.data?.updateAvailable).toBe(true))
+    await waitFor(() => expect(toastCtx.info).toHaveBeenCalledTimes(1))
 
-    // No toast yet
-    expect(toastCtx.info).toHaveBeenCalledTimes(0)
-
-    // Second fetch: update available
-    ;(api.getVersion as Mock).mockResolvedValueOnce(makeUpdateState(true))
     await act(async () => {
       await qc.refetchQueries({ queryKey: ['version'] })
     })
-
-    // ref was false → toast fires
+    await waitFor(() => expect(result.current.data?.updateAvailable).toBe(false))
     expect(toastCtx.info).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ['version'] })
+    })
+    await waitFor(() => expect(result.current.data?.updateAvailable).toBe(true))
+    await waitFor(() => expect(toastCtx.info).toHaveBeenCalledTimes(2))
   })
 })
 
@@ -584,25 +581,24 @@ describe('module exports', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 9. Constants — documented source values
+// 9. Query configuration
 // ---------------------------------------------------------------------------
 
-describe('source constants', () => {
-  it('CHECK_INTERVAL_MS is 3 600 000 ms (60 minutes)', () => {
-    // Source: const CHECK_INTERVAL_MS = 60 * 60 * 1000
-    // Contrast: use-metrics.ts uses 60 000 ms (1 min); this hook polls hourly.
-    expect(CHECK_INTERVAL_MS).toBe(3_600_000)
-  })
+describe('query configuration', () => {
+  it('registers the version query with hourly polling and refetch-on-mount enabled', async () => {
+    const { api } = await import('../../console/src/lib/api')
+    ;(api.getVersion as Mock).mockReturnValue(new Promise(() => {}))
 
-  it('CHECK_INTERVAL_MS is not the 1-minute interval used in use-metrics', () => {
-    expect(CHECK_INTERVAL_MS).not.toBe(60_000)
-  })
+    const { useUpdateCheck } = await import('../../console/src/hooks/use-update-check.js')
+    const { wrapper, qc } = makeWrapper(makeToastContext())
 
-  it('query key is ["version"] — single-element array', () => {
-    // Source: queryKey: ['version']
-    const key = ['version']
-    expect(key).toHaveLength(1)
-    expect(key[0]).toBe('version')
+    renderHook(() => useUpdateCheck(), { wrapper })
+
+    const query = qc.getQueryCache().getAll()[0]
+    const queryOptions = query?.options as { refetchInterval?: unknown; refetchOnMount?: unknown } | undefined
+    expect(query?.queryKey).toEqual(['version'])
+    expect(queryOptions?.refetchInterval).toBe(3_600_000)
+    expect(queryOptions?.refetchOnMount).toBe(true)
   })
 })
 
