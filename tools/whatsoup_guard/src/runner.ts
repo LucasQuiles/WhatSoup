@@ -16,6 +16,7 @@ import { checkSelfSecrets, type SelfSecretCheck } from './self/secret-hygiene.ts
 import { checkTokenAge } from './self/token-age.ts';
 import type { Domain, Event, Severity } from './types.ts';
 import { runChannelChain } from './transport/chain.ts';
+import { resolveProposeFixFollowUp } from './transport/fix-commands.ts';
 import { formatAlert } from './transport/format.ts';
 import type { DeliveryResult, Sink } from './transport/types.ts';
 
@@ -390,6 +391,9 @@ async function deliverAlert(
   const scopeId = alertScopeId(event);
   const probeId = alertProbeId(event);
   const fingerprint = alertFingerprint(event);
+  const followUp = actionLabel === 'propose_fix'
+    ? resolveProposeFixFollowUp(actionKeyForEvent(event), event.payload)
+    : undefined;
   const chain = await runChannelChain(sinks, {
     body: formatAlert({
       eventId: persisted?.id ?? 0,
@@ -400,6 +404,8 @@ async function deliverAlert(
       ts: event.ts,
       diff: readDiff(event),
       actionLabel,
+      ...(followUp?.fixCommand !== undefined ? { fixCommand: followUp.fixCommand } : {}),
+      ...(followUp?.remediationHint !== undefined ? { remediationHint: followUp.remediationHint } : {}),
       fingerprint,
     }),
     severity: event.severity,
