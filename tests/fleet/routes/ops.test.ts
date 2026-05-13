@@ -27,11 +27,10 @@ vi.mock('../../../src/fleet/mcp-client.ts', () => ({
 vi.mock('../../../src/fleet/http-proxy.ts', () => ({
   proxyToInstance: vi.fn(),
 }));
-const childProcessMocks = vi.hoisted(() => ({
-  execFile: vi.fn(),
-  spawn: vi.fn(),
-}));
-vi.mock('node:child_process', () => childProcessMocks);
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../helpers/child-process.ts');
+  return childProcessMock();
+});
 vi.mock('node:fs', async (importOriginal) => {
   const actual = (await importOriginal()) as typeof import('node:fs');
   return {

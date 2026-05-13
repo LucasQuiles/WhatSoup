@@ -19,12 +19,10 @@ import { DatabaseSync } from 'node:sqlite';
 
 // Mock child_process.execFile so restart tests don't invoke real systemctl.
 // (execFile is the safe alternative to exec — no shell injection risk.)
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => {
-    cb(null, '');
-  }),
-  spawn: vi.fn(),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 // Mock platform.ts so fleet server gets a controllable service manager
 const mockSvcManager = {
