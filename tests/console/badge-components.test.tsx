@@ -1,87 +1,31 @@
 /**
+ * @vitest-environment jsdom
+ *
  * Behavioral contract-lock for ModeBadge + StatusDot.
  *
- * Both are small pure-render components with no test mirrors. Tests
- * inspect the returned ReactElement tree directly (no DOM/jsdom);
- * focus is on behavioral invariants (label, aria-label, presence
- * of conditional children, structural arity) plus explicit design-token
- * class mappings that gate semantic colors and motion.
+ * These tests render the real components and assert user-visible DOM output
+ * plus the design-token classes/styles the console UI depends on.
  */
-import { describe, expect, it } from 'vitest';
-import { createElement, type CSSProperties, type ReactElement, type ReactNode } from 'react';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
 import ModeBadge from '../../console/src/components/ModeBadge.tsx';
 import StatusDot from '../../console/src/components/StatusDot.tsx';
 
-type ElementProps = {
-  children?: ReactNode;
-  className?: string;
-  style?: CSSProperties;
-  'aria-label'?: string;
-};
+afterEach(() => {
+  cleanup();
+});
 
-type TestElement = ReactElement<ElementProps>;
-
-function propsOf(element: TestElement): ElementProps {
-  return element.props;
-}
-
-function classTokens(element: TestElement): string[] {
-  return propsOf(element).className?.split(/\s+/).filter(Boolean) ?? [];
-}
-
-function expectClassTokens(element: TestElement, tokens: string[]): void {
-  expect(classTokens(element)).toEqual(expect.arrayContaining(tokens));
-}
-
-/** Recursively gather all string nodes in a ReactElement tree. */
-function collectStrings(node: ReactNode): string[] {
-  if (typeof node === 'string') return [node];
-  if (typeof node === 'number') return [String(node)];
-  if (Array.isArray(node)) return node.flatMap(collectStrings);
-  if (typeof node === 'object' && node !== null && 'props' in node) {
-    return collectStrings(propsOf(node as TestElement).children);
+function expectClassTokens(element: Element, tokens: string[]): void {
+  for (const token of tokens) {
+    expect(element.classList.contains(token)).toBe(true);
   }
-  return [];
 }
 
-/** Recursively walk a tree and return all ReactElements (depth-first). */
-function flattenElements(node: ReactNode): TestElement[] {
-  if (typeof node !== 'object' || node === null) return [];
-  if (Array.isArray(node)) return node.flatMap(flattenElements);
-  if ('type' in node) {
-    const el = node as TestElement;
-    return [el, ...flattenElements(propsOf(el).children)];
-  }
-  return [];
+function expectInlineStyleToken(element: HTMLElement, token: string): void {
+  expect(element.getAttribute('style') ?? '').toContain(token);
 }
 
-/** Render the component into a ReactElement tree (no DOM). */
-function render<P>(component: ReactElement<P>): TestElement {
-  const fn = component.type as (props: P) => TestElement;
-  return fn(component.props);
-}
-
-describe('ModeBadge — labels per mode', () => {
-  for (const mode of ['passive', 'chat', 'agent'] as const) {
-    it(`renders the literal label "${mode}" for mode="${mode}"`, () => {
-      const tree = render(createElement(ModeBadge, { mode }));
-      expect(collectStrings(tree)).toEqual([mode]);
-    });
-  }
-
-  it('returns a <span> as the outer element', () => {
-    const tree = render(createElement(ModeBadge, { mode: 'passive' }));
-    expect(tree.type).toBe('span');
-  });
-
-  it('renders exactly one inner dot <span> (sibling of the text label)', () => {
-    const tree = render(createElement(ModeBadge, { mode: 'agent' }));
-    const inner = flattenElements(propsOf(tree).children).filter(
-      (el) => el.type === 'span',
-    );
-    expect(inner.length).toBe(1);
-  });
-
+describe('ModeBadge', () => {
   const modeTokenCases: Array<[
     'passive' | 'chat' | 'agent',
     { textToken: string; dotToken: string; washToken: string },
@@ -92,88 +36,77 @@ describe('ModeBadge — labels per mode', () => {
   ];
 
   for (const [mode, { textToken, dotToken, washToken }] of modeTokenCases) {
-    it(`locks design tokens for mode="${mode}"`, () => {
-      const tree = render(createElement(ModeBadge, { mode }));
-      const dot = flattenElements(propsOf(tree).children).find(
-        (el) => el.type === 'span',
-      );
-      expect(dot).toBeDefined();
-      expectClassTokens(tree, [textToken]);
-      expect(propsOf(tree).style?.backgroundColor).toBe(washToken);
-      expectClassTokens(dot!, ['rounded-full', dotToken]);
+    it(`renders the visible "${mode}" badge with mode design tokens`, () => {
+      render(<ModeBadge mode={mode} />);
+
+      const badge = screen.getByText(mode);
+      expect(badge).toBeInstanceOf(HTMLSpanElement);
+      expect(badge.textContent).toBe(mode);
+      expectClassTokens(badge, ['text-label', textToken]);
+      expectInlineStyleToken(badge, washToken);
+
+      const dot = badge.querySelector(`.${dotToken}`);
+      expect(dot).toBeInstanceOf(HTMLSpanElement);
+      expectClassTokens(dot!, ['inline-block', 'rounded-full', dotToken]);
     });
   }
 });
 
-describe('StatusDot — defaults', () => {
-  it('defaults size="md" → 8px width and height', () => {
-    const tree = render(createElement(StatusDot, { status: 'online' }));
-    expect(propsOf(tree).style?.width).toBe('8px');
-    expect(propsOf(tree).style?.height).toBe('8px');
+describe('StatusDot', () => {
+  it('defaults size="md" to an 8px accessible status marker', () => {
+    render(<StatusDot status="online" />);
+
+    const marker = screen.getByLabelText('online');
+    expect(marker).toBeInstanceOf(HTMLSpanElement);
+    expectInlineStyleToken(marker, 'width: 8px');
+    expectInlineStyleToken(marker, 'height: 8px');
   });
 
-  it('respects size="sm" → 6px width and height', () => {
-    const tree = render(createElement(StatusDot, { status: 'online', size: 'sm' }));
-    expect(propsOf(tree).style?.width).toBe('6px');
-    expect(propsOf(tree).style?.height).toBe('6px');
+  it('respects size="sm" with a 6px accessible status marker', () => {
+    render(<StatusDot status="online" size="sm" />);
+
+    const marker = screen.getByLabelText('online');
+    expect(marker).toBeInstanceOf(HTMLSpanElement);
+    expectInlineStyleToken(marker, 'width: 6px');
+    expectInlineStyleToken(marker, 'height: 6px');
   });
 
-  it('outer span exposes aria-label = status (screen-reader contract)', () => {
-    const t1 = render(createElement(StatusDot, { status: 'online' }));
-    const t2 = render(createElement(StatusDot, { status: 'degraded' }));
-    const t3 = render(createElement(StatusDot, { status: 'unreachable' }));
-    expect(propsOf(t1)['aria-label']).toBe('online');
-    expect(propsOf(t2)['aria-label']).toBe('degraded');
-    expect(propsOf(t3)['aria-label']).toBe('unreachable');
-  });
-});
+  it('exposes status values through aria-labels', () => {
+    for (const status of ['online', 'degraded', 'unreachable'] as const) {
+      cleanup();
+      render(<StatusDot status={status} />);
 
-describe('StatusDot — status → design color token', () => {
-  const cases: Array<['online' | 'degraded' | 'unreachable', string]> = [
+      expect(screen.getByLabelText(status)).toBeDefined();
+    }
+  });
+
+  const statusTokenCases: Array<['online' | 'degraded' | 'unreachable', string]> = [
     ['online', 'bg-s-ok'],
     ['degraded', 'bg-s-warn'],
     ['unreachable', 'bg-s-crit'],
   ];
-  for (const [status, klass] of cases) {
-    it(`locks ${klass} for status="${status}"`, () => {
-      const tree = render(createElement(StatusDot, { status }));
-      const dot = flattenElements(propsOf(tree).children).find(
-        (el) => el.type === 'span' && classTokens(el).includes('rounded-full'),
-      );
-      expect(dot).toBeDefined();
-      expectClassTokens(dot!, ['rounded-full', klass]);
+
+  for (const [status, colorToken] of statusTokenCases) {
+    it(`renders the "${status}" dot with ${colorToken}`, () => {
+      render(<StatusDot status={status} />);
+
+      const marker = screen.getByLabelText(status);
+      const dot = marker.querySelector(`.${colorToken}`);
+      expect(dot).toBeInstanceOf(HTMLSpanElement);
+      expectClassTokens(dot!, ['absolute', 'inset-0', 'rounded-full', colorToken]);
     });
   }
-});
 
-describe('StatusDot — animated ring is online-only', () => {
-  function countRings(status: 'online' | 'degraded' | 'unreachable'): {
-    rings: number;
-    totalChildren: number;
-  } {
-    const tree = render(createElement(StatusDot, { status }));
-    const children = flattenElements(propsOf(tree).children);
-    const rings = children.filter((el) =>
-      classTokens(el).includes('animate-breathe-ring'),
-    ).length;
-    return { rings, totalChildren: children.length };
-  }
+  it('renders the animated online ring only for online status', () => {
+    render(<StatusDot status="online" />);
+    expect(screen.getByLabelText('online').querySelector('.animate-breathe-ring')).toBeInstanceOf(HTMLSpanElement);
 
-  it('online state renders exactly 1 ring + 1 dot (totalChildren = 2)', () => {
-    const { rings, totalChildren } = countRings('online');
-    expect(rings).toBe(1);
-    expect(totalChildren).toBe(2);
-  });
+    cleanup();
+    render(<StatusDot status="degraded" />);
+    expect(screen.getByLabelText('degraded').querySelector('.animate-breathe-ring')).toBeNull();
 
-  it('degraded state renders 0 rings (only the dot, totalChildren = 1)', () => {
-    const { rings, totalChildren } = countRings('degraded');
-    expect(rings).toBe(0);
-    expect(totalChildren).toBe(1);
-  });
-
-  it('unreachable state renders 0 rings (only the dot, totalChildren = 1)', () => {
-    const { rings, totalChildren } = countRings('unreachable');
-    expect(rings).toBe(0);
-    expect(totalChildren).toBe(1);
+    cleanup();
+    render(<StatusDot status="unreachable" />);
+    expect(screen.getByLabelText('unreachable').querySelector('.animate-breathe-ring')).toBeNull();
   });
 });
