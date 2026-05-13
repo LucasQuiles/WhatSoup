@@ -554,4 +554,42 @@ describe('LinkStep — QR age / expiry warning', () => {
       vi.useRealTimers()
     }
   })
+
+  it('clears the expiry warning after retry + new qr event', async () => {
+    render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    expect(registry).toHaveLength(1)
+
+    vi.useFakeTimers()
+    try {
+      // Emit a QR and advance past the expiry threshold to show the warning.
+      act(() => {
+        latestSource().emit('qr', 'aging-qr')
+      })
+      act(() => {
+        vi.advanceTimersByTime(46_000)
+      })
+      expect(screen.getByText(/QR code expiring soon/)).toBeDefined()
+
+      // Switch back to real timers before triggering async retry flow.
+      vi.useRealTimers()
+
+      // Fire an error to reach the error screen, then click "Try Again".
+      act(() => {
+        latestSource().emit('error', 'forced-fail')
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }))
+
+      // A second EventSource must be opened.
+      await waitFor(() => expect(registry).toHaveLength(2))
+
+      // Emit a fresh QR on the new source — expiry warning must be gone.
+      act(() => {
+        latestSource().emit('qr', 'fresh-qr')
+      })
+
+      expect(screen.queryByText(/QR code expiring soon/)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
