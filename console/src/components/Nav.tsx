@@ -1,5 +1,5 @@
 import { type FC } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Inbox,
@@ -40,34 +40,28 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           <span className="text-s-ok">Soup</span>
         </span>
 
-        <NavLink
+        <Link
           to="/"
-          end
-          className={() =>
-            `text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
-              isFleetActive
-                ? "text-t1 bg-d4"
-                : "text-t4 hover:text-t2"
-            }`
-          }
+          aria-current={isFleetActive ? 'page' : undefined}
+          className={`text-data flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] rounded-sm ${
+            isFleetActive
+              ? "text-t1 bg-d4"
+              : "text-t4 hover:text-t2"
+          }`}
         >
-          {() => (
-            <>
-              <LayoutDashboard size={18} strokeWidth={1.75} />
-              <span>Soup Kitchen</span>
-              {isFleetActive && (
-                <span
-                  className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
-                  style={{
-                    bottom: "-1px",
-                    left: "var(--sp-3)",
-                    right: "var(--sp-3)",
-                  }}
-                />
-              )}
-            </>
+          <LayoutDashboard size={18} strokeWidth={1.75} />
+          <span>Soup Kitchen</span>
+          {isFleetActive && (
+            <span
+              className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
+              style={{
+                bottom: "-1px",
+                left: "var(--sp-3)",
+                right: "var(--sp-3)",
+              }}
+            />
           )}
-        </NavLink>
+        </Link>
 
         <NavLink
           to="/inbox"
