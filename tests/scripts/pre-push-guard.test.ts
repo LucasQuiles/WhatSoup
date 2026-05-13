@@ -82,6 +82,12 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
 
+  it('verify:push:branch invokes staged publication guard', () => {
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:publication:staged\b/);
+  });
+
   it('verify:release invokes guard:work-index', () => {
     // Regression guard for #495: verify:release was missing the work-index
     // step that verify:push:branch and CI quality.yml both run, allowing
@@ -89,5 +95,11 @@ describe('verify chain composition (package.json)', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
+  });
+
+  it('verify:release invokes full publication audit guard', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:publication:all\b/);
   });
 });
