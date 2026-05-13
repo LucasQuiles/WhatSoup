@@ -23,6 +23,8 @@ const toastValue: ToastContextValue = {
   success: vi.fn(),
   error: vi.fn(),
   info: vi.fn(),
+  dismiss: vi.fn(),
+  clear: vi.fn(),
 }
 
 function withProviders(node: ReactElement, queryClient?: QueryClient) {

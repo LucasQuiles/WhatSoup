@@ -68,6 +68,8 @@ function makeToast(): ToastContextValue {
     success: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
   }
 }
 

@@ -68,12 +68,14 @@ function makeUpdateState(updateAvailable: boolean): UpdateState {
   }
 }
 
-function makeToastContext(): ToastContextValue & { info: Mock; success: Mock; error: Mock; toast: Mock } {
+function makeToastContext(): ToastContextValue & { info: Mock; success: Mock; error: Mock; toast: Mock; dismiss: Mock; clear: Mock } {
   return {
     toast: vi.fn(),
     info: vi.fn(),
     success: vi.fn(),
     error: vi.fn(),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
   }
 }
 
