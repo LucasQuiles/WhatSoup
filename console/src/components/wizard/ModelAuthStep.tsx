@@ -1,6 +1,7 @@
 import { type FC, useState } from 'react'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
+import WizardStep from './WizardStep'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -311,14 +312,23 @@ const AgentView: FC<{
 const ModelAuthStep: FC<ModelAuthStepProps> = ({ data, onChange, errors }) => {
   const instanceType = data.type as string | undefined
 
+  let content: React.ReactNode
   switch (instanceType) {
     case 'passive':
-      return <PassiveView />
+      content = <PassiveView />
+      break
     case 'agent':
-      return <AgentView data={data} onChange={onChange} errors={errors} />
+      content = <AgentView data={data} onChange={onChange} errors={errors} />
+      break
     default:
-      return <ChatView data={data} onChange={onChange} errors={errors} />
+      content = <ChatView data={data} onChange={onChange} errors={errors} />
   }
+
+  return (
+    <WizardStep title="Model & Auth">
+      {content}
+    </WizardStep>
+  )
 }
 
 export default ModelAuthStep

@@ -5,6 +5,7 @@ import TagInput from '../TagInput'
 import { api } from '../../lib/api'
 import { slugAgentWorkspaceName } from '../../lib/agent-cwd.ts'
 import { validatePhone } from '../../lib/validation'
+import WizardStep from './WizardStep'
 
 interface IdentityStepProps {
   data: Record<string, unknown>
@@ -91,7 +92,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   }, [name])
 
   return (
-    <div className="flex flex-col gap-[var(--sp-4)]">
+    <WizardStep title="Identity" subtitle="Name this line and choose its type.">
       {/* Type — first so it drives the rest of the wizard */}
       <div>
         <label className="c-heading c-field-label">
@@ -191,7 +192,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
         </div>
         {errors.adminPhones && <div className="c-error">{errors.adminPhones}</div>}
       </div>
-    </div>
+    </WizardStep>
   )
 }
 
