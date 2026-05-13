@@ -63,6 +63,7 @@ export class UpdateChecker {
     this.timer = setInterval(() => {
       this.checkNow().catch(() => {});
     }, CHECK_INTERVAL_MS);
+    this.timer.unref();
   }
 
   stop(): void {
