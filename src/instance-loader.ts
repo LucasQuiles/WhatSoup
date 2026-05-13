@@ -15,9 +15,9 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type InstanceType = 'chat' | 'agent' | 'passive';
-type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
-type SessionScope = 'single' | 'shared' | 'per_chat';
+export type InstanceType = 'chat' | 'agent' | 'passive';
+export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
+export type SessionScope = 'single' | 'shared' | 'per_chat';
 
 // Canonical enum sets live in the shared validator; re-export for back-compat.
 export const VALID_TYPES = _VALID_TYPES;

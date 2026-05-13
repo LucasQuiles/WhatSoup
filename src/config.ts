@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { normalizePhoneE164 } from './lib/phone.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
+import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -15,7 +16,7 @@ export const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
 export const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
 export const DEFAULT_MW_MIND_EMBED_URL = DEFAULT_KNOWLEDGE_EMBED_URL;
 
-export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
+export type { AccessMode } from './instance-loader.ts';
 export type PineconeSearchMode = 'memory' | 'entity';
 export type KnowledgeSearchMode = 'entity' | 'text' | 'vector';
 
@@ -890,14 +891,14 @@ export const config = {
     relayMaxPayloadBytes: (instance?.advanced?.relayMaxPayloadBytes as number | undefined) ?? 1_048_576, // 1MB
   },
 
-  // Access mode (from instance config, defaults to allowlist for backward compat)
+  // Access mode (from instance config, defaults to allowlist for backward compat).
+  // Source of truth: VALID_ACCESS_MODES + AccessMode in ./instance-loader.ts,
+  // which re-exports from ./core/agent-config-validator.ts.
   accessMode: (() => {
-    const VALID_ACCESS_MODES = ['self_only', 'allowlist', 'open_dm', 'groups_only'] as const;
-    type AccessMode = typeof VALID_ACCESS_MODES[number];
     const raw = (instance?.accessMode as string | undefined) ?? 'allowlist';
-    if (!(VALID_ACCESS_MODES as readonly string[]).includes(raw)) {
+    if (!VALID_ACCESS_MODES.has(raw)) {
       throw new Error(
-        `Invalid accessMode "${raw}" — must be one of: ${VALID_ACCESS_MODES.join(', ')}`,
+        `Invalid accessMode "${raw}" — must be one of: ${[...VALID_ACCESS_MODES].join(', ')}`,
       );
     }
     return raw as AccessMode;
