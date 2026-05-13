@@ -1,20 +1,20 @@
 /**
  * Tests for console/src/hooks/use-keyboard-shortcuts.ts
  *
- * The hook is pure behavior — no DOM render — so we mount it via renderHook
+ * The hook is pure behavior - no DOM render - so we mount it via renderHook
  * wrapped in a MemoryRouter (required for useNavigate + useLocation).
- * Events are dispatched on `document` directly; act() flushes React effects.
+ * Events dispatch from their real target and bubble to the document listener.
  *
  * Source surprises documented inline:
- *  S1 — listener is on `document`, not `window`
- *  S2 — Cmd/Ctrl+K fires EVEN when an input is focused (opt-in exception)
- *  S3 — `?` requires no modifier keys (metaKey/ctrlKey/altKey all must be false)
- *  S4 — number keys 1/2/3 are guarded: navigate only when NOT already on target path
- *  S5 — `handlers` ref is captured inside useCallback dependency array;
+ *  S1 - listener is on `document`, not `window`
+ *  S2 - Cmd/Ctrl+K fires EVEN when an input is focused (opt-in exception)
+ *  S3 - `?` requires no modifier keys (metaKey/ctrlKey/altKey all must be false)
+ *  S4 - number keys 1/2/3 are guarded: navigate only when NOT already on target path
+ *  S5 - `handlers` ref is captured inside useCallback dependency array;
  *       if the caller passes a new object each render the callback re-registers;
  *       tests use stable refs to avoid flakiness
- *  S6 — no capture-phase (`addEventListener` without `{ capture: true }`)
- *  S7 — key '4' is NOT wired (only 1, 2, 3 produce navigation)
+ *  S6 - no capture-phase (`addEventListener` without `{ capture: true }`)
+ *  S7 - key '4' is NOT wired (only 1, 2, 3 produce navigation)
  *
  * @vitest-environment jsdom
  */
@@ -24,7 +24,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { createElement, type ReactNode } from 'react';
 
 // ---------------------------------------------------------------------------
-// Navigation mock — capture calls to navigate()
+// Navigation mock - capture calls to navigate()
 // ---------------------------------------------------------------------------
 
 const mockNavigate = vi.fn();
@@ -50,13 +50,15 @@ function wrapper({ children }: { children: ReactNode }) {
   return createElement(MemoryRouter, { initialEntries: ['/'] }, children);
 }
 
-/** Fire a keydown event on document with the given options. */
+/** Fire a keydown event from the requested target and let it bubble. */
 function fireKey(
   key: string,
   opts: Partial<KeyboardEventInit> = {},
-): void {
+  target: Document | HTMLElement = document,
+): KeyboardEvent {
   const event = new KeyboardEvent('keydown', { key, bubbles: true, ...opts });
-  document.dispatchEvent(event);
+  target.dispatchEvent(event);
+  return event;
 }
 
 beforeEach(() => {
@@ -69,10 +71,10 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Cmd/Ctrl+K — search shortcut
+// Cmd/Ctrl+K - search shortcut
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — Cmd/Ctrl+K search', () => {
+describe('useKeyboardShortcuts - Cmd/Ctrl+K search', () => {
   it('calls onSearch when metaKey+K is pressed', () => {
     const onSearch = vi.fn();
     renderHook(() => useKeyboardShortcuts({ onSearch }), { wrapper });
@@ -117,13 +119,7 @@ describe('useKeyboardShortcuts — Cmd/Ctrl+K search', () => {
     input.focus();
 
     act(() => {
-      const event = new KeyboardEvent('keydown', {
-        key: 'k',
-        metaKey: true,
-        bubbles: true,
-      });
-      Object.defineProperty(event, 'target', { value: input, configurable: true });
-      document.dispatchEvent(event);
+      fireKey('k', { metaKey: true }, input);
     });
 
     expect(onSearch).toHaveBeenCalledTimes(1);
@@ -149,10 +145,10 @@ describe('useKeyboardShortcuts — Cmd/Ctrl+K search', () => {
 });
 
 // ---------------------------------------------------------------------------
-// ? key — help toggle
+// ? key - help toggle
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — ? help toggle', () => {
+describe('useKeyboardShortcuts - ? help toggle', () => {
   it('calls onHelp when ? is pressed with no modifiers', () => {
     const onHelp = vi.fn();
     renderHook(() => useKeyboardShortcuts({ onHelp }), { wrapper });
@@ -197,9 +193,7 @@ describe('useKeyboardShortcuts — ? help toggle', () => {
     document.body.appendChild(input);
 
     act(() => {
-      const event = new KeyboardEvent('keydown', { key: '?', bubbles: true });
-      Object.defineProperty(event, 'target', { value: input, configurable: true });
-      document.dispatchEvent(event);
+      fireKey('?', {}, input);
     });
 
     expect(onHelp).not.toHaveBeenCalled();
@@ -218,7 +212,7 @@ describe('useKeyboardShortcuts — ? help toggle', () => {
 // Number key navigation (1/2/3)
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — number key navigation', () => {
+describe('useKeyboardShortcuts - number key navigation', () => {
   it('navigates to / on key 1 when not already on /', () => {
     mockPathname = '/inbox';
     renderHook(() => useKeyboardShortcuts({}), { wrapper });
@@ -276,7 +270,7 @@ describe('useKeyboardShortcuts — number key navigation', () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it('does NOT navigate on key 4 — not wired (S7)', () => {
+  it('does NOT navigate on key 4 - not wired (S7)', () => {
     mockPathname = '/';
     renderHook(() => useKeyboardShortcuts({}), { wrapper });
 
@@ -329,7 +323,7 @@ describe('useKeyboardShortcuts — number key navigation', () => {
 // Input-element opt-out for non-search shortcuts
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — input element opt-out', () => {
+describe('useKeyboardShortcuts - input element opt-out', () => {
   const inputTypes = [
     { label: 'INPUT', tag: 'input' },
     { label: 'TEXTAREA', tag: 'textarea' },
@@ -346,9 +340,7 @@ describe('useKeyboardShortcuts — input element opt-out', () => {
       document.body.appendChild(el);
 
       act(() => {
-        const event = new KeyboardEvent('keydown', { key: '1', bubbles: true });
-        Object.defineProperty(event, 'target', { value: el, configurable: true });
-        document.dispatchEvent(event);
+        fireKey('1', {}, el);
       });
 
       expect(mockNavigate).not.toHaveBeenCalled();
@@ -357,28 +349,32 @@ describe('useKeyboardShortcuts — input element opt-out', () => {
     });
   }
 
-  it('documents jsdom gap: isContentEditable is not implemented (S8)', () => {
-    // jsdom limitation (S8): jsdom does not implement HTMLElement.isContentEditable,
-    // so the property returns undefined regardless of contentEditable="true".
-    // The source guard `target.isContentEditable` therefore cannot be exercised
-    // end-to-end here. This test pins the gap so a future jsdom upgrade that adds
-    // the property will fail this assertion (changing undefined → true) and signal
-    // that we can finally write the behavior test for the opt-out path.
+  it('does not navigate when a contentEditable element is the event target', () => {
+    mockPathname = '/inbox';
+    const onHelp = vi.fn();
+    renderHook(() => useKeyboardShortcuts({ onHelp }), { wrapper });
+
     const div = document.createElement('div');
     div.contentEditable = 'true';
+    Object.defineProperty(div, 'isContentEditable', { value: true, configurable: true });
     document.body.appendChild(div);
 
-    expect(div.isContentEditable).toBeUndefined();
+    act(() => {
+      fireKey('1', {}, div);
+      fireKey('?', {}, div);
+    });
 
+    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(onHelp).not.toHaveBeenCalled();
     document.body.removeChild(div);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Unregistered keys — no-op
+// Unregistered keys - no-op
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — unregistered keys (no-op)', () => {
+describe('useKeyboardShortcuts - unregistered keys (no-op)', () => {
   it('does nothing for Escape key', () => {
     const onSearch = vi.fn();
     const onHelp = vi.fn();
@@ -409,7 +405,7 @@ describe('useKeyboardShortcuts — unregistered keys (no-op)', () => {
 // Empty / default handlers argument
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — default empty handlers', () => {
+describe('useKeyboardShortcuts - default empty handlers', () => {
   it('mounts with no args and fires Cmd+K without throwing', () => {
     expect(() => {
       renderHook(() => useKeyboardShortcuts(), { wrapper });
@@ -426,10 +422,10 @@ describe('useKeyboardShortcuts — default empty handlers', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cleanup — listener removed on unmount (S1, S6)
+// Cleanup - listener removed on unmount (S1, S6)
 // ---------------------------------------------------------------------------
 
-describe('useKeyboardShortcuts — cleanup on unmount', () => {
+describe('useKeyboardShortcuts - cleanup on unmount', () => {
   it('removes document keydown listener on unmount (S1)', () => {
     const addSpy = vi.spyOn(document, 'addEventListener');
     const removeSpy = vi.spyOn(document, 'removeEventListener');
