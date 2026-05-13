@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -62,6 +62,52 @@ describe('readFleetTokenForDevProxy', () => {
       rotatedAt: '2026-05-12T01:00:00.000Z',
     }));
     expect(readFleetTokenForDevProxy(tmpRoot)).toBe('b'.repeat(64));
+  });
+
+  it('logs a one-line warning when neither token file exists', () => {
+    const warn = vi.fn();
+    const result = readFleetTokenForDevProxy(tmpRoot, { warn });
+
+    expect(result).toBe('');
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0][0]);
+    expect(message).toMatch(/fleet-tokens\.json/);
+    expect(message).toMatch(/Authorization/);
+  });
+
+  it('logs a one-line warning when fleet-tokens.json fails to parse', () => {
+    writeConfigFile('fleet-tokens.json', '{bad-json');
+    const warn = vi.fn();
+
+    const result = readFleetTokenForDevProxy(tmpRoot, { warn });
+
+    expect(result).toBe('');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/parse/i);
+  });
+
+  it('does not warn when a valid active token is present', () => {
+    writeConfigFile('fleet-tokens.json', JSON.stringify({
+      active: 'a'.repeat(64),
+      accept: [],
+      rotatedAt: '2026-05-12T00:00:00.000Z',
+    }));
+    const warn = vi.fn();
+
+    const token = readFleetTokenForDevProxy(tmpRoot, { warn });
+
+    expect(token).toBe('a'.repeat(64));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not warn when legacy fallback succeeds', () => {
+    writeConfigFile('fleet-token', `${'d'.repeat(64)}\n`);
+    const warn = vi.fn();
+
+    const token = readFleetTokenForDevProxy(tmpRoot, { warn });
+
+    expect(token).toBe('d'.repeat(64));
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
