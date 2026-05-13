@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { baileysMock, makeMockSocket } from './baileys-mock.ts';
+import { baileysMock, baileysMediaMock, makeMockSocket } from './baileys-mock.ts';
 
 describe('baileys test helpers', () => {
   it('creates the common Baileys module mock shape', async () => {
@@ -27,5 +27,19 @@ describe('baileys test helpers', () => {
     expect(handler).toHaveBeenCalledWith({ 'connection.update': { connection: 'open' } });
     expect(mockSock.ws.isOpen).toBe(true);
     expect(mockSock.user.id).toContain('@s.whatsapp.net');
+  });
+
+  it('baileysMediaMock exposes only downloadMediaMessage', () => {
+    const mock = baileysMediaMock();
+    expect(typeof mock.downloadMediaMessage).toBe('function');
+    expect(Object.keys(mock)).toEqual(['downloadMediaMessage']);
+  });
+
+  it('baileysMediaMock downloadMediaMessage accepts per-test return-value overrides', async () => {
+    const mock = baileysMediaMock();
+    mock.downloadMediaMessage.mockResolvedValue(Buffer.from('media-bytes'));
+
+    await expect(mock.downloadMediaMessage()).resolves.toEqual(Buffer.from('media-bytes'));
+    expect(mock.downloadMediaMessage).toHaveBeenCalledTimes(1);
   });
 });

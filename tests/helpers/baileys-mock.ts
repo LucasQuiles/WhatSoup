@@ -32,6 +32,17 @@ export function baileysMock() {
   };
 }
 
+/**
+ * Partial mock for tests that only need `downloadMediaMessage` from baileys.
+ * Smaller surface than baileysMock() — keeps the partial-shape contract explicit
+ * so consumers can intercept only the API they actually exercise.
+ */
+export function baileysMediaMock() {
+  return {
+    downloadMediaMessage: vi.fn(),
+  };
+}
+
 export function makeMockSocket() {
   let evProcessCallback: ((events: Record<string, unknown>) => void) | undefined;
 
