@@ -96,10 +96,15 @@ describe('verify chain composition (package.json)', () => {
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
-
   it('verify:release invokes full publication audit guard', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:publication:all\b/);
+  });
+
+  it('verify:release invokes release repo hygiene guard', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:repo:release-hygiene\b/);
   });
 });

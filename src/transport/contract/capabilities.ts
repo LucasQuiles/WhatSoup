@@ -36,7 +36,7 @@ export interface MediaCapability {
 }
 
 export interface Capabilities {
-  readonly channel: ChannelId;            // per-account, e.g. 'whatsapp:mw-bot'
+  readonly channel: ChannelId;            // per-account, e.g. 'whatsapp:primary'
   readonly kind: ChannelKind;              // 'whatsapp' (derivable; duplicated for ergonomics)
   readonly extensions: ReadonlySet<ExtensionName>;
   readonly maxTextLength: number;

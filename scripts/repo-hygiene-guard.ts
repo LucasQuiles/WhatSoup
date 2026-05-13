@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export type GuardMode = 'staged' | 'commit-msg';
+export type GuardMode = 'staged' | 'commit-msg' | 'release-hygiene';
 
 export interface ParsedArgs {
   mode: GuardMode;
@@ -34,6 +34,43 @@ const fixtureFiles = new Set([
   'scripts/repo-hygiene-guard.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
 ]);
+
+const releaseHygieneFiles = [
+  'scripts/cutover.sh',
+  'scripts/migrate-namespace.sh',
+  'scripts/soak-check.sh',
+  'src/runtimes/agent/providers/child-env.ts',
+  'src/transport/contract/capabilities.ts',
+];
+
+const operationalReleaseHygieneFiles = new Set([
+  'scripts/cutover.sh',
+  'scripts/migrate-namespace.sh',
+  'scripts/soak-check.sh',
+]);
+
+const allowedEnvVarNameToken = /^[A-Z][A-Z0-9_]+_(?:MUTATIONS|TOKEN|KEY|URL|PATH)$/;
+const allowedMessagingAddressRhs = /@(?:s\.whatsapp\.net|c\.us|lid)$/i;
+
+const operationalProtocolIdentifiers = new Set([
+  'whatsapp-bot@personal',
+  'whatsapp-bot@loops',
+  'whatsapp-bot@besbot',
+  'whatsoup@q',
+  'whatsoup@loops',
+  'whatsoup@besbot',
+  'whatsoup@personal',
+  'whatsoup-personal',
+  'instances/personal/whatsoup.sock',
+]);
+
+function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
+  if (allowedEnvVarNameToken.test(token)) return true;
+  if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
+  return code === 'private-instance-label'
+    && operationalReleaseHygieneFiles.has(filePath)
+    && operationalProtocolIdentifiers.has(token);
+}
 
 const srcConsoleAllowedFiles = new Set([
   'src/bootstrap.ts',
@@ -80,9 +117,14 @@ const addedLinePatterns: GuardPattern[] = [
     regex: /\/(?:Users|home)\/(?!runner(?:\/|$)|testuser(?:\/|$)|whatsoup(?:\/|$))[A-Za-z0-9._-]+(?:\/|$)/,
   },
   {
+    code: 'private-instance-label',
+    message: 'Public repo text must not include private instance labels.',
+    regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/whatsoup\.sock|\/home\/q\//,
+  },
+  {
     code: 'whatsapp-group-jid',
     message: 'Public repo text must not include real-shaped WhatsApp group JIDs.',
-    regex: /\b120363\d{6,}@g\.us\b/,
+    regex: /\b(?!120363555555555000@g\.us\b)120363\d{6,}@g\.us\b/,
   },
   {
     code: 'whatsapp-user-jid',
@@ -138,6 +180,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.help = true;
     } else if (arg === '--staged') {
       args.mode = 'staged';
+    } else if (arg === '--release-hygiene') {
+      args.mode = 'release-hygiene';
     } else if (arg === '--commit-msg') {
       args.mode = 'commit-msg';
       const next = argv[i + 1];
@@ -190,6 +234,21 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   return addedLines;
 }
 
+function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: string): string | null {
+  const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : `${pattern.regex.flags}g`;
+  const regex = new RegExp(pattern.regex.source, flags);
+
+  for (const match of text.matchAll(regex)) {
+    const token = match[0];
+    if (!isAllowedPatternMatch(filePath, pattern.code, token)) {
+      return token;
+    }
+    if (token === '') break;
+  }
+
+  return null;
+}
+
 export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
@@ -209,7 +268,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
       });
     }
     for (const pattern of addedLinePatterns) {
-      if (pattern.regex.test(line.text)) {
+      if (findDisallowedMatch(filePath, pattern, line.text)) {
         issues.push({
           code: pattern.code,
           message: pattern.message,
@@ -229,7 +288,7 @@ export function scanCommitMessage(message: string): GuardIssue[] {
 
   lines.forEach((text, index) => {
     for (const pattern of commitMessagePatterns) {
-      if (pattern.regex.test(text)) {
+      if (findDisallowedMatch('', pattern, text)) {
         issues.push({ code: pattern.code, message: pattern.message, line: index + 1 });
       }
     }
@@ -246,6 +305,49 @@ function stagedDiff(cwd: string): string {
   return git(['diff', '--cached', '--unified=0', '--no-ext-diff'], cwd);
 }
 
+function trackedFiles(cwd: string, filePaths: readonly string[]): string[] {
+  const tracked = new Set(git(['ls-files', '-z', '--', ...filePaths], cwd)
+    .split('\0')
+    .filter(Boolean)
+    .map(normalizeRepoPath));
+
+  return filePaths.filter((filePath) => tracked.has(filePath));
+}
+
+export function scanContentLines(lines: AddedLine[]): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+
+  for (const line of lines) {
+    const filePath = normalizeRepoPath(line.filePath);
+    if (fixtureFiles.has(filePath)) continue;
+    for (const pattern of addedLinePatterns) {
+      if (findDisallowedMatch(filePath, pattern, line.text)) {
+        issues.push({
+          code: pattern.code,
+          message: pattern.message,
+          filePath: line.filePath,
+          line: line.line,
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
+export function scanTrackedFiles(cwd: string): GuardIssue[] {
+  const lines: AddedLine[] = [];
+
+  for (const filePath of trackedFiles(cwd, releaseHygieneFiles)) {
+    const content = readFileSync(path.join(cwd, filePath), 'utf8');
+    content.split(/\r?\n/).forEach((text, index) => {
+      lines.push({ filePath, line: index + 1, text });
+    });
+  }
+
+  return scanContentLines(lines);
+}
+
 function printIssues(issues: GuardIssue[]): void {
   for (const issue of issues) {
     const location = issue.filePath
@@ -257,14 +359,16 @@ function printIssues(issues: GuardIssue[]): void {
 
 function printHelp(): void {
   console.log(`Usage: npm run guard:repo -- [--staged]
+       npm run guard:repo -- --release-hygiene
        npm run guard:repo:commit-msg -- <message-file>
 
 Modes:
   --staged              Scan staged added lines. This is the default.
+  --release-hygiene     Scan tracked release-hygiene files.
   --commit-msg <file>   Scan a commit message file.
   --help                Show this help.
 
-This guard is changed-content only. It is not a full-tree release gate.`);
+By default, this guard is changed-content only. Use --release-hygiene for the release-hygiene file gate.`);
 }
 
 export function run(argv: string[] = process.argv.slice(2), cwd: string = process.cwd()): GuardIssue[] {
@@ -276,7 +380,9 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
 
   const issues = args.mode === 'commit-msg'
     ? scanCommitMessage(readFileSync(args.messageFile ?? '', 'utf8'))
-    : scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd)));
+    : args.mode === 'release-hygiene'
+      ? scanTrackedFiles(cwd)
+      : scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd)));
 
   if (issues.length > 0) {
     printIssues(issues);

@@ -248,7 +248,7 @@ run_cut06() {
   systemctl --user start whatsoup@q
   wait_for_health "whatsoup@q" 9092 || abort
   ok "CUT-06  whatsoup@q started"
-  info "Manual gate: send a test message to Q's number and verify the agent responds."
+  info "Manual gate: send a test message to the q instance number and verify the agent responds."
 }
 
 run_cut07() {
@@ -281,7 +281,7 @@ run_cut08() {
   echo -e "${YELLOW}ACTION REQUIRED — edit ~/.claude/.mcp.json manually:${RESET}"
   echo ""
   echo "  REMOVE this entry:"
-  echo '    "whatsapp-mcp": { "type": "stdio", "command": "/home/q/.local/bin/whatsapp-mcp" }'
+  echo '    "whatsapp-mcp": { "type": "stdio", "command": "/path/to/whatsapp-mcp" }'
   echo ""
   echo "  ADD this entry:"
   cat <<'EOF'
@@ -290,16 +290,16 @@ run_cut08() {
       "command": "node",
       "args": [
         "--experimental-strip-types",
-        "/home/q/LAB/WhatSoup/deploy/mcp/whatsoup-proxy.ts"
+        "/path/to/WhatSoup/deploy/mcp/whatsoup-proxy.ts"
       ],
       "env": {
-        "WHATSOUP_SOCKET": "/home/q/.local/state/whatsoup/instances/personal/whatsoup.sock"
+        "WHATSOUP_SOCKET": "/home/whatsoup/.local/state/whatsoup/instances/personal/whatsoup.sock"
       }
     }
 EOF
   echo ""
   echo -e "${RED}IMPORTANT:${RESET} WHATSOUP_SOCKET must be an absolute path — tilde (~) does NOT"
-  echo "  expand inside JSON strings passed by Claude Code's MCP launcher."
+  echo "  expand inside JSON strings passed by the MCP launcher."
   echo "  A literal ~ will cause ENOENT on socket connection."
   echo ""
 }
@@ -334,13 +334,13 @@ run_cut09() {
 }
 
 # ---------------------------------------------------------------------------
-# CUT-10: Print manual instruction to restart Claude Code
+# CUT-10: Print manual instruction to restart the agent client
 # ---------------------------------------------------------------------------
 run_cut10() {
-  header "=== CUT-10: Restart Claude Code session (MANUAL STEP) ==="
+  header "=== CUT-10: Restart agent client session (MANUAL STEP) ==="
   echo ""
   echo -e "${YELLOW}ACTION REQUIRED:${RESET}"
-  echo "  Restart your Claude Code session to pick up the new MCP configuration."
+  echo "  Restart your agent client session to pick up the new MCP configuration."
   echo ""
   echo "  The session must fully restart (not just reload) so that:"
   echo "    - whatsapp-mcp MCP server is deregistered"
@@ -354,7 +354,7 @@ run_cut10() {
 run_cut11() {
   header "=== CUT-11: Smoke verification (MANUAL STEP) ==="
   echo ""
-  echo -e "${YELLOW}ACTION REQUIRED — from your Claude Code session after restart:${RESET}"
+  echo -e "${YELLOW}ACTION REQUIRED — from your agent client session after restart:${RESET}"
   echo ""
   echo "  1. Call list_chats (mcp__whatsoup-personal__list_chats)"
   echo "     Expected: returns your personal WhatsApp chats"
@@ -410,7 +410,7 @@ main() {
   echo ""
   echo "Next steps:"
   echo "  1. Complete the manual config edits printed above (CUT-08, CUT-09)"
-  echo "  2. Restart Claude Code (CUT-10)"
+  echo "  2. Restart the agent client (CUT-10)"
   echo "  3. Run smoke verification from the new session (CUT-11)"
   echo "  4. Run scripts/soak-check.sh daily for the 48-hour soak period"
   echo ""
