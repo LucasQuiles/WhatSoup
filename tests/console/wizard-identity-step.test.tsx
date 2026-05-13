@@ -6,43 +6,26 @@
  * debounce flow, description field check-mark, adminPhones wiring via TagInput,
  * nameLocked prop, error display, and onChange callback forwarding.
  *
- * Source surprises pinned in §SURPRISES below.
+ * Behavior notes pinned below.
  *
- * §SURPRISES
- * 1. The component uses a LOCAL `slugify` (IdentityStep.tsx:40) — NOT
- *    `slugAgentWorkspaceName` from `lib/agent-cwd.ts`. The local function does:
- *      .toLowerCase()
- *      .replace(/\s+/g, '-')       — \s+ greedy: runs of whitespace → ONE dash
- *      .replace(/[^a-z0-9-]/g, '') — strip non-slug chars
- *    It LACKS the two transforms that `slugAgentWorkspaceName` has:
- *      .replace(/-+/g, '-')        — collapse consecutive dashes
- *      .replace(/^-|-$/g, '')      — strip leading/trailing dashes
- *    Net effect: 'my  line' → 'my-line' (the \s+ regex collapses the whitespace
- *    run into ONE dash). But 'my -line' → 'my--line' (the pre-existing dash and
- *    the new one are not coalesced). And '-leading' → '-leading' (leading dash
- *    preserved). The "jsdom normalizes whitespace" framing is also wrong — jsdom
- *    does NOT trim input.value; \s+ does the collapse. The local-vs-canonical
- *    divergence is tracked as F-024 in the session daemon — affects paste,
- *    autofill, or programmatic inputs that contain dashes.
- * 2. The name <input> calls `onChange({ name: slugify(e.target.value) })` (the
- *    LOCAL slugify per §1) on every change event — the component stores the
- *    already-slugified value, not the raw display string. Emoji and punctuation
- *    are stripped immediately.
- * 3. There is NO "Next" button inside IdentityStep itself — Next-button gating
+ * 1. The name <input> forwards `slugAgentWorkspaceName(e.target.value)` on
+ *    every change event. The component stores the already-normalized value,
+ *    not the raw display string. Emoji and punctuation are stripped immediately.
+ * 2. There is NO "Next" button inside IdentityStep itself — Next-button gating
  *    lives in the parent Wizard. The component only forwards onChange/errors.
- * 4. adminPhones strips non-digits via `values.map(v => v.replace(/\D/g, ''))`.
+ * 3. adminPhones strips non-digits via `values.map(v => v.replace(/\D/g, ''))`.
  *    The TagInput's own `validate` is `validatePhone` (≥10, ≤15 digits after
  *    normalization). "555-123-4567" → TagInput receives "555-123-4567", calls
  *    validatePhone which normalizes to "15551234567" (11 digits) — valid.
  *    IdentityStep then strips non-digits from "555-123-4567" → "5551234567"
  *    (10 digits), so onChange receives "5551234567".
- * 5. The `showConfirmed` state delays check-mark indicators by 300 ms on mount.
+ * 4. The `showConfirmed` state delays check-mark indicators by 300 ms on mount.
  *    In tests we use `act` + fake timers to advance past that gate.
- * 6. The uniqueness-check debounce fires after 500 ms for non-empty slugs and
+ * 5. The uniqueness-check debounce fires after 500 ms for non-empty slugs and
  *    0 ms for empty slugs. Tests use `vi.advanceTimersByTime(500)` inside `act`
  *    to drive the debounce without `waitFor`, which polls real setInterval and
  *    deadlocks under fake timers.
- * 7. The Check icon appears for `nameStatus === 'available' || nameLocked`
+ * 6. The Check icon appears for `nameStatus === 'available' || nameLocked`
  *    regardless of showConfirmed. The description/adminPhones Check icons DO
  *    depend on showConfirmed.
  *
@@ -219,32 +202,39 @@ describe('slug derivation on name input', () => {
     expect(onChange).toHaveBeenCalledWith({ name: 'a-b-c' })
   })
 
-  it('jsdom normalizes multiple spaces to single space before slugify runs', () => {
-    // Source surprise §1: jsdom collapses whitespace in input change events.
-    // 'my  line' arrives at the onChange handler as 'my-line' (one dash),
-    // NOT 'my--line' as the raw regex would produce without jsdom normalization.
+  it('collapses whitespace runs to one dash', () => {
     const { onChange } = renderStep()
     const input = screen.getByPlaceholderText('my-line')
     fireEvent.change(input, { target: { value: 'my  line' } })
     expect(onChange).toHaveBeenCalledWith({ name: 'my-line' })
   })
 
-  it('jsdom trims leading spaces so no leading dash appears', () => {
-    // Source surprise §1: jsdom strips leading whitespace from input values.
-    // The local slugify has no /^-/ trim step, but jsdom prevents leading
-    // spaces from reaching it.
+  it('collapses repeated dashes produced by whitespace and typed dashes', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: 'my - line' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'my-line' })
+  })
+
+  it('trims leading spaces so no leading dash appears', () => {
     const { onChange } = renderStep()
     const input = screen.getByPlaceholderText('my-line')
     fireEvent.change(input, { target: { value: ' leading' } })
     expect(onChange).toHaveBeenCalledWith({ name: 'leading' })
   })
 
-  it('jsdom trims trailing spaces so no trailing dash appears', () => {
-    // Source surprise §1: same as above for trailing whitespace.
+  it('trims trailing spaces so no trailing dash appears', () => {
     const { onChange } = renderStep()
     const input = screen.getByPlaceholderText('my-line')
     fireEvent.change(input, { target: { value: 'trailing ' } })
     expect(onChange).toHaveBeenCalledWith({ name: 'trailing' })
+  })
+
+  it('trims leading and trailing dash separators after slugging', () => {
+    const { onChange } = renderStep()
+    const input = screen.getByPlaceholderText('my-line')
+    fireEvent.change(input, { target: { value: ' -Leading Line- ' } })
+    expect(onChange).toHaveBeenCalledWith({ name: 'leading-line' })
   })
 })
 
