@@ -1,187 +1,112 @@
 /**
  * @vitest-environment jsdom
  *
- * Format-pattern coverage for console/src/lib/format-wa-text.tsx.
- *
- * Existing tests/console/search-highlight.test.ts covers the empty-state
- * fallback + bold-with-highlight integration. This file pins each of the
- * remaining WhatsApp format patterns to the helper's React-node contract:
- *
- *   - inline backtick code         ->  <code>
- *   - single-line triple backticks ->  <code> (block class)
- *   - *bold*                       ->  <strong>
- *   - **bold**                     ->  <strong>
- *   - _italic_                     ->  <em>
- *   - ~strikethrough~              ->  <s>
- *   - https URL                    ->  <a target=_blank rel=noopener noreferrer>
- *   - long URL (>50 chars)         ->  href = full, child = truncated with ...
- *   - multi-line text              ->  <br /> between lines
- *   - plain text                   ->  string children
- *
- * The function returns ReactNode[], so most assertions inspect that tree
- * directly. A rendered assertion below checks the user-visible text/link path.
+ * Rendered coverage for WhatsApp-style message formatting.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { createElement, isValidElement } from 'react';
-import type { ReactElement, ReactNode } from 'react';
-import { formatWhatsAppText } from '../../console/src/lib/format-wa-text.tsx';
-
-type FormatElementProps = {
-  children?: ReactNode;
-  className?: string;
-  href?: string;
-  rel?: string;
-  target?: string;
-};
+import { createElement } from 'react';
+import MessageContent from '../../console/src/components/MessageContent';
+import { formatWhatsAppText } from '../../console/src/lib/format-wa-text';
+import type { Message } from '../../console/src/types';
 
 afterEach(() => cleanup());
 
-function asElement<P extends FormatElementProps = FormatElementProps>(node: ReactNode): ReactElement<P> {
-  if (isValidElement<P>(node)) {
-    return node;
-  }
-  throw new Error(`expected ReactElement, got ${typeof node}: ${String(node)}`);
+function message(content: string | null): Message {
+  return {
+    pk: 42,
+    conversationKey: 'chat-1',
+    senderName: 'Alice',
+    senderJid: 'sender-fixture-jid',
+    content,
+    timestamp: '2026-04-05T19:30:45.000Z',
+    fromMe: false,
+    type: 'text',
+  };
 }
 
-function plainText(children: ReactNode): string {
-  if (typeof children === 'string') return children;
-  if (Array.isArray(children)) return children.map(plainText).join('');
-  if (isValidElement<{ children?: ReactNode }>(children)) {
-    return plainText(children.props.children);
-  }
-  return '';
+function renderMessage(content: string | null) {
+  return render(createElement(MessageContent, { msg: message(content) }));
 }
 
-function isFormatElement(node: ReactNode): node is ReactElement<FormatElementProps> {
-  return isValidElement<FormatElementProps>(node);
+function renderFormatted(content: string | null | undefined) {
+  return render(createElement('div', null, formatWhatsAppText(content)));
 }
 
-function isElementType(node: ReactNode, type: string): node is ReactElement<FormatElementProps> {
-  return isFormatElement(node) && node.type === type;
-}
+describe('MessageContent WhatsApp formatting', () => {
+  it('renders bold, italic, strike, and inline code as DOM elements', () => {
+    const { container } = renderMessage('a *bold* _italic_ ~strike~ `code`');
 
-describe('formatWhatsAppText — single-pattern formats', () => {
-  it('wraps *bold* in <strong>', () => {
-    const parts = formatWhatsAppText('a *b* c');
-    // parts: ['a ', <strong>b</strong>, ' c']
-    expect(parts).toHaveLength(3);
-    expect(parts[0]).toBe('a ');
-    const strong = asElement(parts[1]);
-    expect(strong.type).toBe('strong');
-    expect(plainText(strong.props.children)).toBe('b');
-    expect(parts[2]).toBe(' c');
+    expect(screen.getByText('bold').tagName).toBe('STRONG');
+    expect(screen.getByText('italic').tagName).toBe('EM');
+    expect(screen.getByText('strike').tagName).toBe('S');
+
+    const code = screen.getByText('code');
+    expect(code.tagName).toBe('CODE');
+    expect(code.className).not.toContain('block');
+    expect(container.textContent).toBe('a bold italic strike code');
   });
 
-  it('wraps **double-asterisk bold** in <strong>', () => {
-    const parts = formatWhatsAppText('**b**');
-    const strong = asElement(parts[0]);
-    expect(strong.type).toBe('strong');
-    expect(plainText(strong.props.children)).toBe('b');
+  it('renders double-asterisk bold as a strong element', () => {
+    renderMessage('**bold**');
+
+    expect(screen.getByText('bold').tagName).toBe('STRONG');
   });
 
-  it('wraps _italic_ in <em>', () => {
-    const parts = formatWhatsAppText('a _i_ b');
-    const em = asElement(parts[1]);
-    expect(em.type).toBe('em');
-    expect(plainText(em.props.children)).toBe('i');
+  it('renders a single-line triple-backtick block as block code', () => {
+    const { container } = renderMessage('```code-block```');
+
+    const code = container.querySelector('code');
+    expect(code?.textContent).toBe('code-block');
+    expect(code?.className).toContain('block');
   });
 
-  it('wraps ~strikethrough~ in <s>', () => {
-    const parts = formatWhatsAppText('~s~');
-    const s = asElement(parts[0]);
-    expect(s.type).toBe('s');
-    expect(plainText(s.props.children)).toBe('s');
+  it('renders multiline triple-backtick text as one block code element', () => {
+    const { container } = renderMessage('before\n```line one\nline two```\nafter');
+
+    const code = container.querySelector('code');
+    expect(code?.textContent).toBe('line one\nline two');
+    expect(code?.className).toContain('block');
+    expect(container.querySelectorAll('code')).toHaveLength(1);
+    expect(container.textContent).toBe('beforeline one\nline twoafter');
   });
 
-  it('wraps `inline code` in <code>', () => {
-    const parts = formatWhatsAppText('a `x` b');
-    const code = asElement(parts[1]);
-    expect(code.type).toBe('code');
-    expect(plainText(code.props.children)).toBe('x');
+  it('keeps line breaks outside code blocks as br elements', () => {
+    const { container } = renderMessage('one\ntwo\nthree');
+
+    expect(container.querySelectorAll('br')).toHaveLength(2);
+    expect(container.textContent).toBe('onetwothree');
   });
 
-  it('wraps single-line triple-backtick text in <code> (block variant)', () => {
-    const parts = formatWhatsAppText('```code-block```');
-    const code = asElement(parts[0]);
-    expect(code.type).toBe('code');
-    expect(plainText(code.props.children)).toBe('code-block');
-    // Block variant carries a distinct className (`block` token)
-    expect(String(code.props.className)).toContain('block');
-  });
-});
+  it('renders URLs as external links with the full href', () => {
+    renderMessage('go to https://example.com now');
 
-describe('formatWhatsAppText — URLs', () => {
-  it('wraps an https URL in <a target=_blank rel=noopener noreferrer>', () => {
-    const parts = formatWhatsAppText('go to https://example.com now');
-    const link = asElement(parts[1]);
-    expect(link.type).toBe('a');
-    expect(link.props.href).toBe('https://example.com');
-    expect(link.props.target).toBe('_blank');
-    expect(link.props.rel).toBe('noopener noreferrer');
-    expect(plainText(link.props.children)).toBe('https://example.com');
-  });
-
-  it('truncates display text for URLs longer than 50 chars but keeps full href', () => {
-    const longUrl = 'https://example.com/very/long/path/' + 'x'.repeat(40);
-    expect(longUrl.length).toBeGreaterThan(50);
-    const parts = formatWhatsAppText(longUrl);
-    const link = asElement(parts[0]);
-    expect(link.props.href).toBe(longUrl);
-    const displayed = plainText(link.props.children);
-    expect(displayed.length).toBe(50);
-    expect(displayed.endsWith('...')).toBe(true);
-    expect(longUrl.startsWith(displayed.slice(0, 47))).toBe(true);
-  });
-
-  it('treats http:// (not just https) as a link', () => {
-    const parts = formatWhatsAppText('http://x.test/y');
-    const link = asElement(parts[0]);
-    expect(link.type).toBe('a');
-    expect(link.props.href).toBe('http://x.test/y');
-  });
-});
-
-describe('formatWhatsAppText — line breaks and plain text', () => {
-  it('inserts <br /> between lines', () => {
-    const parts = formatWhatsAppText('one\ntwo');
-    // Expected: ['one', <br />, 'two']
-    expect(parts).toHaveLength(3);
-    expect(parts[0]).toBe('one');
-    expect(asElement(parts[1]).type).toBe('br');
-    expect(parts[2]).toBe('two');
-  });
-
-  it('renders visible formatted text and links', () => {
-    render(createElement('div', null, formatWhatsAppText('go *now* https://example.com')));
-
-    expect(screen.getByText('now').tagName).toBe('STRONG');
     const link = screen.getByRole('link', { name: 'https://example.com' });
     expect(link.getAttribute('href')).toBe('https://example.com');
     expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
   });
 
-  it('returns plain string when no patterns match', () => {
-    const parts = formatWhatsAppText('hello world');
-    expect(parts).toEqual(['hello world']);
-  });
-});
+  it('truncates long URL display text and keeps the full href', () => {
+    const longUrl = 'https://example.com/very/long/path/' + 'x'.repeat(40);
+    const displayText = `${longUrl.slice(0, 47)}...`;
 
-describe('formatWhatsAppText — combined patterns', () => {
-  it('preserves leading and trailing plain text around a format span', () => {
-    const parts = formatWhatsAppText('before *bold* after');
-    expect(parts[0]).toBe('before ');
-    expect(asElement(parts[1]).type).toBe('strong');
-    expect(parts[2]).toBe(' after');
+    renderMessage(longUrl);
+
+    const link = screen.getByRole('link', { name: displayText });
+    expect(displayText).toHaveLength(50);
+    expect(link.getAttribute('href')).toBe(longUrl);
+    expect(link.textContent).toBe(displayText);
   });
 
-  it('renders adjacent formats independently', () => {
-    const parts = formatWhatsAppText('*a* _b_');
-    const strong = parts.find((p): p is ReactElement<FormatElementProps> => isElementType(p, 'strong'));
-    const em = parts.find((p): p is ReactElement<FormatElementProps> => isElementType(p, 'em'));
-    expect(strong).toBeDefined();
-    expect(em).toBeDefined();
-    expect(plainText(strong?.props.children)).toBe('a');
-    expect(plainText(em?.props.children)).toBe('b');
+  it('renders http URLs as links', () => {
+    renderMessage('http://x.test/y');
+
+    expect(screen.getByRole('link', { name: 'http://x.test/y' }).getAttribute('href')).toBe('http://x.test/y');
+  });
+
+  it('renders an empty-state marker for nullish or blank text', () => {
+    renderFormatted(null);
+    expect(screen.getByText('\u2014')).toBeDefined();
   });
 });
