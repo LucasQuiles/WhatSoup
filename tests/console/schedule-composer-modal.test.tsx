@@ -455,6 +455,26 @@ describe('ScheduleComposerModal — field editing', () => {
     expect(cronInput.value).toBe('0 9 * * *')
   })
 
+  it('wires Weekly cron preset (0 9 * * 1)', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Weekly' }))
+
+    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
+    expect(cronInput.value).toBe('0 9 * * 1')
+  })
+
+  it('wires Monthly cron preset (0 9 1 * *)', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Monthly' }))
+
+    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
+    expect(cronInput.value).toBe('0 9 1 * *')
+  })
+
   it('shows a cron preview when recurring and cronExpr maps to a human string', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
