@@ -49,7 +49,7 @@ const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
           <div className="flex justify-between">
             <span className="c-label">ID</span>
             <span className="c-data text-t5">
-              {msg.pk < 0 ? 'pending' : `pk:${msg.pk}`}
+              {msg.pk === -1 ? 'failed' : msg.pk < 0 ? 'sending' : `pk:${msg.pk}`}
             </span>
           </div>
         </div>

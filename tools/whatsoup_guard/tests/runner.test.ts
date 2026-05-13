@@ -1095,7 +1095,11 @@ describe('runCycle', () => {
     ]);
   });
 
-  it('honors credential.token_aging propose_fix with a non-shell proposed action label', async () => {
+  it('honors credential.token_aging propose_fix with a remediation_hint to a runbook (no shell command)', async () => {
+    // Token rotation has no single deterministic shell command — the operator must
+    // pick the right credential surface for the deployment. Per spec §6.5 we still
+    // owe the operator follow-up text; we emit `remediation_hint:` instead of
+    // `propose_fix:<command>`.
     const { baselines, events, mutes } = setup();
     const tokenPath = tempFile('guard-alert-token');
     const oldTimestampSeconds = (NOW.getTime() - 31 * DAY_MS) / 1000;
@@ -1123,6 +1127,120 @@ describe('runCycle', () => {
     const body = vi.mocked(sink.deliver).mock.calls[0]?.[0].body ?? '';
     expect(body).toMatch(/action:\s+propose_fix/u);
     expect(body).not.toMatch(/action:\s+(?:remediate|block)/u);
+    // Must carry a remediation_hint pointing at the protection-layer spec.
+    const hintLine = body.split('\n').find((line: string) => line.startsWith('remediation_hint:'));
+    expect(hintLine).toBeDefined();
+    expect(hintLine!).toMatch(/docs\/specs\/2026-05-08-whatsoup-protection-layer-design\.md/u);
+    // Must NOT carry a fabricated propose_fix command line.
+    expect(body).not.toMatch(/^propose_fix:/m);
+  });
+
+  it('honors alerting.self_secret_widened propose_fix with a chmod command for the widened path', async () => {
+    // self_secret_widened payload carries `path` and `expected_mode` deterministically,
+    // so `chmod <mode> <path>` is a real POSIX command we can safely propose.
+    const { baselines, events, mutes } = setup();
+    const secretPath = tempFile('guard-hmac-key');
+    chmodSync(secretPath, 0o644);
+    const sink: Sink = {
+      name: 'whatsoup',
+      isDurableLog: false,
+      deliver: vi.fn(async () => ({ ok: true, channel: 'whatsoup' })),
+    };
+
+    await runCycle({
+      collectors: [],
+      scopes: [],
+      baselines,
+      events,
+      mutes,
+      evaluatorFor,
+      runtimeConfig: runtimeConfig({ 'alerting.self_secret_widened': 'propose_fix' }),
+      now: () => NOW,
+      selfSecrets: [{ path: secretPath, mode: 0o600 }],
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledOnce();
+    const body = vi.mocked(sink.deliver).mock.calls[0]?.[0].body ?? '';
+    expect(body).toMatch(/action:\s+propose_fix/u);
+    const proposeLine = body.split('\n').find((line: string) => line.startsWith('propose_fix:'));
+    expect(proposeLine).toBeDefined();
+    expect(proposeLine!).toMatch(/^propose_fix: chmod 0600 '.+guard-hmac-key'$/u);
+    // No remediation_hint when a real fix command is present.
+    expect(body).not.toMatch(/^remediation_hint:/m);
+  });
+
+  it('honors change.new_application_route propose_fix with a remediation_hint (no auto-fix)', async () => {
+    // Accepting a new application route is a baseline-update decision, not a shell
+    // command. We emit a hint pointing at the spec instead of inventing a subcommand.
+    const { baselines, events, mutes } = setup();
+    baseline(baselines, 'fixture.change', 'scope-a', { routes: ['/healthz'] });
+    const collector = new FixtureCollector({
+      id: 'fixture.change',
+      docs: { 'scope-a': { fields: { routes: ['/healthz', '/admin'] }, captured_at: NOW.toISOString() } },
+    });
+    const sink: Sink = {
+      name: 'whatsoup',
+      isDurableLog: false,
+      deliver: vi.fn(async () => ({ ok: true, channel: 'whatsoup' })),
+    };
+
+    await runCycle({
+      collectors: [collector],
+      scopes: ['scope-a'],
+      baselines,
+      events,
+      mutes,
+      evaluatorFor: () => () => [],
+      changeProbeIds: ['fixture.change'],
+      runtimeConfig: runtimeConfig({ 'change.new_application_route': 'propose_fix' }),
+      now: () => NOW,
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledOnce();
+    const body = vi.mocked(sink.deliver).mock.calls[0]?.[0].body ?? '';
+    expect(body).toMatch(/action:\s+propose_fix/u);
+    expect(body).not.toMatch(/^propose_fix:/m);
+    const hintLine = body.split('\n').find((line: string) => line.startsWith('remediation_hint:'));
+    expect(hintLine).toBeDefined();
+    expect(hintLine!).toMatch(/docs\/specs\/2026-05-08-whatsoup-protection-layer-design\.md/u);
+  });
+
+  it('honors change.new_persistence_unit propose_fix with a remediation_hint (no auto-fix)', async () => {
+    // Same contract as new_application_route: persistence-unit changes are baseline
+    // decisions, not single shell commands.
+    const { baselines, events, mutes } = setup();
+    baseline(baselines, 'fixture.change', 'scope-a', { units: ['svc-a'] });
+    const collector = new FixtureCollector({
+      id: 'fixture.change',
+      docs: { 'scope-a': { fields: { units: ['svc-a', 'svc-b'] }, captured_at: NOW.toISOString() } },
+    });
+    const sink: Sink = {
+      name: 'whatsoup',
+      isDurableLog: false,
+      deliver: vi.fn(async () => ({ ok: true, channel: 'whatsoup' })),
+    };
+
+    await runCycle({
+      collectors: [collector],
+      scopes: ['scope-a'],
+      baselines,
+      events,
+      mutes,
+      evaluatorFor: () => () => [],
+      changeProbeIds: ['fixture.change'],
+      runtimeConfig: runtimeConfig({ 'change.new_persistence_unit': 'propose_fix' }),
+      now: () => NOW,
+      sinks: [sink],
+    });
+
+    expect(sink.deliver).toHaveBeenCalledOnce();
+    const body = vi.mocked(sink.deliver).mock.calls[0]?.[0].body ?? '';
+    expect(body).toMatch(/action:\s+propose_fix/u);
+    expect(body).not.toMatch(/^propose_fix:/m);
+    const hintLine = body.split('\n').find((line: string) => line.startsWith('remediation_hint:'));
+    expect(hintLine).toBeDefined();
   });
 
   it('honors alerting.self_secret_widened observe by refusing without delivery', async () => {
