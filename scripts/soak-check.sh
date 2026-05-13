@@ -230,13 +230,13 @@ run_soak07() {
 run_soak08_10() {
   header "=== SOAK-08 through SOAK-10: Manual verification reminders ==="
   echo ""
-  manual "SOAK-08  Test Q responds: send a test message to Q's WhatsApp number and"
+  manual "SOAK-08  Test q responds: send a test message to the q instance number and"
   manual "         verify the agent replies within a reasonable time."
   echo ""
-  manual "SOAK-09  Test Loops responds: if accessible, send a test message in a"
-  manual "         Loops-managed chat and verify the agent replies."
+  manual "SOAK-09  Test loops responds: if accessible, send a test message in a"
+  manual "         loops instance chat and verify the agent replies."
   echo ""
-  manual "SOAK-10  Test BES Bot responds: send a test DM to BES Bot's WhatsApp number"
+  manual "SOAK-10  Test besbot responds: send a test DM to the besbot instance number"
   manual "         and verify the bot replies."
   echo ""
 }

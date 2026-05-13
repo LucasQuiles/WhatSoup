@@ -372,7 +372,7 @@ migrate_loops() {
 }
 
 # ---------------------------------------------------------------------------
-# Instance: BES Bot  (namespace move)
+# Instance: besbot  (namespace move)
 # ---------------------------------------------------------------------------
 migrate_besbot() {
   log ""

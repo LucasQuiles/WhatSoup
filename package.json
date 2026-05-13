@@ -27,6 +27,7 @@
     "guard:public-surface-drift": "node --experimental-strip-types scripts/public-surface-drift-check.ts",
     "guard:work-index": "node --experimental-strip-types scripts/work-index.ts --check",
     "guard:repo": "node --experimental-strip-types scripts/repo-hygiene-guard.ts",
+    "guard:repo:release-hygiene": "npm run guard:repo -- --release-hygiene",
     "guard:repo:commit-msg": "npm run guard:repo -- --commit-msg",
     "guard:repo:staged": "npm run guard:repo -- --staged",
     "guard:node-pin-consistency": "node --experimental-strip-types scripts/check-node-pin-consistency.ts",
@@ -40,7 +41,7 @@
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
     "verify:push:branch": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:repo:staged && npm run guard:publication:staged && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm run typecheck && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/doc-drift-check.test.ts tests/scripts/public-surface-drift-check.test.ts tests/scripts/drift-skip-ci-gating.test.ts tests/scripts/work-index.test.ts tests/scripts/node-pin-consistency.test.ts --pool=forks",
-    "verify:release": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:publication:all && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm --prefix console ci && npm run typecheck:all && npm test -- --pool=forks && npm --prefix console run build",
+    "verify:release": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:repo:release-hygiene && npm run guard:publication:all && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm --prefix console ci && npm run typecheck:all && npm test -- --pool=forks && npm --prefix console run build",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "test:watch": "vitest"
