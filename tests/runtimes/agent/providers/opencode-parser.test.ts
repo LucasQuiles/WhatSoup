@@ -1,0 +1,239 @@
+/**
+ * Direct unit coverage for src/runtimes/agent/providers/opencode-parser.ts.
+ *
+ * Unlike the gemini/codex parsers, this one is STATEFUL — it tracks a
+ * `firstStepSeen` flag so that only the first step_start emits an `init`
+ * event (subsequent ones return `ignored`). The module exposes:
+ *
+ * - createOpenCodeParser(): factory returning { parse, reset } with isolated state
+ * - parseOpenCodeEvent(line): deprecated module-level wrapper around a shared instance
+ * - resetParserState(): deprecated reset of that shared instance
+ *
+ * Existing parser-interface-conformance.test.ts covers only `init` +
+ * `assistant_text` generically. This file pins state-tracking + each
+ * event-type branch (step_start / text / tool_use / step_finish).
+ */
+import { describe, expect, it } from 'vitest';
+import {
+  createOpenCodeParser,
+  parseOpenCodeEvent,
+  resetParserState,
+} from '../../../../src/runtimes/agent/providers/opencode-parser.ts';
+
+describe('createOpenCodeParser — factory + per-instance state isolation', () => {
+  it('returns an object exposing parse and reset functions', () => {
+    const p = createOpenCodeParser();
+    expect(typeof p.parse).toBe('function');
+    expect(typeof p.reset).toBe('function');
+  });
+
+  it('two parsers track step_start state independently', () => {
+    const a = createOpenCodeParser();
+    const b = createOpenCodeParser();
+    // a sees its first step_start
+    expect(a.parse(JSON.stringify({ type: 'step_start', sessionID: 'session-a' }))).toEqual({
+      type: 'init',
+      sessionId: 'session-a',
+    });
+    // b has not seen any yet → its first IS a fresh init
+    expect(b.parse(JSON.stringify({ type: 'step_start', sessionID: 'session-b' }))).toEqual({
+      type: 'init',
+      sessionId: 'session-b',
+    });
+    // a's second is ignored
+    expect(a.parse(JSON.stringify({ type: 'step_start', sessionID: 'session-a' }))).toEqual({
+      type: 'ignored',
+    });
+  });
+
+  it('reset() restores first-step behavior on the same instance', () => {
+    const p = createOpenCodeParser();
+    p.parse(JSON.stringify({ type: 'step_start', sessionID: 'x' }));
+    expect(p.parse(JSON.stringify({ type: 'step_start', sessionID: 'y' }))).toEqual({
+      type: 'ignored',
+    });
+    p.reset();
+    expect(p.parse(JSON.stringify({ type: 'step_start', sessionID: 'z' }))).toEqual({
+      type: 'init',
+      sessionId: 'z',
+    });
+  });
+});
+
+describe('parseOpenCodeEvent — deprecated module-level API', () => {
+  it('delegates to the shared default instance and respects resetParserState()', () => {
+    resetParserState();
+    expect(parseOpenCodeEvent(JSON.stringify({ type: 'step_start', sessionID: 'first' }))).toEqual({
+      type: 'init',
+      sessionId: 'first',
+    });
+    // Second step_start through module-level API is ignored (shared state)
+    expect(parseOpenCodeEvent(JSON.stringify({ type: 'step_start', sessionID: 'second' }))).toEqual({
+      type: 'ignored',
+    });
+    // After reset, first-step behavior returns
+    resetParserState();
+    expect(parseOpenCodeEvent(JSON.stringify({ type: 'step_start', sessionID: 'third' }))).toEqual({
+      type: 'init',
+      sessionId: 'third',
+    });
+  });
+});
+
+describe('OpenCode parser — boundary inputs', () => {
+  it('empty string → null', () => {
+    expect(createOpenCodeParser().parse('')).toBeNull();
+  });
+
+  it('whitespace-only line → null', () => {
+    expect(createOpenCodeParser().parse('   ')).toBeNull();
+  });
+
+  it('malformed JSON → parse_error with the original line preserved', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse('{ no')).toEqual({ type: 'parse_error', line: '{ no' });
+  });
+
+  it('non-object parsed value → unknown', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse('"text"')).toEqual({ type: 'unknown', raw: 'text' });
+    expect(p.parse('42')).toEqual({ type: 'unknown', raw: 42 });
+  });
+});
+
+describe('OpenCode parser — text branch', () => {
+  it('emits assistant_text from part.text', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(JSON.stringify({ type: 'text', part: { text: 'hello world' } }));
+    expect(event).toEqual({ type: 'assistant_text', text: 'hello world' });
+  });
+
+  it('defaults text to empty string when part.text is missing', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(JSON.stringify({ type: 'text', part: {} }));
+    expect(event).toEqual({ type: 'assistant_text', text: '' });
+  });
+
+  it('returns ignored when part is not a record', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse(JSON.stringify({ type: 'text', part: 'oops' }))).toEqual({
+      type: 'ignored',
+    });
+    expect(p.parse(JSON.stringify({ type: 'text' }))).toEqual({ type: 'ignored' });
+  });
+});
+
+describe('OpenCode parser — tool_use branch', () => {
+  it('emits tool_result with completed status as not-error', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({
+        type: 'tool_use',
+        part: { callID: 'c-1', state: { status: 'completed', output: 'ok' } },
+      }),
+    );
+    expect(event).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'c-1',
+      content: 'ok',
+    });
+  });
+
+  it('emits tool_result with isError=true for any non-completed status', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({
+        type: 'tool_use',
+        part: { callID: 'c-1', state: { status: 'failed', output: 'boom' } },
+      }),
+    );
+    expect(event).toEqual({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'c-1',
+      content: 'boom',
+    });
+  });
+
+  it('emits tool_result with default empty content + isError=false when state is not a record', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({ type: 'tool_use', part: { callID: 'c-1' } }),
+    );
+    expect(event).toEqual({
+      type: 'tool_result',
+      isError: false,
+      toolId: 'c-1',
+      content: '',
+    });
+  });
+
+  it('returns unknown when part is not a record', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse(JSON.stringify({ type: 'tool_use', part: 'oops' }))).toMatchObject({
+      type: 'unknown',
+    });
+  });
+
+  it('stringifies non-string output via stringifyValue', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({
+        type: 'tool_use',
+        part: { callID: 'c-1', state: { status: 'completed', output: { foo: 'bar' } } },
+      }),
+    );
+    expect(typeof (event as { content: string }).content).toBe('string');
+  });
+});
+
+describe('OpenCode parser — step_finish branch', () => {
+  it('reason="stop" with tokens → result with inputTokens + outputTokens', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({
+        type: 'step_finish',
+        part: { reason: 'stop', tokens: { input: 123, output: 45 } },
+      }),
+    );
+    expect(event).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 123,
+      outputTokens: 45,
+    });
+  });
+
+  it('reason="stop" without tokens → result with undefined token counts', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } }));
+    expect(event).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: undefined,
+      outputTokens: undefined,
+    });
+  });
+
+  it('reason="tool-calls" → ignored (more steps follow)', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse(JSON.stringify({ type: 'step_finish', part: { reason: 'tool-calls' } }))).toEqual({
+      type: 'ignored',
+    });
+  });
+
+  it('non-record part → ignored', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse(JSON.stringify({ type: 'step_finish', part: null }))).toEqual({
+      type: 'ignored',
+    });
+  });
+});
+
+describe('OpenCode parser — unknown event type', () => {
+  it('unrecognised event type → unknown with raw value', () => {
+    const p = createOpenCodeParser();
+    expect(p.parse(JSON.stringify({ type: 'mystery' }))).toMatchObject({ type: 'unknown' });
+  });
+});
