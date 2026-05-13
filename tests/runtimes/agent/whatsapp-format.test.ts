@@ -133,9 +133,62 @@ describe('markdownToWhatsApp', () => {
       .toBe('italic and bold');
   });
 
+  it('iterates nested HTML-like tag stripping to remove malicious script residue', () => {
+    const output = markdownToWhatsApp('<scrip<script>t>alert(1)</script>');
+
+    expect(output).toBe('alert(1)');
+    expect(output).not.toMatch(/<\/?script/i);
+  });
+
+  it('strips malformed nested tags without leaving tag-like residue', () => {
+    const output = markdownToWhatsApp('<di<div>v>content</di</div>v>');
+
+    expect(output).toBe('content');
+    expect(output).not.toMatch(/<[A-Za-z/]/);
+  });
+
+  it('strips deeply nested tag-like residue within the bounded fixed-point loop', () => {
+    const nestedTag = (tag: string, depth: number): [string, string] => {
+      if (depth === 0) return [`<${tag}>`, `</${tag}>`];
+
+      const [open, close] = nestedTag(tag, depth - 1);
+      const split = Math.ceil(tag.length / 2);
+
+      return [
+        `<${tag.slice(0, split)}${open}${tag.slice(split)}>`,
+        `</${tag.slice(0, split)}${close}${tag.slice(split)}>`,
+      ];
+    };
+    const [open, close] = nestedTag('span', 6);
+    const output = markdownToWhatsApp(`${open}safe${close}`);
+
+    expect(output).toBe('safe');
+    expect(output).not.toMatch(/<[A-Za-z/]/);
+  });
+
+  it('preserves plain comparison text when stripping HTML-like tags', () => {
+    expect(markdownToWhatsApp('2 < 3 and 4 > 1')).toBe('2 < 3 and 4 > 1');
+  });
+
   it('decodes HTML entities', () => {
     expect(markdownToWhatsApp('a &lt; b &amp; c &gt; d')).toBe('a < b & c > d');
     expect(markdownToWhatsApp('&quot;hello&quot;')).toBe('"hello"');
+  });
+
+  it('does not double-unescape ampersand-encoded quote and less-than entities', () => {
+    expect(markdownToWhatsApp('&amp;quot;')).toBe('&quot;');
+    expect(markdownToWhatsApp('&amp;lt;')).toBe('&lt;');
+  });
+
+  it('still decodes direct quote entities and plain ampersands', () => {
+    expect(markdownToWhatsApp('&quot;hello&quot;')).toBe('"hello"');
+    expect(markdownToWhatsApp('Tom &amp; Jerry')).toBe('Tom & Jerry');
+  });
+
+  it('leaves encoded script tags as literal WhatsApp text after tag stripping', () => {
+    // Entity decoding intentionally runs after tag stripping; WhatsApp treats the result as text.
+    expect(markdownToWhatsApp('&lt;script&gt;alert(1)&lt;/script&gt;'))
+      .toBe('<script>alert(1)</script>');
   });
 
   // ── Table cleanup ──

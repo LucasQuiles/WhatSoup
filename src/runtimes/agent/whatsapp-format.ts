@@ -77,15 +77,15 @@ export function markdownToWhatsApp(text: string): string {
   // <br> / <br/> → newline
   out = out.replace(/<br\s*\/?>/gi, '\n');
 
-  // Strip remaining HTML tags (but preserve content)
-  out = out.replace(/<[^>]+>/g, '');
+  // Strip remaining HTML-like tags (but preserve content).
+  out = stripHtmlLikeTags(out);
 
   // HTML entities
   out = out.replace(/&lt;/g, '<');
   out = out.replace(/&gt;/g, '>');
-  out = out.replace(/&amp;/g, '&');
   out = out.replace(/&quot;/g, '"');
   out = out.replace(/&#39;/g, "'");
+  out = out.replace(/&amp;/g, '&');
 
   // --- Clean tables ---
 
@@ -160,4 +160,20 @@ function hasUnbalancedDelimiter(text: string, delim: string): boolean {
     if (char === delim) count++;
   }
   return count % 2 !== 0;
+}
+
+const MAX_HTML_TAG_STRIP_PASSES = 8;
+const HTML_LIKE_TAG_PATTERN =
+  /<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*\/?>/g;
+
+function stripHtmlLikeTags(text: string): string {
+  let stripped = text;
+
+  for (let pass = 0; pass < MAX_HTML_TAG_STRIP_PASSES; pass++) {
+    const next = stripped.replace(HTML_LIKE_TAG_PATTERN, '');
+    if (next === stripped) return next;
+    stripped = next;
+  }
+
+  return stripped;
 }
