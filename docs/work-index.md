@@ -25,8 +25,8 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, doc=14, handoff=4, plan=13, review=1, spec=13, state=19 |
-| Status | active=2, closed=6, completed=105, deferred=8, pending=38, unknown=18 |
-| Status source | bead-manifest=3, body-marker=95, directory=7, fallback=9, phase-log=7, state-md-status=56 |
+| Status | active=2, closed=7, completed=114, deferred=8, pending=38, unknown=8 |
+| Status source | bead-manifest=3, body-marker=101, directory=7, fallback=3, phase-log=7, state-md-status=56 |
 
 ## Inconsistencies
 
@@ -41,7 +41,7 @@ scoped markdown files currently on disk.
 | `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
 | `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
 
-### Unknown-status — triage needed (18)
+### Unknown-status — triage needed (8)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -50,19 +50,9 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
-| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | anti-echo-session-controls | 2026-04-07 |
-| `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | operation-tracker | 2026-04-25 |
-| `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | pr-0a-transport-contract-foundation | 2026-04-25 |
-| `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | anti-echo-review-handoff | 2026-04-07 |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
-| `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | anti-echo-session-controls-design | 2026-04-07 |
-| `docs/superpowers/specs/2026-04-07-provider-attribution.md` | spec | provider-attribution | 2026-04-07 |
-| `docs/superpowers/specs/2026-04-25-baseline-test-failures.md` | spec | baseline-test-failures | 2026-04-25 |
 | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | console-test-jsx-runtime-fix | 2026-04-25 |
-| `docs/superpowers/specs/2026-04-25-instance-loader-fixture-fix.md` | spec | instance-loader-fixture-fix | 2026-04-25 |
-| `docs/superpowers/specs/2026-04-25-operation-tracker-design.md` | spec | operation-tracker-design | 2026-04-25 |
-| `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | pr-0a-aqs | 2026-04-25 |
 
 ### Cross-tree topic clusters (1)
 
@@ -340,16 +330,16 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | unknown | fallback | scheduled-groups-tabs | 2026-04-06 |  |
-| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | unknown | fallback | anti-echo-session-controls | 2026-04-07 |  |
+| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | completed | body-marker | anti-echo-session-controls | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
-| `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | unknown | fallback | operation-tracker | 2026-04-25 |  |
-| `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | unknown | fallback | pr-0a-transport-contract-foundation | 2026-04-25 |  |
+| `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
+| `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
 
 ### docs/superpowers/reviews  _(1 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | unknown | fallback | anti-echo-review-handoff | 2026-04-07 |  |
+| `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-05-12 |  |
 
 ### docs/superpowers/specs  _(13 entries)_
 
@@ -359,17 +349,17 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | spec | completed | body-marker | mcp-feature-gaps-design | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | spec | completed | body-marker | phase2-mcp-features-design | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | unknown | body-marker | scheduled-groups-tabs-design | 2026-04-06 |  |
-| `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | unknown | body-marker | anti-echo-session-controls-design | 2026-04-07 |  |
-| `docs/superpowers/specs/2026-04-07-provider-attribution.md` | spec | unknown | body-marker | provider-attribution | 2026-04-07 |  |
+| `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | completed | body-marker | anti-echo-session-controls-design | 2026-05-12 |  |
+| `docs/superpowers/specs/2026-04-07-provider-attribution.md` | spec | completed | body-marker | provider-attribution | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md` | spec | deferred | body-marker | soup-kitchen-fleet-charts | 2026-04-24 |  |
-| `docs/superpowers/specs/2026-04-25-baseline-test-failures.md` | spec | unknown | body-marker | baseline-test-failures | 2026-04-25 |  |
+| `docs/superpowers/specs/2026-04-25-baseline-test-failures.md` | spec | closed | body-marker | baseline-test-failures | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | unknown | body-marker | console-test-jsx-runtime-fix | 2026-04-25 |  |
-| `docs/superpowers/specs/2026-04-25-instance-loader-fixture-fix.md` | spec | unknown | body-marker | instance-loader-fixture-fix | 2026-04-25 |  |
-| `docs/superpowers/specs/2026-04-25-operation-tracker-design.md` | spec | unknown | fallback | operation-tracker-design | 2026-04-25 |  |
-| `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | unknown | fallback | pr-0a-aqs | 2026-04-25 |  |
+| `docs/superpowers/specs/2026-04-25-instance-loader-fixture-fix.md` | spec | completed | body-marker | instance-loader-fixture-fix | 2026-05-12 |  |
+| `docs/superpowers/specs/2026-04-25-operation-tracker-design.md` | spec | completed | body-marker | operation-tracker-design | 2026-05-12 |  |
+| `docs/superpowers/specs/2026-04-25-pr-0a-aqs.md` | spec | completed | body-marker | pr-0a-aqs | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-25-transport-layer-design.md` | spec | pending | body-marker | transport-layer-design | 2026-04-25 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-05-12T06:25:20Z from commit `2c31aa82e787926504866bdee7308f15eb878452`
+- Generated at 2026-05-12T20:27:36Z from commit `e6aa9fe0e1d718fb7e02ea25d4db9cfe9f78f4fa`

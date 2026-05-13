@@ -1,8 +1,9 @@
 # Anti-Echo Protocol & Session Management Controls — Design Specification
 
 **Date:** 2026-04-07
-**Status:** Draft
+**Status:** completed
 **Author:** Q (investigation + spec), Lucas (direction)
+**Implementation:** `src/core/echo-guard.ts` and wiring in `src/runtimes/agent/outbound-queue.ts` and `runtime.ts`.
 **Depends on:** Identity drift fix (commit `3385978`) deployed
 
 ---

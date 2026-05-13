@@ -1,5 +1,7 @@
 # PR 0a — Transport Contract Foundation Implementation Plan
 
+**Status:** completed — contract surface landed under `src/transport/contract/` (adapter, capabilities, commands, error-codes, errors, events, fanout) with conformance tests under `tests/transport/contract/`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Land the WhatSoup v2 transport-layer contract surface (domain refs, contract types, error envelope, bounded queue, fanout dispatcher, in-memory test adapters) plus all conformance/lifecycle/capability-negative tests against in-memory adapters only — completely behavior-neutral. No production code path uses any of this yet; the intent is to lock the contract before any real adapter consumes it.

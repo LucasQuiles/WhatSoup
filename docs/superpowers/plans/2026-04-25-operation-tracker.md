@@ -1,8 +1,12 @@
 # Operation Tracker Implementation Plan
 
+**Status:** completed
+
+Implementation landed: `src/runtimes/agent/operation-tracker.ts` exists in origin/main and is wired into `src/runtimes/agent/runtime.ts` and `src/runtimes/agent/session.ts`. This plan is preserved as historical execution record.
+
 ## Shared Control Header and Run Bootstrap
 
-- Plan status: Draft execution plan after PlanPrompt hardening pass 1.
+- Plan status: completed (implementation landed; superseded by source files in `src/runtimes/agent/`).
 - Spec: `docs/superpowers/specs/2026-04-25-operation-tracker-design.md`
 - Repo root: `/home/q/LAB/WhatSoup`
 - Artifact root: `artifacts/`

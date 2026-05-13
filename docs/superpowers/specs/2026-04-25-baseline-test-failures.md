@@ -1,5 +1,7 @@
 # Baseline Test Failures — Closed 2026-04-25
 
+**Status:** closed — historical baseline snapshot; failures resolved by subsequent fixes.
+
 | Field | Value |
 |---|---|
 | Snapshot date | 2026-04-25 |

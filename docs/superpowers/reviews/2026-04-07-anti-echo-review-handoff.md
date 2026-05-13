@@ -1,5 +1,7 @@
 # Code Review Handoff: Anti-Echo Protocol & Session Management Controls
 
+**Status:** completed — review concluded; implementation merged. Preserved as historical handoff record.
+
 **Branch:** `feat/anti-echo-session-controls`
 **Base:** `main` (`d0fd32c`)
 **Head:** `6d97c83`
