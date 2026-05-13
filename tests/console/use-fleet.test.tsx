@@ -28,7 +28,7 @@ import {
   beforeEach,
   afterEach,
 } from 'vitest';
-import { cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
 
@@ -112,6 +112,12 @@ function wrapper(client: QueryClient) {
   };
 }
 
+async function advanceQueryTimers(ms: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 const LINE_1: LineInstance = {
   name: 'alpha',
   phone: '+15550001000',
@@ -188,6 +194,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 // ---------------------------------------------------------------------------
@@ -360,24 +367,27 @@ describe('useLines', () => {
   });
 
   it('disables polling when WS is connected (refetchInterval=false)', async () => {
+    vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getLines.mockResolvedValue([LINE_1]);
     const client = makeClient();
     const { result } = renderHook(() => useLines(), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    // Data resolved; polling gated off when WS connected
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(15_000);
     expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
   });
 
-  it('enables polling (5000ms) when WS is disconnected', async () => {
+  it('refetches after 5000ms when WS is disconnected', async () => {
+    vi.useFakeTimers();
     wsConnected = false;
     apiMocks.getLines.mockResolvedValue([LINE_1]);
     const client = makeClient();
     const { result } = renderHook(() => useLines(), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    // Polling is configured — cannot assert without fake timers but we confirm
-    // that the hook completed successfully and api was called
-    expect(apiMocks.getLines).toHaveBeenCalled();
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(5_000);
+    expect(apiMocks.getLines).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -412,12 +422,27 @@ describe('useLine', () => {
   });
 
   it('disables polling when WS connected', async () => {
+    vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getLine.mockResolvedValue(LINE_1);
     const client = makeClient();
     const { result } = renderHook(() => useLine('alpha'), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getLine).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(15_000);
+    expect(apiMocks.getLine).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches after 5000ms when WS disconnected', async () => {
+    vi.useFakeTimers();
+    wsConnected = false;
+    apiMocks.getLine.mockResolvedValue(LINE_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useLine('alpha'), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getLine).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(5_000);
+    expect(apiMocks.getLine).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -453,12 +478,27 @@ describe('useChats', () => {
   });
 
   it('disables polling when WS connected', async () => {
+    vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getChats.mockResolvedValue([CHAT_1]);
     const client = makeClient();
     const { result } = renderHook(() => useChats('alpha'), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getChats).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(15_000);
+    expect(apiMocks.getChats).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches after 5000ms when WS disconnected', async () => {
+    vi.useFakeTimers();
+    wsConnected = false;
+    apiMocks.getChats.mockResolvedValue([CHAT_1]);
+    const client = makeClient();
+    const { result } = renderHook(() => useChats('alpha'), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getChats).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(5_000);
+    expect(apiMocks.getChats).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -508,15 +548,19 @@ describe('useMessages', () => {
     expect(result.current.data).toHaveLength(0);
   });
 
-  it('uses 3000ms poll interval when WS disconnected', async () => {
+  it('refetches after 3000ms when WS disconnected', async () => {
+    vi.useFakeTimers();
     wsConnected = false;
     apiMocks.getMessages.mockResolvedValue([MSG_1]);
     const client = makeClient();
     const { result } = renderHook(() => useMessages('alpha', 'ck-001'), {
       wrapper: wrapper(client),
     });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getMessages).toHaveBeenCalledWith('alpha', 'ck-001');
+    expect(apiMocks.getMessages).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(3_000);
+    expect(apiMocks.getMessages).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -553,14 +597,15 @@ describe('useAccess', () => {
   });
 
   it('has no polling interval configured (no WS dependency)', async () => {
-    // useAccess does not call useRealtime — no refetchInterval
+    vi.useFakeTimers();
     apiMocks.getAccess.mockResolvedValue([]);
     const client = makeClient();
     const { result } = renderHook(() => useAccess('alpha'), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    // Just verify it resolves — absence of interval assertion is correct since
-    // useAccess is the only hook WITHOUT the WS polling pattern
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual([]);
+    expect(apiMocks.getAccess).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(60_000);
+    expect(apiMocks.getAccess).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -595,12 +640,27 @@ describe('useLogs', () => {
   });
 
   it('disables polling when WS connected', async () => {
+    vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getLogs.mockResolvedValue([LOG_1]);
     const client = makeClient();
     const { result } = renderHook(() => useLogs('alpha'), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getLogs).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(9_000);
+    expect(apiMocks.getLogs).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches after 3000ms when WS disconnected', async () => {
+    vi.useFakeTimers();
+    wsConnected = false;
+    apiMocks.getLogs.mockResolvedValue([LOG_1]);
+    const client = makeClient();
+    const { result } = renderHook(() => useLogs('alpha'), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getLogs).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(3_000);
+    expect(apiMocks.getLogs).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -635,12 +695,27 @@ describe('useTyping', () => {
   });
 
   it('disables polling when WS connected', async () => {
+    vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getTyping.mockResolvedValue([]);
     const client = makeClient();
     const { result } = renderHook(() => useTyping(), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getTyping).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(6_000);
+    expect(apiMocks.getTyping).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches after 2000ms when WS disconnected', async () => {
+    vi.useFakeTimers();
+    wsConnected = false;
+    apiMocks.getTyping.mockResolvedValue([]);
+    const client = makeClient();
+    const { result } = renderHook(() => useTyping(), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getTyping).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(2_000);
+    expect(apiMocks.getTyping).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -675,12 +750,27 @@ describe('useFeed', () => {
   });
 
   it('disables polling when WS connected', async () => {
+    vi.useFakeTimers();
     wsConnected = true;
     apiMocks.getFeed.mockResolvedValue([FEED_1]);
     const client = makeClient();
     const { result } = renderHook(() => useFeed(), { wrapper: wrapper(client) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiMocks.getFeed).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(15_000);
+    expect(apiMocks.getFeed).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches after 5000ms when WS disconnected', async () => {
+    vi.useFakeTimers();
+    wsConnected = false;
+    apiMocks.getFeed.mockResolvedValue([FEED_1]);
+    const client = makeClient();
+    const { result } = renderHook(() => useFeed(), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getFeed).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(5_000);
+    expect(apiMocks.getFeed).toHaveBeenCalledTimes(2);
   });
 });
 
