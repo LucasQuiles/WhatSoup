@@ -302,6 +302,82 @@ describe('RealtimeProvider — ticket mint failure and backoff', () => {
     expect(wsRegistry).toHaveLength(1);
     expect(wsRegistry[0].url).toContain('ticket=ws-ticket-ok');
   });
+
+  it('caps backoff at RECONNECT_MAX_MS=30_000 after repeated failures', async () => {
+    // Backoff curve: 1000→2000→4000→8000→16000→30000(capped)→30000(still capped)
+    // The cap means the 6th retry fires at 30_000ms delay, not 32_000ms (2^5 * 1000).
+    // We prove the cap by:
+    //   - advancing through 5 failures using per-step increments
+    //   - at the 6th retry window, asserting no socket before 30000ms but one after
+    mockedGetWsTicket
+      .mockRejectedValueOnce(new Error('fail-1'))  // schedules retry at delay=1000
+      .mockRejectedValueOnce(new Error('fail-2'))  // schedules retry at delay=2000
+      .mockRejectedValueOnce(new Error('fail-3'))  // schedules retry at delay=4000
+      .mockRejectedValueOnce(new Error('fail-4'))  // schedules retry at delay=8000
+      .mockRejectedValueOnce(new Error('fail-5'))  // schedules retry at delay=16000
+      .mockRejectedValueOnce(new Error('fail-6'))  // schedules retry at delay=30000 (capped, not 32000)
+      .mockResolvedValue({ ticket: 'ws-ticket-cap', expiresIn: 60 });
+
+    await renderProvider(buildQueryClient());
+    await flush();
+
+    // Drain failures 1–5 using their individual timer windows.
+    // Each advance fires the current pending retry; the mock then rejects again.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1100); });   // fires retry 1
+    expect(wsRegistry).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });   // fires retry 2
+    expect(wsRegistry).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4100); });   // fires retry 3
+    expect(wsRegistry).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(8100); });   // fires retry 4
+    expect(wsRegistry).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(16100); });  // fires retry 5
+    expect(wsRegistry).toHaveLength(0);
+
+    // Retry 6 is scheduled at delay=30_000 (the cap). Advance 29_000ms — socket must NOT exist yet.
+    await act(async () => { await vi.advanceTimersByTimeAsync(29_000); });
+    expect(wsRegistry).toHaveLength(0);
+
+    // Advance the remaining ~1100ms to cross the 30_000ms cap threshold — socket now opens.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+    expect(wsRegistry).toHaveLength(1);
+    expect(wsRegistry[0].url).toContain('ticket=ws-ticket-cap');
+  });
+
+  it('resets backoff to 1000ms after successful open following an elevated retry delay', async () => {
+    // Step 1: fail the ticket once → delay escalates to 2000ms
+    // Step 2: succeed ticket → open socket → onopen resets backoff to 1000ms
+    // Step 3: close socket → next reconnect must fire at ~1100ms, not ~2100ms
+    mockedGetWsTicket
+      .mockRejectedValueOnce(new Error('fail-1'))              // drives delay to 2000ms
+      .mockResolvedValueOnce({ ticket: 'tkt-open', expiresIn: 60 })  // fires at 1000ms
+      .mockResolvedValueOnce({ ticket: 'tkt-after-reset', expiresIn: 60 }); // after close
+
+    await renderProvider(buildQueryClient());
+    await flush();
+
+    // Consume the first failure; the retry is scheduled at 1000ms.
+    expect(wsRegistry).toHaveLength(0);
+
+    // Advance 1100ms — second attempt succeeds, socket is created.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+    expect(wsRegistry).toHaveLength(1);
+
+    // Open the socket — this triggers onopen which resets reconnectDelay to 1000ms.
+    act(() => { wsRegistry[0].simulateOpen(); });
+
+    // Close the socket — onclose schedules reconnect at the (now-reset) 1000ms delay.
+    act(() => { wsRegistry[0].simulateClose(); });
+
+    // At 1100ms the reconnect should already have fired (reset to 1000ms, not 2000ms).
+    await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+    expect(wsRegistry).toHaveLength(2);
+    expect(wsRegistry[1].url).toContain('ticket=tkt-after-reset');
+
+    // Confirm it did NOT fire at the un-reset 2000ms interval — if backoff were still
+    // 2000ms, the second socket would not exist yet at the 1100ms mark above.
+    // The assertion wsRegistry.toHaveLength(2) above is the definitive proof.
+  });
 });
 
 // ---------------------------------------------------------------------------
