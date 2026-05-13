@@ -162,6 +162,10 @@ describe('writeBeadEvent', () => {
       .prepare('SELECT source_message_pk FROM bead_events WHERE id = ?')
       .get(rowId) as { source_message_pk: number | null };
     expect(row.source_message_pk).toBeNull();
+    const nullRow = db.raw
+      .prepare('SELECT COUNT(*) AS c FROM bead_events WHERE id = ? AND source_message_pk IS NULL')
+      .get(rowId) as { c: number };
+    expect(nullRow.c).toBe(1);
   });
 
   it('returns monotonically-increasing ids for successive inserts', () => {
