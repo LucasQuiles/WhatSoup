@@ -38,4 +38,22 @@ describe('childProcessMock', () => {
 
     expect(callback).toHaveBeenCalledWith(null, '', '');
   });
+
+  it('exposes a configurable execFileSync spy that returns an empty Buffer by default', () => {
+    const mock = childProcessMock();
+    const result = mock.execFileSync('security', ['find-generic-password']);
+
+    expect(mock.execFileSync).toHaveBeenCalledWith('security', ['find-generic-password']);
+    expect(Buffer.isBuffer(result)).toBe(true);
+    expect((result as Buffer).length).toBe(0);
+  });
+
+  it('allows per-test execFileSync mockReturnValue overrides', () => {
+    const mock = childProcessMock();
+    mock.execFileSync.mockReturnValue(Buffer.from('sk-test-key\n'));
+
+    const result = mock.execFileSync('security', ['find-generic-password']);
+
+    expect(result.toString()).toBe('sk-test-key\n');
+  });
 });

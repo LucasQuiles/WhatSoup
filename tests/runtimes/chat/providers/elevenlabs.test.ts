@@ -5,9 +5,12 @@ const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
 // Mock execFileSync for API key retrieval (safe - no shell injection)
-vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn().mockReturnValue(Buffer.from('sk-test-elevenlabs-key\n')),
-}));
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../../../tests/helpers/child-process.ts');
+  const m = childProcessMock();
+  m.execFileSync.mockReturnValue(Buffer.from('xi-test-elevenlabs-key\n'));
+  return m;
+});
 
 // Must import after mocks are set up
 const { synthesizeSpeech, _testing } = await import(
@@ -35,7 +38,7 @@ describe('elevenlabs TTS provider', () => {
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toContain('/v1/text-to-speech/');
     expect(opts.method).toBe('POST');
-    expect(opts.headers['xi-api-key']).toBe('sk-test-elevenlabs-key');
+    expect(opts.headers['xi-api-key']).toBe('xi-test-elevenlabs-key');
     expect(opts.headers['Content-Type']).toBe('application/json');
 
     const body = JSON.parse(opts.body);

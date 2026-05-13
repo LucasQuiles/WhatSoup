@@ -23,8 +23,13 @@ export function childProcessMock() {
     return mockChildProcess();
   });
 
+  // execFileSync defaults to returning an empty Buffer; tests override via
+  // .mockReturnValue() / .mockImplementation() for per-call behavior.
+  const execFileSync = vi.fn((..._args: unknown[]) => Buffer.from(''));
+
   return {
     spawn: vi.fn((..._args: unknown[]) => mockChildProcess()),
     execFile,
+    execFileSync,
   };
 }
