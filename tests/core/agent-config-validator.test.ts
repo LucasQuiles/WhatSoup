@@ -112,6 +112,7 @@ describe('name + type immutability on patch', () => {
     const raw = baseAgent({ type: 'agent', systemPrompt: 'You are helpful.' });
     const result = validateInstanceConfig(raw, ctx('patch', { originalType: 'agent' }));
     expect(result).toBeNull();
+    expect(validateInstanceConfig(raw, ctx('patch', { originalType: 'chat' }))?.field).toBe('type');
   });
 });
 
@@ -171,12 +172,18 @@ describe('healthPort validation', () => {
     const raw = baseAgent({ healthPort: 1024 });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(validateInstanceConfig(baseAgent({ healthPort: 1023 }), ctx('create'))?.field).toBe(
+      'healthPort',
+    );
   });
 
   it('accepts healthPort at 65535 boundary', () => {
     const raw = baseAgent({ healthPort: 65535 });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(validateInstanceConfig(baseAgent({ healthPort: 65536 }), ctx('create'))?.field).toBe(
+      'healthPort',
+    );
   });
 
   it('flags healthPort duplicate with 409 status on create', () => {
@@ -193,6 +200,10 @@ describe('healthPort validation', () => {
     const existing = new Map([['alpha', 9001]]);
     const result = validateInstanceConfig(raw, ctx('create', { existingHealthPorts: existing }));
     expect(result).toBeNull();
+    expect(
+      validateInstanceConfig(raw, ctx('create', { existingHealthPorts: new Map([['beta', 9001]]) }))
+        ?.status,
+    ).toBe(409);
   });
 });
 
@@ -254,6 +265,9 @@ describe('claudeMd size cap', () => {
     const raw = baseAgent({ claudeMd: 'A'.repeat(32_768) });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(
+      validateInstanceConfig(baseAgent({ claudeMd: 'A'.repeat(32_769) }), ctx('create'))?.field,
+    ).toBe('claudeMd');
   });
 });
 
@@ -292,6 +306,7 @@ describe('authOnly mode short-circuits type rules', () => {
     const raw = basePassive({ systemPrompt: 'should be rejected normally' });
     const result = validateInstanceConfig(raw, ctx('load', { authOnly: true }));
     expect(result).toBeNull();
+    expect(validateInstanceConfig(raw, ctx('load'))?.field).toBe('systemPrompt');
   });
 });
 
@@ -307,6 +322,7 @@ describe('chat type rules', () => {
     const raw = baseChat({ systemPrompt: undefined });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(validateInstanceConfig(raw, ctx('load'))?.field).toBe('systemPrompt');
   });
 });
 
@@ -329,6 +345,9 @@ describe('passive type rules', () => {
     const raw = basePassive();
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(
+      validateInstanceConfig(basePassive({ accessMode: 'allowlist' }), ctx('create'))?.field,
+    ).toBe('accessMode');
   });
 });
 
@@ -377,6 +396,12 @@ describe('agent type rules', () => {
     });
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(
+      validateInstanceConfig(
+        baseAgent({ agentOptions: { sessionScope: 'single', sandboxPerChat: true } }),
+        ctx('create'),
+      )?.field,
+    ).toBe('agentOptions.sandboxPerChat');
   });
 
   it('cross-field: sessionScope single requires self_only on create', () => {
@@ -462,5 +487,11 @@ describe('agent type rules', () => {
     const raw = baseAgent();
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
+    expect(
+      validateInstanceConfig(
+        { ...baseAgent(), accessMode: 'allowlist', agentOptions: undefined },
+        ctx('create'),
+      )?.field,
+    ).toBe('accessMode');
   });
 });
