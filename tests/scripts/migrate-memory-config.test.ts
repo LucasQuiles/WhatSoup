@@ -10,6 +10,8 @@ import {
   runRollback,
 } from '../../scripts/migrate-memory-config.ts';
 
+const isWindows = process.platform === 'win32';
+
 function makeInstance(root: string, name: string, config: Record<string, unknown>): string {
   const dir = path.join(root, name);
   fs.mkdirSync(path.join(dir, 'auth'), { recursive: true });
@@ -284,6 +286,98 @@ describe('migrate-memory-config operator errors', () => {
       fs.writeFileSync(configPath, '{not valid json');
       expect(() => migrateMemoryConfigFile(configPath)).toThrowError(/malformed JSON/i);
       expect(() => migrateMemoryConfigFile(configPath)).toThrowError(configPath);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isWindows)('reports EACCES with path context on unreadable config', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ name: 'eacces-bot' }));
+      fs.chmodSync(configPath, 0o000);
+      try {
+        expect(() => migrateMemoryConfigFile(configPath)).toThrowError(
+          /cannot read config file \(permission denied\)/i,
+        );
+        expect(() => migrateMemoryConfigFile(configPath)).toThrowError(configPath);
+      } finally {
+        fs.chmodSync(configPath, 0o644);
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isWindows)('reports EACCES with path context when write dir is read-only', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
+    try {
+      const instanceDir = path.join(tmp, 'ro-bot');
+      fs.mkdirSync(instanceDir);
+      const configPath = path.join(instanceDir, 'config.json');
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ name: 'ro-bot', pineconeIndex: 'idx' }),
+      );
+      fs.chmodSync(instanceDir, 0o555);
+      try {
+        expect(() =>
+          migrateMemoryConfigFile(configPath, { write: true, backup: false }),
+        ).toThrowError(/cannot (write|replace) config file \(permission denied\)/i);
+        expect(() =>
+          migrateMemoryConfigFile(configPath, { write: true, backup: false }),
+        ).toThrowError(configPath);
+      } finally {
+        fs.chmodSync(instanceDir, 0o755);
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('migrate-memory-config rollback operator errors', () => {
+  const currentContent =
+    JSON.stringify({ name: 'test-bot', memory: { pinecone: { index: 'test-mind' } } }, null, 2) +
+    '\n';
+
+  it('reports helpful error when no backup files exist', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
+    try {
+      const dir = path.join(tmp, 'no-bak-bot');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'config.json'), currentContent);
+      expect(() =>
+        runRollback(['--root', tmp, '--instance', 'no-bak-bot', '--write']),
+      ).toThrowError(/no backups found/i);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isWindows)('reports EACCES with path context when backup rename fails', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
+    try {
+      const dir = path.join(tmp, 'perm-bot');
+      fs.mkdirSync(dir, { recursive: true });
+      const configPath = path.join(dir, 'config.json');
+      const backupPath = `${configPath}.bak-2026-04-25T12-00-00-000Z`;
+      fs.writeFileSync(configPath, currentContent);
+      fs.writeFileSync(backupPath, currentContent);
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(backupPath, past, past);
+      fs.chmodSync(dir, 0o555);
+      try {
+        expect(() =>
+          runRollback(['--root', tmp, '--instance', 'perm-bot', '--write']),
+        ).toThrowError(/cannot restore backup \(permission denied\)/i);
+        expect(() =>
+          runRollback(['--root', tmp, '--instance', 'perm-bot', '--write']),
+        ).toThrowError(configPath);
+      } finally {
+        fs.chmodSync(dir, 0o755);
+      }
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
