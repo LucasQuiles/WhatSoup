@@ -22,6 +22,8 @@ const MANAGED_ENV_KEYS = [
   'CUSTOM_SECRET',
   'ALLOW_M365_MUTATIONS',
   'WHATSOUP_CONNECTOR_FAILCLOSED',
+  'WHATSOUP_INSTANCE',
+  'WHATSOUP_MCP_SOCKET',
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -117,6 +119,28 @@ describe('buildBaseChildEnv', () => {
     const env = buildBaseChildEnv();
 
     expect(env).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+  });
+
+  it('emits reply-guarantee env only from explicit child-env options', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      WHATSOUP_INSTANCE: 'parent-instance',
+      WHATSOUP_MCP_SOCKET: '/tmp/parent.sock',
+    });
+
+    const implicit = buildBaseChildEnv();
+    expect(implicit).not.toHaveProperty('WHATSOUP_INSTANCE');
+    expect(implicit).not.toHaveProperty('WHATSOUP_MCP_SOCKET');
+
+    const explicit = buildBaseChildEnv({
+      whatsoupInstance: 'line-a',
+      whatsoupMcpSocket: '/tmp/line-a.sock',
+    });
+    expect(explicit).toMatchObject({
+      WHATSOUP_INSTANCE: 'line-a',
+      WHATSOUP_MCP_SOCKET: '/tmp/line-a.sock',
+    });
   });
 });
 

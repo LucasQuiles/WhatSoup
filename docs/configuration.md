@@ -261,7 +261,7 @@ Keep instance `config.json` files private. Profile names are safe to document, b
 
 Outbound send auditing is automatic and has no `config.json` field. Migration 22 creates an `outbound_sends` table in each instance's SQLite database on startup.
 
-The table is per instance. It records outbound send intent and outcome for MCP `send_message` and health `/send`, including the resolved raw chat JID, whether the request used a raw `chatJid` or alias `to`, the selected `profile` when present, SHA-256 hash of the final message text, text length, status, transport message id when available, and error text for failed sends.
+The table is per instance. It records outbound send intent and outcome for MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallbacks, including the resolved raw chat JID, whether the request used a raw `chatJid` or alias `to`, the selected `profile` when present, SHA-256 hash of the final message text, text length, status, transport message id when available, and error text for failed sends.
 
 Message bodies are not stored in `outbound_sends`. Retention is currently unbounded; prune manually after backup if local policy requires it.
 
@@ -693,6 +693,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 23 | Substrate schema: `beads`, `bead_triggers`, `trigger_runs`, `bead_events`, `entities`, `entity_aliases`, `entity_observations`, `bead_entity_refs`, `sweep_runs` (`MIGRATION_23` in `src/core/substrate/schema.ts`) |
 | 24 | `messages.updated_at` column + backfill + touch triggers on insert and content-changing updates |
 | 25 | `lid_mappings_history` retained audit table + indexes — first-seen rows and LID → phone flips are recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
+| 26 | Rebuilds pre-existing `outbound_sends` tables so the caller CHECK constraint allows Reply Guarantee Protocol fallback audit rows (`rgp`) |
 
 ---
 

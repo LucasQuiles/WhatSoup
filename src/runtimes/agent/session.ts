@@ -79,6 +79,8 @@ export interface SessionManagerOptions {
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
   mcpSessionContext?: SessionContext;
+  whatsoupInstance?: string;
+  whatsoupMcpSocket?: string;
 }
 
 /**
@@ -296,6 +298,8 @@ export class SessionManager {
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
   private readonly mcpSessionContext: SessionContext | undefined;
+  private readonly whatsoupInstance: string | undefined;
+  private readonly whatsoupMcpSocket: string | undefined;
 
   private systemPrompt: string = '';
 
@@ -385,6 +389,8 @@ export class SessionManager {
     this.providerConfig = opts.providerConfig;
     this.mcpBridge = opts.mcpBridge;
     this.mcpSessionContext = opts.mcpSessionContext;
+    this.whatsoupInstance = opts.whatsoupInstance;
+    this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -858,7 +864,11 @@ export class SessionManager {
       // Without this, Node.js inherits process.env in full — meaning ALL secrets
       // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
       // Each provider only receives the credentials it actually needs.
-      env: buildChildEnv(this.provider, { allowM365Mutations: this.allowM365Mutations }),
+      env: buildChildEnv(this.provider, {
+        allowM365Mutations: this.allowM365Mutations,
+        whatsoupInstance: this.whatsoupInstance,
+        whatsoupMcpSocket: this.whatsoupMcpSocket,
+      }),
     });
 
     this.child = child;
@@ -1392,7 +1402,11 @@ export class SessionManager {
       const child = spawn(binary, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: buildChildEnv(this.provider, { allowM365Mutations: this.allowM365Mutations }),
+        env: buildChildEnv(this.provider, {
+          allowM365Mutations: this.allowM365Mutations,
+          whatsoupInstance: this.whatsoupInstance,
+          whatsoupMcpSocket: this.whatsoupMcpSocket,
+        }),
       });
 
       this.child = child;

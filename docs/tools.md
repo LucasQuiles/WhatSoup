@@ -101,7 +101,7 @@ Send a text message. In chat-scoped sessions the current chat is injected. In gl
 
 **Target/profile errors:** `chatJid` + `to` returns `chatJid and to are mutually exclusive; provide exactly one`; neither target returns `request body must contain chatJid (raw JID) or to (alias)`; an unknown alias returns `alias not found: <alias>`; an unknown profile returns `unknown profile: <profile>`. MCP returns these as tool error envelopes. The health `/send` route maps the same request errors to HTTP 400.
 
-**Outbound audit:** `send_message` creates one `outbound_sends` intent row after target/profile preparation and finalizes that row as `sent` or `failed` after transport returns. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows; message bodies are not stored or returned.
+**Outbound audit:** `send_message` creates one `outbound_sends` intent row after target/profile preparation and finalizes that row as `sent` or `failed` after transport returns. Reply Guarantee Protocol fallbacks and health `/send` attempts use the same audit table. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows; message bodies are not stored or returned.
 
 ---
 

@@ -21,6 +21,8 @@ export interface BuildBaseChildEnvOptions {
    * this field is ignored. See `docs/configuration.md` (#411).
    */
   allowM365Mutations?: boolean;
+  whatsoupInstance?: string;
+  whatsoupMcpSocket?: string;
 }
 
 function isFailClosedEnabled(): boolean {
@@ -70,6 +72,11 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       ALLOW_M365_MUTATIONS: allowM365,
       // Sudo support
       SUDO_ASKPASS: process.env.SUDO_ASKPASS,
+      // Reply Guarantee Protocol hook context. These are explicit instance
+      // fields, not inherited parent env, so child sessions only see the socket
+      // they are meant to use.
+      WHATSOUP_INSTANCE: opts?.whatsoupInstance,
+      WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
     }).filter(([, v]) => v !== undefined),
   ) as NodeJS.ProcessEnv;
 }

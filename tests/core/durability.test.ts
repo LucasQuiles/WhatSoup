@@ -39,6 +39,13 @@ describe('DurabilityEngine', () => {
       expect(row.processing_status).toBe('turn_done');
     });
 
+    it('getInboundStatus returns the current processing status', () => {
+      const seq = engine.journalInbound('msg-status', 'key-1', 'jid-status', 'agent');
+      expect(engine.getInboundStatus(seq)).toBe('processing');
+      engine.markTurnDone(seq);
+      expect(engine.getInboundStatus(seq)).toBe('turn_done');
+    });
+
     it('markInboundComplete transitions turn_done → complete', () => {
       const seq = engine.journalInbound('msg-1', 'key-1', 'jid-1', 'agent');
       engine.markTurnDone(seq);

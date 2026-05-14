@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import type { LinkPreviewMode } from './send-pipeline.ts';
 
-export type OutboundSendCaller = 'mcp' | 'health';
+export type OutboundSendCaller = 'mcp' | 'health' | 'rgp';
 export type OutboundSendTargetKind = 'chatJid' | 'alias';
 
 export interface OutboundSendIntentInput {
