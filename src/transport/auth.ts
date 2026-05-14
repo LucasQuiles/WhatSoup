@@ -38,11 +38,26 @@ if (existsSync(lockPath)) {
 // ---------------------------------------------------------------------------
 
 const TIMEOUT_MS = 120_000;
+const RESTART_REQUIRED_FLAP_WINDOW_MS = 60_000;
+const RESTART_REQUIRED_FLAP_RECONNECT_DELAY_MS = 1_000;
 
 const timeoutHandle = setTimeout(() => {
   console.error('Timed out after 120 seconds — no successful authentication.');
   process.exit(1);
 }, TIMEOUT_MS);
+
+let restartRequiredTimestamps: number[] = [];
+
+function recordRestartRequired(statusCode: number | undefined): number {
+  if (statusCode !== DisconnectReason.restartRequired) return 0;
+
+  const now = Date.now();
+  restartRequiredTimestamps.push(now);
+  restartRequiredTimestamps = restartRequiredTimestamps.filter(
+    timestamp => now - timestamp < RESTART_REQUIRED_FLAP_WINDOW_MS,
+  );
+  return restartRequiredTimestamps.length;
+}
 
 async function startSocket(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
@@ -94,12 +109,25 @@ async function startSocket(): Promise<void> {
 
     if (connection === 'close') {
       const statusCode: number | undefined = (lastDisconnect?.error as any)?.output?.statusCode;
-      const action = decideDisconnectAction(statusCode);
+      const restartRequiredCount = recordRestartRequired(statusCode);
+      const action = decideDisconnectAction(statusCode, { restartRequiredCount });
 
       if (action.type === 'exit') {
         clearTimeout(timeoutHandle);
         console.error('Logged out — delete the auth directory and re-run this script.');
         process.exit(1);
+      }
+
+      if (action.type === 'reconnect' && action.reason === 'restart-required-flapping') {
+        console.error(
+          `restartRequired flapping detected (${action.count} in <60s) — backing off before reconnecting...`,
+        );
+        restartRequiredTimestamps = [];
+        try { sock.end(undefined); } catch { /* best-effort */ }
+        setTimeout(() => {
+          void startSocket();
+        }, RESTART_REQUIRED_FLAP_RECONNECT_DELAY_MS);
+        return;
       }
 
       if (action.type === 'reconnect' && action.reason === 'restart-required') {
