@@ -10,6 +10,9 @@ dist/
 *.db-wal
 *.db-shm
 *.lock
+.mcp.json
+.codex/
+.tmup-artifacts/
 
 # Auth state (contains session credentials)
 auth_info*/
@@ -29,8 +32,10 @@ docs/sdlc/
 docs/superpowers/
 docs/cutover/
 docs/handoff-*.md
+HANDOFF-*.md
 docs/project-status-*.md
 docs/audit-*.md
+tmp/
 
 # Per-chat workspaces (generated at runtime)
 users/
@@ -58,6 +63,9 @@ Thumbs.db
 
 # Duplicate detection catalog
 .duplicates/
+
+# Publication/artifact sweep scratch output
+.sweep/
 
 # SDLC working state (ephemeral — covered by docs/sdlc/ above)
 docs/sdlc/active/*/beads/
