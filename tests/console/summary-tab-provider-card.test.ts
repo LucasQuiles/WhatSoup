@@ -38,6 +38,8 @@ describe('SummaryTab provider card contract', () => {
       uptime: '5m',
       messagesTotal: 0,
       heartbeat: ['up', 'up', 'up'],
+      lastActive: '2026-05-13T00:00:00.000Z',
+      error: null,
       activeSessions: 1,
       health: {
         status: 'ok',

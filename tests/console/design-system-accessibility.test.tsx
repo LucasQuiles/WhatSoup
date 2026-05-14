@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
-import { createElement } from 'react'
+import { createElement, type ReactNode } from 'react'
 
 import { Field, TextInput } from '../../console/src/components/wizard/form-primitives'
 import HeartbeatStrip from '../../console/src/components/HeartbeatStrip'
@@ -16,9 +16,9 @@ import AddLineWizard from '../../console/src/components/AddLineWizard'
 vi.mock('framer-motion', async () => {
   const React = await import('react');
   return {
-    AnimatePresence: ({ children }: { children: unknown }) => children,
+    AnimatePresence: ({ children }: { children?: ReactNode }) => children,
     motion: {
-      div: ({ children, ...props }: Record<string, unknown>) => React.createElement('div', props, children),
+      div: ({ children, ...props }: { children?: ReactNode } & Record<string, unknown>) => React.createElement('div', props, children),
     },
   };
 })

@@ -2,15 +2,15 @@
  * @vitest-environment jsdom
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { createElement } from 'react';
+import { createElement, type ReactNode } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('framer-motion', async () => {
   const React = await import('react');
   return {
-    AnimatePresence: ({ children }: { children: unknown }) => children,
+    AnimatePresence: ({ children }: { children?: ReactNode }) => children,
     motion: {
-      div: ({ children, ...props }: Record<string, unknown>) => React.createElement('div', props, children),
+      div: ({ children, ...props }: { children?: ReactNode } & Record<string, unknown>) => React.createElement('div', props, children),
     },
   };
 });
@@ -170,7 +170,10 @@ describe('MetricsTab CSV export integration', () => {
   it('exports MetricsTab message volume through the CSV download path', async () => {
     const { MetricsTab } = await import('../../console/src/components/line-detail/MetricsTab.tsx');
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-    const createObjectURL = vi.fn(() => 'blob:metrics');
+    const createObjectURL = vi.fn((blob: Blob) => {
+      expect(blob).toBeInstanceOf(Blob);
+      return 'blob:metrics';
+    });
     const revokeObjectURL = vi.fn();
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
 
@@ -199,7 +202,9 @@ describe('MetricsTab CSV export integration', () => {
     fireEvent.click(screen.getByLabelText('Export metrics as CSV'));
 
     expect(createObjectURL).toHaveBeenCalledTimes(1);
-    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    const blob = createObjectURL.mock.calls[0]?.[0];
+    expect(blob).toBeDefined();
+    if (!blob) throw new Error('expected CSV export to create a blob URL');
     expect(await blob.text()).toBe('bucket,inbound,outbound\n2026-01-01T00:00:00Z,5,3');
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:metrics');
