@@ -221,6 +221,11 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
 }
 
+function gitList(cwd: string, args: string[]): string[] {
+  const output = git(cwd, args);
+  return output ? output.split(/\r?\n/).map(normalizeRepoPath).filter(Boolean) : [];
+}
+
 function gitHead(cwd: string): string {
   return git(cwd, ['rev-parse', 'HEAD']);
 }
@@ -406,9 +411,7 @@ function sdlcEpicsFromFiles(cwd: string, files: string[]): Map<string, StateEpic
 }
 
 export function compareWorkIndexCoverage(cwd: string, indexedPaths: Set<string>): WorkIndexCoverageIssue {
-  const actual = SCOPED_ROOTS.flatMap((root) =>
-    walkMarkdownFiles(path.join(cwd, root)).map((absolutePath) => repoRelative(cwd, absolutePath)),
-  ).sort();
+  const actual = listCandidateMarkdownFiles(cwd).map((absolutePath) => repoRelative(cwd, absolutePath)).sort();
   const missing = actual.filter((filePath) => !indexedPaths.has(filePath));
   const stale = [...indexedPaths].filter((filePath) => SCOPED_ROOTS.some((root) => filePath.startsWith(`${root}/`)) && !actual.includes(filePath)).sort();
   return { missing, stale };
@@ -601,7 +604,7 @@ function buildMarkdown(data: WorkIndexData): string {
 
 export function buildWorkIndex(cwd = process.cwd()): WorkIndexData {
   const root = repoRoot(cwd);
-  const files = SCOPED_ROOTS.flatMap((scopeRoot) => walkMarkdownFiles(path.join(root, scopeRoot)));
+  const files = listCandidateMarkdownFiles(root);
   const rows = parseRows(root, files);
   const coverage = compareWorkIndexCoverage(root, indexedPaths(rows));
 
@@ -619,6 +622,16 @@ export function buildWorkIndex(cwd = process.cwd()): WorkIndexData {
       ...coverage.stale.map((filePath) => ({ kind: 'stale-index-entry' as const, path: filePath })),
     ],
   };
+}
+
+function listCandidateMarkdownFiles(cwd: string): string[] {
+  try {
+    return gitList(cwd, ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...SCOPED_ROOTS])
+      .filter((filePath) => filePath.endsWith('.md'))
+      .map((filePath) => path.join(cwd, filePath));
+  } catch {
+    return SCOPED_ROOTS.flatMap((scopeRoot) => walkMarkdownFiles(path.join(cwd, scopeRoot)));
+  }
 }
 
 export function writeWorkIndex(cwd = process.cwd()): WorkIndexData {
