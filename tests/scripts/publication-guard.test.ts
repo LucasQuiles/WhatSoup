@@ -105,4 +105,13 @@ describe('publication guard staged mode', () => {
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
     expect(error.mock.calls.join('\n')).toContain('github-token');
   });
+
+  it('allows shape-preserving synthetic LID fixtures in staged public text', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    const publicDoc = 'docs/public-note.md';
+    writeFileSync(join(repo, publicDoc), 'fixture: 81536414179000@lid\n');
+    execFileSync('git', ['add', publicDoc], { cwd: repo, stdio: 'ignore' });
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(0);
+  });
 });

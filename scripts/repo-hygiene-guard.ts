@@ -141,7 +141,7 @@ const addedLinePatterns: GuardPattern[] = [
   {
     code: 'whatsapp-user-jid',
     message: 'Public repo text must not include real-shaped WhatsApp user JIDs.',
-    regex: /\b(?!(?:1555\d{4,}|1111111\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/,
+    regex: /\b(?!(?:1555\d{4,}|1111111\d+|81536414179\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/,
   },
   {
     code: 'github-token',

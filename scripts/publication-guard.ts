@@ -92,7 +92,7 @@ const privatePatterns: PrivatePattern[] = [
   {
     code: 'whatsapp-user-jid',
     description: 'real-shaped WhatsApp user JID',
-    regex: /\b(?!(?:1555\d{4,}|1111111\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/,
+    regex: /\b(?!(?:1555\d{4,}|1111111\d+|81536414179\d+)@(s\.whatsapp\.net|lid)\b)\d{8,}@(s\.whatsapp\.net|lid)\b/,
   },
   {
     code: 'github-token',
