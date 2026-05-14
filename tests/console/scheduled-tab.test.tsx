@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('../../console/src/lib/api', () => ({
@@ -12,54 +12,21 @@ vi.mock('../../console/src/lib/api', () => ({
     getScheduled: vi.fn(),
     getChats: vi.fn(),
     cancelScheduled: vi.fn(),
-  },
-}))
-
-// Stub ScheduledMessageRow so we can assert which messages were passed and in what order,
-// without depending on its internal markup (already covered by its own tests).
-vi.mock('../../console/src/components/line-detail/ScheduledMessageRow', () => ({
-  ScheduledMessageRow: ({ message, onCancel, onEdit, onDuplicate, cancelling }: {
-    message: { id: number; status: string; scheduledAt: number }
-    onCancel: (id: number) => void
-    onEdit: (m: unknown) => void
-    onDuplicate: (m: unknown) => void
-    cancelling: number | null
-  }) => (
-    <div data-testid="sched-row" data-id={message.id} data-status={message.status} data-scheduled-at={message.scheduledAt}>
-      <span>row-{message.id}</span>
-      <button type="button" onClick={() => onCancel(message.id)}>row-cancel-{message.id}</button>
-      <button type="button" onClick={() => onEdit(message)}>row-edit-{message.id}</button>
-      <button type="button" onClick={() => onDuplicate(message)}>row-duplicate-{message.id}</button>
-      {cancelling === message.id && <span>row-cancelling-{message.id}</span>}
-    </div>
-  ),
-}))
-
-// Stub the composer so we can assert open/close + props without rendering the heavy modal.
-const composerProps: { last: Record<string, unknown> | null } = { last: null }
-vi.mock('../../console/src/components/line-detail/ScheduleComposerModal', () => ({
-  ScheduleComposerModal: (props: Record<string, unknown>) => {
-    composerProps.last = props
-    if (!props.open) return null
-    return (
-      <div data-testid="composer-modal">
-        <span>composer-open</span>
-        {props.editMessage ? <span>composer-edit-{(props.editMessage as { id: number }).id}</span> : <span>composer-new</span>}
-        <button type="button" onClick={() => (props.onClose as () => void)()}>composer-close</button>
-        <button type="button" onClick={() => (props.onCreated as () => void)()}>composer-created</button>
-      </div>
-    )
+    createScheduled: vi.fn(),
+    updateScheduled: vi.fn(),
   },
 }))
 
 import { ScheduledTab } from '../../console/src/components/line-detail/ScheduledTab'
 import { api } from '../../console/src/lib/api'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
-import type { ScheduledMessage } from '../../console/src/types'
+import type { ChatItem, ScheduledMessage } from '../../console/src/types'
 
 const getScheduledMock = api.getScheduled as unknown as ReturnType<typeof vi.fn>
 const getChatsMock = api.getChats as unknown as ReturnType<typeof vi.fn>
 const cancelScheduledMock = api.cancelScheduled as unknown as ReturnType<typeof vi.fn>
+const createScheduledMock = api.createScheduled as unknown as ReturnType<typeof vi.fn>
+const updateScheduledMock = api.updateScheduled as unknown as ReturnType<typeof vi.fn>
 
 let toastValue: ToastContextValue
 
@@ -92,36 +59,57 @@ function makeMsg(overrides: Partial<ScheduledMessage> = {}): ScheduledMessage {
     chatJid: '15555550001@s.whatsapp.net',
     chatName: 'Chat One',
     contentType: 'text',
-    payload: { text: 'hello' },
-    scheduledAt: 1_700_000_000,
+    payload: { text: 'hello from scheduled row' },
+    scheduledAt: 2_600_000_000,
     runCount: 0,
     status: 'pending',
-    createdAt: 1_699_990_000,
+    createdAt: 2_599_990_000,
     retryCount: 0,
     ...overrides,
   }
 }
 
-const pendingEarly = makeMsg({ id: 11, status: 'pending',    scheduledAt: 1_700_000_000 })
-const pendingLate  = makeMsg({ id: 12, status: 'pending',    scheduledAt: 1_700_001_000 })
-const processing   = makeMsg({ id: 13, status: 'processing', scheduledAt: 1_700_000_500 })
-const sentOlder    = makeMsg({ id: 14, status: 'sent',       scheduledAt: 1_699_000_000, sentAt: 1_699_000_500 })
-const sentNewer    = makeMsg({ id: 15, status: 'sent',       scheduledAt: 1_699_500_000, sentAt: 1_699_500_500 })
-const cancelled    = makeMsg({ id: 16, status: 'cancelled',  scheduledAt: 1_699_200_000 })
-const groupMsg     = makeMsg({ id: 17, status: 'pending',    scheduledAt: 1_700_002_000, chatJid: '120363001@g.us', chatName: 'Group Alpha' })
+const pendingEarly = makeMsg({ id: 11, status: 'pending',    scheduledAt: 2_600_000_000, payload: { text: 'early pending message' } })
+const pendingLate  = makeMsg({ id: 12, status: 'pending',    scheduledAt: 2_600_001_000, payload: { text: 'late pending message' } })
+const processing   = makeMsg({ id: 13, status: 'processing', scheduledAt: 2_600_000_500, payload: { text: 'processing message' } })
+const sentOlder    = makeMsg({ id: 14, status: 'sent',       scheduledAt: 2_599_000_000, sentAt: 2_599_000_500, payload: { text: 'older sent message' } })
+const sentNewer    = makeMsg({ id: 15, status: 'sent',       scheduledAt: 2_599_500_000, sentAt: 2_599_500_500, payload: { text: 'newer sent message' } })
+const cancelled    = makeMsg({ id: 16, status: 'cancelled',  scheduledAt: 2_599_200_000, payload: { text: 'cancelled message' } })
+const groupMsg     = makeMsg({ id: 17, status: 'pending',    scheduledAt: 2_600_002_000, chatJid: '120363001@g.us', chatName: 'Group Alpha', payload: { text: 'group pending message' } })
 
-const chatItems = [
-  { jid: '15555550001@s.whatsapp.net', name: 'Chat One' },
-  { jid: '120363001@g.us', name: 'Group Alpha' },
+function makeChat(overrides: Partial<ChatItem> = {}): ChatItem {
+  return {
+    conversationKey: '15555550001@s.whatsapp.net',
+    name: 'Chat One',
+    lastMessagePreview: 'latest direct preview',
+    lastMessageAt: '2052-05-10T10:00:00.000Z',
+    unreadCount: 0,
+    isGroup: false,
+    ...overrides,
+  }
+}
+
+const chatItems: ChatItem[] = [
+  makeChat(),
+  makeChat({
+    conversationKey: '120363001@g.us',
+    name: 'Group Alpha',
+    lastMessagePreview: 'latest group preview',
+    unreadCount: 3,
+    isGroup: true,
+  }),
 ]
 
 beforeEach(() => {
   getScheduledMock.mockReset()
   getChatsMock.mockReset()
   cancelScheduledMock.mockReset()
-  composerProps.last = null
+  createScheduledMock.mockReset()
+  updateScheduledMock.mockReset()
   toastValue = makeToast()
   getChatsMock.mockResolvedValue(chatItems)
+  createScheduledMock.mockResolvedValue(undefined)
+  updateScheduledMock.mockResolvedValue(undefined)
 })
 
 afterEach(() => cleanup())
@@ -140,6 +128,18 @@ async function renderSettled(client?: QueryClient) {
   return utils
 }
 
+function expectVisibleOrder(labels: string[]) {
+  const nodes = labels.map(label => screen.getByText(label))
+  for (let i = 0; i < nodes.length - 1; i += 1) {
+    expect(Boolean(nodes[i].compareDocumentPosition(nodes[i + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+  }
+}
+
+function inputValue(label: string): string {
+  const input = screen.getByLabelText(label)
+  return (input as HTMLInputElement | HTMLTextAreaElement).value
+}
+
 describe('ScheduledTab — loading / error / empty states', () => {
   it('renders the loading EmptyState while the scheduled query is pending', () => {
     // Never-resolving promises so the query stays in loading state.
@@ -150,7 +150,7 @@ describe('ScheduledTab — loading / error / empty states', () => {
 
     expect(screen.getByText('Loading scheduled messages...')).toBeDefined()
     expect(screen.getByText(/Fetching queue for this instance/i)).toBeDefined()
-    expect(screen.queryByTestId('sched-row')).toBeNull()
+    expect(screen.queryByText(pendingEarly.payload.text as string)).toBeNull()
     expect(screen.queryByRole('button', { name: /New Scheduled Message/i })).toBeNull()
   })
 
@@ -161,7 +161,7 @@ describe('ScheduledTab — loading / error / empty states', () => {
 
     expect(screen.getByText('Failed to load scheduled messages')).toBeDefined()
     expect(screen.getByText('socket down')).toBeDefined()
-    expect(screen.queryByTestId('sched-row')).toBeNull()
+    expect(screen.queryByText(pendingEarly.payload.text as string)).toBeNull()
   })
 
   it('falls back to the MCP-socket hint when the rejection is not an Error', async () => {
@@ -181,7 +181,7 @@ describe('ScheduledTab — loading / error / empty states', () => {
     expect(screen.getByText('0 scheduled messages')).toBeDefined()
     expect(screen.getByText('No scheduled messages')).toBeDefined()
     expect(screen.getByText(/Messages scheduled via the agent or MCP tools will appear here/i)).toBeDefined()
-    expect(screen.queryByTestId('sched-row')).toBeNull()
+    expect(screen.queryByText(pendingEarly.payload.text as string)).toBeNull()
   })
 
   it('does not fire either query when lineName is empty (enabled:false guard)', () => {
@@ -199,7 +199,7 @@ describe('ScheduledTab — header counts and sort order', () => {
     await renderSettled()
 
     expect(screen.getByText('1 scheduled message')).toBeDefined()
-    expect(screen.getAllByTestId('sched-row')).toHaveLength(1)
+    expect(screen.getByText('early pending message')).toBeDefined()
   })
 
   it('renders the plural header text and one row per message', async () => {
@@ -211,7 +211,9 @@ describe('ScheduledTab — header counts and sort order', () => {
     await renderSettled()
 
     expect(screen.getByText('3 scheduled messages')).toBeDefined()
-    expect(screen.getAllByTestId('sched-row')).toHaveLength(3)
+    expect(screen.getByText('early pending message')).toBeDefined()
+    expect(screen.getByText('late pending message')).toBeDefined()
+    expect(screen.getByText('newer sent message')).toBeDefined()
   })
 
   it('sorts pending+processing first ASC by scheduledAt, then the rest DESC by scheduledAt', async () => {
@@ -223,14 +225,13 @@ describe('ScheduledTab — header counts and sort order', () => {
 
     await renderSettled()
 
-    const ids = screen.getAllByTestId('sched-row').map(el => el.getAttribute('data-id'))
-    expect(ids).toEqual([
-      String(pendingEarly.id),
-      String(processing.id),
-      String(pendingLate.id),
-      String(sentNewer.id),
-      String(cancelled.id),
-      String(sentOlder.id),
+    expectVisibleOrder([
+      'early pending message',
+      'processing message',
+      'late pending message',
+      'newer sent message',
+      'cancelled message',
+      'older sent message',
     ])
   })
 
@@ -242,9 +243,9 @@ describe('ScheduledTab — header counts and sort order', () => {
 
     await renderSettled()
 
-    const rows = screen.getAllByTestId('sched-row')
-    expect(rows).toHaveLength(2)
-    expect(rows.map(r => r.getAttribute('data-id'))).toEqual([String(pendingEarly.id), String(groupMsg.id)])
+    expect(screen.getByText('early pending message')).toBeDefined()
+    expect(screen.getByText('group pending message')).toBeDefined()
+    expect(screen.getByText('Group Alpha')).toBeDefined()
   })
 })
 
@@ -259,7 +260,7 @@ describe('ScheduledTab — cancel flow wiring', () => {
     await renderSettled(client)
 
     await act(async () => {
-      fireEvent.click(screen.getByText(`row-cancel-${pendingEarly.id}`))
+      fireEvent.click(screen.getByLabelText('Cancel scheduled message to Chat One'))
     })
 
     expect(cancelScheduledMock).toHaveBeenCalledTimes(1)
@@ -278,7 +279,7 @@ describe('ScheduledTab — cancel flow wiring', () => {
     await renderSettled(client)
 
     await act(async () => {
-      fireEvent.click(screen.getByText(`row-cancel-${pendingEarly.id}`))
+      fireEvent.click(screen.getByLabelText('Cancel scheduled message to Chat One'))
     })
 
     expect(toastValue.error).toHaveBeenCalledWith('Cancel failed: boom')
@@ -293,7 +294,7 @@ describe('ScheduledTab — cancel flow wiring', () => {
     await renderSettled()
 
     await act(async () => {
-      fireEvent.click(screen.getByText(`row-cancel-${pendingEarly.id}`))
+      fireEvent.click(screen.getByLabelText('Cancel scheduled message to Chat One'))
     })
 
     expect(toastValue.error).toHaveBeenCalledWith('Cancel failed: nope')
@@ -301,49 +302,57 @@ describe('ScheduledTab — cancel flow wiring', () => {
 })
 
 describe('ScheduledTab — composer open / close / edit / duplicate / new', () => {
-  it('does not render the composer body until the New button is clicked, then opens it with no editMessage', async () => {
+  it('keeps the composer closed until New is clicked, then shows an empty schedule form', async () => {
     getScheduledMock.mockResolvedValue({ count: 1, messages: [pendingEarly] })
 
     await renderSettled()
 
-    expect(screen.queryByTestId('composer-modal')).toBeNull()
-    expect(composerProps.last?.open).toBe(false)
+    expect(screen.queryByRole('dialog')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /New Scheduled Message/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'New Scheduled Message' }))
 
-    expect(screen.getByTestId('composer-modal')).toBeDefined()
-    expect(screen.getByText('composer-new')).toBeDefined()
-    expect(composerProps.last?.open).toBe(true)
-    expect(composerProps.last?.editMessage).toBeUndefined()
-    // Confirm the edit-marker branch did not render — proves we entered the "new" path.
-    expect(screen.queryByText(/^composer-edit-/)).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Schedule Message' })).toBeDefined()
+    expect(inputValue('Message text')).toBe('')
+    expect(screen.getByLabelText('Search chats...')).toBeDefined()
+    expect(screen.queryByText('Edit Scheduled Message')).toBeNull()
   })
 
-  it('opens the composer in edit mode with the original message when row.onEdit fires', async () => {
+  it('opens edit mode with the selected chat and original message text visible', async () => {
     getScheduledMock.mockResolvedValue({ count: 1, messages: [pendingEarly] })
 
     await renderSettled()
 
-    fireEvent.click(screen.getByText(`row-edit-${pendingEarly.id}`))
+    fireEvent.click(screen.getByLabelText('Edit scheduled message'))
 
-    expect(screen.getByTestId('composer-modal')).toBeDefined()
-    expect(screen.getByText(`composer-edit-${pendingEarly.id}`)).toBeDefined()
-    expect((composerProps.last?.editMessage as ScheduledMessage).id).toBe(pendingEarly.id)
+    const dialog = screen.getByRole('dialog', { name: 'Edit Scheduled Message' })
+    expect(dialog).toBeDefined()
+    expect(within(dialog).getByText('Chat One')).toBeDefined()
+    expect(inputValue('Message text')).toBe('early pending message')
+    expect(screen.getByRole('button', { name: /^Update$/ })).toBeDefined()
   })
 
-  it('opens the composer with id=-1 (signals "create new from template") when row.onDuplicate fires', async () => {
+  it('duplicates a row as a new scheduled message template', async () => {
     getScheduledMock.mockResolvedValue({ count: 1, messages: [pendingEarly] })
 
     await renderSettled()
 
-    fireEvent.click(screen.getByText(`row-duplicate-${pendingEarly.id}`))
+    fireEvent.click(screen.getByLabelText('Duplicate as new scheduled message'))
 
-    expect(screen.getByTestId('composer-modal')).toBeDefined()
-    // id=-1 still goes through ScheduledTab's `editMessage?.id ? ... : undefined` gate (truthy),
-    // so the composer receives a templated edit payload with id=-1.
-    expect((composerProps.last?.editMessage as ScheduledMessage).id).toBe(-1)
-    // Other fields are preserved from the source message.
-    expect((composerProps.last?.editMessage as ScheduledMessage).chatJid).toBe(pendingEarly.chatJid)
+    const dialog = screen.getByRole('dialog', { name: 'Schedule Message' })
+    expect(dialog).toBeDefined()
+    expect(within(dialog).getByText('Chat One')).toBeDefined()
+    expect(inputValue('Message text')).toBe('early pending message')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Schedule$/ }))
+    })
+
+    expect(createScheduledMock).toHaveBeenCalledWith(LINE, expect.objectContaining({
+      chatJid: pendingEarly.chatJid,
+      chatName: pendingEarly.chatName,
+      text: 'early pending message',
+    }))
+    expect(updateScheduledMock).not.toHaveBeenCalled()
   })
 
   it('closes the composer and clears editMessage when the composer onClose fires', async () => {
@@ -351,46 +360,60 @@ describe('ScheduledTab — composer open / close / edit / duplicate / new', () =
 
     await renderSettled()
 
-    fireEvent.click(screen.getByText(`row-edit-${pendingEarly.id}`))
-    expect(screen.getByTestId('composer-modal')).toBeDefined()
+    fireEvent.click(screen.getByLabelText('Edit scheduled message'))
+    expect(screen.getByRole('dialog', { name: 'Edit Scheduled Message' })).toBeDefined()
 
-    fireEvent.click(screen.getByText('composer-close'))
+    fireEvent.click(screen.getByLabelText('Close'))
 
-    expect(screen.queryByTestId('composer-modal')).toBeNull()
-    expect(composerProps.last?.open).toBe(false)
-    expect(composerProps.last?.editMessage).toBeUndefined()
-    expect(screen.queryByText(`composer-edit-${pendingEarly.id}`)).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Scheduled Message' }))
+
+    expect(screen.getByRole('dialog', { name: 'Schedule Message' })).toBeDefined()
+    expect(inputValue('Message text')).toBe('')
   })
 
-  it('invalidates the scheduled query when the composer fires onCreated', async () => {
-    getScheduledMock.mockResolvedValue({ count: 1, messages: [pendingEarly] })
+  it('lets a user choose a chat, submit a new scheduled message, and invalidates the scheduled query', async () => {
+    getScheduledMock.mockResolvedValue({ count: 0, messages: [] })
 
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+    const scheduledAtValue = '2099-01-02T09:30'
+    const expectedScheduledAt = Math.floor(new Date(scheduledAtValue).getTime() / 1000)
 
     await renderSettled(client)
 
-    fireEvent.click(screen.getByRole('button', { name: /New Scheduled Message/i }))
-    fireEvent.click(screen.getByText('composer-created'))
+    fireEvent.click(screen.getByRole('button', { name: 'New Scheduled Message' }))
+    fireEvent.focus(screen.getByLabelText('Search chats...'))
+    fireEvent.click(screen.getByRole('button', { name: 'Group Alpha' }))
+    fireEvent.change(screen.getByLabelText('Message text'), { target: { value: 'Ship update' } })
+    fireEvent.change(screen.getByLabelText('Scheduled time (local)'), { target: { value: scheduledAtValue } })
 
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Schedule$/ }))
+    })
+
+    expect(createScheduledMock).toHaveBeenCalledWith(LINE, {
+      chatJid: '120363001@g.us',
+      chatName: 'Group Alpha',
+      scheduled_at: expectedScheduledAt,
+      text: 'Ship update',
+    })
+    expect(toastValue.success).toHaveBeenCalledWith('Message scheduled')
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scheduled', LINE] })
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('forwards the lineName and chats list from useQuery into the composer props', async () => {
-    getScheduledMock.mockResolvedValue({ count: 0, messages: [] })
-
-    await renderSettled()
-
-    expect(composerProps.last?.lineName).toBe(LINE)
-    expect(composerProps.last?.chats).toEqual(chatItems)
-  })
-
-  it('passes [] for chats when the chats query returns undefined/null', async () => {
+  it('shows no chat options and keeps submit disabled when the chats query returns null', async () => {
     getScheduledMock.mockResolvedValue({ count: 0, messages: [] })
     getChatsMock.mockResolvedValue(null)
 
     await renderSettled()
 
-    expect(composerProps.last?.chats).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: 'New Scheduled Message' }))
+    fireEvent.change(screen.getByLabelText('Search chats...'), { target: { value: 'Chat One' } })
+
+    expect(screen.queryByRole('button', { name: 'Chat One' })).toBeNull()
+    expect((screen.getByRole('button', { name: /^Schedule$/ }) as HTMLButtonElement).disabled).toBe(true)
   })
 })
