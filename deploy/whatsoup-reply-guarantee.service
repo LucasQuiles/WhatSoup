@@ -1,0 +1,7 @@
+[Unit]
+Description=WhatSoup Reply Guarantee queue drain
+Documentation=https://github.com/LucasQuiles/WhatSoup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash -lc 'cd "${WHATSOUP_REPO_ROOT:?Set WHATSOUP_REPO_ROOT to the WhatSoup checkout}" && exec node deploy/hooks/drain-stuck-replies.mjs --once'
