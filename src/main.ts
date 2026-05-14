@@ -139,10 +139,10 @@ process.on('exit', () => releaseLock());
 // 2. Database
 // db.open() runs pending schema migrations against config.dbPath (see
 // core/database.ts:594+). This makes the process that executes these lines
-// the de-facto migration trigger for bot.db. For mw-bot (live WhatsApp
-// runtime), that means only restarting com.whatsoup.mw-bot can apply a
-// new migration to /Users/mw/.local/share/whatsoup/instances/mw-bot/bot.db;
-// com.whatsoup.mw-cell has a separate DB, and com.whatsoup.whatsoup-fleet
+// the de-facto migration trigger for bot.db. For the primary WhatsApp
+// runtime, that means only restarting the matching service can apply a
+// new migration to /home/whatsoup/.local/share/whatsoup/instances/primary/bot.db;
+// companion instances have separate DBs, and the fleet server
 // reads instance DBs read-only (see src/fleet/db-reader.ts) — it does not
 // run migrations. Operator runbook: docs/runbooks/mwlab-transcription-pinecone.md
 // (operator-gated migration trigger for the enrichment exporter rollout).
