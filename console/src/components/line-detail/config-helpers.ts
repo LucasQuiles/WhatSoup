@@ -1,6 +1,7 @@
 // Config helpers — build entries dynamically from real instance config
 import { validatePhone } from '../../lib/validation'
 import { isRecord } from '../../lib/type-guards'
+import { ACCESS_MODE_VALUES } from '../../lib/access-modes'
 
 export { isRecord }
 
@@ -151,7 +152,7 @@ export const TYPE_COLOR: Record<string, string> = {
 }
 
 export const ENUM_OPTIONS: Record<string, string[]> = {
-  accessMode: ['self_only', 'allowlist', 'open_dm', 'groups_only'],
+  accessMode: [...ACCESS_MODE_VALUES],
   toolUpdateMode: ['full', 'minimal'],
   model: ['', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
 }

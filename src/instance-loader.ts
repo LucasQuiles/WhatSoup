@@ -9,6 +9,7 @@ import {
   VALID_TYPES as _VALID_TYPES,
   VALID_ACCESS_MODES as _VALID_ACCESS_MODES,
   VALID_SESSION_SCOPES as _VALID_SESSION_SCOPES,
+  type AccessMode,
 } from './core/agent-config-validator.ts';
 
 // ---------------------------------------------------------------------------
@@ -16,8 +17,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export type InstanceType = 'chat' | 'agent' | 'passive';
-export type AccessMode = 'self_only' | 'allowlist' | 'open_dm' | 'groups_only';
 export type SessionScope = 'single' | 'shared' | 'per_chat';
+export type { AccessMode };
 
 // Canonical enum sets live in the shared validator; re-export for back-compat.
 export const VALID_TYPES = _VALID_TYPES;
