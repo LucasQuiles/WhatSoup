@@ -1241,6 +1241,7 @@ describe('runCycle', () => {
     expect(body).not.toMatch(/^propose_fix:/m);
     const hintLine = body.split('\n').find((line: string) => line.startsWith('remediation_hint:'));
     expect(hintLine).toBeDefined();
+    expect(hintLine!).toMatch(/docs\/specs\/2026-05-08-whatsoup-protection-layer-design\.md/u);
   });
 
   it('honors alerting.self_secret_widened observe by refusing without delivery', async () => {
