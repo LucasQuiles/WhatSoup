@@ -2,7 +2,7 @@
  * CreateGroupModal — open/close, subject input, participants via ContactSearchPicker, submit pipeline, Escape, validation.
  * @vitest-environment jsdom
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -12,71 +12,16 @@ import { ToastContext, type ToastContextValue } from '../../console/src/hooks/to
 // ---- Mocks ----
 
 const createGroupMock = vi.fn()
+const searchContactsMock = vi.fn()
 
 vi.mock('../../console/src/lib/api.js', () => ({
   api: {
     createGroup: (...args: unknown[]) => createGroupMock(...args),
+    searchContacts: (...args: unknown[]) => searchContactsMock(...args),
   },
 }))
 
-// Stub ContactSearchPicker so we don't drag api.searchContacts + debounce into
-// the modal's behavior surface. Expose three buttons:
-//   add-alice / add-bob — push synthetic contacts into the parent list
-//   remove-first        — remove whichever JID is at index 0 of `selected`
-// Rendering also reflects the current `selected` array so tests can assert it.
-vi.mock('../../console/src/components/shared/ContactSearchPicker.js', () => ({
-  ContactSearchPicker: ({
-    lineName,
-    selected,
-    onAdd,
-    onRemove,
-    placeholder,
-  }: {
-    lineName: string
-    selected: ContactResult[]
-    onAdd: (c: ContactResult) => void
-    onRemove: (jid: string) => void
-    placeholder?: string
-  }) => (
-    <div data-testid="picker-stub" data-line={lineName} data-placeholder={placeholder}>
-      <button
-        type="button"
-        data-testid="picker-add-alice"
-        onClick={() => onAdd({ jid: '15551110001@s.whatsapp.net', name: 'Alice' })}
-      >
-        add-alice
-      </button>
-      <button
-        type="button"
-        data-testid="picker-add-bob"
-        onClick={() => onAdd({ jid: '15551110002@s.whatsapp.net', name: 'Bob' })}
-      >
-        add-bob
-      </button>
-      <button
-        type="button"
-        data-testid="picker-remove-first"
-        onClick={() => {
-          if (selected[0]) onRemove(selected[0].jid)
-        }}
-      >
-        remove-first
-      </button>
-      <ul data-testid="picker-selected">
-        {selected.map((c, i) => (
-          // Use index in the key to tolerate duplicate-jid test cases — the
-          // real ContactSearchPicker dedups by selectedJids, but the modal
-          // itself does not, and we want to render whatever it stores.
-          <li key={`${i}-${c.jid}`} data-jid={c.jid}>
-            {c.name ?? c.jid}
-          </li>
-        ))}
-      </ul>
-    </div>
-  ),
-}))
-
-// Import after mocks so the component picks up the stubbed module graph.
+// Import after mocks so the component picks up the mocked API boundary.
 import { CreateGroupModal } from '../../console/src/components/line-detail/CreateGroupModal.js'
 
 // ---- Helpers ----
@@ -88,6 +33,20 @@ interface ToastSpies extends ToastContextValue {
   toast: ReturnType<typeof vi.fn>
   dismiss: ReturnType<typeof vi.fn>
   clear: ReturnType<typeof vi.fn>
+}
+
+const alice: ContactResult = {
+  jid: '15551230001@s.whatsapp.net',
+  name: 'Alice Johnson',
+  notify: 'Alice',
+  number: '15551230001',
+}
+
+const bob: ContactResult = {
+  jid: '15551230002@s.whatsapp.net',
+  name: 'Bob Smith',
+  notify: 'Bob',
+  number: '15551230002',
 }
 
 function makeToast(): ToastSpies {
@@ -123,10 +82,36 @@ function Wrap({
   )
 }
 
+beforeEach(() => {
+  searchContactsMock.mockResolvedValue({ contacts: [alice, bob] })
+})
+
 afterEach(() => {
   cleanup()
   createGroupMock.mockReset()
+  searchContactsMock.mockReset()
 })
+
+function searchInput(): HTMLInputElement {
+  return screen.getByRole('textbox', { name: 'Search contacts...' }) as HTMLInputElement
+}
+
+async function searchFor(query: string, contacts: ContactResult[] = [alice, bob]) {
+  const callCount = searchContactsMock.mock.calls.length
+  searchContactsMock.mockResolvedValueOnce({ contacts })
+  fireEvent.change(searchInput(), { target: { value: query } })
+  await waitFor(() => {
+    expect(searchContactsMock.mock.calls.length).toBeGreaterThan(callCount)
+  })
+}
+
+async function chooseContact(contact: ContactResult, query = contact.name?.slice(0, 2) ?? contact.jid.slice(0, 2)) {
+  await searchFor(query, [contact])
+  fireEvent.click(screen.getByText(contact.name ?? contact.notify ?? contact.jid).closest('button')!)
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: `Remove ${contact.name ?? contact.jid}` })).toBeDefined()
+  })
+}
 
 // ---- Tests ----
 
@@ -171,89 +156,82 @@ describe('CreateGroupModal initial render', () => {
 
     const submit = screen.getByRole('button', { name: /Create Group/ })
     expect(submit).toHaveProperty('disabled', true)
-  })
 
-  it('forwards lineName and placeholder to the ContactSearchPicker and starts with zero participants', () => {
+    expect(searchInput().value).toBe('')
+    expect(screen.queryByText(/selected\)/)).toBeNull()
+    expect(searchContactsMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('CreateGroupModal participant list', () => {
+  it('searches contacts for the current line, adds a result, and shows the selected count', async () => {
     render(
       <Wrap client={makeClient()} toast={makeToast()}>
         <CreateGroupModal open lineName="alpha-line" onClose={() => {}} onCreated={() => {}} />
       </Wrap>,
     )
 
-    const picker = screen.getByTestId('picker-stub')
-    expect(picker.getAttribute('data-line')).toBe('alpha-line')
-    expect(picker.getAttribute('data-placeholder')).toBe('Search contacts...')
-    expect(screen.getByTestId('picker-selected').children.length).toBe(0)
-    expect(screen.queryByText(/selected\)/)).toBeNull()
-  })
-})
+    await searchFor('Ali', [alice])
+    expect(searchContactsMock).toHaveBeenLastCalledWith('alpha-line', 'Ali')
+    fireEvent.click(screen.getByText('Alice Johnson').closest('button')!)
 
-describe('CreateGroupModal participant list', () => {
-  it('appends a contact via onAdd and shows the "(N selected)" badge', () => {
+    expect(screen.getByRole('button', { name: 'Remove Alice Johnson' })).toBeDefined()
+    expect(screen.getByText('(1 selected)')).toBeDefined()
+    expect(searchInput().value).toBe('')
+    expect(screen.queryByText('15551230001')).toBeNull()
+  })
+
+  it('adds a second distinct contact and updates the counter', async () => {
     render(
       <Wrap client={makeClient()} toast={makeToast()}>
         <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
       </Wrap>,
     )
 
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
+    await chooseContact(alice)
+    await chooseContact(bob)
 
-    const list = screen.getByTestId('picker-selected')
-    expect(list.children.length).toBe(1)
-    expect(list.querySelector('[data-jid="15551110001@s.whatsapp.net"]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Remove Alice Johnson' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Remove Bob Smith' })).toBeDefined()
+    expect(screen.getByText('(2 selected)')).toBeDefined()
+  })
+
+  it('does not offer already selected contacts in later search results', async () => {
+    render(
+      <Wrap client={makeClient()} toast={makeToast()}>
+        <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
+      </Wrap>,
+    )
+
+    await chooseContact(alice)
+    await searchFor('team', [alice, bob])
+
+    expect(screen.getByRole('button', { name: 'Remove Alice Johnson' })).toBeDefined()
+    expect(screen.queryByText('15551230001')).toBeNull()
+    expect(screen.getByText('Bob Smith')).toBeDefined()
+    expect(screen.getByText('15551230002')).toBeDefined()
     expect(screen.getByText('(1 selected)')).toBeDefined()
   })
 
-  it('appends a second distinct contact and updates the counter', () => {
+  it('removes a selected participant from the picker', async () => {
     render(
       <Wrap client={makeClient()} toast={makeToast()}>
         <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
       </Wrap>,
     )
 
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
-    fireEvent.click(screen.getByTestId('picker-add-bob'))
-
-    expect(screen.getByTestId('picker-selected').children.length).toBe(2)
+    await chooseContact(alice)
+    await chooseContact(bob)
     expect(screen.getByText('(2 selected)')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Alice Johnson' }))
+
+    expect(screen.queryByRole('button', { name: 'Remove Alice Johnson' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Remove Bob Smith' })).toBeDefined()
+    expect(screen.getByText('(1 selected)')).toBeDefined()
   })
 
-  it('appends duplicates verbatim — the modal performs no dedup itself', () => {
-    // The modal's onAdd is `setParticipants(prev => [...prev, c])` with no
-    // identity check. Dedup is the picker's job (it filters by `selectedJids`).
-    // This test pins the modal's contract: whatever the picker emits goes in.
-    render(
-      <Wrap client={makeClient()} toast={makeToast()}>
-        <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
-      </Wrap>,
-    )
-
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
-
-    expect(screen.getByTestId('picker-selected').children.length).toBe(2)
-    expect(screen.getByText('(2 selected)')).toBeDefined()
-  })
-
-  it('removes a participant via onRemove(jid)', () => {
-    render(
-      <Wrap client={makeClient()} toast={makeToast()}>
-        <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
-      </Wrap>,
-    )
-
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
-    fireEvent.click(screen.getByTestId('picker-add-bob'))
-    expect(screen.getByTestId('picker-selected').children.length).toBe(2)
-
-    fireEvent.click(screen.getByTestId('picker-remove-first'))
-    const remaining = screen.getByTestId('picker-selected')
-    expect(remaining.children.length).toBe(1)
-    expect(remaining.querySelector('[data-jid="15551110001@s.whatsapp.net"]')).toBeNull()
-    expect(remaining.querySelector('[data-jid="15551110002@s.whatsapp.net"]')).not.toBeNull()
-  })
-
-  it('resets subject and participants when re-opened after being closed', () => {
+  it('resets subject and participants when re-opened after being closed', async () => {
     const client = makeClient()
     const { rerender } = render(
       <Wrap client={client} toast={makeToast()}>
@@ -262,8 +240,8 @@ describe('CreateGroupModal participant list', () => {
     )
 
     fireEvent.change(screen.getByLabelText(/Group subject/i), { target: { value: 'temp' } })
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
-    expect(screen.getByTestId('picker-selected').children.length).toBe(1)
+    await chooseContact(alice)
+    expect(screen.getByRole('button', { name: 'Remove Alice Johnson' })).toBeDefined()
 
     rerender(
       <Wrap client={client} toast={makeToast()}>
@@ -278,12 +256,13 @@ describe('CreateGroupModal participant list', () => {
 
     const subjectAfter = screen.getByLabelText(/Group subject/i) as HTMLInputElement
     expect(subjectAfter.value).toBe('')
-    expect(screen.getByTestId('picker-selected').children.length).toBe(0)
+    expect(screen.queryByRole('button', { name: 'Remove Alice Johnson' })).toBeNull()
+    expect(screen.queryByText(/selected\)/)).toBeNull()
   })
 })
 
 describe('CreateGroupModal submit button gating', () => {
-  it('stays disabled until both subject and at least one participant are present', () => {
+  it('stays disabled until both subject and at least one participant are present', async () => {
     render(
       <Wrap client={makeClient()} toast={makeToast()}>
         <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
@@ -296,11 +275,11 @@ describe('CreateGroupModal submit button gating', () => {
     fireEvent.change(screen.getByLabelText(/Group subject/i), { target: { value: 'Team' } })
     expect(submit.disabled).toBe(true)
 
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
+    await chooseContact(alice)
     expect(submit.disabled).toBe(false)
   })
 
-  it('treats whitespace-only subject as empty for the disabled gate', () => {
+  it('treats whitespace-only subject as empty for the disabled gate', async () => {
     render(
       <Wrap client={makeClient()} toast={makeToast()}>
         <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
@@ -308,7 +287,7 @@ describe('CreateGroupModal submit button gating', () => {
     )
 
     fireEvent.change(screen.getByLabelText(/Group subject/i), { target: { value: '   ' } })
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
+    await chooseContact(alice)
 
     const submit = screen.getByRole('button', { name: /Create Group/ }) as HTMLButtonElement
     expect(submit.disabled).toBe(true)
@@ -331,8 +310,8 @@ describe('CreateGroupModal submit pipeline', () => {
     )
 
     fireEvent.change(screen.getByLabelText(/Group subject/i), { target: { value: '  Team Hydra  ' } })
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
-    fireEvent.click(screen.getByTestId('picker-add-bob'))
+    await chooseContact(alice)
+    await chooseContact(bob)
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Create Group/ }))
@@ -340,8 +319,8 @@ describe('CreateGroupModal submit pipeline', () => {
 
     expect(createGroupMock).toHaveBeenCalledTimes(1)
     expect(createGroupMock).toHaveBeenCalledWith('primary', 'Team Hydra', [
-      '15551110001@s.whatsapp.net',
-      '15551110002@s.whatsapp.net',
+      '15551230001@s.whatsapp.net',
+      '15551230002@s.whatsapp.net',
     ])
 
     await waitFor(() => {
@@ -373,7 +352,7 @@ describe('CreateGroupModal submit pipeline', () => {
     )
 
     fireEvent.change(screen.getByLabelText(/Group subject/i), { target: { value: 'Hydra' } })
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
+    await chooseContact(alice)
 
     act(() => {
       fireEvent.click(screen.getByRole('button', { name: /Create Group/ }))
@@ -410,7 +389,7 @@ describe('CreateGroupModal submit pipeline', () => {
     )
 
     fireEvent.change(screen.getByLabelText(/Group subject/i), { target: { value: 'Hydra' } })
-    fireEvent.click(screen.getByTestId('picker-add-alice'))
+    await chooseContact(alice)
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Create Group/ }))
