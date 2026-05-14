@@ -107,6 +107,18 @@ describe('search tools', () => {
       expect(data.results).toHaveLength(1);
     });
 
+    it.each([
+      ['negative', -1],
+      ['zero', 0],
+      ['fractional', 1.5],
+      ['oversized', 1001],
+    ])('rejects %s limit values', async (_name, limit) => {
+      const result = await registry.call('search_messages', { query: 'world', limit }, globalSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Invalid parameters/);
+      expect(result.content[0].text).toMatch(/limit/);
+    });
+
     it('excludes soft-deleted messages', async () => {
       db.raw.exec(`UPDATE messages SET deleted_at = datetime('now') WHERE message_id = 'msg1'`);
       const result = await registry.call('search_messages', { query: 'Hello world' }, globalSession());
@@ -318,6 +330,18 @@ describe('search tools', () => {
       );
       const data = JSON.parse(result.content[0].text) as { messages: unknown[] };
       expect(data.messages).toHaveLength(1);
+    });
+
+    it.each([
+      ['negative', -1],
+      ['zero', 0],
+      ['fractional', 1.5],
+      ['oversized', 1001],
+    ])('rejects %s limit values', async (_name, limit) => {
+      const result = await registry.call('search_messages_advanced', { query: 'world', limit }, globalSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Invalid parameters/);
+      expect(result.content[0].text).toMatch(/limit/);
     });
 
     it('FTS: returns empty results for no matches', async () => {

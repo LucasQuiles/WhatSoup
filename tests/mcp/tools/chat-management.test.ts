@@ -83,6 +83,22 @@ describe('chat-management tools', () => {
       expect(ids).toEqual(['msg1', 'msg2', 'msg3', 'msg4', 'msg5']);
     });
 
+    it.each([
+      ['negative', -1],
+      ['zero', 0],
+      ['fractional', 1.5],
+      ['oversized', 1001],
+    ])('rejects %s limit values', async (_name, limit) => {
+      const result = await registry.call(
+        'list_messages',
+        { conversation_key: '111', limit },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Invalid parameters/);
+      expect(result.content[0].text).toMatch(/limit/);
+    });
+
     it('paginates using before_pk', async () => {
       // Get the last 3 messages first
       const page1 = await registry.call(
