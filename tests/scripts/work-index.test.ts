@@ -60,6 +60,33 @@ describe('work index scanner', () => {
     });
   });
 
+  it('ignores untracked markdown files matched by gitignore', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-ignored-'));
+    const ignoredPlan = path.join(root, 'docs/plans/local-only.md');
+    const trackedPlan = path.join(root, 'docs/superpowers/plans/2026-04-25-example-plan.md');
+
+    mkdirSync(path.dirname(ignoredPlan), { recursive: true });
+    mkdirSync(path.dirname(trackedPlan), { recursive: true });
+    writeFileSync(path.join(root, '.gitignore'), 'docs/plans/\n', 'utf8');
+    writeFileSync(ignoredPlan, '# Local Only\n', 'utf8');
+    writeFileSync(trackedPlan, '# Example\n', 'utf8');
+    git(root, ['init']);
+    git(root, ['config', 'user.name', 'Work Index Test']);
+    git(root, ['config', 'user.email', 'work-index-test@users.noreply.github.com']);
+    git(root, ['add', '.gitignore', 'docs/superpowers/plans/2026-04-25-example-plan.md']);
+    git(root, ['commit', '-m', 'seed docs']);
+
+    const index = buildWorkIndex(root);
+
+    expect(index.rows.map((row) => row.path)).toEqual([
+      'docs/superpowers/plans/2026-04-25-example-plan.md',
+    ]);
+    expect(compareWorkIndexCoverage(root, new Set(index.rows.map((row) => row.path)))).toEqual({
+      missing: [],
+      stale: [],
+    });
+  });
+
   it('keeps the checked-in work-index artifacts clean', () => {
     expect(findWorkIndexCoverageIssues(repoRoot)).toEqual({ missing: [], stale: [] });
     expect(findWorkIndexCheckIssues(repoRoot)).toEqual({ missing: [], stale: [], drift: [] });
