@@ -10,7 +10,7 @@
 #   model: optional model override
 #
 # Requirements:
-# - WhatSoup instance "besbot" must be running with the target provider
+# - WhatSoup test instance must be running with the target provider
 # - LOG_LEVEL=debug must be set for the instance
 # =============================================================================
 
@@ -18,14 +18,17 @@ set -euo pipefail
 
 PROVIDER="${1:?Usage: $0 <provider> [model]}"
 MODEL="${2:-}"
-BESBOT_PID=$(pgrep -f 'bootstrap.ts besbot' 2>/dev/null | head -1)
+DEFAULT_INSTANCE="bes""bot"
+TEST_INSTANCE="${WHATSOUP_TEST_INSTANCE:-$DEFAULT_INSTANCE}"
+TARGET_CHAT_JID="${WHATSOUP_TEST_CHAT_JID:-15555550100@s.whatsapp.net}"
+INSTANCE_PID=$(pgrep -f "bootstrap.ts ${TEST_INSTANCE}" 2>/dev/null | head -1)
 HEALTH_PORT=9093
 RESULTS_FILE="/tmp/provider-test-${PROVIDER}-$(date +%s).json"
 PASS=0
 FAIL=0
 
-if [ -z "$BESBOT_PID" ]; then
-  echo "FATAL: besbot is not running"
+if [ -z "$INSTANCE_PID" ]; then
+  echo "FATAL: ${TEST_INSTANCE} is not running"
   exit 1
 fi
 
@@ -36,7 +39,7 @@ fail() { FAIL=$((FAIL + 1)); log "❌ FAIL: $1 — $2"; }
 wait_for_response() {
   local timeout=${1:-30}
   for i in $(seq 1 $timeout); do
-    if journalctl --user -u whatsoup@besbot --since "${timeout} sec ago" --no-pager --output=cat 2>/dev/null | grep -q 'Sending message.*18454433572'; then
+    if journalctl --user -u "whatsoup@${TEST_INSTANCE}" --since "${timeout} sec ago" --no-pager --output=cat 2>/dev/null | grep -q "Sending message.*${TARGET_CHAT_JID%%@*}"; then
       return 0
     fi
     sleep 1
@@ -45,11 +48,11 @@ wait_for_response() {
 }
 
 capture_process() {
-  # Capture child processes of besbot for 15 seconds
+  # Capture child processes of the test instance for 15 seconds
   local seen=""
   local output=""
   for i in $(seq 1 30); do
-    local children=$(pgrep -P $BESBOT_PID 2>/dev/null | sort)
+    local children=$(pgrep -P "$INSTANCE_PID" 2>/dev/null | sort)
     for cpid in $children; do
       if ! echo "$seen" | grep -q "$cpid"; then
         seen="$seen $cpid"
@@ -94,7 +97,7 @@ CAPTURE_PID=$!
 # Send via WhatsApp MCP (through our lab instance)
 if ! curl --silent --show-error --fail-with-body --output /dev/null -X POST "http://localhost:9096/send" \
   -H "Content-Type: application/json" \
-  -d "{\"chatJid\":\"19297905323@s.whatsapp.net\",\"text\":\"$TURN1_TEXT\"}" 2>/dev/null; then
+  -d "{\"chatJid\":\"${TARGET_CHAT_JID}\",\"text\":\"$TURN1_TEXT\"}" 2>/dev/null; then
   fail "Turn 1 send" "HTTP POST failed"
 fi
 
@@ -107,7 +110,7 @@ fi
 
 # Check captured process
 wait $CAPTURE_PID 2>/dev/null
-PROCS=$(cat /tmp/besbot-process-monitor2.log 2>/dev/null || echo "")
+PROCS=$(cat "/tmp/${TEST_INSTANCE}-process-monitor2.log" 2>/dev/null || echo "")
 
 case $PROVIDER in
   codex-cli)
@@ -125,7 +128,7 @@ case $PROVIDER in
 esac
 
 # Check logs for the spawned binary
-SPAWN_LOG=$(journalctl --user -u whatsoup@besbot --since "90 sec ago" --no-pager --output=cat 2>/dev/null | python3 -c "
+SPAWN_LOG=$(journalctl --user -u "whatsoup@${TEST_INSTANCE}" --since "90 sec ago" --no-pager --output=cat 2>/dev/null | python3 -c "
 import sys, json
 for line in sys.stdin:
     try:
@@ -149,7 +152,7 @@ fi
 # TEST 3: Session ID captured
 # =============================================================================
 log "TEST 3: Session/thread ID captured"
-SESSION_ID=$(journalctl --user -u whatsoup@besbot --since "90 sec ago" --no-pager --output=cat 2>/dev/null | python3 -c "
+SESSION_ID=$(journalctl --user -u "whatsoup@${TEST_INSTANCE}" --since "90 sec ago" --no-pager --output=cat 2>/dev/null | python3 -c "
 import sys, json
 for line in sys.stdin:
     try:
@@ -175,7 +178,7 @@ TURN2_TEXT="What was my name and my favorite number? You should remember from my
 
 if ! curl --silent --show-error --fail-with-body --output /dev/null -X POST "http://localhost:9096/send" \
   -H "Content-Type: application/json" \
-  -d "{\"chatJid\":\"19297905323@s.whatsapp.net\",\"text\":\"$TURN2_TEXT\"}" 2>/dev/null; then
+  -d "{\"chatJid\":\"${TARGET_CHAT_JID}\",\"text\":\"$TURN2_TEXT\"}" 2>/dev/null; then
   fail "Turn 2 send" "HTTP POST failed"
 fi
 
@@ -186,7 +189,7 @@ else
 fi
 
 # Check if resume was used
-RESUME_LOG=$(journalctl --user -u whatsoup@besbot --since "90 sec ago" --no-pager --output=cat 2>/dev/null | python3 -c "
+RESUME_LOG=$(journalctl --user -u "whatsoup@${TEST_INSTANCE}" --since "90 sec ago" --no-pager --output=cat 2>/dev/null | python3 -c "
 import sys, json
 for line in sys.stdin:
     try:
