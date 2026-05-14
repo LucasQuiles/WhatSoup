@@ -70,3 +70,39 @@ describe('publication guard release mode', () => {
     expect(error.mock.calls.join('\n')).toContain('local-home-path');
   });
 });
+
+describe('publication guard staged mode', () => {
+  it('fails when staged internal docs are missing audit classification', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    const newInternalDoc = 'docs/sdlc/closed/example/new-state.md';
+    writeFileSync(join(repo, newInternalDoc), 'Internal planning note.\n');
+    execFileSync('git', ['add', newInternalDoc], { cwd: repo, stdio: 'ignore' });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('staged-internal-doc-unclassified');
+  });
+
+  it('fails when staged markdown adds broken docs references', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    const publicDoc = 'docs/readme.md';
+    writeFileSync(join(repo, publicDoc), 'See `docs/missing-reference.md` for details.\n');
+    execFileSync('git', ['add', publicDoc], { cwd: repo, stdio: 'ignore' });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('missing-doc-ref');
+  });
+
+  it('fails when staged public text adds private literals', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    const publicDoc = 'docs/public-note.md';
+    const token = ['ghp_', 'abcdefghijklmnop'].join('');
+    writeFileSync(join(repo, publicDoc), `token: ${token}\n`);
+    execFileSync('git', ['add', publicDoc], { cwd: repo, stdio: 'ignore' });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('github-token');
+  });
+});

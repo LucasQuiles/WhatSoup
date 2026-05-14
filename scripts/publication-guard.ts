@@ -194,6 +194,33 @@ export function scanTextForPrivateLiterals(filePath: string, text: string): Guar
   return issues;
 }
 
+export function findMissingMarkdownRefs(
+  filePath: string,
+  text: string,
+  exists: (filePath: string) => boolean = existsSync,
+): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+  const refPattern = /`(docs\/[A-Za-z0-9_./@-]+\.md(?:#[^`\s]+)?)`|\]\((docs\/[A-Za-z0-9_./@-]+\.md(?:#[^)\s]+)?)\)/g;
+
+  text.split(/\r?\n/).forEach((lineText, index) => {
+    let match: RegExpExecArray | null;
+    while ((match = refPattern.exec(lineText))) {
+      const ref = (match[1] ?? match[2]).split('#')[0];
+      if (!exists(ref)) {
+        issues.push({
+          severity: 'error',
+          code: 'missing-doc-ref',
+          filePath,
+          line: index + 1,
+          message: `Referenced markdown file does not exist: ${ref}`,
+        });
+      }
+    }
+  });
+
+  return issues;
+}
+
 export function validatePublicationAudit(
   parsed: ParsedAudit,
   trackedInternalDocs: string[],
@@ -290,6 +317,58 @@ function git(args: string[], cwd: string): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
+function listStagedFiles(cwd: string, diffFilter: string): string[] {
+  return git(['diff', '--cached', '--name-only', `--diff-filter=${diffFilter}`], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath);
+}
+
+function readStagedAddedLines(cwd: string, filePath: string): string {
+  try {
+    return execFileSync('git', ['diff', '--cached', '--unified=0', '--', filePath], {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } catch {
+    return '';
+  }
+}
+
+function isTextCandidate(filePath: string): boolean {
+  const normalized = normalizeRepoPath(filePath);
+  const baseName = path.basename(normalized);
+  if (baseName === 'Dockerfile' || baseName.startsWith('.env')) return true;
+  return new Set([
+    '.cjs',
+    '.css',
+    '.html',
+    '.js',
+    '.json',
+    '.jsx',
+    '.md',
+    '.mjs',
+    '.sh',
+    '.ts',
+    '.tsx',
+    '.txt',
+    '.yaml',
+    '.yml',
+  ]).has(path.extname(normalized));
+}
+
+function stagedAddedText(cwd: string, filePath: string): string {
+  const lines: string[] = [];
+
+  for (const diffLine of readStagedAddedLines(cwd, filePath).split(/\r?\n/)) {
+    if (diffLine.startsWith('+++') || diffLine.startsWith('---')) continue;
+    if (diffLine.startsWith('+')) lines.push(diffLine.slice(1));
+  }
+
+  return lines.join('\n');
+}
+
 function listTrackedInternalDocs(cwd: string): string[] {
   const trackedFiles = git(['ls-files'], cwd).split(/\r?\n/).filter(Boolean);
   const docs = new Set<string>();
@@ -322,6 +401,60 @@ function loadAudit(cwd: string): ParsedAudit | undefined {
 function readWorkingFile(cwd: string, filePath: string): string | undefined {
   const fullPath = path.join(cwd, filePath);
   return existsSync(fullPath) ? readFileSync(fullPath, 'utf8') : undefined;
+}
+
+function validateStaged(cwd: string): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+  const staged = listStagedFiles(cwd, 'ACMR');
+  const deleted = listStagedFiles(cwd, 'D');
+  const parsed = loadAudit(cwd);
+  const auditRows = new Set(parsed?.rows.map((row) => row.filePath) ?? []);
+  const auditStaged = staged.includes('docs/publication-audit.md') || deleted.includes('docs/publication-audit.md');
+
+  for (const filePath of staged.filter(isInternalPublicationPath)) {
+    if (!auditRows.has(filePath)) {
+      issues.push({
+        severity: 'error',
+        code: 'staged-internal-doc-unclassified',
+        filePath,
+        message: 'Staged internal documentation must be classified in docs/publication-audit.md before commit.',
+      });
+    }
+  }
+
+  for (const filePath of deleted.filter(isInternalPublicationPath)) {
+    if (auditRows.has(filePath)) {
+      issues.push({
+        severity: 'error',
+        code: 'deleted-internal-doc-stale-audit',
+        filePath,
+        message: 'Deleted internal documentation still has a docs/publication-audit.md row. Update the audit in the same commit.',
+      });
+    }
+  }
+
+  for (const filePath of staged.filter(isTextCandidate)) {
+    const addedText = stagedAddedText(cwd, filePath);
+    issues.push(...scanTextForPrivateLiterals(filePath, addedText));
+    if (path.extname(filePath) === '.md') {
+      issues.push(...findMissingMarkdownRefs(filePath, addedText, (ref) => existsSync(path.join(cwd, ref))));
+    }
+  }
+
+  if (auditStaged) {
+    if (!parsed) {
+      issues.push({
+        severity: 'error',
+        code: 'audit-missing',
+        filePath: 'docs/publication-audit.md',
+        message: 'docs/publication-audit.md is required when internal docs are tracked.',
+      });
+    } else {
+      issues.push(...validatePublicationAudit(parsed, listTrackedInternalDocs(cwd), (filePath) => readWorkingFile(cwd, filePath)));
+    }
+  }
+
+  return issues;
 }
 
 function validateAll(cwd: string): GuardIssue[] {
@@ -404,7 +537,12 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     return 0;
   }
 
-  const issues = args.mode === 'release' ? validateRelease(cwd) : validateAll(cwd);
+  const issues =
+    args.mode === 'staged'
+      ? validateStaged(cwd)
+      : args.mode === 'release'
+        ? validateRelease(cwd)
+        : validateAll(cwd);
   const errors = issues.filter((issue) => issue.severity === 'error');
 
   if (args.json) {
