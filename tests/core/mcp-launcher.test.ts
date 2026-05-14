@@ -76,6 +76,9 @@ describe('buildMcpLaunchCommand', () => {
     expect(buildMcpLaunchCommand(scriptPath).args).toEqual([scriptPath]);
   });
 
+});
+
+describe('spawnMcpProcess', () => {
   it('throws an actionable error when the repo-local tsx runner is missing', async () => {
     vi.resetModules();
     vi.doMock('node:fs', async (importOriginal) => {
@@ -85,14 +88,12 @@ describe('buildMcpLaunchCommand', () => {
         existsSync: vi.fn(() => false),
       };
     });
-    const { buildMcpLaunchCommand } = await import(MODULE_PATH);
+    const { spawnMcpProcess } = await import(MODULE_PATH);
 
-    expect(() => buildMcpLaunchCommand('server.ts')).toThrow(/tsx/);
-    expect(() => buildMcpLaunchCommand('server.ts')).toThrow(/npm install/);
+    expect(() => spawnMcpProcess('server.ts', {})).toThrow(/tsx/);
+    expect(() => spawnMcpProcess('server.ts', {})).toThrow(/npm install/);
   });
-});
 
-describe('spawnMcpProcess', () => {
   it('uses an allowlisted base env while applying caller overrides', async () => {
     const { spawnMcpProcess } = await importLauncher();
     const tempDir = mkdtempSync(join(tmpdir(), 'mcp-launcher-env-'));

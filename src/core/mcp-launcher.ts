@@ -23,16 +23,18 @@ const BASE_ENV_KEYS = [
 ] as const;
 
 export function buildMcpLaunchCommand(scriptPath: string): { command: string; args: readonly string[] } {
+  return {
+    command: TSX_RUNNER,
+    args: [scriptPath],
+  };
+}
+
+function assertMcpRunnerAvailable(): void {
   if (!existsSync(TSX_RUNNER)) {
     throw new Error(
       `Missing MCP TypeScript runner at ${TSX_RUNNER}. Run npm install before launching MCP scripts.`,
     );
   }
-
-  return {
-    command: TSX_RUNNER,
-    args: [scriptPath],
-  };
 }
 
 export function spawnMcpProcess(
@@ -40,6 +42,7 @@ export function spawnMcpProcess(
   env: NodeJS.ProcessEnv,
   opts: SpawnOptions = {},
 ): ChildProcess {
+  assertMcpRunnerAvailable();
   const { command, args } = buildMcpLaunchCommand(scriptPath);
   const baseEnv = Object.fromEntries(
     BASE_ENV_KEYS
