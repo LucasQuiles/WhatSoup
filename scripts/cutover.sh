@@ -277,29 +277,49 @@ run_cut07() {
 # ---------------------------------------------------------------------------
 run_cut08() {
   header "=== CUT-08: Update ~/.claude/.mcp.json (MANUAL STEP) ==="
+  local repo_root_input
+  local repo_root
+  repo_root_input="${WHATSOUP_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+  if [[ ! -d "$repo_root_input" ]]; then
+    fail "CUT-08  Repository root does not exist: $repo_root_input"
+    abort
+  fi
+  repo_root="$(cd "$repo_root_input" && pwd -P)"
+  local tsx_runner="$repo_root/node_modules/.bin/tsx"
+  local proxy_script="$repo_root/deploy/mcp/whatsoup-proxy.ts"
+
+  if [[ ! -x "$tsx_runner" ]]; then
+    fail "CUT-08  Missing repo-local tsx runner: $tsx_runner"
+    echo "Run: cd \"$repo_root\" && npm ci"
+    abort
+  fi
+  if [[ ! -f "$proxy_script" ]]; then
+    fail "CUT-08  Missing proxy script: $proxy_script"
+    abort
+  fi
+
   echo ""
   echo -e "${YELLOW}ACTION REQUIRED — edit ~/.claude/.mcp.json manually:${RESET}"
   echo ""
   echo "  REMOVE this entry:"
-  echo '    "whatsapp-mcp": { "type": "stdio", "command": "/path/to/whatsapp-mcp" }'
+  echo "    \"whatsapp-mcp\": { \"type\": \"stdio\", \"command\": \"$HOME/.local/bin/whatsapp-mcp\" }"
   echo ""
   echo "  ADD this entry:"
-  cat <<'EOF'
+  cat <<EOF
     "whatsoup-personal": {
       "type": "stdio",
-      "command": "node",
+      "command": "$tsx_runner",
       "args": [
-        "--experimental-strip-types",
-        "/path/to/WhatSoup/deploy/mcp/whatsoup-proxy.ts"
+        "$proxy_script"
       ],
       "env": {
-        "WHATSOUP_SOCKET": "/home/whatsoup/.local/state/whatsoup/instances/personal/whatsoup.sock"
+        "WHATSOUP_SOCKET": "$HOME/.local/state/whatsoup/instances/personal/whatsoup.sock"
       }
     }
 EOF
   echo ""
   echo -e "${RED}IMPORTANT:${RESET} WHATSOUP_SOCKET must be an absolute path — tilde (~) does NOT"
-  echo "  expand inside JSON strings passed by the MCP launcher."
+  echo "  expand inside JSON strings passed by the agent client's MCP launcher."
   echo "  A literal ~ will cause ENOENT on socket connection."
   echo ""
 }
@@ -416,4 +436,6 @@ main() {
   echo ""
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
