@@ -4,6 +4,10 @@
 > live backlog truth. Any still-actionable item must be promoted to a GitHub
 > issue or an indexed `docs/sdlc` / `docs/superpowers` artifact before it is
 > treated as active work. See `docs/canonical-status-policy.md`.
+>
+> Closed note: access-mode / validation-set duplication references in this
+> historical report were superseded by PR #369 at commit `9b828823`; do not
+> treat those references as current actionable backlog.
 
 Generated: 2026-04-04
 Scanned: 696 functions across 20 categories
@@ -158,6 +162,7 @@ Analysis: 16 agents (11 semantic + 5 structural)
 - **Fix:** Extract `cachedQuery<T>(cache: Map, key: string, ttl: number, queryFn: () => T): T` helper. Each function becomes a one-liner.
 
 ### 2.7 Validation constant Sets duplicated (SSOT violation)
+- **Closed / superseded:** PR #369 at commit `9b828823` addressed this drift after the report was generated.
 - **Confirmed by:** 2 agents | **Est. savings:** ~6 lines | **Confidence:** HIGH
 - **What:** `VALID_TYPES`, `VALID_ACCESS_MODES`, `VALID_SESSION_SCOPES` are defined identically in two files. If a new type/mode is added, both must be updated.
 - **Where:**

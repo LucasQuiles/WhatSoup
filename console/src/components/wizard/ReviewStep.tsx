@@ -3,6 +3,7 @@ import { Pencil, Loader2, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
+import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -117,13 +118,6 @@ const ReviewStep: FC<ReviewStepProps> = ({
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
   const agentCwd = agentOptions.cwd || defaultAgentWorkspacePath(name)
 
-  const accessLabels: Record<string, string> = {
-    self_only: 'Admin Only',
-    allowlist: 'Allowlist',
-    open_dm: 'Open DMs',
-    groups_only: 'Groups Only',
-  }
-
   return (
     <div className="flex flex-col gap-[var(--sp-4)]">
       {/* Identity card */}
@@ -173,7 +167,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
           <span className="font-medium text-data" style={headingStyle}>Config</span>
           <EditBtn onClick={() => onEditPhase(3)} />
         </div>
-        <KV label="Access mode" value={accessLabels[accessMode] ?? accessMode} />
+        <KV label="Access mode" value={ACCESS_MODE_LABELS[accessMode as keyof typeof ACCESS_MODE_LABELS] ?? accessMode} />
         {type !== 'passive' && systemPrompt && (
           <KV label="System prompt" value={truncate(systemPrompt, 60)} />
         )}

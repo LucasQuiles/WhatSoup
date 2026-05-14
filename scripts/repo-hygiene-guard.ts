@@ -31,7 +31,9 @@ interface GuardPattern {
 }
 
 const fixtureFiles = new Set([
+  'scripts/anonymize-private-literals.ts',
   'scripts/repo-hygiene-guard.ts',
+  'tests/scripts/anonymize-private-literals.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
 ]);
 
@@ -64,6 +66,8 @@ const operationalProtocolIdentifiers = new Set([
   'instances/personal/whatsoup.sock',
 ]);
 
+const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.json']);
+
 function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
@@ -95,6 +99,11 @@ const addedLinePatterns: GuardPattern[] = [
     code: 'skipped-test',
     message: 'Skipped tests must not be committed without an explicit tracked exception.',
     regex: /\b(?:describe|it|test)\.skip(?:\s*\(|\.)/,
+  },
+  {
+    code: 'debugger-statement',
+    message: 'debugger statements must not be committed.',
+    regex: /\bdebugger\b/,
   },
   {
     code: 'model-attribution',
@@ -254,6 +263,8 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
 
   for (const line of lines) {
     const filePath = normalizeRepoPath(line.filePath);
+    const productionCodePath = /^(?:src|scripts|deploy|console\/src)\//.test(filePath);
+
     if (fixtureFiles.has(filePath)) continue;
     if (
       filePath.startsWith('src/')
@@ -263,6 +274,38 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
       issues.push({
         code: 'src-console-call',
         message: 'Production source should use the structured logger instead of ad-hoc console calls.',
+        filePath: line.filePath,
+        line: line.line,
+      });
+    }
+    if (productionCodePath && /(?:\benv\s*:\s*process\.env|\.{3}process\.env\b)/.test(line.text)) {
+      issues.push({
+        code: 'process-env-inheritance',
+        message: 'Child processes must use an explicit allowlisted env instead of inheriting process.env.',
+        filePath: line.filePath,
+        line: line.line,
+      });
+    }
+    if (productionCodePath && /\bshell\s*:\s*true\b/.test(line.text)) {
+      issues.push({
+        code: 'child-process-shell-true',
+        message: 'Child process shell mode must not be introduced without an explicit reviewed exception.',
+        filePath: line.filePath,
+        line: line.line,
+      });
+    }
+    if (productionCodePath && /\b(?:eval\s*\(|(?:new\s+)?Function\s*\()/.test(line.text)) {
+      issues.push({
+        code: 'dynamic-code-execution',
+        message: 'Dynamic code execution must not be introduced in source, scripts, or deploy code.',
+        filePath: line.filePath,
+        line: line.line,
+      });
+    }
+    if (isSuppressionComment(line.text) && !hasSuppressionRationaleAndExpiry(line.text)) {
+      issues.push({
+        code: 'unbounded-suppression',
+        message: 'Lint/type suppressions must include a rationale and an expires YYYY-MM-DD marker.',
         filePath: line.filePath,
         line: line.line,
       });
@@ -280,6 +323,14 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
   }
 
   return issues;
+}
+
+function isSuppressionComment(text: string): boolean {
+  return /(?:@ts-ignore|@ts-expect-error|@ts-nocheck|eslint-disable|biome-ignore)/.test(text);
+}
+
+function hasSuppressionRationaleAndExpiry(text: string): boolean {
+  return /--\s+\S.*\bexpires\s+\d{4}-\d{2}-\d{2}\b/.test(text);
 }
 
 export function scanCommitMessage(message: string): GuardIssue[] {
@@ -305,6 +356,13 @@ function stagedDiff(cwd: string): string {
   return git(['diff', '--cached', '--unified=0', '--no-ext-diff'], cwd);
 }
 
+function stagedFilePaths(cwd: string): string[] {
+  return git(['diff', '--cached', '--name-only', '--diff-filter=ACMR'], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath);
+}
+
 function trackedFiles(cwd: string, filePaths: readonly string[]): string[] {
   const tracked = new Set(git(['ls-files', '-z', '--', ...filePaths], cwd)
     .split('\0')
@@ -312,6 +370,30 @@ function trackedFiles(cwd: string, filePaths: readonly string[]): string[] {
     .map(normalizeRepoPath));
 
   return filePaths.filter((filePath) => tracked.has(filePath));
+}
+
+export function isTrackedSensitiveArtifact(filePath: string): boolean {
+  const normalized = normalizeRepoPath(filePath);
+  if (trackedSensitiveAllowlist.has(normalized)) return false;
+  if (/^\.env(?:\.|$)/.test(normalized)) return true;
+  if (/(^|\/)auth_info/.test(normalized)) return true;
+  if (/\.(?:db|db-wal|db-shm)$/.test(normalized)) return true;
+  if (/\.(?:pem|key)$/.test(normalized)) return true;
+  if (/^(?:\.codex|\.tmup-artifacts|artifacts)(?:\/|$)/.test(normalized)) return true;
+  if (normalized === '.mcp.json') return true;
+  if (/^instances\/[^/]+\/instance\.json$/.test(normalized)) return true;
+  if (/^(?:users|groups|\.sweep)\//.test(normalized)) return true;
+  return false;
+}
+
+function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
+  return stagedFilePaths(cwd)
+    .filter(isTrackedSensitiveArtifact)
+    .map((filePath) => ({
+      code: 'staged-sensitive-artifact',
+      filePath,
+      message: 'Runtime credential, database, key, workspace, or scratch artifact must not be committed.',
+    }));
 }
 
 export function scanContentLines(lines: AddedLine[]): GuardIssue[] {
@@ -382,7 +464,10 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     ? scanCommitMessage(readFileSync(args.messageFile ?? '', 'utf8'))
     : args.mode === 'release-hygiene'
       ? scanTrackedFiles(cwd)
-      : scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd)));
+      : [
+          ...scanStagedSensitiveArtifacts(cwd),
+          ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd))),
+        ];
 
   if (issues.length > 0) {
     printIssues(issues);

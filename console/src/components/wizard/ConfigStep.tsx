@@ -1,4 +1,4 @@
-import { type FC, type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
@@ -7,6 +7,7 @@ import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } f
 import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
+import { ACCESS_MODE_DETAILS, ACCESS_MODE_VALUES, type AccessModeValue } from '../../lib/access-modes'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -67,36 +68,20 @@ const CATEGORY_LABELS: Record<string, string> = {
   lsp: 'Language Servers',
 }
 
-const ACCESS_OPTIONS = [
-  {
-    value: 'self_only',
-    label: 'Admin Only',
-    description: 'Only admin phone numbers can interact',
-    icon: <Lock size={24} />,
-    color: 'var(--wizard-accent)',
-  },
-  {
-    value: 'allowlist',
-    label: 'Allowlist',
-    description: 'Approved contacts only',
-    icon: <List size={24} />,
-    color: 'var(--wizard-accent)',
-  },
-  {
-    value: 'open_dm',
-    label: 'Open DMs',
-    description: 'Anyone can send direct messages',
-    icon: <MessageCircle size={24} />,
-    color: 'var(--wizard-accent)',
-  },
-  {
-    value: 'groups_only',
-    label: 'Groups Only',
-    description: 'Only responds in group chats',
-    icon: <Users size={24} />,
-    color: 'var(--wizard-accent)',
-  },
-]
+const ACCESS_ICONS = {
+  self_only: <Lock size={24} />,
+  allowlist: <List size={24} />,
+  open_dm: <MessageCircle size={24} />,
+  groups_only: <Users size={24} />,
+} satisfies Record<AccessModeValue, ReactNode>
+
+const ACCESS_OPTIONS = ACCESS_MODE_VALUES.map((value) => ({
+  value,
+  label: ACCESS_MODE_DETAILS[value].label,
+  description: ACCESS_MODE_DETAILS[value].description,
+  icon: ACCESS_ICONS[value],
+  color: 'var(--wizard-accent)',
+}))
 
 // detailPanelStyle replaced by Tailwind classes: bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]
 

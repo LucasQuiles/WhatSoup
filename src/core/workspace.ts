@@ -24,6 +24,7 @@ import {
 } from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
+import { buildMcpLaunchCommand } from './mcp-launcher.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('workspace');
@@ -318,15 +319,13 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
     const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
     const mcpServers: Record<string, unknown> = {
       'whatsoup': {
-        command: 'node',
-        args: ['--experimental-strip-types', mcpServerPath],
+        ...buildMcpLaunchCommand(mcpServerPath),
         env: { WHATSOUP_SOCKET: socketPath },
       },
     };
     if (sendMediaServerPath) {
       mcpServers['send-media'] = {
-        command: 'node',
-        args: ['--experimental-strip-types', sendMediaServerPath],
+        ...buildMcpLaunchCommand(sendMediaServerPath),
         env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
       };
     }

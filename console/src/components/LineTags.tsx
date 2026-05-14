@@ -19,7 +19,12 @@ function getAccessTag(accessMode: string): TagDef | null {
     case 'open_dm':
       return { label: 'open', icon: ShieldOff, color: 'var(--color-s-warn)', bg: 'var(--s-warn-wash)' }
     case 'allowList':
+    case 'allowlist':
       return { label: 'allowlist', icon: Shield, color: 'var(--color-m-cht)', bg: 'var(--m-cht-wash)' }
+    case 'self_only':
+      return { label: 'self only', icon: ShieldAlert, color: 'var(--color-t4)', bg: 'var(--color-d4)' }
+    case 'groups_only':
+      return { label: 'groups only', icon: Shield, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
     case 'denyAll':
       return { label: 'deny all', icon: ShieldAlert, color: 'var(--color-t4)', bg: 'var(--color-d4)' }
     default:

@@ -243,6 +243,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
+| `cli:npm.leaks-anonymize` | `npm run leaks:anonymize` | `package.json` | stable | active | Report-first private literal anonymizer; pass `--write` to update files |
 | `cli:npm.guard-publication` | `npm run guard:publication` | `package.json` | stable | active | Publication audit guard (default mode) |
 | `cli:npm.guard-publication-all` | `npm run guard:publication:all` | `package.json` | stable | active | Verify tracked internal docs are represented in `docs/publication-audit.md` |
 | `cli:npm.guard-publication-release` | `npm run guard:publication:release` | `package.json` | stable | active | Verify tracked internal docs are public-clean before publication |
@@ -308,7 +309,7 @@ are breaking.
 | `deploy:hooks` | Agent sandbox hooks | [`deploy/hooks/`](../deploy/hooks) | beta | active | Sandbox enforcement; behavior contract still settling |
 | `deploy:loops` | Background loop runners | [`deploy/loops/`](../deploy/loops) | beta | active | Long-running maintenance loops |
 | `deploy:scripts` | Operator helper scripts | [`deploy/scripts/`](../deploy/scripts) | beta | active | Helpers that operators may reference from docs |
-| `deploy:launchd.generated` | macOS plist generation behavior | [docs/runbook.md](runbook.md) | stable | active | Generated launchd plists; per §4, regen non-destructively is non-breaking |
+| `deploy:launchd.generated` | macOS plist generation behavior | [docs/runbooks/macos-launchd-deployment.md](runbooks/macos-launchd-deployment.md), [src/fleet/platform.ts](../src/fleet/platform.ts) | stable | active | Generated launchd plists; per §4, regen non-destructively is non-breaking |
 
 ---
 
@@ -329,7 +330,6 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
 | `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
-| `artifact:mcp.config` | `.mcp.json` (repo root) | [`.mcp.json`](../.mcp.json) | stable | active | MCP server registration for MCP-aware clients |
 | `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
 
 ---

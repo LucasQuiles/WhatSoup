@@ -1,3 +1,12 @@
+/**
+ * Static policy coverage for critical structured log fields.
+ *
+ * These tests intentionally read production source to pin logging keys and
+ * lifecycle messages that would otherwise regress silently without invasive
+ * runtime harnesses for every failure path.
+ *
+ * test-integrity: source-string-ok
+ */
 import { describe, it, expect } from 'vitest';
 import { readFile } from 'node:fs/promises';
 
