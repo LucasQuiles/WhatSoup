@@ -5,6 +5,18 @@ import {
 } from '../../../src/runtimes/agent/whatsapp-format.ts';
 
 describe('markdownToWhatsApp', () => {
+  const nestedTag = (tag: string, depth: number): [string, string] => {
+    if (depth === 0) return [`<${tag}>`, `</${tag}>`];
+
+    const [open, close] = nestedTag(tag, depth - 1);
+    const split = Math.ceil(tag.length / 2);
+
+    return [
+      `<${tag.slice(0, split)}${open}${tag.slice(split)}>`,
+      `</${tag.slice(0, split)}${close}${tag.slice(split)}>`,
+    ];
+  };
+
   // ── Bold ──
 
   it('converts **bold** to *bold*', () => {
@@ -148,17 +160,6 @@ describe('markdownToWhatsApp', () => {
   });
 
   it('strips deeply nested tag-like residue within the bounded fixed-point loop', () => {
-    const nestedTag = (tag: string, depth: number): [string, string] => {
-      if (depth === 0) return [`<${tag}>`, `</${tag}>`];
-
-      const [open, close] = nestedTag(tag, depth - 1);
-      const split = Math.ceil(tag.length / 2);
-
-      return [
-        `<${tag.slice(0, split)}${open}${tag.slice(split)}>`,
-        `</${tag.slice(0, split)}${close}${tag.slice(split)}>`,
-      ];
-    };
     const [open, close] = nestedTag('span', 6);
     const output = markdownToWhatsApp(`${open}safe${close}`);
 
@@ -166,8 +167,42 @@ describe('markdownToWhatsApp', () => {
     expect(output).not.toMatch(/<[A-Za-z/]/);
   });
 
+  it('strips tag-like residue beyond the current bounded loop depth', () => {
+    const [open, close] = nestedTag('script', 8);
+    const output = markdownToWhatsApp(`${open}alert(1)${close}`);
+
+    expect(output).toBe('alert(1)');
+    expect(output).not.toMatch(/<[A-Za-z/]/);
+  });
+
+  it('strips tag-like residue at depth sixteen', () => {
+    const [open, close] = nestedTag('script', 16);
+    const output = markdownToWhatsApp(`${open}alert(1)${close}`);
+
+    expect(output).toBe('alert(1)');
+    expect(output).not.toMatch(/<[A-Za-z/]/);
+  });
+
   it('preserves plain comparison text when stripping HTML-like tags', () => {
     expect(markdownToWhatsApp('2 < 3 and 4 > 1')).toBe('2 < 3 and 4 > 1');
+    expect(markdownToWhatsApp('5<x<10')).toBe('5<x<10');
+  });
+
+  it('preserves mathematical expressions in code blocks', () => {
+    const input = '```text\n2 < 3 and 5<x<10\n```';
+    expect(markdownToWhatsApp(input)).toBe(input);
+  });
+
+  it('strips tag attributes with the tag wrapper', () => {
+    expect(markdownToWhatsApp('<a href="https://example.com">text</a>')).toBe('text');
+  });
+
+  it('strips HTML comments', () => {
+    expect(markdownToWhatsApp('before <!-- hidden --> after')).toBe('before  after');
+  });
+
+  it('preserves malformed trailing less-than text', () => {
+    expect(markdownToWhatsApp('text<')).toBe('text<');
   });
 
   it('decodes HTML entities', () => {
