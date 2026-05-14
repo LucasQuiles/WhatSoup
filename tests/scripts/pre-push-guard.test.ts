@@ -100,11 +100,22 @@ describe('verify chain composition (package.json)', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:publication:all\b/);
+    expect(chain).not.toMatch(/\bnpm run guard:publication:release\b/);
   });
 
   it('verify:release invokes release repo hygiene guard', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:repo:release-hygiene\b/);
+  });
+
+  it('verify:publish invokes strict publication release guard before release verification', () => {
+    const chain = packageJson.scripts['verify:publish'];
+    expect(chain, 'verify:publish script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:publication:release\b/);
+    expect(chain).toMatch(/\bnpm run verify:release\b/);
+    expect(chain.indexOf('npm run guard:publication:release')).toBeLessThan(
+      chain.indexOf('npm run verify:release'),
+    );
   });
 });
