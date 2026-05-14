@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isTrackedSensitiveArtifact,
   parseArgs,
   parseUnifiedDiffAddedLines,
   scanAddedLines,
@@ -212,6 +213,64 @@ describe('repo hygiene guard', () => {
     ]);
 
     expect(issues).toEqual([]);
+  });
+
+  it('blocks staged child-process hazards, debuggers, and unbounded suppressions', () => {
+    const issues = scanAddedLines([
+      {
+        filePath: 'src/process-runner.ts',
+        line: 1,
+        text: 'spawn("node", [], { env: { ...process.env } });',
+      },
+      {
+        filePath: 'scripts/run-task.ts',
+        line: 2,
+        text: 'spawn("node", [], { shell: true });',
+      },
+      {
+        filePath: 'console/src/runner.ts',
+        line: 3,
+        text: 'const compiled = Function(source);',
+      },
+      {
+        filePath: 'src/handler.ts',
+        line: 4,
+        text: 'debugger;',
+      },
+      {
+        filePath: 'src/types.ts',
+        line: 5,
+        text: '// @ts-expect-error',
+      },
+      {
+        filePath: 'src/types.ts',
+        line: 6,
+        text: '// @ts-expect-error -- upstream type is narrower than runtime payload; expires 2026-12-31',
+      },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'process-env-inheritance',
+      'child-process-shell-true',
+      'dynamic-code-execution',
+      'debugger-statement',
+      'unbounded-suppression',
+    ]);
+    expect(issues.some((issue) => issue.line === 6)).toBe(false);
+  });
+
+  it('classifies staged runtime artifacts as sensitive without blocking tracked settings template', () => {
+    expect(isTrackedSensitiveArtifact('.env')).toBe(true);
+    expect(isTrackedSensitiveArtifact('.env.local')).toBe(true);
+    expect(isTrackedSensitiveArtifact('.env.example')).toBe(false);
+    expect(isTrackedSensitiveArtifact('.mcp.json')).toBe(true);
+    expect(isTrackedSensitiveArtifact('.tmup-artifacts/task/output.md')).toBe(true);
+    expect(isTrackedSensitiveArtifact('artifacts/private-screenshot.png')).toBe(true);
+    expect(isTrackedSensitiveArtifact('instances/test/instance.json')).toBe(true);
+    expect(isTrackedSensitiveArtifact('users/chat/auth_info_baileys/creds.json')).toBe(true);
+    expect(isTrackedSensitiveArtifact('bot.db')).toBe(true);
+    expect(isTrackedSensitiveArtifact('certs/private.pem')).toBe(true);
+    expect(isTrackedSensitiveArtifact('.claude/settings.json')).toBe(false);
   });
 
   it('flags public-history hygiene problems in commit messages', () => {
