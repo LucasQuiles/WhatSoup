@@ -82,8 +82,8 @@ function parseResult(stdout: string, stderr: string): { stdout: string; stderr: 
   let reason: string | undefined;
   try {
     const parsed = JSON.parse(stdout.trim());
-    decision = parsed.decision ?? '';
-    reason = parsed.reason;
+    decision = parsed.hookSpecificOutput?.permissionDecision ?? '';
+    reason = parsed.hookSpecificOutput?.permissionDecisionReason;
   } catch {
     // ignore parse errors
   }
@@ -118,6 +118,22 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('agent-sandbox.sh — allowedMcpTools semantics', () => {
+  it('emits Claude hookSpecificOutput for allow decisions', () => {
+    const dir = makeTmpDir();
+    const result = runHookFull(
+      { allowedPaths: [dir], allowedTools: [], bash: { enabled: false } },
+      { tool_name: 'mcp__whatsoup__send_message' },
+      dir,
+    );
+    const parsed = JSON.parse(result.stdout.trim());
+    expect(parsed).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+      },
+    });
+  });
+
   it('allowedMcpTools absent → allows all MCP tools', () => {
     const dir = makeTmpDir();
     const result = runHookFull(
@@ -148,14 +164,14 @@ describe('agent-sandbox.sh — allowedMcpTools semantics', () => {
     expect(result.decision).toBe('allow');
   });
 
-  it('allowedMcpTools: ["send_message"] → blocks unlisted MCP tool', () => {
+  it('allowedMcpTools: ["send_message"] → denies unlisted MCP tool', () => {
     const dir = makeTmpDir();
     const result = runHookFull(
       { allowedPaths: [dir], allowedMcpTools: ['send_message'], bash: { enabled: false } },
       { tool_name: 'mcp__whatsoup__list_contacts' },
       dir,
     );
-    expect(result.decision).toBe('block');
+    expect(result.decision).toBe('deny');
     expect(result.reason).toContain('not in allowedMcpTools');
   });
 
@@ -166,7 +182,7 @@ describe('agent-sandbox.sh — allowedMcpTools semantics', () => {
       { tool_name: 'mcp__some-plugin__some_tool' },
       dir,
     );
-    expect(result.decision).toBe('block');
+    expect(result.decision).toBe('deny');
     expect(result.reason).toContain('not in allowedMcpTools');
   });
 
@@ -177,7 +193,7 @@ describe('agent-sandbox.sh — allowedMcpTools semantics', () => {
       { tool_name: 'mcp__whatsoup__blocked_tool' },
       dir,
     );
-    expect(result.decision).toBe('block');
+    expect(result.decision).toBe('deny');
     // Structured JSON log on stderr
     let stderrParsed: Record<string, unknown> | null = null;
     try {
@@ -191,6 +207,23 @@ describe('agent-sandbox.sh — allowedMcpTools semantics', () => {
     expect(typeof stderrParsed!.reason).toBe('string');
     expect(typeof stderrParsed!.cwd).toBe('string');
     expect(typeof stderrParsed!.policyPath).toBe('string');
+  });
+
+  it('emits Claude hookSpecificOutput for deny decisions', () => {
+    const dir = makeTmpDir();
+    const result = runHookFull(
+      { allowedPaths: [dir], allowedMcpTools: ['send_message'], bash: { enabled: false } },
+      { tool_name: 'mcp__whatsoup__blocked_tool' },
+      dir,
+    );
+    const parsed = JSON.parse(result.stdout.trim());
+    expect(parsed).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'MCP tool mcp__whatsoup__blocked_tool not in allowedMcpTools',
+      },
+    });
   });
 });
 
@@ -211,6 +244,6 @@ describe('agent-sandbox.sh — no policy file', () => {
       encoding: 'utf8',
     });
     const parsed = JSON.parse((result.stdout as string).trim());
-    expect(parsed.decision).toBe('allow');
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow');
   });
 });

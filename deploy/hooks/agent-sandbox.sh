@@ -10,7 +10,7 @@ POLICY_FILE=".claude/sandbox-policy.json"
 
 if [ ! -f "$POLICY_FILE" ]; then
   # No sandbox policy — allow everything
-  echo '{"decision":"allow"}'
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
   exit 0
 fi
 
@@ -32,6 +32,15 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
     const toolInput = input.tool_input ?? {};
     const allowedPaths = policy.allowedPaths ?? [];
 
+    function allow() {
+      console.log(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      }));
+    }
+
     function deny(reason) {
       const log = JSON.stringify({
         event: 'sandbox_deny',
@@ -41,7 +50,13 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
         policyPath: '$POLICY_FILE',
       });
       process.stderr.write(log + '\n');
-      console.log(JSON.stringify({ decision: 'block', reason }));
+      console.log(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: reason,
+        },
+      }));
       process.exit(0);
     }
 
@@ -60,19 +75,19 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
       const allowed = policy.allowedMcpTools;
       if (allowed === undefined || allowed === null) {
         // Field omitted = no MCP restriction (allow all)
-        console.log(JSON.stringify({ decision: 'allow' }));
+        allow();
         process.exit(0);
       }
       if (allowed.length === 0) {
         // Empty array = no restriction (same as absent). Normalized contract:
         // undefined/absent/[] = allow all, non-empty array = allowlist.
-        console.log(JSON.stringify({ decision: 'allow' }));
+        allow();
         process.exit(0);
       }
       const parts = toolName.split('__');
       const mcpTool = parts.length >= 3 ? parts.slice(2).join('__') : toolName;
       if (allowed.includes(mcpTool) || allowed.includes(toolName)) {
-        console.log(JSON.stringify({ decision: 'allow' }));
+        allow();
       } else {
         deny('MCP tool ' + toolName + ' not in allowedMcpTools');
       }
@@ -126,7 +141,7 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
         }
       }
       // Bash allowed
-      console.log(JSON.stringify({ decision: 'allow' }));
+      allow();
       process.exit(0);
     }
 
@@ -145,6 +160,6 @@ echo "$INPUT" | exec node --experimental-strip-types -e "
       }
     }
 
-    console.log(JSON.stringify({ decision: 'allow' }));
+    allow();
   });
 "
