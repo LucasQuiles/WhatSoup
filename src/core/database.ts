@@ -405,7 +405,7 @@ const MIGRATION_22 = `
 CREATE TABLE IF NOT EXISTS outbound_sends (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   line TEXT NOT NULL,
-  caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health')),
+  caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health', 'rgp')),
   chat_jid TEXT NOT NULL,
   target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias')),
   alias TEXT,
@@ -458,6 +458,77 @@ CREATE INDEX IF NOT EXISTS idx_lid_mappings_history_lid
 
 CREATE INDEX IF NOT EXISTS idx_lid_mappings_history_changed_at
   ON lid_mappings_history(changed_at);
+`;
+
+const MIGRATION_26_OUTBOUND_SENDS = `
+CREATE TABLE outbound_sends_v26 (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  line TEXT NOT NULL,
+  caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health', 'rgp')),
+  chat_jid TEXT NOT NULL,
+  target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias')),
+  alias TEXT,
+  profile TEXT,
+  text_hash TEXT NOT NULL,
+  text_length INTEGER NOT NULL,
+  link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL),
+  status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed')),
+  error TEXT,
+  transport_message_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+INSERT INTO outbound_sends_v26 (
+  id,
+  line,
+  caller,
+  chat_jid,
+  target_kind,
+  alias,
+  profile,
+  text_hash,
+  text_length,
+  link_preview_mode,
+  status,
+  error,
+  transport_message_id,
+  created_at,
+  completed_at
+)
+SELECT
+  id,
+  line,
+  caller,
+  chat_jid,
+  target_kind,
+  alias,
+  profile,
+  text_hash,
+  text_length,
+  link_preview_mode,
+  status,
+  error,
+  transport_message_id,
+  created_at,
+  completed_at
+FROM outbound_sends;
+
+DROP TABLE outbound_sends;
+ALTER TABLE outbound_sends_v26 RENAME TO outbound_sends;
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_created_at
+  ON outbound_sends(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_status_created
+  ON outbound_sends(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_chat_created
+  ON outbound_sends(chat_jid, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_sends_alias_created
+  ON outbound_sends(alias, created_at)
+  WHERE alias IS NOT NULL;
 `;
 
 // ─── Known migrations ────────────────────────────────────────────────────────
@@ -630,10 +701,19 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [23, runMigration23],
   [24, runMigration24],
   [25, runMigration25],
+  [26, runMigration26],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
   db.exec(MIGRATION_25);
+}
+
+function runMigration26(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
+    .get() as { sql: string } | undefined;
+  if (!table || table.sql.includes("'rgp'")) return;
+  db.exec(MIGRATION_26_OUTBOUND_SENDS);
 }
 
 function runMigration20(db: DatabaseSync): void {

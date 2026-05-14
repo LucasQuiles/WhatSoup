@@ -918,7 +918,7 @@ If a profile has `linkPreview` and a request also sends `link_preview`, the requ
 
 ### Read Outbound Send Audit
 
-Every MCP `send_message` and health `/send` attempt creates one row in the instance-local `outbound_sends` table. The public read surface is the global MCP `read_outbound_sends` tool.
+Every MCP `send_message`, health `/send`, and Reply Guarantee Protocol fallback attempt creates one row in the instance-local `outbound_sends` table. The public read surface is the global MCP `read_outbound_sends` tool.
 
 Query recent rows through the global MCP socket:
 

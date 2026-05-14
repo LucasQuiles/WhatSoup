@@ -340,6 +340,11 @@ export class DurabilityEngine {
     this.statements.markTurnDone.run(seq);
   }
 
+  getInboundStatus(seq: number): string | undefined {
+    const row = this.statements.selectInboundStatus.get(seq) as { processing_status: string } | undefined;
+    return row?.processing_status;
+  }
+
   markInboundComplete(seq: number, terminalReason: string): void {
     this.statements.markInboundComplete.run(terminalReason, seq);
   }

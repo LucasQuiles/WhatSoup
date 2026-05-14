@@ -396,7 +396,7 @@ describe('Test 3 — migrations are idempotent (reopen does not throw)', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
 
     db2.close();
   });
@@ -499,7 +499,7 @@ describe('Test 5 — schema_migrations version tracking', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
 
     db.close();
   });
@@ -699,7 +699,7 @@ describe('Test 8 — fresh :memory: DB receives all migrations', () => {
         .prepare('SELECT version FROM schema_migrations ORDER BY version')
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
 
     const tables = (
       db.raw
@@ -867,7 +867,7 @@ describe('Test 9 — migration ordering: only version 1 recorded, 2-10 apply in 
         .all() as Array<{ version: number }>
     ).map((r) => r.version);
 
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
 
     // raw_message column from migration 5
     const cols = db.raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
@@ -929,7 +929,7 @@ describe('outbound_sends migration contract', () => {
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
       .get() as { sql: string } | undefined;
     expect(table).toBeDefined();
-    expect(table!.sql).toContain("caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health'))");
+    expect(table!.sql).toContain("caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health', 'rgp'))");
     expect(table!.sql).toContain("target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias'))");
     expect(table!.sql).toContain("link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL)");
     expect(table!.sql).toContain("status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed'))");
@@ -971,6 +971,86 @@ describe('outbound_sends migration contract', () => {
     expect(indexMap.get('idx_outbound_sends_chat_created')).toContain('chat_jid, created_at');
     expect(indexMap.get('idx_outbound_sends_alias_created')).toContain('alias, created_at');
     expect(indexMap.get('idx_outbound_sends_alias_created')).toContain('WHERE alias IS NOT NULL');
+  });
+
+  it('upgrades existing outbound_sends tables to allow rgp callers without losing rows', () => {
+    const dbPath = tmpFile();
+    try {
+      const raw = new DatabaseSync(dbPath);
+      raw.exec(`
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO schema_migrations(version)
+        VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10),
+               (11), (12), (13), (14), (15), (16), (17), (18), (19), (20),
+               (21), (22), (23), (24), (25);
+
+        CREATE TABLE outbound_sends (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          line TEXT NOT NULL,
+          caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health')),
+          chat_jid TEXT NOT NULL,
+          target_kind TEXT NOT NULL CHECK (target_kind IN ('chatJid', 'alias')),
+          alias TEXT,
+          profile TEXT,
+          text_hash TEXT NOT NULL,
+          text_length INTEGER NOT NULL,
+          link_preview_mode TEXT CHECK (link_preview_mode IN ('auto', 'off') OR link_preview_mode IS NULL),
+          status TEXT NOT NULL DEFAULT 'intent' CHECK (status IN ('intent', 'sent', 'failed')),
+          error TEXT,
+          transport_message_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT
+        );
+        CREATE INDEX idx_outbound_sends_created_at ON outbound_sends(created_at);
+        CREATE INDEX idx_outbound_sends_status_created ON outbound_sends(status, created_at);
+        CREATE INDEX idx_outbound_sends_chat_created ON outbound_sends(chat_jid, created_at);
+        CREATE INDEX idx_outbound_sends_alias_created ON outbound_sends(alias, created_at) WHERE alias IS NOT NULL;
+        INSERT INTO outbound_sends (
+          line, caller, chat_jid, target_kind, text_hash, text_length, status, transport_message_id
+        )
+        VALUES ('personal', 'mcp', '111@s.whatsapp.net', 'chatJid', 'abc', 3, 'sent', 'wamid.old');
+      `);
+      raw.close();
+
+      const migrated = new Database(dbPath);
+      migrated.open();
+      try {
+        const table = migrated.raw
+          .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_sends'")
+          .get() as { sql: string };
+        expect(table.sql).toContain("caller TEXT NOT NULL CHECK (caller IN ('mcp', 'health', 'rgp'))");
+
+        const preserved = migrated.raw
+          .prepare("SELECT line, caller, chat_jid, status, transport_message_id FROM outbound_sends WHERE id = 1")
+          .get();
+        expect(preserved).toEqual({
+          line: 'personal',
+          caller: 'mcp',
+          chat_jid: '111@s.whatsapp.net',
+          status: 'sent',
+          transport_message_id: 'wamid.old',
+        });
+
+        migrated.raw.prepare(`
+          INSERT INTO outbound_sends (
+            line, caller, chat_jid, target_kind, text_hash, text_length, status
+          )
+          VALUES ('personal', 'rgp', '222@s.whatsapp.net', 'chatJid', 'def', 3, 'sent')
+        `).run();
+
+        const version = migrated.raw
+          .prepare('SELECT version FROM schema_migrations WHERE version = 26')
+          .get() as { version: number } | undefined;
+        expect(version?.version).toBe(26);
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      cleanup(dbPath);
+    }
   });
 });
 

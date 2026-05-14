@@ -8,7 +8,13 @@ import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
-  const capturedSessionManagerOptsRef: { current: { allowM365Mutations?: boolean } | null } = { current: null };
+  const capturedSessionManagerOptsRef: {
+    current: {
+      allowM365Mutations?: boolean;
+      whatsoupInstance?: string;
+      whatsoupMcpSocket?: string;
+    } | null;
+  } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
   const capturedOnResumeFailedRef: { current: (() => void) | null } = { current: null };
   const capturedOnCrashRef: { current: ((info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void) | null } = { current: null };
@@ -110,6 +116,8 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   SessionManager: vi.fn().mockImplementation(function (
     opts: {
       allowM365Mutations?: boolean;
+      whatsoupInstance?: string;
+      whatsoupMcpSocket?: string;
       onEvent: (event: AgentEvent) => void;
       onResumeFailed?: () => void;
       onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
@@ -473,6 +481,8 @@ describe('AgentRuntime', () => {
     (SessionManagerMock as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       function (opts: {
         allowM365Mutations?: boolean;
+        whatsoupInstance?: string;
+        whatsoupMcpSocket?: string;
         onEvent: (event: AgentEvent) => void;
         onResumeFailed?: () => void;
         onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
@@ -579,6 +589,67 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       allowM365Mutations: true,
     });
+  });
+
+  it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global' });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
+
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      whatsoupInstance: 'line-a',
+      whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
+    });
+  });
+
+  it('forwards reply-guarantee workspace socket env for sandbox per-chat sessions', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/rgp-workspaces',
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } },
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
+
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      whatsoupInstance: 'line-a',
+      whatsoupMcpSocket: '/tmp/workspace/.claude/whatsoup.sock',
+    });
+  });
+
+  it('arms and disarms reply guarantee around a non-shared turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-turn' });
+    const durability = {
+      getInboundStatus: vi.fn(() => 'processing'),
+      completeTurn: vi.fn(),
+      markInboundFailed: vi.fn(),
+    };
+    const replyGuarantee = {
+      arm: vi.fn(),
+      disarm: vi.fn(),
+      shutdown: vi.fn(),
+    };
+
+    runtime.setDurability(durability as never);
+    (runtime as unknown as { replyGuarantee: typeof replyGuarantee }).replyGuarantee = replyGuarantee;
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello claude', inboundSeq: 31 }));
+    capturedOnEventRef.current?.({ type: 'result', text: 'done' });
+
+    expect(replyGuarantee.arm).toHaveBeenCalledWith({
+      inboundSeq: 31,
+      chatJid: 'test@s.whatsapp.net',
+    });
+    expect(replyGuarantee.disarm).toHaveBeenCalledWith(31);
   });
 
   it('handleMessage /new calls session.handleNew and notifies user', async () => {

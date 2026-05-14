@@ -1,0 +1,162 @@
+import { createChildLogger } from '../logger.ts';
+import type { ChatResolver } from './chats-resolver.ts';
+import type { CompleteTurnParams } from './durability.ts';
+import type { Messenger } from './types.ts';
+import type { OutboundSendsWriter } from './outbound-sends.ts';
+import { createSendPipeline } from './send-pipeline.ts';
+
+const log = createChildLogger('reply-guarantee');
+
+export const DEFAULT_REPLY_GUARANTEE_TEXT = "I'm still working on this and will follow up shortly.";
+export const DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS = 15 * 60 * 1000;
+
+export type InboundProcessingStatus = 'processing' | 'turn_done' | 'complete' | 'failed' | 'skipped';
+
+export interface ReplyGuaranteeDurability {
+  getInboundStatus(seq: number): InboundProcessingStatus | string | undefined;
+  completeTurn(params: CompleteTurnParams): void;
+}
+
+export interface ReplyGuaranteeFallbackInput {
+  inboundSeq: number;
+  chatJid: string;
+  text: string;
+}
+
+export type ReplyGuaranteeFallbackSender = (input: ReplyGuaranteeFallbackInput) => Promise<unknown>;
+
+export interface ReplyGuaranteeArmInput {
+  inboundSeq: number | undefined;
+  chatJid: string;
+}
+
+export interface ReplyGuaranteeManagerOptions {
+  durability: ReplyGuaranteeDurability | undefined;
+  sendFallback: ReplyGuaranteeFallbackSender;
+  timeoutMs?: number;
+  rateLimitMs?: number;
+  fallbackText?: string;
+  setTimer?: typeof setTimeout;
+  clearTimer?: typeof clearTimeout;
+  now?: () => number;
+}
+
+interface ArmedTurn {
+  chatJid: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export class ReplyGuaranteeManager {
+  private readonly durability: ReplyGuaranteeDurability | undefined;
+  private readonly sendFallback: ReplyGuaranteeFallbackSender;
+  private readonly timeoutMs: number;
+  private readonly rateLimitMs: number;
+  private readonly fallbackText: string;
+  private readonly setTimer: typeof setTimeout;
+  private readonly clearTimer: typeof clearTimeout;
+  private readonly now: () => number;
+  private readonly armed = new Map<number, ArmedTurn>();
+  private readonly lastFallbackByChat = new Map<string, number>();
+
+  constructor(opts: ReplyGuaranteeManagerOptions) {
+    this.durability = opts.durability;
+    this.sendFallback = opts.sendFallback;
+    this.timeoutMs = normalizePositiveMs(opts.timeoutMs, DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS);
+    this.rateLimitMs = normalizePositiveMs(opts.rateLimitMs, DEFAULT_REPLY_GUARANTEE_RATE_LIMIT_MS);
+    this.fallbackText = opts.fallbackText ?? DEFAULT_REPLY_GUARANTEE_TEXT;
+    this.setTimer = opts.setTimer ?? setTimeout;
+    this.clearTimer = opts.clearTimer ?? clearTimeout;
+    this.now = opts.now ?? Date.now;
+  }
+
+  arm(input: ReplyGuaranteeArmInput): void {
+    if (input.inboundSeq === undefined) return;
+    if (this.armed.has(input.inboundSeq)) return;
+
+    const timer = this.setTimer(() => {
+      void this.onTimeout(input.inboundSeq!, input.chatJid);
+    }, this.timeoutMs);
+    timer.unref?.();
+    this.armed.set(input.inboundSeq, { chatJid: input.chatJid, timer });
+  }
+
+  disarm(inboundSeq: number | undefined): void {
+    if (inboundSeq === undefined) return;
+    const active = this.armed.get(inboundSeq);
+    if (!active) return;
+    this.clearTimer(active.timer);
+    this.armed.delete(inboundSeq);
+  }
+
+  shutdown(): void {
+    for (const { timer } of this.armed.values()) {
+      this.clearTimer(timer);
+    }
+    this.armed.clear();
+  }
+
+  private async onTimeout(inboundSeq: number, chatJid: string): Promise<void> {
+    this.armed.delete(inboundSeq);
+    if (!this.durability) return;
+
+    const status = this.durability.getInboundStatus(inboundSeq);
+    if (!isOpenInboundStatus(status)) {
+      return;
+    }
+
+    const now = this.now();
+    const lastFallbackAt = this.lastFallbackByChat.get(chatJid);
+    if (lastFallbackAt !== undefined && now - lastFallbackAt < this.rateLimitMs) {
+      log.warn({ inboundSeq, chatJid, status }, 'reply guarantee fallback suppressed by rate limit');
+      return;
+    }
+
+    try {
+      await this.sendFallback({ inboundSeq, chatJid, text: this.fallbackText });
+      this.lastFallbackByChat.set(chatJid, now);
+      this.durability.completeTurn({
+        inbound: {
+          seq: inboundSeq,
+          terminalReason: 'rgp_fallback_sent',
+        },
+      });
+    } catch (err) {
+      log.warn({ err, inboundSeq, chatJid }, 'reply guarantee fallback send failed');
+    }
+  }
+}
+
+export function createAuditedReplyGuaranteeSender({
+  messenger,
+  resolver,
+  auditWriter,
+}: {
+  messenger: Messenger;
+  resolver: ChatResolver;
+  auditWriter: OutboundSendsWriter;
+}): ReplyGuaranteeFallbackSender {
+  const pipeline = createSendPipeline({
+    resolver,
+    auditWriter,
+    caller: 'rgp',
+  });
+  return async ({ chatJid, text }) => {
+    await pipeline.executeSend(
+      { chatJid, text },
+      async (prepared) => {
+        const receipt = await messenger.sendMessage(prepared.chatJid, prepared.text);
+        return { transportId: receipt.waMessageId };
+      },
+    );
+  };
+}
+
+function isOpenInboundStatus(status: string | undefined): boolean {
+  return status === 'processing' || status === 'turn_done';
+}
+
+function normalizePositiveMs(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}

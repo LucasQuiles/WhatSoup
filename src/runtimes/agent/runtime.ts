@@ -9,6 +9,11 @@ import type { AgentEvent } from './stream-parser.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
+import {
+  createAuditedReplyGuaranteeSender,
+  DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
+  ReplyGuaranteeManager,
+} from '../../core/reply-guarantee.ts';
 import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -35,6 +40,8 @@ import { ControlQueue } from './control-queue.ts';
 import { classifyInput } from './commands.ts';
 import { getRecentMessages, getMessagesSince, updateMediaPath, updateTranscription } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey } from '../../core/conversation-key.ts';
+import { createChatResolver } from '../../core/chats-resolver.ts';
+import { createOutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
@@ -294,6 +301,8 @@ export interface AgentRuntimeOptions {
   enabledPlugins?: Record<string, boolean>;
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
   allowM365Mutations?: boolean;
+  /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
+  replyGuaranteeTimeoutMs?: number;
 }
 
 /**
@@ -570,6 +579,7 @@ export class AgentRuntime implements Runtime {
   private readonly allowM365Mutations: boolean | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
 
   // single mode: one session, one queue
@@ -596,6 +606,8 @@ export class AgentRuntime implements Runtime {
     mediaBridge: MediaBridge | null;
     lastActivity: number;
   }> = new Map();
+  private globalMcpSocketPath: string | null = null;
+  private replyGuarantee: ReplyGuaranteeManager | null = null;
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
 
@@ -892,6 +904,7 @@ export class AgentRuntime implements Runtime {
     if (!this.durability) return;
     for (const seq of inboundSeqs) {
       try {
+        this.replyGuarantee?.disarm(seq);
         this.durability.markInboundSkipped(seq, reason);
       } catch (err) {
         log.warn({ err, mapKey, seq, reason }, 'failed to mark image coalesce seq skipped');
@@ -902,6 +915,7 @@ export class AgentRuntime implements Runtime {
   private markImageCoalesceSeqFailed(mapKey: string, seq: number): void {
     if (!this.durability) return;
     try {
+      this.replyGuarantee?.disarm(seq);
       this.durability.markInboundFailed(seq);
     } catch (err) {
       log.warn({ err, mapKey, seq }, 'failed to mark image coalesce representative seq failed');
@@ -1104,6 +1118,7 @@ export class AgentRuntime implements Runtime {
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
+    this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
 
@@ -1150,6 +1165,16 @@ export class AgentRuntime implements Runtime {
   setDurability(engine: DurabilityEngine): void {
     this.durability = engine;
     this.registry.setDurability(engine);
+    this.replyGuarantee?.shutdown();
+    this.replyGuarantee = new ReplyGuaranteeManager({
+      durability: engine,
+      timeoutMs: this.replyGuaranteeTimeoutMs,
+      sendFallback: createAuditedReplyGuaranteeSender({
+        messenger: this.messenger,
+        resolver: createChatResolver({ db: this.db.raw }),
+        auditWriter: createOutboundSendsWriter({ db: this.db.raw, line: this.instanceName }),
+      }),
+    });
     // Propagate to any already-created outbound queues
     if (this.queue) this.queue.setDurability(engine);
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
@@ -1327,6 +1352,7 @@ export class AgentRuntime implements Runtime {
         const globalSession: SessionContext = { tier: 'global' };
         this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
         this.globalSocketServer.start();
+        this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
 
         // Write .mcp.json so Claude Code discovers the whatsoup MCP server
@@ -1346,6 +1372,7 @@ export class AgentRuntime implements Runtime {
           }
           this.globalSocketServer = null;
         }
+        this.globalMcpSocketPath = null;
         log.error({ err, agentCwd }, 'failed to initialize global MCP socket resources');
         throw err;
       }
@@ -1574,6 +1601,7 @@ export class AgentRuntime implements Runtime {
             this.cleanupSharedCrashTurnState();
             // Mark inbound event failed so it doesn't stay stuck in processing
             if (this.durability && this.currentInboundSeq !== undefined) {
+              this.replyGuarantee?.disarm(this.currentInboundSeq);
               this.durability.markInboundFailed(this.currentInboundSeq);
               this.currentInboundSeq = undefined;
             }
@@ -1844,6 +1872,7 @@ export class AgentRuntime implements Runtime {
           `messageId=${msg.messageId} chatJid=${msg.chatJid} code=${codeStr || 'unknown'}`,
         );
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
         // Propagate so the outer turn-chain handler notifies the user and
@@ -1863,6 +1892,7 @@ export class AgentRuntime implements Runtime {
         );
         // Mark inbound event as failed so it doesn't stay stuck in 'processing'
         if (this.durability && msg.inboundSeq !== undefined) {
+          this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq);
         }
         // Notify user of failure
@@ -2142,6 +2172,7 @@ export class AgentRuntime implements Runtime {
         if (msg.inboundSeq !== undefined) seqQueue.push(msg.inboundSeq);
         this.perChatInboundSeqQueue.set(mapKey, seqQueue);
         this.getQueueForChat(chatJid, mapKey)?.setInboundSeq(msg.inboundSeq);
+        this.replyGuarantee?.arm({ inboundSeq: msg.inboundSeq, chatJid });
         // Track inbound contentType for voice reply (SP4)
         this.perChatTurnContentType.set(mapKey, msg.contentType);
         this.perChatTurnText.set(mapKey, '');
@@ -2152,6 +2183,7 @@ export class AgentRuntime implements Runtime {
       // single mode: store inbound seq on runtime + queue
       this.currentInboundSeq = msg.inboundSeq;
       this.queue?.setInboundSeq(msg.inboundSeq);
+      this.replyGuarantee?.arm({ inboundSeq: msg.inboundSeq, chatJid });
       // Track inbound contentType for voice reply (SP4)
       this.currentTurnInboundContentType = msg.contentType;
       this.currentTurnAssistantText = '';
@@ -2188,6 +2220,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnChatJid = chatJid;
     this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
+    this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
     // Thread inbound seq into the outbound queue so ops can link back
     this.getActiveQueue()?.setInboundSeq(turn.inboundSeq);
@@ -2334,7 +2367,9 @@ export class AgentRuntime implements Runtime {
         log.error({ chatJid, mapKey }, 'failed to create session for chat — message dropped');
         this.pendingTurnText.delete(mapKey);
         if (this.durability && this.perChatInboundSeqQueue.get(mapKey)?.[0] !== undefined) {
-          this.durability.markInboundFailed(this.perChatInboundSeqQueue.get(mapKey)![0]);
+          const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
+          this.replyGuarantee?.disarm(failedSeq);
+          this.durability.markInboundFailed(failedSeq);
         }
         this.sendDirect(chatJid, 'Something went wrong starting a session. Try sending your message again.');
         return;
@@ -2515,6 +2550,7 @@ export class AgentRuntime implements Runtime {
               : {}),
             ...(lastOpId !== undefined ? { lastOpId } : {}),
           });
+          this.replyGuarantee?.disarm(inboundSeq);
           if (lastOpId !== undefined) {
             queue.clearLastOpId();
           }
@@ -2911,6 +2947,8 @@ export class AgentRuntime implements Runtime {
       clearTimeout(timer);
     }
     this.silentCompactScopes.clear();
+    this.replyGuarantee?.shutdown();
+    this.replyGuarantee = null;
 
     // Shutdown per_chat sessions
     if (this.sessionScope === 'per_chat') {
@@ -2982,6 +3020,7 @@ export class AgentRuntime implements Runtime {
         log.warn({ err, instanceName: this.instanceName }, 'global socket server stop failed');
       }
       this.globalSocketServer = null;
+      this.globalMcpSocketPath = null;
     }
 
     // Stop workspace-scoped socket servers and media bridges (sandboxPerChat)
@@ -3164,6 +3203,7 @@ export class AgentRuntime implements Runtime {
     onCrash: (info: SessionCrashInfo) => void;
     notifyUser: (msg: string) => void;
     onResumeFailed?: () => void;
+    mcpSocketPath?: string;
   }): SessionManager {
     const conversationKey = toConversationKey(opts.chatJid);
     const providerToolSession: SessionContext =
@@ -3199,6 +3239,8 @@ export class AgentRuntime implements Runtime {
       providerConfig: this.agentProviderConfig,
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
+      whatsoupInstance: this.instanceName,
+      whatsoupMcpSocket: opts.mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
     });
     if (this.durability) {
       session.setDurability(this.durability);
@@ -3315,6 +3357,7 @@ export class AgentRuntime implements Runtime {
           chatJid,
           cwd: workspacePath,  // scoped cwd instead of this.cwd
           actorJid,
+          mcpSocketPath: socketPath,
           onEvent: (event) => this.handleEventPerChat(workspaceKey, event, toolScopeKey),
           onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info),
           notifyUser: (msg) => {
@@ -3457,6 +3500,7 @@ export class AgentRuntime implements Runtime {
           this.cleanupSharedCrashTurnState();
           // Mark inbound event failed so it doesn't stay stuck in processing
           if (this.durability && this.currentInboundSeq !== undefined) {
+            this.replyGuarantee?.disarm(this.currentInboundSeq);
             this.durability.markInboundFailed(this.currentInboundSeq);
             this.currentInboundSeq = undefined;
           }
@@ -3510,6 +3554,7 @@ export class AgentRuntime implements Runtime {
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0];
     if (this.durability && inboundSeq !== undefined) {
+      this.replyGuarantee?.disarm(inboundSeq);
       this.durability.markInboundFailed(inboundSeq);
       seqQueue.shift();
     }
@@ -3951,6 +3996,7 @@ export class AgentRuntime implements Runtime {
               : {}),
             ...(lastOpId !== undefined ? { lastOpId } : {}),
           });
+          this.replyGuarantee?.disarm(this.currentInboundSeq);
           if (this.currentInboundSeq !== undefined) {
             this.currentInboundSeq = undefined;
           }
@@ -4044,6 +4090,7 @@ export class AgentRuntime implements Runtime {
     if (this.durability && inboundSeq !== undefined) {
       this.durability.completeInbound(inboundSeq, 'response_sent')
     }
+    this.replyGuarantee?.disarm(inboundSeq)
     if (clearCurrentInboundSeq) {
       this.currentInboundSeq = undefined
     }
