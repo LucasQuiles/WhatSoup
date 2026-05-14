@@ -2,6 +2,9 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { git, normalizeRepoPath } from './lib/guard-core.ts';
+
+export { normalizeRepoPath } from './lib/guard-core.ts';
 
 export type GuardMode = 'staged' | 'commit-msg' | 'release-hygiene';
 
@@ -176,10 +179,6 @@ const commitMessagePatterns: GuardPattern[] = [
   ...addedLinePatterns.filter((pattern) => pattern.code !== 'merge-conflict-marker'),
 ];
 
-export function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/').replace(/^\.\//, '');
-}
-
 export function parseArgs(argv: string[]): ParsedArgs {
   const args: ParsedArgs = { mode: 'staged', help: false };
 
@@ -346,10 +345,6 @@ export function scanCommitMessage(message: string): GuardIssue[] {
   });
 
   return issues;
-}
-
-function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
 function stagedDiff(cwd: string): string {
