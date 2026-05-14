@@ -162,18 +162,71 @@ function hasUnbalancedDelimiter(text: string, delim: string): boolean {
   return count % 2 !== 0;
 }
 
-const MAX_HTML_TAG_STRIP_PASSES = 8;
-const HTML_LIKE_TAG_PATTERN =
-  /<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*\/?>/g;
-
 function stripHtmlLikeTags(text: string): string {
-  let stripped = text;
+  let stripped = '';
 
-  for (let pass = 0; pass < MAX_HTML_TAG_STRIP_PASSES; pass++) {
-    const next = stripped.replace(HTML_LIKE_TAG_PATTERN, '');
-    if (next === stripped) return next;
-    stripped = next;
+  for (let i = 0; i < text.length;) {
+    const tagEnd = parseHtmlLikeTag(text, i);
+    if (tagEnd !== null) {
+      i = tagEnd;
+      continue;
+    }
+
+    stripped += text[i];
+    i++;
   }
 
   return stripped;
+}
+
+function parseHtmlLikeTag(text: string, start: number): number | null {
+  if (text[start] !== '<') return null;
+
+  if (text.startsWith('<!--', start)) {
+    const end = text.indexOf('-->', start + 4);
+    return end === -1 ? null : end + 3;
+  }
+
+  let i = start + 1;
+  if (text[i] === '/') i++;
+  if (!isHtmlTagNameStart(text[i])) return null;
+
+  i++;
+  while (i < text.length && isHtmlTagNameChar(text[i])) i++;
+
+  while (i < text.length) {
+    const char = text[i];
+    if (char === '>') return i + 1;
+    if (char === '"' || char === "'") {
+      const quoteEnd = scanQuotedAttribute(text, i);
+      if (quoteEnd === null) return null;
+      i = quoteEnd;
+      continue;
+    }
+    if (char === '<') {
+      const nestedEnd = parseHtmlLikeTag(text, i);
+      if (nestedEnd === null) return null;
+      i = nestedEnd;
+      continue;
+    }
+    i++;
+  }
+
+  return null;
+}
+
+function scanQuotedAttribute(text: string, start: number): number | null {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === quote) return i + 1;
+  }
+  return null;
+}
+
+function isHtmlTagNameStart(char: string | undefined): boolean {
+  return char !== undefined && /[A-Za-z]/.test(char);
+}
+
+function isHtmlTagNameChar(char: string | undefined): boolean {
+  return char !== undefined && /[A-Za-z0-9:-]/.test(char);
 }
