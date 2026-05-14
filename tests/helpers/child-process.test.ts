@@ -29,6 +29,25 @@ describe('childProcessMock', () => {
     expect(callback).toHaveBeenCalledWith(0);
   });
 
+  it('provides the child process members used by spawn consumers', () => {
+    const mock = childProcessMock();
+    const child = mock.spawn('node', ['script.js']);
+    const stdoutCallback = vi.fn();
+    const stderrCallback = vi.fn();
+
+    child.stdout.on('data', stdoutCallback);
+    child.stderr.on('data', stderrCallback);
+    child.stdout.emit('data', Buffer.from('out'));
+    child.stderr.emit('data', Buffer.from('err'));
+    const killed = child.kill('SIGTERM');
+
+    expect(child.pid).toBeGreaterThan(0);
+    expect(stdoutCallback).toHaveBeenCalledWith(Buffer.from('out'));
+    expect(stderrCallback).toHaveBeenCalledWith(Buffer.from('err'));
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(killed).toBe(true);
+  });
+
   it('completes callback-style execFile calls by default', async () => {
     const mock = childProcessMock();
     const callback = vi.fn();
