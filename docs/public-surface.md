@@ -308,7 +308,7 @@ are breaking.
 | `deploy:hooks` | Agent sandbox hooks | [`deploy/hooks/`](../deploy/hooks) | beta | active | Sandbox enforcement; behavior contract still settling |
 | `deploy:loops` | Background loop runners | [`deploy/loops/`](../deploy/loops) | beta | active | Long-running maintenance loops |
 | `deploy:scripts` | Operator helper scripts | [`deploy/scripts/`](../deploy/scripts) | beta | active | Helpers that operators may reference from docs |
-| `deploy:launchd.generated` | macOS plist generation behavior | [docs/runbook.md](runbook.md) | stable | active | Generated launchd plists; per §4, regen non-destructively is non-breaking |
+| `deploy:launchd.generated` | macOS plist generation behavior | [docs/runbooks/macos-launchd-deployment.md](runbooks/macos-launchd-deployment.md), [src/fleet/platform.ts](../src/fleet/platform.ts) | stable | active | Generated launchd plists; per §4, regen non-destructively is non-breaking |
 
 ---
 

@@ -56,7 +56,7 @@ local vector embedding or scheduled Pinecone export.
 | --- | --- | --- |
 | `com.whatsoup.<agent-instance>.plist` | Agent runtime | instance health port |
 | `com.whatsoup.<passive-instance>.plist` | Passive capture/runtime instance | instance health port |
-| `com.whatsoup.fleet.plist` | Fleet server, health polling, proxy routing, discovery | `FLEET_PORT` |
+| `com.whatsoup.whatsoup-fleet.plist` | Fleet server, health polling, proxy routing, discovery | `FLEET_PORT` |
 | `com.whatsoup.<embed-service>.plist` | Optional local embed service for vector profiles | service-owned |
 | `com.whatsoup.<bridge>.plist` | Optional scheduled bridge that drains `fact_export_queue` | none |
 
@@ -157,7 +157,7 @@ Those are wrong tiers. `.gitignore` covers `*.db` to prevent accidental commit.
 Restart fleet only:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.whatsoup.fleet
+launchctl kickstart -k gui/$(id -u)/com.whatsoup.whatsoup-fleet
 tail -F ~/.local/share/whatsoup/fleet-stdout.log
 ```
 

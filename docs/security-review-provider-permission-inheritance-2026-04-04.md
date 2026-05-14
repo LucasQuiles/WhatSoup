@@ -11,9 +11,9 @@ Current WhatSoup agent isolation is strong at the tool-routing layer, but weak a
 The most important facts are:
 
 1. Agent subprocesses are launched with full local-machine authority via `bypassPermissions` and are told they have full machine access.
-2. API keys are loaded from shared GNOME Keyring entries and exported into the parent process environment.
+2. Shared provider API keys can still be loaded from keyring entries and exported into the parent process environment, while HTTP agent providers can now select a keyring service through `providerConfig.apiKeyService`.
 3. `sandboxPerChat` creates per-chat workspaces and chat-scoped MCP sockets, but it does not create per-provider OS isolation.
-4. There is no provider-specific rate limiting or cost circuit breaker today.
+4. Provider budget controls now exist when configured through `providerConfig.budget`, but they are runtime controls, not provider-account billing caps or OS isolation.
 5. A compromised provider binary would likely escape the intended chat/workspace boundary because the current sandbox is hook-based, not OS-enforced.
 
 Recommendation: do not make spawned Codex/Gemini agents "mirror our access, permissions, etc." by default. Mirror conversation context and explicitly approved tools. Do not mirror full machine authority, shared environment secrets, or cross-provider socket visibility.
@@ -22,16 +22,16 @@ Recommendation: do not make spawned Codex/Gemini agents "mirror our access, perm
 
 - Agent subprocesses are launched with `--permission-mode bypassPermissions` and the prompt states "full access to the local machine": `src/runtimes/agent/session.ts:153-169`.
 - Default agent settings also use `defaultMode: 'bypassPermissions'` and broad MCP wildcards: `src/core/settings-template.ts:19-50`.
-- Shared keyring secrets are exported into the service environment:
+- Shared keyring secrets can be exported into the service environment:
   - chat instances export `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `PINECONE_API_KEY`: `deploy/whatsoup:37-56`
   - agent/passive instances export `OPENAI_API_KEY` and `PINECONE_API_KEY`: `deploy/whatsoup:57-73`
-- Per-instance API key support is explicitly still TODO: `src/fleet/routes/ops.ts:545-547`.
+- Raw per-instance API key persistence remains intentionally absent: instance creation ignores raw provider key material while a dedicated secret-storage model is unresolved (`src/fleet/routes/ops.ts`). For HTTP agent providers, `providerConfig.apiKeyService` selects the keyring service used by `resolveApiKey` before falling back to the conventional env var (`src/runtimes/agent/providers/api-key-resolver.ts`, `src/runtimes/agent/providers/anthropic-api.ts`, `src/runtimes/agent/providers/openai-api.ts`).
 - `sandboxPerChat` provisions per-chat `.mcp.json`, `whatsoup.sock`, and `media-bridge.sock`: `src/core/workspace.ts:183-225`.
 - Chat-scoped sockets carry `conversationKey`, `deliveryJid`, and `allowedRoot`: `src/runtimes/agent/runtime.ts:1719-1737`, `src/mcp/types.ts:7-15`.
 - MCP scope enforcement exists in the registry, but socket clients are not authenticated beyond filesystem access: `src/mcp/registry.ts:165-245`, `src/mcp/socket-server.ts:48-103`.
 - Workspace `.claude/` directories are created without explicit `0700` mode in the per-chat path: `src/core/workspace.ts:186-188`.
 - WhatSoup runs as a systemd user service, not as isolated per-provider users: `docs/runbook.md:45`, `deploy/whatsoup@.service:10-30`.
-- Existing "rate limit" and "token budget" controls are chat-runtime controls, not provider spend controls: `src/config.ts:165-167`, `src/runtimes/chat/runtime.ts:156-170`, `src/runtimes/chat/runtime.ts:243-253`.
+- Existing chat `rateLimitPerHour` and `tokenBudget` controls remain chat-runtime controls. Configured agent-provider budget controls now live under `providerConfig.budget` and are enforced by `ProviderBudget` / `SessionManager` for request, token, daily-spend estimate, and per-chat burst limits (`src/runtimes/agent/providers/budget.ts`, `src/runtimes/agent/session.ts`).
 
 ## 1. Implications Of Passing `--dangerously-bypass-approvals-and-sandbox` To Codex
 
@@ -120,18 +120,17 @@ Important conclusion:
 
 Yes, API providers should have rate limiting and spend controls.
 
-Current controls in repo are insufficient for this problem:
+Current controls now include configured agent-provider budgets:
 
-- `rateLimitPerHour` limits user message handling in chat runtime.
-- `tokenBudget` trims prompt context.
-- neither one is a provider quota or spend circuit breaker.
+- `providerConfig.budget.requestsPerMinute` limits provider-instance request rate.
+- `providerConfig.budget.tokensPerMinute` limits recent token throughput.
+- `providerConfig.budget.dailySpendCapUsd` estimates spend from token counts and configured cost.
+- `providerConfig.budget.chatBurstLimit` limits per-chat bursts.
+- `rateLimitPerHour` still limits user message handling in chat runtime, and `tokenBudget` still trims prompt context; neither is a provider-account billing cap.
 
-Recommended controls:
+Remaining recommended controls:
 
-- Per-provider requests/minute.
-- Per-provider tokens/minute.
-- Per-instance daily spend cap.
-- Per-chat burst cap.
+- Provider-account-level billing caps or brokered provider quotas outside the process.
 - Automatic cool-down after repeated provider failures or repeated 429s.
 - Alerting when usage crosses thresholds such as 50%, 80%, and 95% of budget.
 - Hard kill switch for a provider-instance combination.
@@ -272,7 +271,7 @@ If alternate providers must run with elevated local access, place them behind a 
 
 ### P1
 
-- Add per-provider and per-instance budget controls.
+- Harden configured provider budgets with external billing caps, alerting, and operator-visible kill switches.
 - Add `0700` permissions to per-chat workspace and `.claude/` directories.
 - Move provider sockets into a dedicated private runtime tree.
 
