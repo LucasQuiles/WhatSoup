@@ -1,8 +1,16 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  git,
+  isTextCandidate,
+  listStagedFiles,
+  normalizeRepoPath,
+  readStagedAddedLines,
+} from './lib/guard-core.ts';
+
+export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
 
 export type PublicationClass = 'PUBLIC' | 'PRIVATE-ARCHIVE' | 'SANITIZE' | 'DELETE';
 export type PublicationMode = 'all' | 'release' | 'staged';
@@ -112,10 +120,6 @@ const privatePatterns: PrivatePattern[] = [
     regex: /BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY/,
   },
 ];
-
-export function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/').replace(/^\.\//, '');
-}
 
 export function isInternalPublicationPath(filePath: string): boolean {
   const normalized = normalizeRepoPath(filePath);
@@ -311,51 +315,6 @@ export function validatePublicationAudit(
   }
 
   return issues;
-}
-
-function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
-}
-
-function listStagedFiles(cwd: string, diffFilter: string): string[] {
-  return git(['diff', '--cached', '--name-only', `--diff-filter=${diffFilter}`], cwd)
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map(normalizeRepoPath);
-}
-
-function readStagedAddedLines(cwd: string, filePath: string): string {
-  try {
-    return execFileSync('git', ['diff', '--cached', '--unified=0', '--', filePath], {
-      cwd,
-      encoding: 'utf8',
-      maxBuffer: 20 * 1024 * 1024,
-    });
-  } catch {
-    return '';
-  }
-}
-
-function isTextCandidate(filePath: string): boolean {
-  const normalized = normalizeRepoPath(filePath);
-  const baseName = path.basename(normalized);
-  if (baseName === 'Dockerfile' || baseName.startsWith('.env')) return true;
-  return new Set([
-    '.cjs',
-    '.css',
-    '.html',
-    '.js',
-    '.json',
-    '.jsx',
-    '.md',
-    '.mjs',
-    '.sh',
-    '.ts',
-    '.tsx',
-    '.txt',
-    '.yaml',
-    '.yml',
-  ]).has(path.extname(normalized));
 }
 
 function stagedAddedText(cwd: string, filePath: string): string {
