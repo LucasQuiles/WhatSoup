@@ -487,6 +487,8 @@ The source of truth is `REQUIRED_DENY`; this document describes categories only.
 - **Set to `"1"` (opt-in):** `buildBaseChildEnv` drops `ALLOW_M365_MUTATIONS` from the child env *unless* the instance has `agentOptions.allowM365Mutations: true`. This converts the env-var gate into a per-instance allowlist that can be audited at config-write time.
 - Any other value of the flag is treated as unset (back-compat).
 
+WhatSoup forwards `agentOptions.allowM365Mutations` from the loaded instance config through runtime/session startup into each Claude CLI child-env builder; `buildBaseChildEnv` remains the single policy gate.
+
 `WHATSOUP_CONNECTOR_FAILCLOSED` only controls child-env propagation of `ALLOW_M365_MUTATIONS`. It does not gate the `REQUIRED_DENY` floor.
 
 **How operators enable fail-closed child-env propagation:**

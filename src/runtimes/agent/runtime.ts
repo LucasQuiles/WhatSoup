@@ -292,6 +292,8 @@ export interface AgentRuntimeOptions {
   pluginDirs?: string[];
   /** Per-instance plugin enablement. Written to project settings.json to override global. */
   enabledPlugins?: Record<string, boolean>;
+  /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
+  allowM365Mutations?: boolean;
 }
 
 /**
@@ -565,6 +567,7 @@ export class AgentRuntime implements Runtime {
   private readonly sandboxPerChat: boolean;
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
+  private readonly allowM365Mutations: boolean | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
   private readonly registry: ToolRegistry;
@@ -1100,6 +1103,7 @@ export class AgentRuntime implements Runtime {
     this.sandboxPerChat = options?.sandboxPerChat ?? false;
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
+    this.allowM365Mutations = options?.allowM365Mutations;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
 
@@ -3190,6 +3194,7 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: this.model,
       pluginDirs: this.pluginDirs,
+      allowM365Mutations: this.allowM365Mutations,
       provider: this.agentProvider,
       providerConfig: this.agentProviderConfig,
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),

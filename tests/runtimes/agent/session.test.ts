@@ -128,6 +128,39 @@ import {
 
 const CHAT_JID = 'test@s.whatsapp.net';
 
+async function withConnectorMutationEnv(
+  overrides: Record<string, string | undefined>,
+  run: () => Promise<void>,
+): Promise<void> {
+  const keys = ['ALLOW_M365_MUTATIONS', 'WHATSOUP_CONNECTOR_FAILCLOSED'] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+
+  try {
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await run();
+  } finally {
+    for (const key of keys) {
+      const value = saved[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+function lastSpawnEnv(): NodeJS.ProcessEnv {
+  const options = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
+  return options?.env ?? {};
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('SessionManager', () => {
@@ -182,6 +215,78 @@ describe('SessionManager', () => {
 
     const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(callArgs[1]).toContain('bypassPermissions');
+  });
+
+  it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
+    await withConnectorMutationEnv({
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: undefined,
+    }, async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+
+      await sm.spawnSession();
+
+      expect(lastSpawnEnv()).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
+    });
+  });
+
+  it('spawnSession propagates ALLOW_M365_MUTATIONS in fail-closed mode when the instance opts in', async () => {
+    await withConnectorMutationEnv({
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+    }, async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sm = new SessionManager({
+        db,
+        messenger,
+        chatJid: CHAT_JID,
+        onEvent: vi.fn(),
+        allowM365Mutations: true,
+      });
+
+      await sm.spawnSession();
+
+      expect(lastSpawnEnv()).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
+    });
+  });
+
+  it('spawnSession drops ALLOW_M365_MUTATIONS in fail-closed mode when the instance omits the opt-in', async () => {
+    await withConnectorMutationEnv({
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+    }, async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+
+      await sm.spawnSession();
+
+      expect(lastSpawnEnv()).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+    });
+  });
+
+  it('spawnSession drops ALLOW_M365_MUTATIONS in fail-closed mode when the instance explicitly opts out', async () => {
+    await withConnectorMutationEnv({
+      ALLOW_M365_MUTATIONS: '1',
+      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+    }, async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sm = new SessionManager({
+        db,
+        messenger,
+        chatJid: CHAT_JID,
+        onEvent: vi.fn(),
+        allowM365Mutations: false,
+      });
+
+      await sm.spawnSession();
+
+      expect(lastSpawnEnv()).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+    });
   });
 
   it('sendTurn writes JSONL to stdin', async () => {
