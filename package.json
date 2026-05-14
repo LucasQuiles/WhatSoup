@@ -35,6 +35,7 @@
     "guard:test-integrity": "bash scripts/test-integrity-ci.sh",
     "migrate-memory-config": "node --experimental-strip-types scripts/migrate-memory-config.ts",
     "fleet:rotate-token": "node --experimental-strip-types scripts/fleet-rotate-token.ts",
+    "leaks:anonymize": "node --experimental-strip-types scripts/anonymize-private-literals.ts",
     "work-index:regen": "node --experimental-strip-types scripts/work-index.ts",
     "strip-types-compat": "bash scripts/strip-types-compat.sh",
     "pretest": "npm run strip-types-compat",

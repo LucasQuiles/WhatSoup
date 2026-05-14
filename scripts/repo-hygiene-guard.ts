@@ -31,7 +31,9 @@ interface GuardPattern {
 }
 
 const fixtureFiles = new Set([
+  'scripts/anonymize-private-literals.ts',
   'scripts/repo-hygiene-guard.ts',
+  'tests/scripts/anonymize-private-literals.test.ts',
   'tests/scripts/repo-hygiene-guard.test.ts',
 ]);
 

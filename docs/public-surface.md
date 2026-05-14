@@ -243,6 +243,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
+| `cli:npm.leaks-anonymize` | `npm run leaks:anonymize` | `package.json` | stable | active | Report-first private literal anonymizer; pass `--write` to update files |
 | `cli:npm.guard-publication` | `npm run guard:publication` | `package.json` | stable | active | Publication audit guard (default mode) |
 | `cli:npm.guard-publication-all` | `npm run guard:publication:all` | `package.json` | stable | active | Verify tracked internal docs are represented in `docs/publication-audit.md` |
 | `cli:npm.guard-publication-release` | `npm run guard:publication:release` | `package.json` | stable | active | Verify tracked internal docs are public-clean before publication |
