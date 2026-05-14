@@ -6,6 +6,10 @@
 
 **Live queue note:** GitHub issue/PR tables in this report are a dated reconciliation snapshot from the sweep, not a current queue. Run `gh issue list` and `gh pr list --state open` for live state.
 
+**Closed note:** Access-mode registry / validation-set duplication entries below
+were superseded by PR #369 at commit `9b828823` after this sweep snapshot. Keep
+the rows as historical evidence, not current actionability.
+
 **Method:** three independent specialist reviews plus controller verification against the codebase. Findings below are recorded only when they were verified against current files, generated indexes, or GitHub state. Masked or environment-only failures are treated as inconclusive.
 
 ## Central Tracking Surfaces
@@ -84,7 +88,7 @@ Ready-for-review PRs: none as of 2026-05-12 09:13Z. Draft PR details from that s
 | Private config write | High | Merged via PR `#374` | `src/main.ts` wrote an instance `config.json` update with string encoding only; private-write tests covered other paths, not this intro-sent write. | PR `#374` merged at `6c18169d` with a private intro-sent config writer plus direct mode/symlink regression coverage. |
 | Provider KPI missing | Critical claim, false positive | Not actionable | `console/src/components/line-detail/SummaryTab.tsx` already computes and displays provider; `tests/console/summary-tab-provider-card.test.ts` exists on current main. | No new feature PR. |
 | Disconnect policy consolidation | High | Covered by updated draft PR `#297` | `src/transport/auth.ts` and `src/transport/connection.ts` carried separate disconnect decision logic; connection path adds flapping behavior. | PR `#297` now routes both call sites through the shared policy and adds explicit restart-required flapping policy coverage. |
-| Access-mode constant reuse | High | Actionable | `src/config.ts` has a local `VALID_ACCESS_MODES` set while `src/core/agent-config-validator.ts` exports the canonical set through `src/instance-loader.ts`. | Import the canonical set and keep validation messages stable. |
+| Access-mode constant reuse | High | Closed / superseded | Snapshot finding: `src/config.ts` had a local `VALID_ACCESS_MODES` set while `src/core/agent-config-validator.ts` exported the canonical set through `src/instance-loader.ts`. Superseded by PR `#369` at `9b828823`. | No new action from this historical report. |
 | Direct validator coverage | High | Actionable | `src/core/agent-config-validator.ts` has direct validation logic but no `tests/core/agent-config-validator.test.ts`; route tests cover it indirectly. | Add direct validator contract tests. |
 | Root fleet token query-string auth | Medium | Removal plan defined; issue `#393` closed | `src/fleet/index.ts` still accepts root fleet token `?token=` during the deprecation window; PR `#397` warns once per server lifetime on successful query-token HTTP auth, and PR `#401` publishes `removeAfter: "2026-06-30"`. | Execute the removal after 2026-06-30; prefer query credentials only for scoped tickets/SSE constraints. |
 
@@ -110,7 +114,7 @@ The affected row is `docs/superpowers/plans/2026-04-05-phase5-analytics-observab
 ## Recommended PR Queue
 
 1. Disconnect policy consolidation: covered by updated draft PR `#297`; do not duplicate while that PR is active.
-2. Access-mode constant reuse: covered by draft PR `#369`; do not duplicate while that PR is active.
+2. Access-mode constant reuse: superseded by merged PR `#369` at `9b828823`; do not duplicate from this historical report.
 3. Direct validator coverage: covered by draft PR `#372`; do not duplicate while that PR is active.
 4. Root fleet token query-string removal execution: schedule after the documented 2026-06-30 deadline; no open issue remains today.
 

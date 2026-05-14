@@ -210,7 +210,7 @@ All five fail closed with `401` when the token is missing or wrong. Supply it on
 ```
 Authorization: Bearer <WHATSOUP_HEALTH_TOKEN>
 ```
-The token comes from the `WHATSOUP_HEALTH_TOKEN` environment variable (or the `health.token` config field). See [`docs/configuration.md`](configuration.md#health-server) for the canonical statement.
+The token comes from the `WHATSOUP_HEALTH_TOKEN` environment variable. See [`docs/configuration.md`](configuration.md#health-server) for the canonical statement.
 
 Note: this is the per-line health-server token. The fleet-server audience-scoped ticket system (introduced in #313) is a separate auth layer for the fleet API and is not covered here.
 
