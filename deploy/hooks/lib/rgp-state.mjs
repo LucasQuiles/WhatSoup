@@ -141,6 +141,7 @@ export async function withQueueLock(instance, fn, opts = {}) {
   const staleMs = opts.staleMs ?? 60_000;
   const lockPath = queueLockPath(instance);
   let fd = null;
+  let acquired = false;
 
   const acquire = () => {
     try {
@@ -148,6 +149,7 @@ export async function withQueueLock(instance, fn, opts = {}) {
       writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
       closeSync(fd);
       fd = null;
+      acquired = true;
       return true;
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err;
@@ -158,6 +160,7 @@ export async function withQueueLock(instance, fn, opts = {}) {
       writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), recoveredStale: true }));
       closeSync(fd);
       fd = null;
+      acquired = true;
       return true;
     }
   };
@@ -172,7 +175,9 @@ export async function withQueueLock(instance, fn, opts = {}) {
     if (fd !== null) {
       try { closeSync(fd); } catch {}
     }
-    try { unlinkSync(lockPath); } catch {}
+    if (acquired) {
+      try { unlinkSync(lockPath); } catch {}
+    }
   }
 }
 

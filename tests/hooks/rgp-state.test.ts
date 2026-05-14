@@ -172,6 +172,7 @@ describe('rgp-state lock and rate-limit helpers', () => {
 
     expect(result).toMatchObject({ ok: false, locked: true });
     expect(callback).not.toHaveBeenCalled();
+    expect(existsSync(lockPath)).toBe(true);
   });
 
   it('withQueueLock recovers stale locks before running the callback', async () => {
