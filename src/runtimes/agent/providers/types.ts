@@ -147,6 +147,8 @@ export interface ProviderSessionOptions {
   model?: string;
   /** Plugin directories to load (CLI providers). */
   pluginDirs?: string[];
+  /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
+  allowM365Mutations?: boolean;
   /** Instance name for logging / identification. */
   instanceName: string;
   /** Callback invoked for every event emitted by the provider. */

@@ -238,6 +238,7 @@ if (instanceType === 'agent') {
     sandboxPerChat?: boolean;
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
+    allowM365Mutations?: boolean;
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   runtime = new AgentRuntime(db, connectionManager, config.botName, {
@@ -250,6 +251,7 @@ if (instanceType === 'agent') {
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
     pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
     enabledPlugins: agentOpts?.enabledPlugins,
+    allowM365Mutations: agentOpts?.allowM365Mutations,
   });
 } else if (instanceType === 'passive') {
   runtime = new PassiveRuntime(db, connectionManager, {

@@ -8,7 +8,8 @@ import { readFile } from 'node:fs/promises';
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
-const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
+const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
+  const capturedSessionManagerOptsRef: { current: { allowM365Mutations?: boolean } | null } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
   const capturedOnResumeFailedRef: { current: (() => void) | null } = { current: null };
   const capturedOnCrashRef: { current: ((info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void) | null } = { current: null };
@@ -54,7 +55,7 @@ const { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, c
     setDurability: vi.fn(),
   };
 
-  return { mockSession, mockQueue, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
+  return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
 });
 
 const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
@@ -109,12 +110,14 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   // eslint-disable-next-line prefer-arrow-callback -- vi.fn().mockImplementation requires function keyword for constructor mocks; expires 2026-12-31
   SessionManager: vi.fn().mockImplementation(function (
     opts: {
+      allowM365Mutations?: boolean;
       onEvent: (event: AgentEvent) => void;
       onResumeFailed?: () => void;
       onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
       notifyUser?: (msg: string) => void;
     },
   ) {
+    capturedSessionManagerOptsRef.current = opts;
     capturedOnEventRef.current = opts.onEvent;
     capturedOnResumeFailedRef.current = opts.onResumeFailed ?? null;
     capturedOnCrashRef.current = opts.onCrash ?? null;
@@ -422,6 +425,7 @@ describe('AgentRuntime', () => {
     capturedOnCrashRef.current = null;
     capturedNotifyUserRef.current = null;
     capturedOnResumeFailedRef.current = null;
+    capturedSessionManagerOptsRef.current = null;
     mockSession.spawnSession.mockResolvedValue(undefined);
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
@@ -441,11 +445,13 @@ describe('AgentRuntime', () => {
     const { SessionManager: SessionManagerMock } = await import('../../../src/runtimes/agent/session.ts');
     (SessionManagerMock as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       function (opts: {
+        allowM365Mutations?: boolean;
         onEvent: (event: AgentEvent) => void;
         onResumeFailed?: () => void;
         onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
         notifyUser?: (msg: string) => void;
       }) {
+        capturedSessionManagerOptsRef.current = opts;
         capturedOnEventRef.current = opts.onEvent;
         capturedOnResumeFailedRef.current = opts.onResumeFailed ?? null;
         capturedOnCrashRef.current = opts.onCrash ?? null;
@@ -532,6 +538,19 @@ describe('AgentRuntime', () => {
     await runtime.handleMessage(makeMsg({ content: '   ' }));
 
     expect(mockSession.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it('forwards allowM365Mutations into created sessions', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { allowM365Mutations: true });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
+
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      allowM365Mutations: true,
+    });
   });
 
   it('handleMessage /new calls session.handleNew and notifies user', async () => {

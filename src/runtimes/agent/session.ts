@@ -74,6 +74,7 @@ export interface SessionManagerOptions {
   instructionsPath?: string;
   model?: string;
   pluginDirs?: string[];
+  allowM365Mutations?: boolean;
   provider?: string;
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
@@ -290,6 +291,7 @@ export class SessionManager {
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
   private readonly pluginDirs: string[];
+  private readonly allowM365Mutations: boolean | undefined;
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
@@ -368,6 +370,7 @@ export class SessionManager {
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
     this.pluginDirs = opts.pluginDirs ?? [];
+    this.allowM365Mutations = opts.allowM365Mutations;
     this.provider = opts.provider ?? 'claude-cli';
     // Fail-fast on unknown provider IDs (#447). The shared validator blocks
     // these at config-load time, but direct instantiation (tests, programmatic
@@ -763,6 +766,7 @@ export class SessionManager {
           systemPrompt,
           model: this.model,
           pluginDirs: this.pluginDirs,
+          allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
           onEvent: (event) => this.handleProviderEvent(event),
           onCrash: ({ exitCode, signal }) => {
@@ -854,7 +858,7 @@ export class SessionManager {
       // Without this, Node.js inherits process.env in full — meaning ALL secrets
       // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
       // Each provider only receives the credentials it actually needs.
-      env: buildChildEnv(this.provider),
+      env: buildChildEnv(this.provider, { allowM365Mutations: this.allowM365Mutations }),
     });
 
     this.child = child;
@@ -1388,7 +1392,7 @@ export class SessionManager {
       const child = spawn(binary, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: buildChildEnv(this.provider),
+        env: buildChildEnv(this.provider, { allowM365Mutations: this.allowM365Mutations }),
       });
 
       this.child = child;

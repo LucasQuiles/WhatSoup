@@ -80,7 +80,7 @@ export class ClaudeProvider implements ProviderSession {
     const child = spawn('claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: buildChildEnv('claude-cli'),
+      env: buildChildEnv('claude-cli', { allowM365Mutations: opts.allowM365Mutations }),
     });
 
     this.child = child;
@@ -220,7 +220,7 @@ export class ClaudeProvider implements ProviderSession {
   }
 
   buildEnv(): NodeJS.ProcessEnv {
-    return buildChildEnv('claude-cli');
+    return buildChildEnv('claude-cli', { allowM365Mutations: this.opts?.allowM365Mutations });
   }
 
   generateMcpConfig(socketPath: string): Record<string, unknown> | null {
