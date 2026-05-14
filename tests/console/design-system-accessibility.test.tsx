@@ -4,15 +4,24 @@
  * interactive node buttons, and wizard dialog semantics.
  * @vitest-environment jsdom
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { createElement } from 'react'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 
 import { Field, TextInput } from '../../console/src/components/wizard/form-primitives'
 import HeartbeatStrip from '../../console/src/components/HeartbeatStrip'
 import { PipelineTab } from '../../console/src/components/line-detail/PipelineTab'
+import AddLineWizard from '../../console/src/components/AddLineWizard'
+
+vi.mock('framer-motion', async () => {
+  const React = await import('react');
+  return {
+    AnimatePresence: ({ children }: { children: unknown }) => children,
+    motion: {
+      div: ({ children, ...props }: Record<string, unknown>) => React.createElement('div', props, children),
+    },
+  };
+})
 
 afterEach(() => cleanup())
 
@@ -60,10 +69,11 @@ describe('PipelineTab node interaction', () => {
 
 describe('AddLineWizard dialog semantics', () => {
   it('marks the wizard overlay as an accessible dialog', () => {
-    const source = readFileSync(resolve(__dirname, '../../console/src/components/AddLineWizard.tsx'), 'utf8')
-    expect(source).toContain('role="dialog"')
-    expect(source).toContain('aria-modal="true"')
-    expect(source).toContain('aria-labelledby="wizard-title"')
-    expect(source).toContain('id="wizard-title"')
+    render(createElement(AddLineWizard, { onClose: vi.fn() }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Add New Line' })
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.getAttribute('aria-labelledby')).toBe('wizard-title')
+    expect(screen.getByRole('heading', { name: 'Add New Line' }).id).toBe('wizard-title')
   })
 })
