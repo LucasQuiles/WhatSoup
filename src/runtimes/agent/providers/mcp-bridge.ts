@@ -4,6 +4,7 @@
 
 import type { ToolRegistry } from '../../../mcp/registry.ts';
 import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
+import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
 import type {
   McpMode,
   ProviderMcpBridge,
@@ -71,8 +72,7 @@ export function generateMcpConfigFile(
       return {
         mcpServers: {
           whatsoup: {
-            command: 'node',
-            args: ['--experimental-strip-types', proxyScriptPath],
+            ...buildMcpLaunchCommand(proxyScriptPath),
             env: { WHATSOUP_SOCKET: socketPath },
           },
         },

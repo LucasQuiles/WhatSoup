@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { buildMcpLaunchCommand } from '../../../../src/core/mcp-launcher.ts';
 import { generateMcpConfigFile } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 
 // ---------------------------------------------------------------------------
@@ -16,8 +17,7 @@ describe('generateMcpConfigFile – oracle comparison', () => {
     return {
       mcpServers: {
         whatsoup: {
-          command: 'node',
-          args: ['--experimental-strip-types', script],
+          ...buildMcpLaunchCommand(script),
           env: { WHATSOUP_SOCKET: socket },
         },
       },

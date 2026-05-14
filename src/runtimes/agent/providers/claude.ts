@@ -14,6 +14,7 @@ import type {
 } from './types.ts';
 import { parseEvent } from '../stream-parser.ts';
 import { buildChildEnv } from '../session.ts';
+import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
 
 // ---------------------------------------------------------------------------
 // Static descriptor
@@ -233,8 +234,7 @@ export class ClaudeProvider implements ProviderSession {
     return {
       mcpServers: {
         whatsoup: {
-          command: 'node',
-          args: ['--experimental-strip-types', mcpServerScript],
+          ...buildMcpLaunchCommand(mcpServerScript),
           env: { WHATSOUP_SOCKET: socketPath },
         },
       },

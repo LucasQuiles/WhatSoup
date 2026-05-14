@@ -11,6 +11,7 @@ import {
   getMcpStrategy,
 } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
 import { ClaudeProvider } from '../../../../src/runtimes/agent/providers/claude.ts';
+import { buildMcpLaunchCommand } from '../../../../src/core/mcp-launcher.ts';
 
 // ---------------------------------------------------------------------------
 // Media Bridge
@@ -191,8 +192,7 @@ describe('generateMcpConfigFile', () => {
     expect(result).toEqual({
       mcpServers: {
         whatsoup: {
-          command: 'node',
-          args: ['--experimental-strip-types', '/tmp/proxy.ts'],
+          ...buildMcpLaunchCommand('/tmp/proxy.ts'),
           env: { WHATSOUP_SOCKET: '/tmp/whatsoup.sock' },
         },
       },
@@ -204,8 +204,7 @@ describe('generateMcpConfigFile', () => {
     expect(result).toEqual({
       mcpServers: {
         whatsoup: {
-          command: 'node',
-          args: ['--experimental-strip-types', '/tmp/proxy.ts'],
+          ...buildMcpLaunchCommand('/tmp/proxy.ts'),
           env: { WHATSOUP_SOCKET: '/tmp/whatsoup.sock' },
         },
       },
