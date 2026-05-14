@@ -19,12 +19,14 @@
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
-export const VALID_ACCESS_MODES: ReadonlySet<string> = new Set([
+export const ACCESS_MODES = [
   'self_only',
   'allowlist',
   'open_dm',
   'groups_only',
-]);
+] as const;
+export type AccessMode = (typeof ACCESS_MODES)[number];
+export const VALID_ACCESS_MODES: ReadonlySet<string> = new Set(ACCESS_MODES);
 export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
   'single',
   'shared',

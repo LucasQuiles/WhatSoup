@@ -34,6 +34,20 @@ function tagLabels(container: HTMLElement): string[] {
 }
 
 describe('LineTags access mode', () => {
+  it('renders canonical access mode tags from fleet config values', () => {
+    const { container: cSelf } = render(<LineTags line={line({ accessMode: 'self_only' })} />)
+    expect(tagLabels(cSelf)).toContain('self only')
+
+    const { container: cAllow } = render(<LineTags line={line({ accessMode: 'allowlist' })} />)
+    expect(tagLabels(cAllow)).toContain('allowlist')
+
+    const { container: cOpen } = render(<LineTags line={line({ accessMode: 'open_dm' })} />)
+    expect(tagLabels(cOpen)).toContain('open')
+
+    const { container: cGroups } = render(<LineTags line={line({ accessMode: 'groups_only' })} />)
+    expect(tagLabels(cGroups)).toContain('groups only')
+  })
+
   it('renders open tag for allowAll and open_dm', () => {
     const { container: c1 } = render(<LineTags line={line({ accessMode: 'allowAll' })} />)
     expect(tagLabels(c1)).toContain('open')

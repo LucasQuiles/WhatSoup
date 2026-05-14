@@ -14,6 +14,7 @@ import {
   validateInstanceConfig,
   type ValidatorContext,
 } from '../../src/core/agent-config-validator.ts';
+import * as validator from '../../src/core/agent-config-validator.ts';
 
 const baseAgent = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   name: 'alpha',
@@ -62,6 +63,12 @@ describe('VALID_* sets', () => {
     expect(VALID_SESSION_SCOPES.has('shared')).toBe(true);
     expect(VALID_SESSION_SCOPES.has('per_chat')).toBe(true);
     expect(VALID_SESSION_SCOPES.size).toBe(3);
+  });
+
+  it('derives the valid access mode set from an exported ordered registry', () => {
+    expect(validator).toHaveProperty('ACCESS_MODES');
+    expect(validator.ACCESS_MODES).toEqual(['self_only', 'allowlist', 'open_dm', 'groups_only']);
+    expect([...VALID_ACCESS_MODES]).toEqual(validator.ACCESS_MODES);
   });
 });
 
