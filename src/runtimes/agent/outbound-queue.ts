@@ -462,12 +462,13 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'operation_stalled': {
+        const elapsed = formatElapsed(event.elapsedMs);
         if (this.toolUpdateMode === 'minimal') {
-          this.enqueue('_Something went wrong \u2014 retrying..._');
+          this.enqueue(`_Still working (${elapsed})..._`);
         } else if (this.toolUpdateMode === 'friendly') {
-          this.enqueue(`_${name} got stuck \u2014 trying again..._`);
+          this.enqueue(`_${name}: Still working (${elapsed})..._`);
         } else {
-          this.enqueue(`_\u26a0\ufe0f ${name} appears stuck \u2014 recovering..._`);
+          this.enqueue(`_\u23f3 ${name}: Still working (${elapsed})..._`);
         }
         return;
       }
