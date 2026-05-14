@@ -403,9 +403,9 @@ The operation tracker detects and recovers from stuck operations regardless of t
 
 | Mode | Progress updates | Slow warning | Stall warning |
 |------|-----------------|--------------|---------------|
-| `full` | Elapsed time every 30s | Timing details and expected duration | Technical details with elapsed time |
-| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "Got stuck — trying again..." |
-| `minimal` | Typing indicator only | "Still working..." | "Something went wrong — retrying..." |
+| `full` | Elapsed time every 30s | Timing details and expected duration | "Still working" with elapsed time |
+| `friendly` | One-time "working on something" per tool | Plain-language "still working on it..." | "Still working" with elapsed time |
+| `minimal` | Typing indicator only | "Still working..." | "Still working" with elapsed time |
 
 ### `agentOptions`
 

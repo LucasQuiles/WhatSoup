@@ -1114,13 +1114,13 @@ describe('OutboundQueue', () => {
       queue.abortTurn(); // clean up typing interval
     });
 
-    it('renders operation_stalled in all three modes', async () => {
+    it('renders operation_stalled as still-working copy with elapsed time in all three modes', async () => {
       const baseEvent = {
         type: 'operation_stalled' as const,
         toolId: 'tool-1',
         toolName: 'Bash',
         category: 'running' as const,
-        elapsedMs: 60_000,
+        elapsedMs: 65_000,
       };
 
       for (const mode of ['full', 'friendly', 'minimal'] as const) {
@@ -1132,6 +1132,10 @@ describe('OutboundQueue', () => {
         await vi.runAllTimersAsync();
 
         expect(calls.length).toBeGreaterThanOrEqual(1);
+        expect(calls[0]).toContain('Still working');
+        expect(calls[0]).toContain('1m 5s');
+        expect(calls[0]).not.toContain('Something went wrong');
+        expect(calls[0]).not.toContain('stuck');
       }
     });
 
