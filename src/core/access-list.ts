@@ -91,9 +91,9 @@ export function getPendingCount(db: Database): number {
  * `resolvePhoneFromJid(jid, db)` instead.
  *
  * Examples:
- *   '15184194479@s.whatsapp.net' → '15184194479'
+ *   '15555550101@s.whatsapp.net' → '15555550101'
  *   '81536414179557@lid'         → '81536414179557'  (opaque LID!)
- *   '120363123456789@g.us'       → '120363123456789_at_g.us'
+ *   '120363555555555000@g.us'    → '120363555555555000_at_g.us'
  */
 export function extractLocal(jid: string): string {
   const atIdx = jid.indexOf('@');
@@ -122,8 +122,8 @@ export function extractLocal(jid: string): string {
  *   - Contact directory population
  *
  * Examples:
- *   resolvePhoneFromJid('15184194479@s.whatsapp.net', db) → '15184194479'
- *   resolvePhoneFromJid('81536414179557@lid', db)         → '18455880337' (resolved)
+ *   resolvePhoneFromJid('15555550101@s.whatsapp.net', db) → '15555550101'
+ *   resolvePhoneFromJid('11111119999@lid', db)            → '15555551234' (resolved)
  *   resolvePhoneFromJid('99999999@lid', db)               → '99999999'   (unresolvable fallback)
  */
 export function resolvePhoneFromJid(jid: string, db: Database): string {

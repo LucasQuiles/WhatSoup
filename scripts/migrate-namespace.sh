@@ -466,7 +466,7 @@ migrate_personal() {
   write_json_config "$dest_config_dir/config.json" '{
   "name": "personal",
   "type": "passive",
-  "adminPhones": ["18459780919"],
+  "adminPhones": ["15555550100"],
   "accessMode": "self_only",
   "healthPort": 9094
 }'

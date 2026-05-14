@@ -743,8 +743,8 @@ export function getAllLidMappings(db: Database): Map<string, string> {
  * Normalize a chat JID to its canonical form for use as a map key.
  *
  * Canonical form:
- *   - Groups:   unchanged (e.g. `120363406689931730@g.us`)
- *   - Phone DMs: unchanged (e.g. `18459780919@s.whatsapp.net`)
+ *   - Groups:   unchanged (e.g. `120363555555555000@g.us`)
+ *   - Phone DMs: unchanged (e.g. `15555550100@s.whatsapp.net`)
  *   - LID DMs:  resolved to `phone@s.whatsapp.net` via lid_mappings if known;
  *               returned unchanged if unmapped (graceful degradation)
  *

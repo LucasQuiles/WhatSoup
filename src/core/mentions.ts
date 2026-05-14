@@ -78,7 +78,7 @@ export class ContactsDirectory {
    * Record a sender's display name → phone mapping.
    * Call this for every incoming message to keep the directory fresh.
    *
-   * Accepts a full JID (e.g. '15184194479@s.whatsapp.net') or bare phone.
+   * Accepts a full JID (e.g. '15555550101@s.whatsapp.net') or bare phone.
    * Resolves LID JIDs to real phone numbers via the DB when available.
    * Generates lowercase keys for: full name, first name, and phone number.
    */
