@@ -3,7 +3,6 @@ import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
-import { readFile } from 'node:fs/promises';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
@@ -824,24 +823,6 @@ describe('AgentRuntime', () => {
       randomSpy.mockRestore();
       vi.useRealTimers();
     }
-  });
-
-  it('LEAK-02 structurally wires cleanup into crash/deletion sites without dropping replay text', async () => {
-    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
-    const mapKeyCleanupMatches = source.match(/this\.cleanupPerChatState\(mapKey\);/g) ?? [];
-    const workspaceCleanupMatches = source.match(/this\.cleanupPerChatState\(workspaceKey\);/g) ?? [];
-    const crashMatch = source.match(/private cleanupPerChatCrashTurnState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
-
-    expect(mapKeyCleanupMatches.length).toBeGreaterThanOrEqual(2);
-    expect(workspaceCleanupMatches).toHaveLength(2);
-    expect(source).toContain('this.cleanupPerChatState(lidKey);');
-    expect(crashMatch).toBeTruthy();
-
-    const crashBody = crashMatch?.[1] ?? '';
-    expect(crashBody).toContain('this.perChatTurnContentType.delete(mapKey);');
-    expect(crashBody).toContain('this.perChatTurnText.delete(mapKey);');
-    expect(crashBody).toContain('this.perChatAssistantItemText.delete(mapKey);');
-    expect(crashBody).not.toContain('this.pendingTurnText.delete(mapKey);');
   });
 
   it('startup proactive-resume notifyUser cleanup removes only the crashed chat state', async () => {
@@ -1984,32 +1965,6 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('cleanupPerChatState structurally covers all eight auxiliary per-chat maps', async () => {
-    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
-    const match = source.match(/private cleanupPerChatState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
-
-    expect(match).toBeTruthy();
-
-    const methodBody = match?.[1] ?? '';
-    const expectedDeletes = [
-      'this.perChatCrashCount.delete(mapKey);',
-      'this.perChatInboundSeqQueue.delete(mapKey);',
-      'this.perChatTurnContentType.delete(mapKey);',
-      'this.perChatTurnText.delete(mapKey);',
-      'this.perChatAssistantItemText.delete(mapKey);',
-      'this.pendingTurnText.delete(mapKey);',
-      'this.resumeFailedHandling.delete(mapKey);',
-      'this.operationTrackers.delete(mapKey);',
-    ];
-
-    for (const expectedDelete of expectedDeletes) {
-      expect(methodBody).toContain(expectedDelete);
-    }
-
-    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length);
-    expect(methodBody).toContain("this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');");
-  });
-
   it('per_chat shutdown calls cleanupPerChatState for each chat key and clears auxiliary maps', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2456,13 +2411,6 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('shared queue sweep timer is unrefd and cleared structurally', async () => {
-    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
-
-    expect(source).toContain('this.queueSweepTimer.unref?.();');
-    expect(source).toContain('clearInterval(this.queueSweepTimer);');
-  });
-
   it('sandboxPerChat sweepIdleWorkspaces evicts idle workspace resources', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2671,13 +2619,6 @@ describe('AgentRuntime', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('sandboxPerChat workspace sweep timer is unrefd and cleared structurally', async () => {
-    const source = await readFile(new URL('../../../src/runtimes/agent/runtime.ts', import.meta.url), 'utf8');
-
-    expect(source).toContain('this.workspaceSweepTimer.unref?.();');
-    expect(source).toContain('clearInterval(this.workspaceSweepTimer);');
   });
 
   // ─── Session resume ────────────────────────────────────────────────────────

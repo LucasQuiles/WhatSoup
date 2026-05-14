@@ -52,7 +52,7 @@ describe('WS URL construction', () => {
       { protocol: 'http:', host: 'localhost' },
       () => Promise.reject(new Error('unauthenticated')),
     );
-    expect(url).toBeNull();
+    expect(url).toBe(null);
   });
 });
 

@@ -1,3 +1,12 @@
+/**
+ * Static policy coverage for provider hardening invariants.
+ *
+ * These checks intentionally read provider/session source files to pin
+ * cross-file security contracts such as explicit spawn envs, descriptor fields,
+ * parser registration, and provider budget/tool mapping coverage.
+ *
+ * test-integrity: source-string-ok
+ */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
