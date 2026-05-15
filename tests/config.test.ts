@@ -29,6 +29,7 @@ beforeEach(() => {
     WHATSOUP_DATA_DIR: process.env.WHATSOUP_DATA_DIR,
     WHATSOUP_STATE_DIR: process.env.WHATSOUP_STATE_DIR,
     WHATSOUP_GUI_PORT: process.env.WHATSOUP_GUI_PORT,
+    TMPDIR: process.env.TMPDIR,
     // P3.6 D-2: new env var that overrides apiTimeoutMs.
     WHATSOUP_API_TIMEOUT_MS: process.env.WHATSOUP_API_TIMEOUT_MS,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
@@ -59,6 +60,7 @@ beforeEach(() => {
   delete process.env.MAX_AGE_DAYS;
   delete process.env.LOG_LEVEL;
   delete process.env.WHATSOUP_GUI_PORT;
+  delete process.env.TMPDIR;
   // D-2: keep existing "apiTimeoutMs defaults to 30_000" tests deterministic
   // regardless of what the parent env has set for WHATSOUP_API_TIMEOUT_MS.
   delete process.env.WHATSOUP_API_TIMEOUT_MS;
@@ -188,6 +190,8 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.logDir).toBe(path.join(tmpDir, 'data', 'logs'));
     expect(config.lockPath).toBe(path.join(tmpDir, 'state', 'bot.lock'));
     expect(config.mediaDir).toBe(path.join(tmpDir, 'data', 'media', 'tmp'));
+    expect(config.tmpDir).toBe(path.join(tmpDir, 'data', 'tmp'));
+    expect(process.env.TMPDIR).toBe(config.tmpDir);
   });
 });
 
@@ -666,6 +670,8 @@ describe('config — instance paths', () => {
     expect(config.logDir).toBe(path.join(instDataRoot, 'logs'));
     expect(config.lockPath).toBe(path.join(instStateRoot, 'bot.lock'));
     expect(config.mediaDir).toBe(path.join(instDataRoot, 'media', 'tmp'));
+    expect(config.tmpDir).toBe(path.join(instDataRoot, 'tmp'));
+    expect(process.env.TMPDIR).toBe(config.tmpDir);
   });
 
   it('creates instance directories via mkdirSync', async () => {

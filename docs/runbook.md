@@ -38,6 +38,7 @@
 | Logs | `~/.local/share/whatsoup/instances/<name>/logs/` |
 | Lock file | `~/.local/state/whatsoup/instances/<name>/whatsoup.lock` |
 | Media temp | `~/.local/share/whatsoup/instances/<name>/media/tmp/` |
+| Process temp | `~/.local/share/whatsoup/tmp/<name>/` |
 
 ---
 

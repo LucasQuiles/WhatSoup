@@ -331,6 +331,7 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
 | `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
+| `artifact:process-tmp.dir` | `$XDG_DATA_HOME/whatsoup/tmp/<name>/` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Per-instance runtime `TMPDIR`; swept hourly after 3 hours |
 
 ---
 

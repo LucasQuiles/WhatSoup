@@ -41,6 +41,7 @@ beforeEach(() => {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME,
     INSTANCE_CONFIG: process.env.INSTANCE_CONFIG,
+    TMPDIR: process.env.TMPDIR,
     HOME: process.env.HOME,
   };
 
@@ -54,6 +55,7 @@ beforeEach(() => {
 
   // Clear any existing INSTANCE_CONFIG
   delete process.env.INSTANCE_CONFIG;
+  delete process.env.TMPDIR;
 });
 
 afterEach(() => {
@@ -101,6 +103,9 @@ describe('loadInstance — happy path: chat', () => {
     expect(p.logDir).toBe(path.join(dataRoot, 'logs'));
     expect(p.lockPath).toBe(path.join(stateRoot, 'whatsoup.lock'));
     expect(p.mediaDir).toBe(path.join(dataRoot, 'media', 'tmp'));
+    expect(p.tmpDir).toBe(path.join(tmpDir, 'data', 'whatsoup', 'tmp', 'test-chat'));
+    expect(process.env.TMPDIR).toBe(p.tmpDir);
+    expect(fs.statSync(process.env.TMPDIR!).isDirectory()).toBe(true);
 
     // Cross-root checks: data/state must not bleed into config
     expect(p.dataRoot).toContain('/data/whatsoup/instances/');
@@ -134,6 +139,7 @@ describe('loadInstance — happy path: agent', () => {
       logDir: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'logs'),
       lockPath: path.join(tmpDir, 'state', 'whatsoup', 'instances', 'test-agent', 'whatsoup.lock'),
       mediaDir: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'media', 'tmp'),
+      tmpDir: path.join(tmpDir, 'data', 'whatsoup', 'tmp', 'test-agent'),
     });
   });
 });
