@@ -213,6 +213,78 @@ describe('handleAuth', () => {
     child.emit('exit', 0);
     expect(res._ended).toBe(true);
   });
+
+  it('restarts a stopped instance when auth exits nonzero before connecting', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.emit('exit', 1);
+
+    expect(svc.stop).toHaveBeenCalledWith('test-line');
+    expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._chunks.join('')).toContain('auth exited with code 1');
+    expect(res._ended).toBe(true);
+  });
+
+  it('restarts a stopped instance when auth spawn reports an error before connecting', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.emit('error', new Error('spawn failed'));
+
+    expect(svc.stop).toHaveBeenCalledWith('test-line');
+    expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._chunks.join('')).toContain('spawn failed');
+    expect(res._ended).toBe(true);
+  });
+
+  it('restarts a stopped instance when auth times out before connecting', async () => {
+    vi.useFakeTimers();
+    try {
+      const inst = fakeInstance({ name: 'test-line' });
+      const child = fakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(child as any);
+
+      const svc = mockServiceManager();
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+        serviceManager: svc,
+      });
+      const req = mockReq('', '/api/lines/test-line/auth');
+      const res = mockSseRes();
+
+      await handleAuth(req, res, deps, { name: 'test-line' });
+      vi.advanceTimersByTime(5 * 60 * 1000);
+
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(svc.stop).toHaveBeenCalledWith('test-line');
+      expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+      expect(res._chunks.join('')).toContain('Authentication timed out');
+      expect(res._ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1138,8 +1138,12 @@ export async function handleAuth(
     'Connection': 'keep-alive',
   });
 
-  // Stop the running instance so the lock file is released for auth
-  try { await deps.serviceManager.stop(params.name); } catch { /* may not be running */ }
+  // Stop the running instance so the lock file is released for auth.
+  let stoppedForAuth = false;
+  try {
+    await deps.serviceManager.stop(params.name);
+    stoppedForAuth = true;
+  } catch { /* may not be running */ }
 
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
@@ -1160,16 +1164,27 @@ export async function handleAuth(
 
   // Guard against double res.end() — declared before any event handlers
   let authTimer: ReturnType<typeof setTimeout> | null = null;
+  let connected = false;
+  let restoreRequested = false;
   const { writeSSE, endOnce } = createSSEWriter(res, () => {
     activeAuthProcesses.delete(params.name);
     authInFlight.delete(params.name);
     if (authTimer) clearTimeout(authTimer);
   });
 
+  const restoreStoppedInstance = (reason: string) => {
+    if (!stoppedForAuth || connected || restoreRequested) return;
+    restoreRequested = true;
+    deps.serviceManager.startFire(params.name, (err: Error | null) => {
+      if (err) log.error({ err, instance: params.name, reason }, 'post-auth failure restart failed');
+    });
+  };
+
   // Wall-clock timeout — prevents auth process from hanging forever
   authTimer = setTimeout(() => {
     writeSSE('error', { message: 'Authentication timed out. QR codes expire after ~60 seconds. Please retry.' });
     child.kill('SIGTERM');
+    restoreStoppedInstance('timeout');
     endOnce();
   }, AUTH_TIMEOUT_MS);
 
@@ -1186,6 +1201,7 @@ export async function handleAuth(
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
         writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
+          connected = true;
           // Reset introSent so the instance sends an introduction on next boot
           try {
             const cfgPath = instance.configPath;
@@ -1214,11 +1230,13 @@ export async function handleAuth(
   // Forward errors
   child.on('error', (err) => {
     writeSSE('error', { message: err.message });
+    restoreStoppedInstance('child-error');
     endOnce();
   });
   child.on('exit', (code) => {
     if (code !== 0) {
       writeSSE('error', { message: `auth exited with code ${code}` });
+      restoreStoppedInstance('child-exit');
     }
     endOnce();
   });
