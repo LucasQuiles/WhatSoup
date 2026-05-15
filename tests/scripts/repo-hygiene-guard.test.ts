@@ -171,15 +171,22 @@ describe('repo hygiene guard', () => {
         line: 77,
         text: 'console.error("chat failed", err);',
       },
+      {
+        filePath: 'console/src/components/Example.tsx',
+        line: 12,
+        text: 'console.warn("debug console component", payload);',
+      },
     ]);
 
     expect(issues.map((issue) => issue.code)).toEqual([
+      'src-console-call',
       'src-console-call',
       'src-console-call',
     ]);
     expect(issues.map((issue) => `${issue.filePath}:${issue.line}`)).toEqual([
       'src/fleet/routes/example.ts:42',
       'src/runtimes/chat/runtime.ts:77',
+      'console/src/components/Example.tsx:12',
     ]);
   });
 
