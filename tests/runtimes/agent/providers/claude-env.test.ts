@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { FAILCLOSED_FLAG } from '../../../../src/runtimes/agent/providers/child-env.ts';
 
 const { spawnMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(),
@@ -60,11 +61,11 @@ describe('ClaudeProvider child env', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     spawnMock.mockReturnValue(makeChild());
-    for (const key of ['ALLOW_M365_MUTATIONS', 'WHATSOUP_CONNECTOR_FAILCLOSED']) {
+    for (const key of ['ALLOW_M365_MUTATIONS', FAILCLOSED_FLAG]) {
       savedEnv[key] = process.env[key];
     }
     process.env.ALLOW_M365_MUTATIONS = '1';
-    process.env.WHATSOUP_CONNECTOR_FAILCLOSED = '1';
+    process.env[FAILCLOSED_FLAG] = '1';
   });
 
   afterEach(() => {

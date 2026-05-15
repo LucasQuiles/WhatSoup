@@ -5,6 +5,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
+import { FAILCLOSED_FLAG } from '../../../src/runtimes/agent/providers/child-env.ts';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -132,7 +133,7 @@ async function withConnectorMutationEnv(
   overrides: Record<string, string | undefined>,
   run: () => Promise<void>,
 ): Promise<void> {
-  const keys = ['ALLOW_M365_MUTATIONS', 'WHATSOUP_CONNECTOR_FAILCLOSED'] as const;
+  const keys = ['ALLOW_M365_MUTATIONS', FAILCLOSED_FLAG] as const;
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 
   try {
