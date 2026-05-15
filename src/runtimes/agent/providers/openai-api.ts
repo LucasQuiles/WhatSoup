@@ -22,6 +22,8 @@ import type {
 } from './types.ts';
 import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
+import { turnPartsToOpenAIContent } from './media-bridge.ts';
+import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -48,7 +50,7 @@ export const openaiApiDescriptor: ProviderDescriptor = {
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | null | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
   tool_calls?: Array<{
     id: string;
     type: 'function';
@@ -68,6 +70,7 @@ interface CallApiResult {
   toolCalls?: ToolCall[];
   inputTokens?: number;
   outputTokens?: number;
+  terminalResultText?: string;
 }
 
 const MAX_TOOL_ITERATIONS = 20;
@@ -130,13 +133,17 @@ export class OpenAIApiProvider implements ProviderSession {
     // Per-turn model override (e.g. model-switch mid-conversation)
     const turnModel = request.model ?? this.model;
 
-    // Collect text parts; images would need base64 encoding (future)
-    const textParts = request.parts
-      .filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text')
-      .map(p => p.text);
-    const text = stripLoneSurrogates(textParts.join('\n'));
+    const hasRichParts = request.parts.some((part) => part.kind !== 'text');
+    const userContent = hasRichParts
+      ? turnPartsToOpenAIContent(request.parts)
+      : stripLoneSurrogates(
+          request.parts
+            .filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text')
+            .map(p => p.text)
+            .join('\n'),
+        );
 
-    this.messages.push({ role: 'user', content: text });
+    this.messages.push({ role: 'user', content: userContent });
 
     if (this.messages.length > MAX_HISTORY_MESSAGES) {
       const system = this.messages[0]; // preserve system prompt
@@ -151,6 +158,16 @@ export class OpenAIApiProvider implements ProviderSession {
 
       lastInputTokens = result.inputTokens;
       lastOutputTokens = result.outputTokens;
+
+      if (result.terminalResultText !== undefined) {
+        this.opts.onEvent({
+          type: 'result',
+          text: result.terminalResultText,
+          inputTokens: lastInputTokens,
+          outputTokens: lastOutputTokens,
+        });
+        return;
+      }
 
       if (!result.toolCalls || result.toolCalls.length === 0) {
         // Final text response — loop complete
@@ -189,6 +206,17 @@ export class OpenAIApiProvider implements ProviderSession {
           toolId: tc.id,
           content: toolResult.content,
         });
+      }
+
+      if (i === MAX_TOOL_ITERATIONS - 1) {
+        log.warn({ model: turnModel, toolCallCount: result.toolCalls.length }, 'managed tool loop exhausted');
+        this.opts.onEvent({
+          type: 'result',
+          text: '_Tool loop limit reached - please try again or send /new._',
+          inputTokens: lastInputTokens,
+          outputTokens: lastOutputTokens,
+        });
+        return;
       }
     }
 
@@ -274,9 +302,8 @@ export class OpenAIApiProvider implements ProviderSession {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.opts.onEvent({ type: 'result', text: '_Connection error — please try again._' });
       log.error({ err: msg, model }, 'fetch error in callApi');
-      return { text: '' };
+      return { text: '', terminalResultText: '_Connection error - please try again._' };
     }
 
     if (!response.ok) {
@@ -292,102 +319,83 @@ export class OpenAIApiProvider implements ProviderSession {
       // User-friendly error — never show raw JSON error bodies
       let friendlyMsg: string;
       if (response.status === 400) {
-        friendlyMsg = '⚠️ _There was an issue with my conversation data. Please try again or send /new to start fresh._';
+        friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
         log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error');
       } else if (response.status === 429) {
-        friendlyMsg = '_Rate limited — please wait a moment and try again._';
+        friendlyMsg = '_Rate limited - please wait a moment and try again._';
       } else if (response.status >= 500) {
-        friendlyMsg = '_Service temporarily unavailable — please try again in a moment._';
+        friendlyMsg = '_Service temporarily unavailable - please try again in a moment._';
       } else {
-        friendlyMsg = `_Service error (${response.status}) — please try again._`;
+        friendlyMsg = `_Service error (${response.status}) - please try again._`;
       }
 
-      this.opts.onEvent({ type: 'result', text: friendlyMsg });
-      return { text: '' };
+      return { text: '', terminalResultText: friendlyMsg };
     }
 
     // ── SSE streaming ────────────────────────────────────────────────────────
 
-    const reader = response.body?.getReader();
-    if (!reader) {
-      this.opts.onEvent({ type: 'result', text: 'No response body' });
-      return { text: '' };
+    const body = response.body;
+    if (!body) {
+      return { text: '', terminalResultText: 'No response body' };
     }
 
-    const decoder = new TextDecoder();
-    let sseBuffer = '';
     let fullText = '';
     // Sparse array indexed by tool_call delta index
     const toolCallAccum: ToolCall[] = [];
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    for await (const data of readSseDataLines(body)) {
+      if (data === '[DONE]') continue;
 
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split('\n');
-        // Keep the last (possibly incomplete) line in the buffer
-        sseBuffer = lines.pop() ?? '';
+      let chunk: Record<string, unknown>;
+      try {
+        chunk = JSON.parse(data) as Record<string, unknown>;
+      } catch (err) {
+        // Malformed SSE chunk - skip, but preserve observability.
+        log.warn({ err, dataPreview: data.slice(0, 200), model }, 'malformed SSE chunk from OpenAI-compatible API');
+        continue;
+      }
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
+      const choices = chunk['choices'] as Array<Record<string, unknown>> | undefined;
+      const delta = choices?.[0]?.['delta'] as Record<string, unknown> | undefined;
 
-          let chunk: Record<string, unknown>;
-          try {
-            chunk = JSON.parse(data) as Record<string, unknown>;
-          } catch {
-            // Malformed SSE chunk — skip
-            continue;
-          }
+      if (delta) {
+        // ── Text content ─────────────────────────────────────────────
+        if (typeof delta['content'] === 'string' && delta['content'].length > 0) {
+          fullText += delta['content'];
+          this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
+        }
 
-          const choices = chunk['choices'] as Array<Record<string, unknown>> | undefined;
-          const delta = choices?.[0]?.['delta'] as Record<string, unknown> | undefined;
+        // ── Tool call deltas ──────────────────────────────────────────
+        const deltaToolCalls = delta['tool_calls'] as
+          | Array<{
+              index: number;
+              id?: string;
+              type?: string;
+              function?: { name?: string; arguments?: string };
+            }>
+          | undefined;
 
-          if (delta) {
-            // ── Text content ─────────────────────────────────────────────
-            if (typeof delta['content'] === 'string' && delta['content'].length > 0) {
-              fullText += delta['content'];
-              this.opts.onEvent({ type: 'assistant_text', text: delta['content'] });
+        if (deltaToolCalls) {
+          for (const dtc of deltaToolCalls) {
+            const idx = dtc.index;
+            if (!toolCallAccum[idx]) {
+              toolCallAccum[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } };
             }
-
-            // ── Tool call deltas ──────────────────────────────────────────
-            const deltaToolCalls = delta['tool_calls'] as
-              | Array<{
-                  index: number;
-                  id?: string;
-                  type?: string;
-                  function?: { name?: string; arguments?: string };
-                }>
-              | undefined;
-
-            if (deltaToolCalls) {
-              for (const dtc of deltaToolCalls) {
-                const idx = dtc.index;
-                if (!toolCallAccum[idx]) {
-                  toolCallAccum[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } };
-                }
-                if (dtc.id) toolCallAccum[idx].id = dtc.id;
-                if (dtc.function?.name) toolCallAccum[idx].function.name += dtc.function.name;
-                if (dtc.function?.arguments) toolCallAccum[idx].function.arguments += dtc.function.arguments;
-              }
-            }
-          }
-
-          // ── Usage (may appear in any chunk, typically the last) ───────────
-          const usage = chunk['usage'] as { prompt_tokens?: number; completion_tokens?: number } | undefined;
-          if (usage) {
-            if (typeof usage.prompt_tokens === 'number') inputTokens = usage.prompt_tokens;
-            if (typeof usage.completion_tokens === 'number') outputTokens = usage.completion_tokens;
+            if (dtc.id) toolCallAccum[idx].id = dtc.id;
+            if (dtc.function?.name) toolCallAccum[idx].function.name += dtc.function.name;
+            if (dtc.function?.arguments) toolCallAccum[idx].function.arguments += dtc.function.arguments;
           }
         }
       }
-    } finally {
-      reader.releaseLock();
+
+      // ── Usage (may appear in any chunk, typically the last) ───────────
+      const usage = chunk['usage'] as { prompt_tokens?: number; completion_tokens?: number } | undefined;
+      if (usage) {
+        if (typeof usage.prompt_tokens === 'number') inputTokens = usage.prompt_tokens;
+        if (typeof usage.completion_tokens === 'number') outputTokens = usage.completion_tokens;
+      }
     }
 
     // Filter out any sparse-array holes and incomplete tool calls

@@ -25,6 +25,13 @@ function makeSseResponse(events: Array<Record<string, unknown> | string>): Respo
   });
 }
 
+function makeRawSseResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
 function registerEchoTool(registry: ToolRegistry): void {
   registry.register({
     name: 'echo_tool',
@@ -309,7 +316,14 @@ describe('HTTP provider MCP bridge', () => {
       messages: Array<{ role: string; content: unknown }>;
     };
     const toolResultTurn = secondBody.messages.find(
-      (message) => message.role === 'user' && Array.isArray(message.content),
+      (message) => message.role === 'user'
+        && Array.isArray(message.content)
+        && message.content.some((block) => (
+          typeof block === 'object'
+            && block !== null
+            && 'type' in block
+            && block.type === 'tool_result'
+        )),
     );
     expect(toolResultTurn?.content).toEqual([
       {
@@ -335,5 +349,184 @@ describe('HTTP provider MCP bridge', () => {
       toolId: 'toolu_1',
       content: 'Tool "fail_tool" failed: boom: denied',
     });
+  });
+
+  it('openai-api parses a final SSE data line without a trailing newline', async () => {
+    const events: AgentEvent[] = [];
+    const provider = new OpenAIApiProvider();
+
+    fetchMock.mockResolvedValueOnce(makeRawSseResponse(
+      'data: {"choices":[{"delta":{"content":"tail text"}}]}',
+    ));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (event) => events.push(event),
+      onCrash,
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'hello' }],
+    });
+
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'assistant_text', text: 'tail text' },
+      expect.objectContaining({ type: 'result', text: null }),
+    ]));
+  });
+
+  it('anthropic-api parses a final SSE data line without a trailing newline', async () => {
+    const events: AgentEvent[] = [];
+    const provider = new AnthropicApiProvider();
+
+    fetchMock.mockResolvedValueOnce(makeRawSseResponse([
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"tail text"}}',
+    ].join('')));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (event) => events.push(event),
+      onCrash,
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'hello' }],
+    });
+
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'assistant_text', text: 'tail text' },
+      expect.objectContaining({ type: 'result', text: null }),
+    ]));
+  });
+
+  it('openai-api emits one terminal result for fetch failures', async () => {
+    const events: AgentEvent[] = [];
+    const provider = new OpenAIApiProvider();
+    fetchMock.mockRejectedValueOnce(new Error('network down'));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (event) => events.push(event),
+      onCrash,
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'hello' }],
+    });
+
+    const resultEvents = events.filter((event) => event.type === 'result');
+    expect(resultEvents).toHaveLength(1);
+    expect(resultEvents[0]).toMatchObject({
+      type: 'result',
+      text: '_Connection error - please try again._',
+    });
+  });
+
+  it('anthropic-api emits one terminal result for fetch failures', async () => {
+    const events: AgentEvent[] = [];
+    const provider = new AnthropicApiProvider();
+    fetchMock.mockRejectedValueOnce(new Error('network down'));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (event) => events.push(event),
+      onCrash,
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'hello' }],
+    });
+
+    const resultEvents = events.filter((event) => event.type === 'result');
+    expect(resultEvents).toHaveLength(1);
+    expect(resultEvents[0]).toMatchObject({
+      type: 'result',
+      text: '_Connection error - please try again._',
+    });
+  });
+
+  it('openai-api includes base64 image parts in the request body', async () => {
+    const provider = new OpenAIApiProvider();
+    fetchMock.mockResolvedValueOnce(makeSseResponse(['[DONE]']));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: () => {},
+      onCrash,
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [
+        { kind: 'text', text: 'inspect this' },
+        { kind: 'image', mimeType: 'image/jpeg', base64: 'abc123', caption: 'front panel' },
+      ],
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const userMessage = body.messages.find((message) => message.role === 'user');
+    expect(userMessage?.content).toEqual([
+      { type: 'text', text: 'inspect this' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,abc123' } },
+      { type: 'text', text: 'front panel' },
+    ]);
+  });
+
+  it('anthropic-api includes base64 image parts in the request body', async () => {
+    const provider = new AnthropicApiProvider();
+    fetchMock.mockResolvedValueOnce(makeSseResponse([
+      { type: 'message_stop' },
+    ]));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: () => {},
+      onCrash,
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [
+        { kind: 'text', text: 'inspect this' },
+        { kind: 'image', mimeType: 'image/png', base64: 'abc123', caption: 'front panel' },
+      ],
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    expect(body.messages[0]?.content).toEqual([
+      { type: 'text', text: 'inspect this' },
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: 'abc123' },
+      },
+      { type: 'text', text: 'front panel' },
+    ]);
   });
 });
