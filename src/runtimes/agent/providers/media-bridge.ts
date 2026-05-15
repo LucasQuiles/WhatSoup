@@ -116,3 +116,44 @@ export function turnPartsToOpenAIContent(
 
   return content.length > 0 ? content : [{ type: 'text', text: '' }];
 }
+
+/**
+ * Convert TurnParts to Anthropic Messages API content block format.
+ * Supports text + base64 image content parts.
+ */
+export function turnPartsToAnthropicContent(
+  parts: TurnPart[],
+): Array<
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+> {
+  const content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  > = [];
+
+  for (const part of parts) {
+    switch (part.kind) {
+      case 'text':
+        content.push({ type: 'text', text: part.text });
+        break;
+      case 'image':
+        if (part.base64) {
+          content.push({
+            type: 'image',
+            source: { type: 'base64', media_type: part.mimeType, data: part.base64 },
+          });
+        }
+        if (part.caption) content.push({ type: 'text', text: part.caption });
+        break;
+      case 'audio':
+        if (part.transcript) content.push({ type: 'text', text: `[Audio]: ${part.transcript}` });
+        break;
+      case 'document':
+        if (part.extractedText) content.push({ type: 'text', text: `[${part.filename ?? 'Document'}]:\n${part.extractedText}` });
+        break;
+    }
+  }
+
+  return content.length > 0 ? content : [{ type: 'text', text: '' }];
+}

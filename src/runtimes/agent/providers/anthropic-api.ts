@@ -21,6 +21,8 @@ import type {
 } from './types.ts';
 import { convertMcpToolsToAnthropic } from './mcp-bridge.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
+import { turnPartsToAnthropicContent } from './media-bridge.ts';
+import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -52,6 +54,7 @@ interface AnthropicMessage {
 
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
 
@@ -66,6 +69,7 @@ interface CallApiResult {
   toolUses?: ToolUseAccum[];
   inputTokens?: number;
   outputTokens?: number;
+  terminalResultText?: string;
 }
 
 const MAX_TOOL_ITERATIONS = 20;
@@ -130,13 +134,13 @@ export class AnthropicApiProvider implements ProviderSession {
     // Per-turn model override (e.g. model-switch mid-conversation)
     const turnModel = request.model ?? this.model;
 
-    // Collect text parts; images would need base64 encoding (future)
-    const textParts = request.parts
-      .filter((p): p is Extract<typeof p, { kind: 'text' }> => p.kind === 'text')
-      .map(p => p.text);
-    const text = stripLoneSurrogates(textParts.join('\n'));
+    const userContent = turnPartsToAnthropicContent(request.parts).map((block) => (
+      block.type === 'text'
+        ? { ...block, text: stripLoneSurrogates(block.text) }
+        : block
+    ));
 
-    this.messages.push({ role: 'user', content: text });
+    this.messages.push({ role: 'user', content: userContent });
 
     if (this.messages.length > MAX_HISTORY_MESSAGES) {
       this.messages = this.messages.slice(-MAX_HISTORY_MESSAGES);
@@ -150,6 +154,16 @@ export class AnthropicApiProvider implements ProviderSession {
 
       lastInputTokens = result.inputTokens;
       lastOutputTokens = result.outputTokens;
+
+      if (result.terminalResultText !== undefined) {
+        this.opts.onEvent({
+          type: 'result',
+          text: result.terminalResultText,
+          inputTokens: lastInputTokens,
+          outputTokens: lastOutputTokens,
+        });
+        return;
+      }
 
       if (!result.toolUses || result.toolUses.length === 0) {
         // Final text response — loop complete
@@ -193,6 +207,17 @@ export class AnthropicApiProvider implements ProviderSession {
 
       // Anthropic requires tool results in a user turn
       this.messages.push({ role: 'user', content: toolResultBlocks });
+
+      if (i === MAX_TOOL_ITERATIONS - 1) {
+        log.warn({ model: turnModel, toolUseCount: result.toolUses.length }, 'managed tool loop exhausted');
+        this.opts.onEvent({
+          type: 'result',
+          text: '_Tool loop limit reached - please try again or send /new._',
+          inputTokens: lastInputTokens,
+          outputTokens: lastOutputTokens,
+        });
+        return;
+      }
     }
 
     this.opts.onEvent({
@@ -280,9 +305,8 @@ export class AnthropicApiProvider implements ProviderSession {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.opts.onEvent({ type: 'result', text: `_Connection error — please try again._` });
       log.error({ err: msg, model }, 'fetch error in callApi');
-      return { text: '' };
+      return { text: '', terminalResultText: '_Connection error - please try again._' };
     }
 
     if (!response.ok) {
@@ -307,36 +331,32 @@ export class AnthropicApiProvider implements ProviderSession {
       // Never expose raw API error JSON to the user.
       let friendlyMsg: string;
       if (response.status === 400) {
-        friendlyMsg = '⚠️ _There was an issue with my conversation data. Please try again or send /new to start fresh._';
+        friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
         log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error (post self-heal)');
       } else if (response.status === 429) {
-        friendlyMsg = '_Rate limited — please wait a moment and try again._';
+        friendlyMsg = '_Rate limited - please wait a moment and try again._';
         log.warn({ status: 429, model }, 'API rate limited');
       } else if (response.status === 401) {
-        friendlyMsg = '_Authentication error — please contact the administrator._';
+        friendlyMsg = '_Authentication error - please contact the administrator._';
         log.error({ status: 401, model }, 'API auth error');
       } else if (response.status >= 500) {
-        friendlyMsg = '_Service temporarily unavailable — please try again in a moment._';
+        friendlyMsg = '_Service temporarily unavailable - please try again in a moment._';
         log.error({ status: response.status, model }, 'API server error');
       } else {
-        friendlyMsg = `_Service error (${response.status}) — please try again._`;
+        friendlyMsg = `_Service error (${response.status}) - please try again._`;
         log.error({ status: response.status, errPreview: errText.slice(0, 300), model }, 'API error');
       }
 
-      this.opts.onEvent({ type: 'result', text: friendlyMsg });
-      return { text: '' };
+      return { text: '', terminalResultText: friendlyMsg };
     }
 
     // ── SSE streaming ────────────────────────────────────────────────────────
 
-    const reader = response.body?.getReader();
-    if (!reader) {
-      this.opts.onEvent({ type: 'result', text: 'No response body' });
-      return { text: '' };
+    const body = response.body;
+    if (!body) {
+      return { text: '', terminalResultText: 'No response body' };
     }
 
-    const decoder = new TextDecoder();
-    let sseBuffer = '';
     let fullText = '';
     // Indexed by content block index
     const textBlockAccum: Map<number, string> = new Map();
@@ -344,110 +364,96 @@ export class AnthropicApiProvider implements ProviderSession {
     let inputTokens: number | undefined;
     let outputTokens: number | undefined;
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    for await (const data of readSseDataLines(body)) {
+      if (data === '[DONE]') continue;
 
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split('\n');
-        // Keep the last (possibly incomplete) line in the buffer
-        sseBuffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-
-          let event: Record<string, unknown>;
-          try {
-            event = JSON.parse(data) as Record<string, unknown>;
-          } catch {
-            // Malformed SSE chunk — skip
-            continue;
-          }
-
-          const eventType = event['type'] as string | undefined;
-
-          switch (eventType) {
-            case 'content_block_start': {
-              const index = event['index'] as number;
-              const block = event['content_block'] as Record<string, unknown> | undefined;
-              if (!block) break;
-
-              if (block['type'] === 'text') {
-                textBlockAccum.set(index, '');
-              } else if (block['type'] === 'tool_use') {
-                toolUseAccum.set(index, {
-                  id: (block['id'] as string) ?? '',
-                  name: (block['name'] as string) ?? '',
-                  inputJson: '',
-                });
-              }
-              break;
-            }
-
-            case 'content_block_delta': {
-              const index = event['index'] as number;
-              const delta = event['delta'] as Record<string, unknown> | undefined;
-              if (!delta) break;
-
-              const deltaType = delta['type'] as string | undefined;
-
-              if (deltaType === 'text_delta') {
-                const chunk = (delta['text'] as string) ?? '';
-                if (chunk.length > 0) {
-                  const existing = textBlockAccum.get(index) ?? '';
-                  textBlockAccum.set(index, existing + chunk);
-                  fullText += chunk;
-                  this.opts.onEvent({ type: 'assistant_text', text: chunk });
-                }
-              } else if (deltaType === 'input_json_delta') {
-                const partialJson = (delta['partial_json'] as string) ?? '';
-                const existing = toolUseAccum.get(index);
-                if (existing) {
-                  existing.inputJson += partialJson;
-                }
-              }
-              break;
-            }
-
-            case 'message_delta': {
-              const usage = event['usage'] as { output_tokens?: number } | undefined;
-              if (typeof usage?.output_tokens === 'number') {
-                outputTokens = usage.output_tokens;
-              }
-              break;
-            }
-
-            case 'message_start': {
-              const message = event['message'] as Record<string, unknown> | undefined;
-              const usage = message?.['usage'] as
-                | {
-                    input_tokens?: number;
-                    output_tokens?: number;
-                    cache_creation_input_tokens?: number;
-                    cache_read_input_tokens?: number;
-                  }
-                | undefined;
-              if (typeof usage?.input_tokens === 'number') {
-                const cacheCreation = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0;
-                const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0;
-                inputTokens = usage.input_tokens + cacheCreation + cacheRead;
-              }
-              if (typeof usage?.output_tokens === 'number') {
-                outputTokens = usage.output_tokens;
-              }
-              break;
-            }
-
-            // content_block_stop and message_stop require no action
-            default:
-              break;
-          }
-        }
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(data) as Record<string, unknown>;
+      } catch (err) {
+        // Malformed SSE chunk - skip, but preserve observability.
+        log.warn({ err, dataPreview: data.slice(0, 200), model }, 'malformed SSE chunk from Anthropic API');
+        continue;
       }
-    } finally {
-      reader.releaseLock();
+
+      const eventType = event['type'] as string | undefined;
+
+      switch (eventType) {
+        case 'content_block_start': {
+          const index = event['index'] as number;
+          const block = event['content_block'] as Record<string, unknown> | undefined;
+          if (!block) break;
+
+          if (block['type'] === 'text') {
+            textBlockAccum.set(index, '');
+          } else if (block['type'] === 'tool_use') {
+            toolUseAccum.set(index, {
+              id: (block['id'] as string) ?? '',
+              name: (block['name'] as string) ?? '',
+              inputJson: '',
+            });
+          }
+          break;
+        }
+
+        case 'content_block_delta': {
+          const index = event['index'] as number;
+          const delta = event['delta'] as Record<string, unknown> | undefined;
+          if (!delta) break;
+
+          const deltaType = delta['type'] as string | undefined;
+
+          if (deltaType === 'text_delta') {
+            const chunk = (delta['text'] as string) ?? '';
+            if (chunk.length > 0) {
+              const existing = textBlockAccum.get(index) ?? '';
+              textBlockAccum.set(index, existing + chunk);
+              fullText += chunk;
+              this.opts.onEvent({ type: 'assistant_text', text: chunk });
+            }
+          } else if (deltaType === 'input_json_delta') {
+            const partialJson = (delta['partial_json'] as string) ?? '';
+            const existing = toolUseAccum.get(index);
+            if (existing) {
+              existing.inputJson += partialJson;
+            }
+          }
+          break;
+        }
+
+        case 'message_delta': {
+          const usage = event['usage'] as { output_tokens?: number } | undefined;
+          if (typeof usage?.output_tokens === 'number') {
+            outputTokens = usage.output_tokens;
+          }
+          break;
+        }
+
+        case 'message_start': {
+          const message = event['message'] as Record<string, unknown> | undefined;
+          const usage = message?.['usage'] as
+            | {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_creation_input_tokens?: number;
+                cache_read_input_tokens?: number;
+              }
+            | undefined;
+          if (typeof usage?.input_tokens === 'number') {
+            const cacheCreation = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0;
+            const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0;
+            inputTokens = usage.input_tokens + cacheCreation + cacheRead;
+          }
+          if (typeof usage?.output_tokens === 'number') {
+            outputTokens = usage.output_tokens;
+          }
+          break;
+        }
+
+        // content_block_stop and message_stop require no action
+        default:
+          break;
+      }
     }
 
     // Collect completed tool uses
