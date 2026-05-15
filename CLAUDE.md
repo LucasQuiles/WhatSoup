@@ -33,6 +33,8 @@ Four independent processes managed by the platform-appropriate service manager �
 - `sandbox-agent` — sandboxed per-chat agent (tier: chat-scoped per workspace)
 - `chat-bot` — chat API bot, no MCP, no agent
 
+`tier` here is the MCP `SessionContext.tier` (controls tool scope), independent of `agentOptions.sessionScope` (controls agent-session lifetime: `single`/`shared`/`per_chat`).
+
 ### Per-Instance Plugin Scoping
 
 Each agent instance controls which Claude Code plugins it loads via `enabledPlugins` in `agentOptions` (config.json) and `.claude/settings.json` (project-level). Plugins disabled at the instance level are not loaded into the session, saving context.

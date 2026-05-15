@@ -962,10 +962,6 @@ export async function handleCreateLine(
       jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
       return;
     }
-    if (ao.sessionScope === 'single' && accessMode !== 'self_only') {
-      jsonResponse(res, 400, { error: 'agent with sessionScope "single" requires accessMode "self_only"' });
-      return;
-    }
     if (resolveAndValidateAgentCwd(name, ao, res) === null) return;
     // Confine pluginDirs to user home directory
     if (Array.isArray(ao.pluginDirs)) {

@@ -359,11 +359,15 @@ describe('passive type rules', () => {
 });
 
 describe('agent type rules', () => {
-  it('requires self_only accessMode when agentOptions is absent', () => {
+  it('accepts agent without agentOptions on any accessMode (AE1-AE4 protections live)', () => {
     const raw = { ...baseAgent(), accessMode: 'allowlist', agentOptions: undefined };
-    const result = validateInstanceConfig(raw, ctx('create'));
-    expect(result?.field).toBe('accessMode');
-    expect(result?.message).toContain('self_only');
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+    expect(
+      validateInstanceConfig(
+        { ...baseAgent(), accessMode: 'open_dm', agentOptions: undefined },
+        ctx('create'),
+      ),
+    ).toBeNull();
   });
 
   it('rejects non-object agentOptions', () => {
@@ -411,14 +415,16 @@ describe('agent type rules', () => {
     ).toBe('agentOptions.sandboxPerChat');
   });
 
-  it('cross-field: sessionScope single requires self_only on create', () => {
-    const raw = baseAgent({
-      accessMode: 'allowlist',
-      agentOptions: { sessionScope: 'single' },
-    });
-    const result = validateInstanceConfig(raw, ctx('create'));
-    expect(result?.field).toBe('accessMode');
-    expect(result?.message).toContain('self_only');
+  it('accepts agent + sessionScope=single + non-self_only accessModes (AE1-AE4 protections live)', () => {
+    for (const accessMode of ['allowlist', 'open_dm', 'groups_only', 'self_only']) {
+      const raw = baseAgent({
+        accessMode,
+        agentOptions: { sessionScope: 'single' },
+      });
+      expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+      expect(validateInstanceConfig(raw, ctx('patch'))).toBeNull();
+      expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+    }
   });
 
   it('rejects provider outside canonical provider IDs', () => {
@@ -490,7 +496,7 @@ describe('agent type rules', () => {
     expect(result?.message).toContain('must be a string');
   });
 
-  it('accepts minimal valid agent on create', () => {
+  it('accepts minimal valid agent on create (any accessMode with or without agentOptions)', () => {
     const raw = baseAgent();
     const result = validateInstanceConfig(raw, ctx('create'));
     expect(result).toBeNull();
@@ -498,7 +504,7 @@ describe('agent type rules', () => {
       validateInstanceConfig(
         { ...baseAgent(), accessMode: 'allowlist', agentOptions: undefined },
         ctx('create'),
-      )?.field,
-    ).toBe('accessMode');
+      ),
+    ).toBeNull();
   });
 });

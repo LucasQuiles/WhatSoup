@@ -249,13 +249,6 @@ function validateAgentOptions(
   const agentOpts = raw['agentOptions'];
 
   if (agentOpts === undefined || agentOpts === null) {
-    // No agentOptions: existing rule — requires self_only.
-    if (raw['accessMode'] !== undefined && raw['accessMode'] !== 'self_only') {
-      return err(
-        'accessMode',
-        `Agent instances require accessMode "self_only", got "${String(raw['accessMode'])}"`,
-      );
-    }
     return null;
   }
 
@@ -364,23 +357,6 @@ function validateAgentOptions(
         );
       }
     }
-  }
-
-  // Cross-field: sessionScope === 'single' requires accessMode === 'self_only'.
-  if (scope === 'single' && raw['accessMode'] !== 'self_only') {
-    if (ctx.mode === 'create') {
-      return err(
-        'accessMode',
-        'agent with sessionScope "single" requires accessMode "self_only"',
-      );
-    }
-    if (ctx.mode === 'patch') {
-      return err('accessMode', 'sessionScope "single" requires accessMode "self_only"');
-    }
-    return err(
-      'accessMode',
-      `Agent instances require accessMode "self_only", got "${String(raw['accessMode'])}"`,
-    );
   }
 
   return null;
