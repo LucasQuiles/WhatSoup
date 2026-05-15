@@ -11,7 +11,7 @@ const level = process.env.LOG_LEVEL ?? 'info';
 // pino.transport() returns a Writable stream at runtime that also implements
 // DestinationStream. We store it as `any` because the pino types don't expose
 // the .on()/.end() methods needed for shutdown flush.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- pino.transport() returns a Writable stream exposing runtime .on()/.end() methods that are not in pino's TypeScript definitions; needed for shutdown flush expires 2026-12-31
 let transport: any;
 
 const logDir = process.env.LOG_DIR;

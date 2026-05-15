@@ -86,7 +86,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 }));
 
 vi.mock('../../../src/runtimes/agent/session.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn() callback signatures use function expressions to preserve constructor semantics in mocks expires 2026-12-31
   SessionManager: vi.fn().mockImplementation(function (
     _opts: { onEvent: (event: AgentEvent) => void; onResumeFailed?: () => void },
   ) {
@@ -96,14 +96,14 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
 }));
 
 vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn() callback signatures use function expressions to preserve constructor semantics in mocks expires 2026-12-31
   OutboundQueue: vi.fn().mockImplementation(function () {
     return mockQueue;
   }),
 }));
 
 vi.mock('../../../src/runtimes/agent/control-queue.ts', () => ({
-  // eslint-disable-next-line prefer-arrow-callback
+  // eslint-disable-next-line prefer-arrow-callback -- vi.fn() callback signatures use function expressions to preserve constructor semantics in mocks expires 2026-12-31
   ControlQueue: vi.fn().mockImplementation(function () {
     return {
       enqueueText: vi.fn(),

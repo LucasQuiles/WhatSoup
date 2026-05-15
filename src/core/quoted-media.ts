@@ -42,13 +42,13 @@ export interface QuotedMediaResult {
    * Typed as unknown because the exact proto shape is internal to Baileys;
    * callers must pass it to downloadMediaMessage() as-is.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Baileys quoted-media payloads are dynamic protobuf objects with no shared TypeScript shape expires 2026-12-31
   message: any;
   /**
    * Minimal WAMessageKey for logging / DB correlation.
    * Typed as unknown for the same reason as above.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Baileys quoted-media payloads are dynamic protobuf objects with no shared TypeScript shape expires 2026-12-31
   key: any;
   /** Detected content type of the quoted media. */
   contentType: QuotedMediaContentType;
