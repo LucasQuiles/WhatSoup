@@ -96,6 +96,21 @@ describe('verify chain composition (package.json)', () => {
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
+
+  it('verify:release invokes the test-integrity baseline gate', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
+  });
+
+  it('verify:release invokes the standalone whatsoup guard package checks', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard ci\b/);
+    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard run typecheck\b/);
+    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard test\b/);
+  });
+
   it('verify:release invokes full publication audit guard', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();

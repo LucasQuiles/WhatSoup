@@ -46,6 +46,8 @@ jobs:
         run: npm run guard:repo:staged
 
       - name: Test integrity baseline check
+        env:
+          WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'
         run: npm run guard:test-integrity
 
       - name: Repo hygiene commit-message smoke

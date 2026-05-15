@@ -16,7 +16,7 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Documentation drift | `npm run guard:doc-drift` | docs ↔ code coupling check |
 | Public surface drift | `npm run guard:public-surface-drift` | exported API surface stability check |
 | Work index coverage | `npm run guard:work-index` | docs/work-index.json completeness |
-| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the local/CI runner has the plugin installed; skips only when the plugin is absent and `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set |
+| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set |
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
 | Full test suite | `npm test -- --pool=forks` | vitest with --pool=forks for stability |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
@@ -28,7 +28,7 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 | Push target | Composite script | Required checks |
 |---|---|---|
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, `npm run typecheck`, and the targeted guard test list below |
-| `main` or release tag push | `npm run verify:release` | doc drift guard, public-surface drift guard, work-index guard, node-pin guard, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, and console production build |
+| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, test-integrity baseline, `tools/whatsoup_guard` install/typecheck/test, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, and console production build |
 
 `verify:push:branch` runs this targeted `tests/scripts/` list:
 - `repo-hygiene-guard.test.ts`
