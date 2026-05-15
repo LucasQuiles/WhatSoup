@@ -24,7 +24,7 @@ import { isGroupConversationKey, conversationKeyToJid } from '../../core/convers
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
-import type { ServiceManager } from '../platform.ts';
+import { systemdUnitName, type ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
@@ -381,6 +381,39 @@ async function handleServiceAction(
   }
 }
 
+function serviceErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function serviceErrorExitCode(err: unknown): number | string | undefined {
+  return typeof err === 'object' && err !== null && 'code' in err
+    ? (err as { code?: number | string }).code
+    : undefined;
+}
+
+function isBenignServiceTeardownError(err: unknown, name: string): boolean {
+  const message = serviceErrorMessage(err);
+  if (/\bcommand\s+not\s+found\b/iu.test(message)) return false;
+
+  const systemdUnit = escapeRegExp(systemdUnitName(name));
+  const systemdAbsent = new RegExp(
+    String.raw`\b(?:unit|unit file|service)\s+${systemdUnit}\b[^\n]*(?:not\s+(?:found|loaded|running|active|installed)|could\s+not\s+be\s+found|does\s+not\s+exist|already\s+(?:stopped|disabled|inactive|removed))\b`,
+    'iu',
+  );
+  if (systemdAbsent.test(message)) return true;
+
+  const launchdLabel = escapeRegExp(`com.whatsoup.${name}`);
+  const launchdStopCommand = new RegExp(
+    String.raw`\blaunchctl\s+stop\s+${launchdLabel}\b`,
+    'iu',
+  );
+  return serviceErrorExitCode(err) === 3 && launchdStopCommand.test(message);
+}
+
 /** POST /api/lines/:name/restart — restart the service. */
 export async function handleRestart(
   _req: IncomingMessage,
@@ -581,11 +614,36 @@ export async function handleDeleteLine(
 ): Promise<void> {
   if (!validateInstanceName(params.name, res)) return;
 
-  // 1. Stop the service (ignore failure — may already be stopped/gone)
-  try { await deps.serviceManager.stop(params.name); } catch { /* ok */ }
+  // 1. Stop the service. Only service-absence errors are idempotent; other
+  // failures may leave the instance running, so state must not be deleted.
+  try {
+    await deps.serviceManager.stop(params.name);
+  } catch (err) {
+    if (!isBenignServiceTeardownError(err, params.name)) {
+      log.error({ err, instance: params.name }, 'delete line: service stop failed');
+      jsonResponse(res, 500, {
+        error: `stop failed: ${serviceErrorMessage(err)}`,
+        instance: params.name,
+      });
+      return;
+    }
+    log.warn({ err, instance: params.name }, 'delete line: service already stopped or absent');
+  }
 
-  // 2. Disable the service (ignore failure — may not be enabled)
-  try { await deps.serviceManager.disable(params.name); } catch { /* ok */ }
+  // 2. Disable the service. As above, unknown disable failures block deletion.
+  try {
+    await deps.serviceManager.disable(params.name);
+  } catch (err) {
+    if (!isBenignServiceTeardownError(err, params.name)) {
+      log.error({ err, instance: params.name }, 'delete line: service disable failed');
+      jsonResponse(res, 500, {
+        error: `disable failed: ${serviceErrorMessage(err)}`,
+        instance: params.name,
+      });
+      return;
+    }
+    log.warn({ err, instance: params.name }, 'delete line: service already disabled or absent');
+  }
 
   // 3. Remove config, data, and state directories
   cleanupPartial(params.name);
