@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('emit-alert');
@@ -6,6 +7,16 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
+let missingScriptWarned = false;
+
+function alertScriptAvailable(): boolean {
+  if (existsSync(ALERT_SCRIPT)) return true;
+  if (!missingScriptWarned) {
+    missingScriptWarned = true;
+    log.warn({ script: ALERT_SCRIPT }, 'alert helper script not present; alerts will be silent');
+  }
+  return false;
+}
 
 /**
  * Fire-and-forget alert emission. Spawns whatsapp-alert.sh with stdio: 'ignore'.
@@ -17,6 +28,7 @@ export function emitAlert(
   summary: string,
   evidence: string,
 ): void {
+  if (!alertScriptAvailable()) return;
   const child = spawn(
     ALERT_SCRIPT,
     ['--instance', instance, '--source', source,
@@ -33,6 +45,7 @@ export function emitAlert(
  * Fire-and-forget clear emission. Clears a source from an open incident.
  */
 export function clearAlertSource(instance: string, source: string): void {
+  if (!alertScriptAvailable()) return;
   const child = spawn(
     ALERT_SCRIPT,
     ['--clear', `repair_lane:${instance}`, '--source', source],

@@ -4,10 +4,18 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loggerWarn = vi.hoisted(() => vi.fn());
+const existsSyncMock = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('node:child_process', async () => {
   const { childProcessMock } = await import('../helpers/child-process.ts');
   return childProcessMock();
+});
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import('node:fs');
+  return {
+    ...actual,
+    existsSync: existsSyncMock,
+  };
 });
 
 vi.mock('../../src/logger.ts', () => ({
@@ -29,6 +37,7 @@ describe('emitAlert', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     loggerWarn.mockClear();
+    existsSyncMock.mockReturnValue(true);
   });
 
   it('spawns the alert script with instance, source, summary, and evidence', () => {
@@ -73,12 +82,28 @@ describe('emitAlert', () => {
       'alert emission failed',
     );
   });
+
+  it('does not spawn emit or clear when the alert helper script is missing and only warns once', () => {
+    existsSyncMock.mockReturnValue(false);
+
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+    clearAlertSource('whatsoup-prod', 'agent_respawn_failed');
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(loggerWarn).toHaveBeenCalledOnce();
+    expect(loggerWarn).toHaveBeenCalledWith(
+      { script: ALERT_SCRIPT },
+      'alert helper script not present; alerts will be silent',
+    );
+  });
 });
 
 describe('clearAlertSource', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     loggerWarn.mockClear();
+    existsSyncMock.mockReturnValue(true);
   });
 
   it('spawns the alert script with clear source arguments', () => {
@@ -114,4 +139,5 @@ describe('clearAlertSource', () => {
       'alert clear failed',
     );
   });
+
 });
