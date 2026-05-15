@@ -62,6 +62,47 @@ function sendJsonRpc(socketPath: string, msg: unknown): Promise<unknown> {
   });
 }
 
+function sendRawJsonRpcLine(socketPath: string, line: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const client = createConnection(socketPath, () => {
+      client.write(line + '\n');
+    });
+    let settled = false;
+    let buf = '';
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      client.setTimeout(0);
+      fn();
+    };
+
+    client.on('data', (chunk) => {
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      for (const responseLine of lines) {
+        if (!responseLine.trim()) continue;
+        try {
+          const parsed = JSON.parse(responseLine);
+          settle(() => {
+            resolve(parsed);
+            client.end();
+          });
+        } catch {
+          // partial
+        }
+      }
+    });
+    client.once('error', (err) => settle(() => reject(err)));
+    client.setTimeout(500, () => {
+      settle(() => {
+        client.destroy();
+        reject(new Error('timeout'));
+      });
+    });
+  });
+}
+
 /**
  * Wait for the socket file to appear (server ready), then resolve.
  */
@@ -274,6 +315,24 @@ describe('WhatSoupSocketServer', () => {
 
     expect(response.error.code).toBe(-32601);
     expect(response.error.message).toMatch(/no_such_method/);
+  });
+
+  it('malformed JSON returns JSON-RPC parse error -32700', async () => {
+    server = new WhatSoupSocketServer(socketPath, registry, session);
+    server.start();
+    await waitForSocket(socketPath);
+
+    const response = await sendRawJsonRpcLine(socketPath, '{"jsonrpc":"2.0","id":1,') as {
+      jsonrpc: string;
+      id: null;
+      error: { code: number; message: string };
+    };
+
+    expect(response).toEqual({
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32700, message: 'Parse error' },
+    });
   });
 
   // --- socket cleanup on startup ---

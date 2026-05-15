@@ -101,6 +101,16 @@ export class WhatSoupSocketServer {
             req = JSON.parse(trimmed) as JsonRpcRequest;
           } catch {
             log.warn({ line: trimmed }, 'failed to parse JSON-RPC message');
+            const response: JsonRpcResponse = {
+              jsonrpc: '2.0',
+              id: null,
+              error: { code: -32700, message: 'Parse error' },
+            };
+            try {
+              socket.write(JSON.stringify(response) + '\n');
+            } catch (err) {
+              log.error({ err }, 'failed to write parse error response');
+            }
             continue;
           }
 
