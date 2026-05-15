@@ -221,7 +221,7 @@ describe('SessionManager', () => {
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',
-      WHATSOUP_CONNECTOR_FAILCLOSED: undefined,
+      [FAILCLOSED_FLAG]: undefined,
     }, async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
@@ -236,7 +236,7 @@ describe('SessionManager', () => {
   it('spawnSession propagates ALLOW_M365_MUTATIONS in fail-closed mode when the instance opts in', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',
-      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+      [FAILCLOSED_FLAG]: '1',
     }, async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
@@ -257,7 +257,7 @@ describe('SessionManager', () => {
   it('spawnSession drops ALLOW_M365_MUTATIONS in fail-closed mode when the instance omits the opt-in', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',
-      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+      [FAILCLOSED_FLAG]: '1',
     }, async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
@@ -272,7 +272,7 @@ describe('SessionManager', () => {
   it('spawnSession drops ALLOW_M365_MUTATIONS in fail-closed mode when the instance explicitly opts out', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',
-      WHATSOUP_CONNECTOR_FAILCLOSED: '1',
+      [FAILCLOSED_FLAG]: '1',
     }, async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
