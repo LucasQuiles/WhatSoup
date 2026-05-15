@@ -198,6 +198,34 @@ describe('bridge request handling', () => {
     media.stream?.destroy?.();
   });
 
+  it('retries Baileys encrypted tmp ENOENT with a fresh stream', async () => {
+    const imgPath = join(allowedRoot, 'photo.png');
+    writeFileSync(imgPath, Buffer.from([137, 80, 78, 71]));
+    const tmpErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/image123-enc'),
+      { code: 'ENOENT', path: '/tmp/image123-enc' },
+    );
+    let attempts = 0;
+    messenger = makeMessenger(async () => {
+      attempts += 1;
+      if (attempts === 1) throw tmpErr;
+    });
+    bridge();
+    bridge = startMediaBridge(socketPath, messenger, allowedRoot);
+    await waitListening(bridge);
+
+    setMediaBridgeChat(bridge, '15551234567@s.whatsapp.net');
+    const res = await sendRequest(socketPath, { path: imgPath });
+
+    expect(res.ok).toBe(true);
+    expect(messenger.sendMedia).toHaveBeenCalledTimes(2);
+    const first = vi.mocked(messenger.sendMedia).mock.calls[0]?.[1] as OutboundMedia & { stream?: NodeJS.ReadableStream };
+    const second = vi.mocked(messenger.sendMedia).mock.calls[1]?.[1] as OutboundMedia & { stream?: NodeJS.ReadableStream };
+    expect(first.stream).toBeDefined();
+    expect(second.stream).toBeDefined();
+    expect(first.stream).not.toBe(second.stream);
+  });
+
   it('infers document type for .pdf extension', async () => {
     const pdfPath = join(allowedRoot, 'report.pdf');
     writeFileSync(pdfPath, Buffer.from('%PDF-1.4'));

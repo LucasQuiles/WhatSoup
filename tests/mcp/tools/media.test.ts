@@ -163,6 +163,30 @@ describe('registerMediaTools', () => {
     media.stream.destroy();
   });
 
+  it('retries Baileys encrypted tmp ENOENT with a fresh stream for file sends', async () => {
+    const filePath = writeFile('photo.jpg');
+    const session = chatSession('15551234567', '15551234567@s.whatsapp.net', workspace);
+    const tmpErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/image123-enc'),
+      { code: 'ENOENT', path: '/tmp/image123-enc' },
+    );
+    connection.sendMedia = vi.fn(async (chatJid: string, media: unknown) => {
+      mediaCalls.push({ chatJid, media });
+      if (mediaCalls.length === 1) throw tmpErr;
+      return { waMessageId: null };
+    }) as typeof connection.sendMedia;
+
+    const result = await registry.call('send_media', { filePath }, session);
+
+    expect(result.isError).toBeUndefined();
+    expect(connection.sendMedia).toHaveBeenCalledTimes(2);
+    expect(mediaCalls).toHaveLength(2);
+    expect((mediaCalls[0].media as { stream?: unknown }).stream).toBeDefined();
+    expect((mediaCalls[1].media as { stream?: unknown }).stream).toBeDefined();
+    expect((mediaCalls[0].media as { stream?: unknown }).stream)
+      .not.toBe((mediaCalls[1].media as { stream?: unknown }).stream);
+  });
+
   it('sends a PNG image file', async () => {
     const filePath = writeFile('image.png');
     const session = chatSession('1234567890', '1234567890@s.whatsapp.net', workspace);
