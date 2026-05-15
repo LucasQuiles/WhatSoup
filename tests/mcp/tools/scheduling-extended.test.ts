@@ -34,6 +34,20 @@ describe('extended scheduling tools', () => {
       expect(body.chatName).toBe('Test');
     });
 
+    it('does not mark failed scheduled-message rows as tool errors', async () => {
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, status, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run('123@s.whatsapp.net', 'Test', 'text', '{"text":"hi"}', 1700000000, 'failed', 'send failed');
+
+      const result = await registry.call('get_scheduled', { id: 1 }, globalSession());
+
+      expect(result.isError).toBeUndefined();
+      const body = JSON.parse(result.content[0].text);
+      expect(body.status).toBe('failed');
+      expect(body.error).toBe('send failed');
+    });
+
     it('returns error for non-existent ID', async () => {
       const result = await registry.call('get_scheduled', { id: 999 }, globalSession());
       expect(result.isError).toBe(true);

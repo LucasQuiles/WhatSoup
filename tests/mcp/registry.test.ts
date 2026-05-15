@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
-import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
+import { toolError, type ToolDeclaration, type SessionContext } from '../../src/mcp/types.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -438,6 +438,56 @@ describe('ToolRegistry', () => {
     const result = await registry.call('test_tool', {}, makeSession());
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/handler exploded/);
+  });
+
+  it('marks explicitly returned tool errors with isError', async () => {
+    registry.register(
+      makeTool({
+        schema: z.object({}),
+        handler: async () => toolError({ error: 'denied' }),
+      }),
+    );
+
+    const result = await registry.call('test_tool', {}, makeSession());
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toEqual({ error: 'denied' });
+  });
+
+  it('does not treat ordinary domain error fields as tool failures', async () => {
+    registry.register(
+      makeTool({
+        schema: z.object({}),
+        handler: async () => ({ id: 123, status: 'failed', error: 'delivery failed' }),
+      }),
+    );
+
+    const result = await registry.call('test_tool', {}, makeSession());
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      id: 123,
+      status: 'failed',
+      error: 'delivery failed',
+    });
+  });
+
+  it('does not infer tool failure from a tool name or top-level error field', async () => {
+    registry.register(
+      makeTool({
+        name: 'send_message',
+        schema: z.object({}),
+        handler: async () => ({ sent: true, error: 'provider annotated delivery' }),
+      }),
+    );
+
+    const result = await registry.call('send_message', {}, makeSession());
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      sent: true,
+      error: 'provider annotated delivery',
+    });
   });
 
   // --- Zod-to-JSON-Schema conversion spot checks ---

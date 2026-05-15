@@ -168,6 +168,7 @@ describe('Tool handlers with disconnected WhatsApp socket', () => {
           error: 'WhatsApp is temporarily disconnected. Try again in a moment.',
         }, null, 2),
       }],
+      isError: true,
     });
     expect(throwingConn.sendRaw).toHaveBeenCalledWith(
       '15551234567@s.whatsapp.net',
@@ -295,9 +296,8 @@ describe('Tool handlers with missing or invalid messages', () => {
       chatSession('15551234567', '15551234567@s.whatsapp.net'),
     );
 
-    // Tool returns { error: 'Message not found' } — the registry wraps it as success
-    // but the content will contain error info
     expect(result).toBeDefined();
+    expect(result.isError).toBe(true);
     const text = result.content[0].text;
     expect(text).toMatch(/not found|error/i);
   });
@@ -319,6 +319,7 @@ describe('Tool handlers with missing or invalid messages', () => {
     );
 
     expect(result).toBeDefined();
+    expect(result.isError).toBe(true);
     const text = result.content[0].text;
     expect(text).toMatch(/edit.*own|own.*message/i);
   });
