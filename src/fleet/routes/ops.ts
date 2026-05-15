@@ -1017,6 +1017,7 @@ export async function handleCreateLine(
 
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
+  let serviceEnabled = false;
   try {
     fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { mode: 0o700 });
@@ -1083,6 +1084,7 @@ export async function handleCreateLine(
 
     // --- Enable service ---
     await deps.serviceManager.enable(name);
+    serviceEnabled = true;
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -1091,6 +1093,21 @@ export async function handleCreateLine(
     publishFeedEvent(deps.realtime, name);
     jsonResponse(res, 201, { name, healthPort });
   } catch (err) {
+    if (serviceEnabled) {
+      try {
+        await deps.serviceManager.disable(name);
+      } catch (rollbackErr) {
+        log.error(
+          { err: rollbackErr, originalErr: err, instance: name },
+          'failed to disable service after instance creation failure',
+        );
+        jsonResponse(res, 500, {
+          error: `instance creation failed: ${(err as Error).message}`,
+          rollbackError: `service disable failed: ${(rollbackErr as Error).message}`,
+        });
+        return;
+      }
+    }
     cleanupPartial(name, createdExtras);
     jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
   }

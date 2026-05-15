@@ -933,6 +933,80 @@ describe('handleCreateLine', () => {
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).sentinel).toBe(true);
     expect(svc.enable).not.toHaveBeenCalled();
   });
+
+  it('disables the service when creation fails after enabling it', async () => {
+    const name = 'enable-rollback';
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(() => {
+          throw new Error('scan failed after enable');
+        }),
+      } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'chat',
+        adminPhones: ['18459780919'],
+        healthPort: 3202,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/scan failed after enable/);
+    expect(svc.enable).toHaveBeenCalledWith(name);
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+  });
+
+  it('preserves partial state when post-enable rollback cannot disable the service', async () => {
+    const name = 'enable-rollback-fails';
+    const svc = mockServiceManager();
+    svc.disable.mockRejectedValueOnce(new Error('disable failed'));
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(() => {
+          throw new Error('scan failed after enable');
+        }),
+      } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'chat',
+        adminPhones: ['18459780919'],
+        healthPort: 3203,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toEqual({
+      error: 'instance creation failed: scan failed after enable',
+      rollbackError: 'service disable failed: disable failed',
+    });
+    expect(svc.enable).toHaveBeenCalledWith(name);
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(true);
+    expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(true);
+    expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
