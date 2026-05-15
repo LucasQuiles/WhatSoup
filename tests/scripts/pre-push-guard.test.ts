@@ -15,6 +15,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
+const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
 
 describe('pre-push guard classifier', () => {
   it('classifies delete-only ref updates as metadata-only', () => {
@@ -132,5 +133,18 @@ describe('verify chain composition (package.json)', () => {
     expect(chain.indexOf('npm run guard:publication:release')).toBeLessThan(
       chain.indexOf('npm run verify:release'),
     );
+  });
+});
+
+describe('quality workflow composition', () => {
+  it('installs the private test-integrity plugin before requiring the baseline gate', () => {
+    const installIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
+    const gateIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
+
+    expect(installIndex).toBeGreaterThanOrEqual(0);
+    expect(gateIndex).toBeGreaterThan(installIndex);
+    expect(qualityWorkflow).toContain('TEST_INTEGRITY_REPO_TOKEN');
+    expect(qualityWorkflow).toContain('github.com/LucasQuiles/test-integrity.git');
+    expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
   });
 });
