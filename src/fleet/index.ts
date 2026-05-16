@@ -8,6 +8,7 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine } from './routes/lines.ts';
+import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth, handleMarkRead } from './routes/ops.ts';
 import { handleGetFeed } from './routes/feed.ts';
@@ -89,6 +90,9 @@ type NameJidRouteParams = { name: string; jid: string };
 type RouteParamsByHandler = {
   getLines: EmptyRouteParams;
   getLine: NameRouteParams;
+  getSilences: EmptyRouteParams;
+  addSilence: EmptyRouteParams;
+  removeSilence: NameRouteParams;
   getChats: NameRouteParams;
   getMessages: NameRouteParams;
   searchMessages: NameRouteParams;
@@ -153,6 +157,7 @@ type RouteHandler<K extends RouteKey> = (
 const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLine',
+  'removeSilence',
   'getChats',
   'getMessages',
   'searchMessages',
@@ -200,6 +205,9 @@ function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
 const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getLines:     (req, res, deps, _params) => handleGetLines(req, res, deps),
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
+  getSilences:  (req, res, _deps, _params) => handleGetSilences(req, res),
+  addSilence:   (req, res, _deps, _params) => handleAddSilence(req, res),
+  removeSilence: (req, res, _deps, params) => handleRemoveSilence(req, res, { instance: params.name }),
   getChats:     (req, res, deps, params) => handleGetChats(req, res, deps, params),
   getMessages:  (req, res, deps, params) => handleGetMessages(req, res, deps, params),
   searchMessages: (req, res, deps, params) => handleSearchMessages(req, res, deps, params),
@@ -276,6 +284,9 @@ export async function loadOrCreateFleetToken(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 const ROUTES = [
+  { method: 'GET',    path: /^\/api\/fleet\/silences$/, handler: 'getSilences' },
+  { method: 'POST',   path: /^\/api\/fleet\/silence$/, handler: 'addSilence' },
+  { method: 'DELETE', path: /^\/api\/fleet\/silence\/(?<name>[^/]+)$/, handler: 'removeSilence' },
   { method: 'GET',   path: /^\/api\/typing$/, handler: 'getTyping' },
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/directories\/check$/, handler: 'checkDirectory' },

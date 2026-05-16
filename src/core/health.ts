@@ -92,6 +92,8 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
     firstFailureAt: null,
     lastPingAt: null,
     lastPongAt: null,
+    lastDisconnectReason: null,
+    lastStatusCode: null,
   };
 }
 
@@ -610,6 +612,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             first_failure_at: connectionState.firstFailureAt,
             last_ping_at: connectionState.lastPingAt,
             last_pong_at: connectionState.lastPongAt,
+            last_disconnect_reason: connectionState.lastDisconnectReason ?? null,
+            last_status_code: connectionState.lastStatusCode ?? null,
           },
         },
         sqlite: {
