@@ -52,6 +52,11 @@ function makeRepoFixture(nvmrcContent?: string): string {
  * Creates a HOME fixture with a fake ~/.nvm/nvm.sh script.
  * The fake nvm() function handles the `install` subcommand according to
  * the provided installBody shell snippet.
+ *
+ * The fake script references an unbound variable ($NVM_CD_FLAGS) during init,
+ * mimicking real nvm.sh (v0.39+) which references several unset variables on
+ * source.  Under `set -u`, sourcing real nvm aborts the calling script; this
+ * fixture catches that regression in our pre-install wrapper.
  */
 function makeHomeWithFakeNvm(installBody: string): { home: string; nvmDir: string } {
   const home = makeTmpDir();
@@ -60,6 +65,9 @@ function makeHomeWithFakeNvm(installBody: string): { home: string; nvmDir: strin
 
   const nvmSh = [
     '#!/usr/bin/env bash',
+    '# Mimic real nvm.sh: reference an unbound variable during init.',
+    '# Under `set -u`, expanding $NVM_CD_FLAGS aborts the sourcing script.',
+    'echo "$NVM_CD_FLAGS" > /dev/null',
     'nvm() {',
     '  local subcmd="$1"',
     '  shift',

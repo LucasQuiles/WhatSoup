@@ -61,10 +61,22 @@ if [ ! -f "$NVM_SH" ]; then
 fi
 
 # ── Run nvm install ──────────────────────────────────────────────────────────
-# Source nvm into this shell using POSIX-portable dot-source.
-# shellcheck source=/dev/null
+# Real nvm.sh (v0.39+) references unset variables during init ($NVM_CD_FLAGS
+# and others).  Under `set -u`, sourcing aborts the script before
+# `nvm install` can run.  Suspend `set -u` around both the source and the
+# install (nvm internals also reference unbound vars), then restore it and
+# propagate the install exit status.
+#
+# We capture the install exit code via `|| install_status=$?` so a non-zero
+# return doesn't get short-circuited by `set -e` before we can restore
+# `set -u` and re-exit deterministically.
+set +u
+# shellcheck source=/dev/null disable=SC1091
 . "$NVM_SH"
 
 # nvm install is a no-op when the version is already present.
 # --no-progress suppresses download progress bars in systemd journals.
-nvm install "$NVMRC_VERSION" --no-progress
+install_status=0
+nvm install "$NVMRC_VERSION" --no-progress || install_status=$?
+set -u
+exit "$install_status"
