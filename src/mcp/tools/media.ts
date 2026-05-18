@@ -2,7 +2,7 @@
 // Media sending tool with filesystem boundary enforcement.
 
 import { z } from 'zod';
-import { createReadStream, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
@@ -15,7 +15,7 @@ import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { assertConversationAccess, isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
-import { isBaileysEncryptedTmpEnoent } from '../../transport/baileys-media-errors.ts';
+import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 
 const log = createChildLogger('mcp:media');
@@ -83,15 +83,15 @@ function buildSendMediaPayload(
 ): OutboundMedia {
   switch (type) {
     case 'image':
-      return { type: 'image', stream: createReadStream(resolved), caption: params.caption, mimetype: mime, viewOnce: params.viewOnce };
+      return { type: 'image', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, viewOnce: params.viewOnce };
     case 'document':
-      return { type: 'document', stream: createReadStream(resolved), filename: basename, mimetype: mime, caption: params.caption };
+      return { type: 'document', stream: createMediaReadStream(resolved, log), filename: basename, mimetype: mime, caption: params.caption };
     case 'audio':
-      return { type: 'audio', stream: createReadStream(resolved), mimetype: mime, ptt: params.ptt, seconds: params.seconds };
+      return { type: 'audio', stream: createMediaReadStream(resolved, log), mimetype: mime, ptt: params.ptt, seconds: params.seconds };
     case 'video':
-      return { type: 'video', stream: createReadStream(resolved), caption: params.caption, mimetype: mime, ptv: params.ptv, gifPlayback: params.gifPlayback, viewOnce: params.viewOnce };
+      return { type: 'video', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, ptv: params.ptv, gifPlayback: params.gifPlayback, viewOnce: params.viewOnce };
     case 'sticker':
-      return { type: 'sticker', stream: createReadStream(resolved), mimetype: mime, isAnimated: params.isAnimated };
+      return { type: 'sticker', stream: createMediaReadStream(resolved, log), mimetype: mime, isAnimated: params.isAnimated };
   }
 }
 

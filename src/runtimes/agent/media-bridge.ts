@@ -3,12 +3,12 @@
 // Ported from legacy whatsapp-bot/src/runtimes/agent/media-bridge.ts.
 
 import { createServer, type Server, type Socket } from 'node:net';
-import { createReadStream, statSync, unlinkSync, realpathSync } from 'node:fs';
+import { statSync, unlinkSync, realpathSync } from 'node:fs';
 import { resolve, extname, dirname, basename, join } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
 import { isPathWithinAllowedRoot } from '../../mcp/types.ts';
 import { createChildLogger } from '../../logger.ts';
-import { isBaileysEncryptedTmpEnoent } from '../../transport/baileys-media-errors.ts';
+import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 
 const log = createChildLogger('media-bridge');
 
@@ -75,13 +75,13 @@ function buildOutboundMediaFromPath(
 ): OutboundMedia {
   switch (mediaType) {
     case 'image':
-      return { type: 'image', stream: createReadStream(resolvedPath), mimetype, caption };
+      return { type: 'image', stream: createMediaReadStream(resolvedPath, log), mimetype, caption };
     case 'audio':
-      return { type: 'audio', stream: createReadStream(resolvedPath), mimetype };
+      return { type: 'audio', stream: createMediaReadStream(resolvedPath, log), mimetype };
     case 'video':
-      return { type: 'video', stream: createReadStream(resolvedPath), mimetype, caption };
+      return { type: 'video', stream: createMediaReadStream(resolvedPath, log), mimetype, caption };
     default:
-      return { type: 'document', stream: createReadStream(resolvedPath), filename, mimetype, caption };
+      return { type: 'document', stream: createMediaReadStream(resolvedPath, log), filename, mimetype, caption };
   }
 }
 
