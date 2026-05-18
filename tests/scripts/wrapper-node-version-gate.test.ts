@@ -158,6 +158,10 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     );
     // Wrapper must not produce gate-passed in stdout (the exec never ran)
     expect(stdout).not.toContain('gate-passed');
+    // Per spec AC #3: direct evidence that the gate fired BEFORE exec —
+    // stderr must not echo the exec command's flag.  Prevents a regression
+    // where the gate exits 1 but somehow still attempted exec.
+    expect(stderr, 'gate must fire before exec — stderr must not mention --experimental-strip-types').not.toContain('--experimental-strip-types');
   });
 
   it('Test 2: matching Node major passes the gate and reaches exec', () => {

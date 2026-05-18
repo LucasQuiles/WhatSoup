@@ -51,7 +51,7 @@ FATAL: resolved Node is incompatible with WhatSoup entrypoint
   Resolved:        ${NODE}
   Version:         ${resolved_version}
 
-The entrypoint passes --experimental-strip-types, which requires Node >= 22.6.
+The entrypoint requires Node >= 22.6 for native TypeScript stripping.
 A resolved Node older than the pinned major will exit status 9 at exec.
 
 Install the pinned version on this host:
