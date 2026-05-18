@@ -48,7 +48,7 @@ fi
 # Reject alias forms like "lts/iron" that nvm resolves but which the wrapper
 # version gate doesn't accept.
 if [[ "$NVMRC_VERSION" != [0-9]* ]]; then
-  echo "FATAL: ensure-node-installed: .nvmrc contains non-numeric version '$NVMRC_VERSION' (expected dotted semver like 24.15.0)" >&2
+  echo "FATAL: ensure-node-installed: .nvmrc contains non-numeric version '$NVMRC_VERSION' (expected dotted version like 24.15.0)" >&2
   exit 1
 fi
 

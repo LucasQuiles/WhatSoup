@@ -2,7 +2,7 @@
 //
 // Black-box tests for deploy/scripts/ensure-node-installed.sh.
 // Spawns the script directly with controlled HOME / NVM_DIR / REPO_ROOT
-// fixtures so we can exercise all five branches deterministically.
+// fixtures so we can exercise every branch deterministically.
 //
 // No setTimeout/sleep — purely synchronous process spawn + result inspection.
 
@@ -184,9 +184,11 @@ describe('ensure-node-installed.sh', () => {
   });
 
   // ── Test 4 ─────────────────────────────────────────────────────────────────
-  it('propagates a non-zero exit code when nvm install fails', () => {
+  it('propagates the exact non-zero exit code from nvm install', () => {
+    // Use a distinctive code (42) — not 1 — so the assertion proves
+    // propagation fidelity, not just "non-zero in / non-zero out".
     const { home, nvmDir } = makeHomeWithFakeNvm(
-      'echo "network error: cannot download node" >&2; return 1',
+      'echo "network error: cannot download node" >&2; return 42',
     );
     const repo = makeRepoFixture('24.15.0\n');
 
@@ -196,11 +198,11 @@ describe('ensure-node-installed.sh', () => {
       REPO_ROOT: repo,
     });
 
-    expect(exitCode, 'should propagate non-zero exit from nvm install').not.toBe(0);
+    expect(exitCode, 'should propagate the exact exit code from nvm install').toBe(42);
     expect(stderr).toMatch(/network error|cannot download/i);
   });
 
-  // ── Test 5 ─────────────────────────────────────────────────────────────────
+  // ── Test 5a ────────────────────────────────────────────────────────────────
   it('exits non-zero with a diagnostic when .nvmrc is missing', () => {
     const home = makeTmpDir();
     const repo = makeRepoFixture(); // intentionally no .nvmrc written
@@ -213,5 +215,24 @@ describe('ensure-node-installed.sh', () => {
 
     expect(exitCode, 'should exit non-zero when .nvmrc is absent').not.toBe(0);
     expect(stderr).toMatch(/\.nvmrc/i);
+  });
+
+  // ── Test 5b ────────────────────────────────────────────────────────────────
+  it('exits non-zero with a format diagnostic when .nvmrc holds an alias like lts/iron', () => {
+    // The wrapper's version gate (PR #663) rejects alias forms, so the
+    // pre-install must surface them as fail-fast diagnostics rather than
+    // letting nvm resolve them.
+    const home = makeTmpDir();
+    const repo = makeRepoFixture('lts/iron\n');
+
+    const { exitCode, stderr } = runScript({
+      HOME: home,
+      NVM_DIR: join(home, '.nvm-absent'),
+      REPO_ROOT: repo,
+    });
+
+    expect(exitCode, 'should exit non-zero when .nvmrc holds an alias').not.toBe(0);
+    expect(stderr).toContain('lts/iron');
+    expect(stderr).toMatch(/dotted version/i);
   });
 });
