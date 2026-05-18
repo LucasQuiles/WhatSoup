@@ -14,6 +14,13 @@ if [ -z "$NVMRC_VERSION" ]; then
   echo "FATAL: cannot read Node version from $REPO_ROOT/.nvmrc" >&2
   exit 1
 fi
+# Gate requires a dotted version (e.g. 24.15.0) for the -lt arithmetic
+# comparison. lts/iron, latest, or any non-numeric leading value would
+# silently disable the gate.
+if ! printf '%s' "$NVMRC_VERSION" | grep -qE '^[0-9]'; then
+  echo "FATAL: .nvmrc must be a dotted version (e.g. 24.15.0), not '$NVMRC_VERSION'" >&2
+  exit 1
+fi
 DEFAULT_NODE="$HOME/.nvm/versions/node/v${NVMRC_VERSION}/bin/node"
 NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
 if [ ! -x "$NODE" ]; then

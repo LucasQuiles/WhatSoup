@@ -94,10 +94,16 @@ function runWrapper(opts: {
   home: string;
   env?: Record<string, string>;
   instanceName?: string;
+  wrapperOverride?: string;
 }): { stdout: string; stderr: string; exitCode: number } {
-  const { home, env = {}, instanceName = 'test-instance' } = opts;
+  const {
+    home,
+    env = {},
+    instanceName = 'test-instance',
+    wrapperOverride,
+  } = opts;
 
-  const result = spawnSync('bash', [wrapperPath, instanceName], {
+  const result = spawnSync('bash', [wrapperOverride ?? wrapperPath, instanceName], {
     encoding: 'utf8',
     env: {
       // Minimal safe environment for bash
@@ -121,6 +127,25 @@ function runWrapper(opts: {
     stderr: result.stderr ?? '',
     exitCode,
   };
+}
+
+/**
+ * Build a fixture REPO_ROOT containing a copy of deploy/whatsoup and a
+ * caller-supplied `.nvmrc` content. The wrapper resolves REPO_ROOT from its
+ * own location (SCRIPT_DIR/..), so copying it into fixtureRoot/deploy/whatsoup
+ * makes fixtureRoot/.nvmrc the version source.
+ *
+ * @returns the path to the fixture wrapper script.
+ */
+function makeFixtureRepoWithNvmrc(nvmrcContents: string): string {
+  const fixtureRoot = makeTmpDir('whatsoup-gate-fixture-repo-');
+  fs.mkdirSync(path.join(fixtureRoot, 'deploy'), { recursive: true });
+  const wrapperContents = fs.readFileSync(wrapperPath, 'utf8');
+  const fixtureWrapper = path.join(fixtureRoot, 'deploy', 'whatsoup');
+  fs.writeFileSync(fixtureWrapper, wrapperContents, 'utf8');
+  fs.chmodSync(fixtureWrapper, 0o755);
+  fs.writeFileSync(path.join(fixtureRoot, '.nvmrc'), `${nvmrcContents}\n`, 'utf8');
+  return fixtureWrapper;
 }
 
 describe('deploy/whatsoup — Node major-version gate', () => {
@@ -216,5 +241,40 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     expect(stdout, 'must not have reached exec via fallback path (no gate-passed in stdout)').not.toContain(
       'gate-passed',
     );
+  });
+
+  it('Test 4: non-dotted .nvmrc (lts/iron, latest, ...) fails fast before gate arithmetic', () => {
+    // ${NVMRC_VERSION%%.*} on "lts/iron" yields the literal string "lts/iron".
+    // The subsequent `[ "$node_major" -lt "lts/iron" ]` arithmetic comparison
+    // errors, `2>/dev/null` suppresses the error, the `if` condition
+    // evaluates false, and the gate silently fails open. Without a format
+    // check up front, a future .nvmrc bump to an nvm alias would disable
+    // the gate's entire purpose.
+    const fixtureWrapper = makeFixtureRepoWithNvmrc('lts/iron');
+    const binDir = makeTmpDir('whatsoup-gate-nvmrc-bin-');
+    const home = makeBareHome();
+    // Fake node that reports a major matching the would-be required major if
+    // the gate ran the broken comparison and fell open — i.e. it would
+    // pass through to exec and print gate-passed.  With the format guard in
+    // place, the wrapper must abort BEFORE invoking node at all.
+    writeFakeNode(binDir, '24');
+
+    const { stdout, stderr, exitCode } = runWrapper({
+      home,
+      env: {
+        WHATSOUP_NODE: path.join(binDir, 'node'),
+      },
+      wrapperOverride: fixtureWrapper,
+    });
+
+    expect(exitCode, 'non-dotted .nvmrc must fail fast (non-zero exit)').not.toBe(0);
+    expect(exitCode, 'non-dotted .nvmrc must exit 1, not 9').toBe(1);
+    // Stderr must surface the rejected value so the operator can see what's wrong.
+    expect(stderr, 'stderr must echo the rejected .nvmrc value').toContain('lts/iron');
+    // Stderr must contain the diagnostic phrase identifying the format violation.
+    expect(stderr, 'stderr must explain the dotted-version requirement').toContain('dotted version');
+    // Must not have reached exec.
+    expect(stderr, 'gate must fire before exec — no exec flag in stderr').not.toContain('--experimental-strip-types');
+    expect(stdout, 'must not have reached exec (no gate-passed in stdout)').not.toContain('gate-passed');
   });
 });
