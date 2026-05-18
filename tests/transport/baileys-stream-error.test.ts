@@ -7,12 +7,13 @@
 //   ENOENT: no such file or directory, open '/tmp/user/1000/document<hex>-enc'
 //   → uncaughtException → global handler triggers shutdown
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
-import { createMediaReadStream, type MediaStreamLogger } from '../../src/transport/baileys-media-errors.ts';
+import type { Logger } from 'pino';
+import { createMediaReadStream } from '../../src/transport/baileys-media-errors.ts';
 
 // ─── Test infrastructure ──────────────────────────────────────────────────────
 
@@ -26,16 +27,20 @@ function uncaughtListener(err: Error) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function makeStubLog(): { log: MediaStreamLogger; warned: Array<{ err: unknown; path: string; msg: string }> } {
+function makeStubLog(): { log: Logger; warned: Array<{ err: unknown; path: string; msg: string }> } {
   const warned: Array<{ err: unknown; path: string; msg: string }> = [];
-  return {
-    log: {
-      warn(obj: { err: unknown; path: string }, msg: string) {
-        warned.push({ ...obj, msg });
-      },
-    },
-    warned,
-  };
+  const log = {
+    error: vi.fn((obj: { err: unknown; path: string }, msg: string) => {
+      warned.push({ ...obj, msg });
+    }),
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+    fatal: vi.fn(),
+    trace: vi.fn(),
+    child: () => log,
+  } as unknown as Logger;
+  return { log, warned };
 }
 
 // ─── Suite ───────────────────────────────────────────────────────────────────
@@ -52,6 +57,7 @@ describe('createMediaReadStream — race-delete safety', () => {
 
   afterEach(() => {
     process.removeListener('uncaughtException', uncaughtListener);
+    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   // ── Test 1: listener attached synchronously before any await ───────────────
@@ -74,7 +80,7 @@ describe('createMediaReadStream — race-delete safety', () => {
 
   // ── Test 2: race-delete does NOT produce uncaughtException ─────────────────
   it('does not raise uncaughtException when the file is deleted before stream is consumed', async () => {
-    expect.assertions(3);
+    expect.assertions(5);
 
     const filePath = join(tmpDir, 'document3EB0DA6BF316F42701A08F-enc');
     writeFileSync(filePath, 'fake-enc-payload');
@@ -92,16 +98,19 @@ describe('createMediaReadStream — race-delete safety', () => {
     // The error should be the ENOENT we caused
     expect((err as NodeJS.ErrnoException).code).toBe('ENOENT');
 
-    // The internal listener must have fired (logged a warning)
-    expect(warned.length).toBeGreaterThan(0);
-
-    // Most importantly: the uncaughtException handler must NOT have been called
+    // The uncaughtException handler must NOT have been called
     expect(uncaughtCalled).toBe(false);
+    expect(uncaughtErr).toBeUndefined();
+
+    // The internal listener must have logged the exact path that failed —
+    // not just "something" was logged, the right thing was logged.
+    expect(warned).toHaveLength(1);
+    expect((warned[0].err as NodeJS.ErrnoException).path).toBe(filePath);
   });
 
   // ── Test 3: caller can still observe the error after suppression ───────────
   it('allows caller to attach their own error listener and see the failure', async () => {
-    expect.assertions(2);
+    expect.assertions(3);
 
     const filePath = join(tmpDir, 'image-enc');
     writeFileSync(filePath, 'fake-image-payload');
@@ -119,7 +128,8 @@ describe('createMediaReadStream — race-delete safety', () => {
     // Wait for caller's error listener to fire
     await once(stream, 'error');
 
-    expect(callerErrors.length).toBeGreaterThan(0);
+    expect(callerErrors).toHaveLength(1);
     expect((callerErrors[0] as NodeJS.ErrnoException).code).toBe('ENOENT');
+    expect((callerErrors[0] as NodeJS.ErrnoException).path).toBe(filePath);
   });
 });

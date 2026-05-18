@@ -1,10 +1,6 @@
 import type { Readable } from 'node:stream';
 import { createReadStream } from 'node:fs';
-
-/** Minimal logger interface — satisfied by pino child loggers and test stubs alike. */
-export interface MediaStreamLogger {
-  warn(obj: { err: unknown; path: string }, msg: string): void;
-}
+import type { Logger } from 'pino';
 
 export function isBaileysEncryptedTmpEnoent(err: unknown): err is NodeJS.ErrnoException {
   if (!(err instanceof Error)) return false;
@@ -27,10 +23,10 @@ export function isBaileysEncryptedTmpEnoent(err: unknown): err is NodeJS.ErrnoEx
  * so the window is zero. The error is still re-emitted to allow retry logic
  * at the caller to observe it via their own 'error' listener.
  */
-export function createMediaReadStream(path: string, log: MediaStreamLogger): Readable {
+export function createMediaReadStream(path: string, log: Logger): Readable {
   const stream = createReadStream(path);
   stream.on('error', (err) => {
-    log.warn({ err, path }, 'media stream error suppressed (would have raised uncaughtException)');
+    log.error({ err, path }, 'media stream open error intercepted (would have raised uncaughtException); propagating to retry listener');
   });
   return stream;
 }
