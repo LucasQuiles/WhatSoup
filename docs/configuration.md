@@ -60,6 +60,7 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `XDG_CONFIG_HOME` | path | `~/.config` | XDG config base. |
 | `XDG_DATA_HOME` | path | `~/.local/share` | XDG data base. |
 | `XDG_STATE_HOME` | path | `~/.local/state` | XDG state base. |
+| `TMPDIR` | path | `<dataRoot>/tmp` or `$XDG_DATA_HOME/whatsoup/tmp/<name>` | Runtime process temp directory. The wrapper, launchd plist generation, and bootstrap pin this to a WhatSoup-owned per-instance path. |
 
 ### Pinecone
 
@@ -542,6 +543,9 @@ $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
   bot.db            — SQLite database (messages, contacts, access list, sessions, outbound_sends audit)
   logs/             — Pino log files (daily rotation via pino-roll)
   media/tmp/        — Temporary media files for agent Read access
+
+$XDG_DATA_HOME/whatsoup/tmp/<name>/           (default: ~/.local/share/...)
+  process temp      — Runtime `TMPDIR`; old files are swept hourly after 3 hours
 
 $XDG_STATE_HOME/whatsoup/instances/<name>/    (default: ~/.local/state/...)
   whatsoup.lock     — PID lock file (prevents double-start)

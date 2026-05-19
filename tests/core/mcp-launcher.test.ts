@@ -104,14 +104,17 @@ describe('spawnMcpProcess', () => {
         'process.stderr.write(JSON.stringify({',
         '  inherited: process.env.MCP_LAUNCHER_INHERITED ?? null,',
         '  override: process.env.MCP_LAUNCHER_OVERRIDE,',
+        '  tmpdir: process.env.TMPDIR,',
         '}));',
       ].join('\n'),
     );
 
     const originalInherited = process.env.MCP_LAUNCHER_INHERITED;
     const originalOverride = process.env.MCP_LAUNCHER_OVERRIDE;
+    const originalTmpdir = process.env.TMPDIR;
     process.env.MCP_LAUNCHER_INHERITED = 'from-process';
     process.env.MCP_LAUNCHER_OVERRIDE = 'from-process';
+    process.env.TMPDIR = join(tempDir, 'owned-tmp');
 
     try {
       const child = spawnMcpProcess(
@@ -126,6 +129,7 @@ describe('spawnMcpProcess', () => {
       expect(JSON.parse(result.stderr)).toEqual({
         inherited: null,
         override: 'from-caller',
+        tmpdir: join(tempDir, 'owned-tmp'),
       });
     } finally {
       if (originalInherited === undefined) {
@@ -137,6 +141,11 @@ describe('spawnMcpProcess', () => {
         delete process.env.MCP_LAUNCHER_OVERRIDE;
       } else {
         process.env.MCP_LAUNCHER_OVERRIDE = originalOverride;
+      }
+      if (originalTmpdir === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = originalTmpdir;
       }
       rmSync(tempDir, { recursive: true, force: true });
     }

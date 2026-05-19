@@ -63,6 +63,7 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
       XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+      TMPDIR: process.env.TMPDIR,
       // Per-instance overrides can set ALLOW_M365_MUTATIONS=1 to bypass
       // external M365 read-only hooks; most instances do not set it and
       // remain read-only.

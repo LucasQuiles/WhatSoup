@@ -15,6 +15,7 @@ import {
   xdgDir,
   configRoot,
   dataRoot,
+  tmpRoot,
   stateRoot,
   instancePaths,
 } from '../../src/fleet/paths.ts';
@@ -75,6 +76,19 @@ describe('dataRoot', () => {
   });
 });
 
+describe('tmpRoot', () => {
+  it('joins xdg data dir with whatsoup/tmp/<name>', () => {
+    expect(tmpRoot('primary')).toBe(
+      path.join(HOME, '.local/share', 'whatsoup', 'tmp', 'primary'),
+    );
+  });
+
+  it('honors XDG_DATA_HOME when set', () => {
+    process.env.XDG_DATA_HOME = '/x/data';
+    expect(tmpRoot('agent')).toBe(path.join('/x/data', 'whatsoup', 'tmp', 'agent'));
+  });
+});
+
 describe('stateRoot', () => {
   it('joins xdg state dir with whatsoup/instances/<name>', () => {
     expect(stateRoot('primary')).toBe(
@@ -104,6 +118,7 @@ describe('instancePaths', () => {
       logDir: path.join(data, 'logs'),
       lockPath: path.join(state, 'whatsoup.lock'),
       mediaDir: path.join(data, 'media', 'tmp'),
+      tmpDir: path.join(HOME, '.local/share', 'whatsoup', 'tmp', 'primary'),
     });
   });
 
@@ -130,6 +145,7 @@ describe('instancePaths', () => {
     expect(p.authDir).toBe(path.join('/x/config', 'whatsoup', 'instances', 'agent', 'auth'));
     expect(p.dbPath).toBe(path.join('/x/data', 'whatsoup', 'instances', 'agent', 'bot.db'));
     expect(p.lockPath).toBe(path.join('/x/state', 'whatsoup', 'instances', 'agent', 'whatsoup.lock'));
+    expect(p.tmpDir).toBe(path.join('/x/data', 'whatsoup', 'tmp', 'agent'));
   });
 
   it('does not throw on instance names containing dashes, underscores, or numerics', () => {

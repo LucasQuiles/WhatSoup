@@ -82,6 +82,11 @@ interface InstanceConfig {
   paths: InstancePaths;
 }
 
+function pinProcessTmpDir(paths: InstancePaths): void {
+  fs.mkdirSync(paths.tmpDir, { recursive: true, mode: 0o700 });
+  process.env.TMPDIR = paths.tmpDir;
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -133,6 +138,7 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
 
   // 5. Resolve paths
   const paths = instancePaths(name);
+  pinProcessTmpDir(paths);
 
   // 6. Build config — cast through unknown since validateInstance already
   // verified the required fields; TS cannot narrow from Record<string,unknown>

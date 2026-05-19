@@ -42,6 +42,7 @@ import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
+import { ProcessTmpRetentionTimer, DEFAULT_PROCESS_TMP_RETENTION } from './core/process-tmp-retention.ts';
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
@@ -650,6 +651,12 @@ const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
 });
 mediaRetentionTimer.start(config.mediaRetention.intervalHours * 60 * 60 * 1000);
 
+const processTmpRetentionTimer = new ProcessTmpRetentionTimer(
+  process.env.TMPDIR ?? join(config.dataRoot, 'tmp'),
+  DEFAULT_PROCESS_TMP_RETENTION,
+);
+processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
+
 const databaseRetentionTimer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
 
@@ -793,6 +800,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(metricsInterval);
     clearInterval(retentionInterval);
     mediaRetentionTimer.stop();
+    processTmpRetentionTimer.stop();
     databaseRetentionTimer.stop();
     await memoryConsolidationScheduler?.stop();
     clearInterval(echoTimeoutInterval);

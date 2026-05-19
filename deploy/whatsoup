@@ -113,6 +113,14 @@ fi
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)
 export PATH="$HOME/.local/bin:$(dirname "$NODE"):$PATH"
 
+# Pin process temp files under a per-instance WhatSoup-owned tmp directory so
+# Baileys encrypted upload blobs are not exposed to macOS /var/folders cleanup.
+XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+TMPDIR="$XDG_DATA/whatsoup/tmp/$INSTANCE"
+mkdir -p "$TMPDIR"
+chmod 700 "$TMPDIR"
+export TMPDIR
+
 # Detect instance type from instance.json (whatsoup-instances namespace)
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 INSTANCE_JSON="$XDG_CONFIG/whatsoup/instances/$INSTANCE/config.json"

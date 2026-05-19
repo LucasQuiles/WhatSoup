@@ -12,7 +12,7 @@ import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { repoRoot } from './paths.ts';
+import { repoRoot, tmpRoot } from './paths.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -99,6 +99,7 @@ function plistPath(name: string): string {
 export function buildPlist(name: string): string {
   const xdgConfig = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config');
   const logDir = path.join(xdgConfig, 'whatsoup', 'instances', name);
+  const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');
   const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
 
@@ -131,6 +132,8 @@ export function buildPlist(name: string): string {
     `    <string>${escapeXml(envPath)}</string>`,
     '    <key>HOME</key>',
     `    <string>${escapeXml(os.homedir())}</string>`,
+    '    <key>TMPDIR</key>',
+    `    <string>${escapeXml(tmpDir)}</string>`,
     '  </dict>',
     '</dict>',
     '</plist>',

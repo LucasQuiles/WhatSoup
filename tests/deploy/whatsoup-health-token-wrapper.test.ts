@@ -20,6 +20,14 @@ function extractKeyringLookup(source: string): string {
   return source.slice(start, end + 3);
 }
 
+function extractTmpdirBlock(source: string): string {
+  const start = source.indexOf('# Pin process temp files');
+  const end = source.indexOf('\n# Detect instance type', start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
+}
+
 function writeExecutable(filePath: string, contents: string): void {
   fs.writeFileSync(filePath, contents, 'utf8');
   fs.chmodSync(filePath, 0o700);
@@ -122,6 +130,27 @@ describe('health token shell wrappers', () => {
     expect(stdout).toBe('preloaded-token');
     expect(log).not.toContain('secret-tool lookup');
     expect(log).not.toContain('security find-generic-password');
+  });
+
+  it('deploy/whatsoup exports an owned per-instance TMPDIR before Node starts', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-wrapper-tmpdir-'));
+    tmpDirs.push(tmpDir);
+    const source = fs.readFileSync('deploy/whatsoup', 'utf8');
+    const scriptPath = path.join(tmpDir, 'probe-tmpdir.sh');
+    const homeDir = path.join(tmpDir, 'home');
+    const dataHome = path.join(tmpDir, 'data');
+    fs.mkdirSync(homeDir);
+
+    fs.writeFileSync(
+      scriptPath,
+      `#!/usr/bin/env bash\nset -euo pipefail\nHOME="${homeDir}"\nXDG_DATA_HOME="${dataHome}"\nINSTANCE=media-bot\n${extractTmpdirBlock(source)}\nprintf '%s\\n' "$TMPDIR"\n[ -d "$TMPDIR" ]\n`,
+      'utf8',
+    );
+    fs.chmodSync(scriptPath, 0o700);
+
+    const stdout = execFileSync('bash', [scriptPath], { encoding: 'utf8' }).trim();
+
+    expect(stdout).toBe(path.join(dataHome, 'whatsoup', 'tmp', 'media-bot'));
   });
 
   it('heal-notify checks canonical health token before legacy fallback', () => {
