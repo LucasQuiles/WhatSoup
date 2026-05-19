@@ -79,8 +79,19 @@ function resolveTypingState(state: TypingState): 'composing' | 'recording' | 'pa
   return state;
 }
 
-function mediaUpload(media: OutboundMedia): Buffer | { stream: Readable } | { url: string } {
-  if (media.stream !== undefined) return { stream: media.stream };
+/** Drain a stream into a Buffer so Baileys never holds an open fd to a temp file. */
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function mediaUpload(media: OutboundMedia): Promise<Buffer | { url: string }> {
+  // Buffer streams eagerly — eliminates the race where /tmp files are deleted
+  // between createReadStream() and Baileys' internal read.
+  if (media.stream !== undefined) return streamToBuffer(media.stream);
   if (media.url !== undefined) return { url: media.url };
   return media.buffer;
 }
@@ -385,53 +396,103 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
     this.log.info({ chatJid, mediaType: media.type }, 'Sending media');
-    const upload = mediaUpload(media);
 
-    let result;
-    switch (media.type) {
-      case 'image':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          image: upload,
-          caption: media.caption,
-          mimetype: media.mimetype,
-          viewOnce: media.viewOnce,
-        }), 'sendMedia:image');
-        break;
-      case 'document':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          document: upload,
-          fileName: media.filename,
-          mimetype: media.mimetype,
-          caption: media.caption,
-        }), 'sendMedia:document');
-        break;
-      case 'audio':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          audio: upload,
-          mimetype: media.mimetype,
-          ptt: media.ptt,
-          seconds: media.seconds,
-        }), 'sendMedia:audio');
-        break;
-      case 'video':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          video: upload,
-          caption: media.caption,
-          mimetype: media.mimetype,
-          ptv: media.ptv,
-          gifPlayback: media.gifPlayback,
-          viewOnce: media.viewOnce,
-        }), 'sendMedia:video');
-        break;
-      case 'sticker':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          sticker: upload,
-          mimetype: media.mimetype ?? 'image/webp',
-          isAnimated: media.isAnimated,
-        }), 'sendMedia:sticker');
-        break;
+    // Buffer the media eagerly so Baileys never holds an open fd to a temp file.
+    // This eliminates the ENOENT race where /tmp files get cleaned up mid-send.
+    let upload: Buffer | { url: string };
+    try {
+      upload = await mediaUpload(media);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        throw new WhatSoupError(
+          `Media file not found (deleted before send): ${(err as Error).message}`,
+          'MEDIA_NOT_FOUND',
+          err,
+        );
+      }
+      throw new WhatSoupError(
+        `Failed to read media for upload: ${(err as Error).message}`,
+        'SEND_FAILED',
+        err,
+      );
     }
-    return { waMessageId: result?.key?.id ?? null };
+
+    const maxAttempts = 3;
+    let lastErr: unknown;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
+        const delayMs = jitteredDelay(1000, attempt - 1, 10_000);
+        this.log.warn({ chatJid, mediaType: media.type, attempt: attempt + 1, delayMs }, 'sendMedia retry');
+        await new Promise((r) => setTimeout(r, delayMs));
+        if (!this.sock) {
+          throw new WhatSoupError('WhatsApp disconnected during media retry', 'CONNECTION_UNAVAILABLE');
+        }
+      }
+
+      let result;
+      try {
+        switch (media.type) {
+          case 'image':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              image: upload,
+              caption: media.caption,
+              mimetype: media.mimetype,
+              viewOnce: media.viewOnce,
+            }), 'sendMedia:image');
+            break;
+          case 'document':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              document: upload,
+              fileName: media.filename,
+              mimetype: media.mimetype,
+              caption: media.caption,
+            }), 'sendMedia:document');
+            break;
+          case 'audio':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              audio: upload,
+              mimetype: media.mimetype,
+              ptt: media.ptt,
+              seconds: media.seconds,
+            }), 'sendMedia:audio');
+            break;
+          case 'video':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              video: upload,
+              caption: media.caption,
+              mimetype: media.mimetype,
+              ptv: media.ptv,
+              gifPlayback: media.gifPlayback,
+              viewOnce: media.viewOnce,
+            }), 'sendMedia:video');
+            break;
+          case 'sticker':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              sticker: upload,
+              mimetype: media.mimetype ?? 'image/webp',
+              isAnimated: media.isAnimated,
+            }), 'sendMedia:sticker');
+            break;
+        }
+        return { waMessageId: result?.key?.id ?? null };
+      } catch (err) {
+        lastErr = err;
+        // Non-retryable: MEDIA_NOT_FOUND, explicit WhatSoupErrors
+        if (err instanceof WhatSoupError && !err.retryable) throw err;
+        // Retryable: timeouts, connection hiccups
+        this.log.warn({ err, chatJid, mediaType: media.type, attempt: attempt + 1 }, 'sendMedia attempt failed');
+      }
+    }
+
+    // All attempts exhausted
+    if (lastErr instanceof WhatSoupError) throw lastErr;
+    throw new WhatSoupError(
+      `sendMedia:${media.type} failed after ${maxAttempts} attempts: ${(lastErr as Error).message}`,
+      'SEND_FAILED',
+      lastErr,
+    );
   }
 
   async shutdown(): Promise<void> {

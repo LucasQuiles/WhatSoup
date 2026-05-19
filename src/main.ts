@@ -822,6 +822,14 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
+  // Stray stream ENOENT on /tmp files — Baileys opened a read stream on a temp file
+  // that was cleaned up before the read completed. Non-fatal; demote to warning.
+  const errno = err as NodeJS.ErrnoException;
+  if (errno.code === 'ENOENT' && errno.path && errno.path.startsWith('/tmp/')) {
+    log.warn({ err, path: errno.path }, 'non-fatal ENOENT on temp file — suppressed crash');
+    return;
+  }
+
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
   if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
   const done = shutdown('uncaughtException').then(() => process.exit(1));

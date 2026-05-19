@@ -135,13 +135,15 @@ describe('WhatSoupError contract', () => {
     expect(err.code).toBe('LOCK_CONTENTION');
   });
 
-  it('retryable is true for exactly CONNECTION_UNAVAILABLE, RECONNECTING, LLM_UNAVAILABLE, LLM_TIMEOUT, PINECONE_UNAVAILABLE', () => {
+  it('retryable is true for transient error codes', () => {
     const expectedRetryable = new Set<ErrorCode>([
       'CONNECTION_UNAVAILABLE',
       'RECONNECTING',
       'LLM_UNAVAILABLE',
       'LLM_TIMEOUT',
       'PINECONE_UNAVAILABLE',
+      'SEND_FAILED',
+      'SEND_TIMEOUT',
     ]);
 
     for (const code of allCodes) {
@@ -162,8 +164,8 @@ describe('WhatSoupError contract', () => {
     expect(new WhatSoupError('test', 'DATABASE_ERROR').retryable).toBe(false);
   });
 
-  it('retryable is false for SEND_FAILED', () => {
-    expect(new WhatSoupError('test', 'SEND_FAILED').retryable).toBe(false);
+  it('retryable is true for SEND_FAILED', () => {
+    expect(new WhatSoupError('test', 'SEND_FAILED').retryable).toBe(true);
   });
 
   it('retryable is false for INTERNAL_ERROR', () => {

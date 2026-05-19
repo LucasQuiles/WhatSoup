@@ -11,6 +11,7 @@ export type ErrorCode =
   | 'LLM_BAD_REQUEST'
   | 'LLM_TIMEOUT'
   | 'PINECONE_UNAVAILABLE'
+  | 'MEDIA_NOT_FOUND'
   | 'SEND_FAILED'
   | 'SEND_TIMEOUT'
   | 'SEND_UNCERTAIN'
@@ -24,6 +25,8 @@ const RETRYABLE: Set<ErrorCode> = new Set([
   'LLM_UNAVAILABLE',
   'LLM_TIMEOUT',
   'PINECONE_UNAVAILABLE',
+  'SEND_FAILED',
+  'SEND_TIMEOUT',
 ]);
 
 export class WhatSoupError extends Error {

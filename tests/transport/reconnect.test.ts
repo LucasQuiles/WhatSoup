@@ -878,7 +878,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     });
   });
 
-  it('sendMedia passes stream sources through to Baileys media upload payloads', async () => {
+  it('sendMedia buffers stream sources before passing to Baileys', async () => {
     const { mockSock } = makeMockSocket();
     mockSock.sendMessage.mockResolvedValue({ key: { id: 'media-1' } });
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
@@ -895,10 +895,11 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       }),
     ).resolves.toEqual({ waMessageId: 'media-1' });
 
+    // Stream is now eagerly buffered — Baileys receives a Buffer, not { stream }
     expect(mockSock.sendMessage).toHaveBeenCalledWith(
       '111@s.whatsapp.net',
       expect.objectContaining({
-        image: { stream },
+        image: Buffer.from('image'),
         mimetype: 'image/png',
       }),
     );
