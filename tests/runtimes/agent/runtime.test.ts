@@ -678,6 +678,50 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).toHaveBeenNthCalledWith(3, 'follow-up');
   });
 
+  it('does not retry auto-compact within the cooldown window after a timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 123,
+        sessionId: 'session-1',
+        startedAt: '2026-05-18T00:00:00.000Z',
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 150,
+        totalOutputTokens: 5,
+        lastCompactInputTokens: 0,
+        lastCompactOutputTokens: 0,
+      });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 150, outputTokens: 5 });
+      await Promise.resolve();
+
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      // Advance past the 2-minute compact timeout - no compact_boundary event arrived.
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000 + 100);
+
+      // A subsequent result event would normally trigger maybeStartAutoCompact again.
+      // With the cooldown in place, /compact must NOT be re-sent.
+      mockSession.sendTurn.mockClear();
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 200, outputTokens: 10 });
+      await Promise.resolve();
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
