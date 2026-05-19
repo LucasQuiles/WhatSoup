@@ -254,6 +254,7 @@ describe('chat-scoped session', () => {
       contactsDir: { contacts: new Map<string, string>(), getLidMappings: () => undefined },
       sendRaw: async (jid: string, content: unknown) => {
         capturedCalls.push({ jid, content });
+        return { waMessageId: null };
       },
     } as unknown as ConnectionManager;
 

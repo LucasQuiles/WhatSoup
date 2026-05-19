@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import type { ToolRegistry } from '../registry.ts';
-import type { SessionContext } from '../types.ts';
+import { toolError, type SessionContext } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { synthesizeSpeech } from '../../runtimes/chat/providers/elevenlabs.ts';
@@ -11,6 +11,10 @@ import { writeTempFile } from '../../core/media-download.ts';
 import { createChildLogger } from '../../logger.ts';
 
 const log = createChildLogger('mcp:voice');
+
+function errorResult(error: string, message: string) {
+  return toolError({ error, message });
+}
 
 // ---------------------------------------------------------------------------
 // Deps interface (Pattern 1 — options-object)
@@ -47,12 +51,12 @@ export function registerVoiceTools(
       const voiceId = params['voice_id'] as string | undefined;
 
       if (!text) {
-        return { error: 'invalid_input', message: 'Text cannot be empty.' };
+        return errorResult('invalid_input', 'Text cannot be empty.');
       }
 
       const chatJid = session.deliveryJid;
       if (!chatJid) {
-        return { error: 'no_target', message: 'No delivery JID in session context.' };
+        return errorResult('no_target', 'No delivery JID in session context.');
       }
 
       // Synthesize speech
@@ -62,7 +66,7 @@ export function registerVoiceTools(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         log.warn({ error: message, textLength: text.length }, 'voice synthesis failed');
-        return { error: 'synthesis_failed', message };
+        return errorResult('synthesis_failed', message);
       }
 
       // Write to temp file (for audit trail / replay)
@@ -81,7 +85,7 @@ export function registerVoiceTools(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         log.error({ err, chatJid }, 'failed to send voice note');
-        return { error: 'send_failed', message: `Failed to send voice note: ${message}` };
+        return errorResult('send_failed', `Failed to send voice note: ${message}`);
       }
 
       return {

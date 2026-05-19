@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
-import type { SessionContext } from '../types.ts';
+import { toolError, type SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import {
@@ -49,6 +49,10 @@ function sanitizeError(err: unknown): string {
   }
   // Generic fallback — don't expose raw error details
   return 'Operation failed. Try again.';
+}
+
+function errorResult(error: string) {
+  return toolError({ error });
 }
 
 // ---------------------------------------------------------------------------
@@ -182,12 +186,12 @@ export function registerMessagingTools(
           err instanceof MissingTextError ||
           err instanceof UnknownProfileError
         ) {
-          return { error: err.message };
+          return errorResult(err.message);
         }
         if (err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))) {
-          return { error: err.message };
+          return errorResult(err.message);
         }
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { sent: true, text: formattedText };
@@ -215,7 +219,7 @@ export function registerMessagingTools(
       const linkPreviewMode = (params['link_preview'] as string | undefined) ?? 'auto';
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
-      if (error) return { error };
+      if (error) return errorResult(error);
 
       try {
         const content: Record<string, unknown> = {
@@ -229,7 +233,7 @@ export function registerMessagingTools(
         if (linkPreviewMode === 'off') content['linkPreview'] = null;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { sent: true, quotedMessageId: messageId };
@@ -270,7 +274,7 @@ export function registerMessagingTools(
           )
           .get(chatJid) as OwnershipRow | undefined;
         if (!recent) {
-          return { error: 'No recent inbound message found in this chat to react to' };
+          return errorResult('No recent inbound message found in this chat to react to');
         }
         messageId = recent.message_id;
         // Skip ownership validation — we just queried it directly
@@ -286,13 +290,13 @@ export function registerMessagingTools(
             },
           });
         } catch (err) {
-          return { error: sanitizeError(err) };
+          return errorResult(sanitizeError(err));
         }
         return { sent: true, emoji, messageId, resolved: 'last_inbound' };
       }
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
-      if (error) return { error };
+      if (error) return errorResult(error);
 
       try {
         await connection.sendRaw(chatJid, {
@@ -306,7 +310,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { sent: true, emoji, messageId };
@@ -332,10 +336,10 @@ export function registerMessagingTools(
       const newText = params['newText'] as string;
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
-      if (error) return { error };
+      if (error) return errorResult(error);
 
       if (!row!.is_from_me) {
-        return { error: 'Can only edit your own messages' };
+        return errorResult('Can only edit your own messages');
       }
 
       try {
@@ -348,7 +352,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { edited: true, messageId, newText };
@@ -372,7 +376,7 @@ export function registerMessagingTools(
       const messageId = params['messageId'] as string;
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
-      if (error) return { error };
+      if (error) return errorResult(error);
 
       try {
         await connection.sendRaw(chatJid, {
@@ -383,7 +387,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { deleted: true, messageId };
@@ -426,7 +430,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { sent: true, latitude, longitude };
@@ -476,7 +480,7 @@ export function registerMessagingTools(
         if (viewOnce) content['viewOnce'] = true;
         await connection.sendRaw(chatJid, content);
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { sent: true, count: contactCards.length };
@@ -504,11 +508,11 @@ export function registerMessagingTools(
       const selectableCount = params['selectableCount'] as number | undefined;
 
       if (options.length < 2) {
-        return { error: 'Poll requires at least 2 options' };
+        return errorResult('Poll requires at least 2 options');
       }
 
       if (options.length > 12) {
-        return { error: 'Poll allows at most 12 options' };
+        return errorResult('Poll allows at most 12 options');
       }
 
       try {
@@ -520,7 +524,7 @@ export function registerMessagingTools(
           },
         });
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { sent: true, question, options };
@@ -548,7 +552,7 @@ export function registerMessagingTools(
       const duration = (params['duration'] as string | undefined) ?? '7d';
 
       const { row, error } = validateMessageOwnership(db, messageId, session);
-      if (error) return { error };
+      if (error) return errorResult(error);
 
       // Duration in seconds mapping
       const durationSeconds: Record<string, 86400 | 604800 | 2592000> = {
@@ -571,7 +575,7 @@ export function registerMessagingTools(
           time: pin ? durationSeconds[duration] : undefined,
         });
       } catch (err) {
-        return { error: sanitizeError(err) };
+        return errorResult(sanitizeError(err));
       }
 
       return { pinned: pin, messageId, duration: pin ? duration : undefined };

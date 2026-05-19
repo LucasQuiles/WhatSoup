@@ -9,7 +9,7 @@ import { truncateForRerank } from '../../lib/text-utils.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
-import type { ToolDeclaration } from '../types.ts';
+import { toolError, type ToolDeclaration } from '../types.ts';
 
 const log = createChildLogger('knowledge-tools');
 
@@ -18,6 +18,10 @@ const MAX_TEXT_PER_RESULT = 600;
 
 /** Max total results to return (after rerank/dedup). */
 const MAX_RESULTS = 8;
+
+function errorResult(error: string) {
+  return toolError({ error });
+}
 
 interface ParsedHit {
   id: string;
@@ -235,7 +239,7 @@ export function registerKnowledgeTools(
     handler: async (params) => {
       const parsed = KnowledgeSearchSchema.safeParse(params);
       if (!parsed.success) {
-        return { error: `Invalid parameters: ${parsed.error.issues.map(i => i.message).join(', ')}` };
+        return errorResult(`Invalid parameters: ${parsed.error.issues.map(i => i.message).join(', ')}`);
       }
 
       const { index: indexName, query, top_k, namespace: nsOverride } = parsed.data;
@@ -259,7 +263,7 @@ export function registerKnowledgeTools(
         memoryConfig.namespaces,
       );
       if (routed.error) {
-        return { error: routed.error };
+        return errorResult(routed.error);
       }
       const namespacesToSearch = routed.namespacesToSearch;
       const queryIntent = routed.queryIntent;
@@ -269,7 +273,7 @@ export function registerKnowledgeTools(
           projectId: memoryConfig.projectId,
           expectedHostSuffix: memoryConfig.expectedHostSuffix,
         });
-        if (projectError) return { error: projectError };
+        if (projectError) return errorResult(projectError);
 
         const index = pc.index(indexName);
         let hits: ParsedHit[] = [];
@@ -280,7 +284,7 @@ export function registerKnowledgeTools(
           try {
             const embedUrl = profile.embedUrl ?? memoryConfig.knowledgeProfiles[indexName]?.embedUrl;
             if (!embedUrl) {
-              return { error: `Vector index "${indexName}" is missing memory.pinecone.knowledgeProfiles.${indexName}.embedUrl.` };
+              return errorResult(`Vector index "${indexName}" is missing memory.pinecone.knowledgeProfiles.${indexName}.embedUrl.`);
             }
             const embedResp = await fetch(embedUrl, {
               method: 'POST',
@@ -290,17 +294,17 @@ export function registerKnowledgeTools(
             if (!embedResp.ok) {
               const status = embedResp.status;
               log.error({ index: indexName, status }, 'embed service returned non-OK');
-              return { error: `Embed service unavailable (HTTP ${status}). Try again in a moment.` };
+              return errorResult(`Embed service unavailable (HTTP ${status}). Try again in a moment.`);
             }
             const embedJson = (await embedResp.json()) as { vectors: number[][]; dim?: number };
             if (!Array.isArray(embedJson.vectors) || embedJson.vectors.length === 0) {
               log.error({ index: indexName }, 'embed service returned no vectors');
-              return { error: 'Embed service returned no vectors.' };
+              return errorResult('Embed service returned no vectors.');
             }
             vec = embedJson.vectors[0]!;
           } catch (embedErr) {
             log.error({ err: embedErr, index: indexName }, 'embed service call failed');
-            return { error: 'Knowledge base is temporarily unavailable (embed service). Try again in a moment.' };
+            return errorResult('Knowledge base is temporarily unavailable (embed service). Try again in a moment.');
           }
 
           const topK = top_k ?? profile.topK;
@@ -449,12 +453,12 @@ export function registerKnowledgeTools(
 
         // User-friendly error for common failures
         if (/ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(message)) {
-          return { error: 'Knowledge base is temporarily unavailable. Try again in a moment.' };
+          return errorResult('Knowledge base is temporarily unavailable. Try again in a moment.');
         }
         if (/401|403|unauthorized|forbidden/i.test(message)) {
-          return { error: 'Knowledge base authentication error. Contact admin.' };
+          return errorResult('Knowledge base authentication error. Contact admin.');
         }
-        return { error: `Search failed: ${message}` };
+        return errorResult(`Search failed: ${message}`);
       }
     },
   });
