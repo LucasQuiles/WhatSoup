@@ -29,6 +29,7 @@ import { formatMentions, buildLidMappings, ContactsDirectory } from '../core/men
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
+import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
 
@@ -83,6 +84,10 @@ function mediaUpload(media: OutboundMedia): Buffer | { stream: Readable } | { ur
   if (media.stream !== undefined) return { stream: media.stream };
   if (media.url !== undefined) return { url: media.url };
   return media.buffer;
+}
+
+function canReplayMediaSend(media: OutboundMedia): boolean {
+  return media.buffer !== undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,54 +389,66 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!this.sock) {
       throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
     }
-    this.log.info({ chatJid, mediaType: media.type }, 'Sending media');
-    const upload = mediaUpload(media);
+    for (let attempt = 0; ; attempt += 1) {
+      this.log.info({ chatJid, mediaType: media.type, attempt }, 'Sending media');
+      const upload = mediaUpload(media);
 
-    let result;
-    switch (media.type) {
-      case 'image':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          image: upload,
-          caption: media.caption,
-          mimetype: media.mimetype,
-          viewOnce: media.viewOnce,
-        }), 'sendMedia:image');
-        break;
-      case 'document':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          document: upload,
-          fileName: media.filename,
-          mimetype: media.mimetype,
-          caption: media.caption,
-        }), 'sendMedia:document');
-        break;
-      case 'audio':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          audio: upload,
-          mimetype: media.mimetype,
-          ptt: media.ptt,
-          seconds: media.seconds,
-        }), 'sendMedia:audio');
-        break;
-      case 'video':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          video: upload,
-          caption: media.caption,
-          mimetype: media.mimetype,
-          ptv: media.ptv,
-          gifPlayback: media.gifPlayback,
-          viewOnce: media.viewOnce,
-        }), 'sendMedia:video');
-        break;
-      case 'sticker':
-        result = await withSendTimeout(this.sock.sendMessage(chatJid, {
-          sticker: upload,
-          mimetype: media.mimetype ?? 'image/webp',
-          isAnimated: media.isAnimated,
-        }), 'sendMedia:sticker');
-        break;
+      let result;
+      try {
+        switch (media.type) {
+          case 'image':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              image: upload,
+              caption: media.caption,
+              mimetype: media.mimetype,
+              viewOnce: media.viewOnce,
+            }), 'sendMedia:image');
+            break;
+          case 'document':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              document: upload,
+              fileName: media.filename,
+              mimetype: media.mimetype,
+              caption: media.caption,
+            }), 'sendMedia:document');
+            break;
+          case 'audio':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              audio: upload,
+              mimetype: media.mimetype,
+              ptt: media.ptt,
+              seconds: media.seconds,
+            }), 'sendMedia:audio');
+            break;
+          case 'video':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              video: upload,
+              caption: media.caption,
+              mimetype: media.mimetype,
+              ptv: media.ptv,
+              gifPlayback: media.gifPlayback,
+              viewOnce: media.viewOnce,
+            }), 'sendMedia:video');
+            break;
+          case 'sticker':
+            result = await withSendTimeout(this.sock.sendMessage(chatJid, {
+              sticker: upload,
+              mimetype: media.mimetype ?? 'image/webp',
+              isAnimated: media.isAnimated,
+            }), 'sendMedia:sticker');
+            break;
+        }
+        return { waMessageId: result?.key?.id ?? null };
+      } catch (err) {
+        if (attempt > 0 || !canReplayMediaSend(media) || !isBaileysEncryptedTmpEnoent(err)) {
+          throw err;
+        }
+        this.log.warn(
+          { chatJid, mediaType: media.type, path: err.path },
+          'baileys encrypted tmp file vanished during media send; retrying once',
+        );
+      }
     }
-    return { waMessageId: result?.key?.id ?? null };
   }
 
   async shutdown(): Promise<void> {

@@ -2,7 +2,7 @@
 // Media sending tool with filesystem boundary enforcement.
 
 import { z } from 'zod';
-import { createReadStream, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
@@ -15,6 +15,7 @@ import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { assertConversationAccess, isPathWithinAllowedRoot, toolError, type SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
+import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 
 const log = createChildLogger('mcp:media');
@@ -67,6 +68,35 @@ function destroyOutboundMediaStream(media: OutboundMedia): void {
   if (media.stream === undefined) return;
   media.stream.on('error', () => {});
   media.stream.destroy();
+}
+
+function buildSendMediaPayload(
+  type: OutboundMedia['type'],
+  resolved: string,
+  basename: string,
+  mime: string,
+  params: {
+    caption?: string;
+    viewOnce?: boolean;
+    ptt?: boolean;
+    seconds?: number;
+    ptv?: boolean;
+    gifPlayback?: boolean;
+    isAnimated?: boolean;
+  },
+): OutboundMedia {
+  switch (type) {
+    case 'image':
+      return { type: 'image', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, viewOnce: params.viewOnce };
+    case 'document':
+      return { type: 'document', stream: createMediaReadStream(resolved, log), filename: basename, mimetype: mime, caption: params.caption };
+    case 'audio':
+      return { type: 'audio', stream: createMediaReadStream(resolved, log), mimetype: mime, ptt: params.ptt, seconds: params.seconds };
+    case 'video':
+      return { type: 'video', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, ptv: params.ptv, gifPlayback: params.gifPlayback, viewOnce: params.viewOnce };
+    case 'sticker':
+      return { type: 'sticker', stream: createMediaReadStream(resolved, log), mimetype: mime, isAnimated: params.isAnimated };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -160,34 +190,24 @@ export function registerMediaTools(
 
       // ── Build OutboundMedia ───────────────────────────────────────────
 
-      let media: OutboundMedia;
       const basename = filenameOverride ?? resolved.split('/').pop() ?? 'file';
       const effectiveType = mediaTypeOverride ?? mediaInfo.type;
       const mime = mediaInfo.mime;
+      const mediaParams = { caption, viewOnce, ptt, seconds, ptv, gifPlayback, isAnimated };
 
-      switch (effectiveType) {
-        case 'image':
-          media = { type: 'image', stream: createReadStream(resolved), caption, mimetype: mime, viewOnce };
+      for (let attempt = 0; ; attempt += 1) {
+        const media = buildSendMediaPayload(effectiveType, resolved, basename, mime, mediaParams);
+        try {
+          await connection.sendMedia(chatJid, media);
           break;
-        case 'document':
-          media = { type: 'document', stream: createReadStream(resolved), filename: basename, mimetype: mime, caption };
-          break;
-        case 'audio':
-          media = { type: 'audio', stream: createReadStream(resolved), mimetype: mime, ptt, seconds };
-          break;
-        case 'video':
-          media = { type: 'video', stream: createReadStream(resolved), caption, mimetype: mime, ptv, gifPlayback, viewOnce };
-          break;
-        case 'sticker':
-          media = { type: 'sticker', stream: createReadStream(resolved), mimetype: mime, isAnimated };
-          break;
-      }
-
-      try {
-        await connection.sendMedia(chatJid, media);
-      } catch (err) {
-        destroyOutboundMediaStream(media);
-        throw err;
+        } catch (err) {
+          destroyOutboundMediaStream(media);
+          if (attempt > 0 || !isBaileysEncryptedTmpEnoent(err)) throw err;
+          log.warn(
+            { chatJid, mediaType: effectiveType, path: err.path },
+            'baileys encrypted tmp file vanished during send_media; retrying with fresh stream',
+          );
+        }
       }
 
       return {

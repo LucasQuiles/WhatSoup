@@ -129,6 +129,33 @@ describe('status tools', () => {
     );
   });
 
+  it('post_status retries once when Baileys encrypted tmp media upload vanishes', async () => {
+    db.raw.prepare(
+      'INSERT INTO contacts (jid, canonical_phone, display_name, notify_name) VALUES (?, ?, ?, ?)',
+    ).run('333@s.whatsapp.net', '333', 'Cara', 'Cara');
+    const tmpErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/image123-enc'),
+      { code: 'ENOENT', path: '/tmp/image123-enc' },
+    );
+    vi.mocked(mockSock.sendMessage)
+      .mockRejectedValueOnce(tmpErr)
+      .mockResolvedValueOnce({ key: { id: 'status-msg-2' } });
+
+    const filePath = join(scratchDir, 'photo.jpg');
+    writeFileSync(filePath, Buffer.from('fake-image'));
+
+    const result = await registry.call(
+      'post_status',
+      { filePath, caption: 'look at this' },
+      globalSession(),
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(2);
+    const body = JSON.parse(result.content[0].text) as { messageId: string | null };
+    expect(body.messageId).toBe('status-msg-2');
+  });
+
   it('post_status errors when there are no eligible contacts', async () => {
     const result = await registry.call('post_status', { text: 'no recipients' }, globalSession());
     expect(result.isError).toBe(true);

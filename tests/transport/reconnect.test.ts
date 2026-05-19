@@ -906,6 +906,138 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.shutdown();
   });
 
+  it('sendMedia retries once when a buffer-backed Baileys encrypted tmp file vanishes', async () => {
+    const { mockSock } = makeMockSocket();
+    const tmpErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/document123-enc'),
+      { code: 'ENOENT', path: '/tmp/document123-enc' },
+    );
+    mockSock.sendMessage
+      .mockRejectedValueOnce(tmpErr)
+      .mockResolvedValueOnce({ key: { id: 'media-retry' } });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'document',
+        buffer: Buffer.from('doc'),
+        filename: 'doc.txt',
+        mimetype: 'text/plain',
+      }),
+    ).resolves.toEqual({ waMessageId: 'media-retry' });
+
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+
+  it('sendMedia does not retry Baileys tmp ENOENT more than once', async () => {
+    const { mockSock } = makeMockSocket();
+    const firstErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/video123-enc'),
+      { code: 'ENOENT', path: '/tmp/video123-enc' },
+    );
+    const secondErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/video456-enc'),
+      { code: 'ENOENT', path: '/tmp/video456-enc' },
+    );
+    mockSock.sendMessage
+      .mockRejectedValueOnce(firstErr)
+      .mockRejectedValueOnce(secondErr);
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'video',
+        buffer: Buffer.from('video'),
+        mimetype: 'video/mp4',
+      }),
+    ).rejects.toBe(secondErr);
+
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+
+  it('sendMedia does not retry non-Baileys tmp errors', async () => {
+    const { mockSock } = makeMockSocket();
+    const err = Object.assign(new Error('network down'), { code: 'ETIMEDOUT' });
+    mockSock.sendMessage.mockRejectedValueOnce(err);
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'image',
+        buffer: Buffer.from('image'),
+        mimetype: 'image/png',
+      }),
+    ).rejects.toBe(err);
+
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
+  it('sendMedia does not retry generic ENOENT outside the Baileys encrypted tmp path', async () => {
+    const { mockSock } = makeMockSocket();
+    const err = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/source.pdf'),
+      { code: 'ENOENT', path: '/tmp/source.pdf' },
+    );
+    mockSock.sendMessage.mockRejectedValueOnce(err);
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'document',
+        buffer: Buffer.from('doc'),
+        filename: 'source.pdf',
+        mimetype: 'application/pdf',
+      }),
+    ).rejects.toBe(err);
+
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
+  it('sendMedia does not retry stream-backed media because the stream may be consumed', async () => {
+    const { mockSock } = makeMockSocket();
+    const tmpErr = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/image123-enc'),
+      { code: 'ENOENT', path: '/tmp/image123-enc' },
+    );
+    mockSock.sendMessage.mockRejectedValueOnce(tmpErr);
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    await expect(
+      manager.sendMedia('111@s.whatsapp.net', {
+        type: 'image',
+        stream: Readable.from(['image']),
+        mimetype: 'image/png',
+      }),
+    ).rejects.toBe(tmpErr);
+
+    expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
   it('ignores events emitted by stale sockets after reconnect', async () => {
     const sockets: ReturnType<typeof makeMockSocket>[] = [];
     vi.mocked(makeWASocket).mockImplementation(() => {
