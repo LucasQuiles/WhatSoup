@@ -122,6 +122,7 @@ const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
 const AUTO_COMPACT_TIMEOUT_MS = 2 * 60 * 1000;
+const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 15 * 60 * 1000;
 
 class AgentCommandRuntimeError extends Error {
   readonly code: string;
@@ -628,6 +629,7 @@ export class AgentRuntime implements Runtime {
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
+  private autoCompactCooldownUntil = new Map<string, number>();
   private autoCompactWaiters = new Map<string, {
     promise: Promise<void>;
     resolve: () => void;
@@ -750,11 +752,18 @@ export class AgentRuntime implements Runtime {
     const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
     if (this.autoCompactWaiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
 
+    const cooldownUntil = this.autoCompactCooldownUntil.get(scopeKey);
+    if (cooldownUntil !== undefined) {
+      if (Date.now() < cooldownUntil) return;
+      this.autoCompactCooldownUntil.delete(scopeKey);
+    }
+
     let resolveWaiter!: () => void;
     const timer = setTimeout(() => {
-      log.warn({ scopeKey, rowId }, 'auto compact timed out');
+      log.warn({ scopeKey, rowId, backoffMs: AUTO_COMPACT_TIMEOUT_BACKOFF_MS }, 'auto compact timed out');
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
+      this.autoCompactCooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
     }, AUTO_COMPACT_TIMEOUT_MS);
     timer.unref?.();
 
@@ -1015,6 +1024,7 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnText.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.compactBoundaryScopes.delete(mapKey);
+    this.autoCompactCooldownUntil.delete(mapKey);
     this.finishAutoCompact(mapKey);
     this.clearSilentCompact(mapKey);
     // Cancel any pending image coalesce buffer
