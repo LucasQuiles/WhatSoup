@@ -82,7 +82,7 @@ source.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `source` | enum (see §3) | yes | Trigger kind |
+| `source` | enum: one of `poll.email`, `poll.url`, `poll.file`, `poll.sqlite`, `poll.pinecone`, `poll.shell`, `event.message` | yes | Trigger kind. The `schedule.*` kinds in §3 are valid `bead_triggers.kind` values but are reachable via `create_agent_job`, not `create_watch`. |
 | `criteria` | object | yes | Kind-specific spec (must pass Zod validation) |
 | `report_chat` | string | yes | Conversation key to send notifications to |
 | `title` | string | no | Human-readable description |
@@ -97,7 +97,7 @@ Generic `poll.sqlite` example (placeholders in `<>` brackets):
 {
   "source": "poll.sqlite",
   "criteria": {
-    "sql": "SELECT message_id, sender_name, substr(content,1,200) AS preview, datetime(timestamp/1000,'unixepoch') AS ts FROM messages WHERE chat_jid = '<GROUP_JID>' AND (sender_jid = '<CONTACT_JID>' OR sender_jid = '<CONTACT_LID>') AND timestamp > (strftime('%s','now') - <WINDOW_SECONDS>) * 1000 ORDER BY timestamp DESC LIMIT 5",
+    "sql": "SELECT message_id, sender_name, substr(content,1,200) AS preview, datetime(timestamp,'unixepoch') AS ts FROM messages WHERE chat_jid = '<GROUP_JID>' AND (sender_jid = '<CONTACT_JID>' OR sender_jid = '<CONTACT_LID>') AND timestamp > strftime('%s','now') - <WINDOW_SECONDS> ORDER BY timestamp DESC LIMIT 5",
     "fire_when": "rows_returned"
   },
   "report_chat": "<REPORT_CHAT_JID>",
@@ -184,13 +184,15 @@ bracketed placeholders with the target instance's values.
 import sqlite3, json, time
 
 db = sqlite3.connect("<INSTANCE_BOT_DB_PATH>")
+db.execute("PRAGMA foreign_keys = ON")  # bead_triggers.bead_id has ON DELETE CASCADE
 now = int(time.time())
 
 db.execute("BEGIN")
-# 1. Create bead
+# 1. Create bead. Mirrors create_watch: kind, title, owner_jid, status only —
+#    the MCP tool does not set chat_jid on watch beads, so omit it here too.
 db.execute("""
-    INSERT INTO beads (kind, title, owner_jid, status, chat_jid, created_at, updated_at)
-    VALUES ('watch', '<TITLE>', '<OWNER_JID>', 'active', '<GROUP_JID>', ?, ?)
+    INSERT INTO beads (kind, title, owner_jid, status, created_at, updated_at)
+    VALUES ('watch', '<TITLE>', '<OWNER_JID>', 'active', ?, ?)
 """, (now, now))
 bead_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -214,7 +216,7 @@ db.commit()
 
 The bot.db location follows the standard XDG layout described in
 `docs/configuration.md` — typically
-`~/.local/share/whatsoup/instances/<instance>/bot.db` on Linux/macOS.
+`~/.local/share/whatsoup/instances/<instance>/bot.db`.
 
 ## 8. Operational gotcha: startup-message amplification
 
