@@ -514,6 +514,8 @@ After all eight tasks pass on the development host, deploy both the WhatSoup cod
    ssh target host 'launchctl bootstrap gui/$(id -u) <target-home>/Library/LaunchAgents/com.target bot.token-budget-watchdog.plist'
    ```
 7. Set `ENABLE_TOOL_SEARCH=auto:5` and `TOKENOMICS_BOT=target bot` in target host's WhatSoup service environment (the LaunchAgent or operator script that launches target bot  -  *not* the tokenomics watchdog plist). Restart the WhatSoup service so the F.8 allowlist actually forwards the value. Do not introduce new low output caps or simple-prompt/autocompact overrides during this pilot unless the operator explicitly records the value and rollback condition in `DEPLOYMENT.md`.
+
+   Rollback for tool-search regression: remove `ENABLE_TOOL_SEARCH` from the same WhatSoup service environment, restart the WhatSoup service, and re-run step 8 to confirm the spawned agent child no longer has the variable. Record the before/after token-window sample and user-quality reason in `DEPLOYMENT.md`. Do not substitute `ENABLE_TOOL_SEARCH=false` unless intentionally testing all-tools-upfront behavior; unset returns to the agent runtime's documented default behavior.
 8. **Validate `ENABLE_TOOL_SEARCH` reaches the spawned agent child**, not just the parent:
    ```
    ssh target host 'ps -E -o pid,command | rg "claude" | head -5'
