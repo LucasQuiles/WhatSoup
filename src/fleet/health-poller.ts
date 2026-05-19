@@ -1,7 +1,10 @@
 import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
+import { isInstanceSilenced } from './silence-manager.ts';
 
 const log = createChildLogger('fleet:health-poller');
+
+const MIN_ALERT_INTERVAL_MS = 15 * 60 * 1000;
 
 export interface InstanceHealth {
   name: string;
@@ -16,8 +19,10 @@ export interface InstanceStatus {
   health: Record<string, unknown> | null;
   lastPollAt: string;
   consecutiveFailures: number;
-  status: 'online' | 'degraded' | 'unreachable';
+  status: 'online' | 'degraded' | 'unreachable' | 'logged_out';
   error: string | null;
+  lastAlertAt: string | null;
+  silencedUntil: string | null;
 }
 
 export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
@@ -93,6 +98,7 @@ export class HealthPoller {
         // Self-instance: use callback, no HTTP
         try {
           const health = this.getSelfHealth();
+          const existing = this.statuses.get(name);
           this.statuses.set(name, {
             name,
             health,
@@ -100,6 +106,8 @@ export class HealthPoller {
             consecutiveFailures: 0,
             status: 'online',
             error: null,
+            lastAlertAt: existing?.lastAlertAt ?? null,
+            silencedUntil: existing?.silencedUntil ?? null,
           });
         } catch (err) {
           this.updateFailure(name, (err as Error).message);
@@ -134,7 +142,20 @@ export class HealthPoller {
           clearTimeout(timeout);
         }
 
+        // Detect logged-out: backoff phase with zero attempts means fresh logout
+        const waConn = (health as any)?.whatsapp?.connection;
+        const isLoggedOut =
+          waConn?.reconnect_phase === 'backoff' && waConn?.reconnect_attempts === 0;
+
+        // HTTP 200 but body signals unhealthy → treat as degraded
+        if (health['status'] === 'unhealthy' || isLoggedOut) {
+          const derivedStatus = isLoggedOut ? 'logged_out' as const : 'degraded' as const;
+          this.updateDegraded(name, health, derivedStatus);
+          return;
+        }
+
         const prevStatus = this.statuses.get(name)?.status ?? 'online';
+        const existing = this.statuses.get(name);
         this.statuses.set(name, {
           name,
           health,
@@ -142,6 +163,8 @@ export class HealthPoller {
           consecutiveFailures: 0,
           status: 'online',
           error: null,
+          lastAlertAt: existing?.lastAlertAt ?? null,
+          silencedUntil: existing?.silencedUntil ?? null,
         });
         if (prevStatus !== 'online') {
           this.emitStatusChange(name, 'online', prevStatus);
@@ -165,7 +188,7 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
-    const newStatus = failures >= 3 ? 'unreachable' : 'degraded';
+    const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
 
     log.warn({ name, failures, error }, 'instance health poll failed');
     this.statuses.set(name, {
@@ -175,6 +198,8 @@ export class HealthPoller {
       consecutiveFailures: failures,
       status: newStatus,
       error,
+      lastAlertAt: existing?.lastAlertAt ?? null,
+      silencedUntil: existing?.silencedUntil ?? null,
     });
 
     // Notify listeners on any status transition
@@ -184,10 +209,70 @@ export class HealthPoller {
 
     // Emit alert on transition into unreachable (exactly when failures crosses 2→3)
     if (newStatus === 'unreachable' && prevStatus !== 'unreachable') {
-      emitAlert(name, 'instance_unreachable',
+      this.maybeEmitAlert(name, 'instance_unreachable',
         `whatsoup@${name} unreachable (${failures} consecutive poll failures)`,
         `Last error: ${error}`,
       );
     }
+  }
+
+  private updateDegraded(
+    name: string,
+    health: Record<string, unknown>,
+    newStatus: 'degraded' | 'logged_out',
+  ): void {
+    const existing = this.statuses.get(name);
+    const prevStatus = existing?.status ?? 'online';
+
+    this.statuses.set(name, {
+      name,
+      health,
+      lastPollAt: new Date().toISOString(),
+      consecutiveFailures: existing?.consecutiveFailures ?? 0,
+      status: newStatus,
+      error: null,
+      lastAlertAt: existing?.lastAlertAt ?? null,
+      silencedUntil: existing?.silencedUntil ?? null,
+    });
+
+    if (newStatus !== prevStatus) {
+      this.emitStatusChange(name, newStatus, prevStatus);
+    }
+
+    if (newStatus === 'logged_out' && prevStatus !== 'logged_out') {
+      this.maybeEmitAlert(name, 'instance_logged_out',
+        `whatsoup@${name} appears logged out`,
+        `reconnect_phase=backoff reconnect_attempts=0`,
+      );
+    } else if (newStatus === 'degraded' && prevStatus !== 'degraded') {
+      this.maybeEmitAlert(name, 'instance_degraded',
+        `whatsoup@${name} is degraded`,
+        `Health body reports status=unhealthy`,
+      );
+    }
+  }
+
+  private maybeEmitAlert(name: string, source: string, summary: string, evidence: string): void {
+    if (isInstanceSilenced(name)) {
+      log.info({ name, source }, 'alert suppressed — instance is silenced');
+      return;
+    }
+
+    const existing = this.statuses.get(name);
+    const lastAlertAt = existing?.lastAlertAt ?? null;
+    if (lastAlertAt !== null) {
+      const elapsed = Date.now() - new Date(lastAlertAt).getTime();
+      if (elapsed < MIN_ALERT_INTERVAL_MS) {
+        log.info({ name, source, elapsed }, 'alert suppressed — rate limit (15min)');
+        return;
+      }
+    }
+
+    // Set lastAlertAt BEFORE emitting to prevent races
+    if (existing) {
+      existing.lastAlertAt = new Date().toISOString();
+    }
+
+    emitAlert(name, source, summary, evidence);
   }
 }

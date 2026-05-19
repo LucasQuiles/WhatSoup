@@ -37,6 +37,8 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     consecutiveFailures: 0,
     status: 'online',
     error: null,
+    lastAlertAt: null,
+    silencedUntil: null,
     ...overrides,
   };
 }

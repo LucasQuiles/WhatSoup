@@ -1,0 +1,73 @@
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+const CONFIG_DIR = join(homedir(), '.config', 'whatsoup');
+const SILENCES_FILE = join(CONFIG_DIR, 'fleet-silences.json');
+
+export interface SilenceRule {
+  instance: string;
+  until: string;        // ISO8601
+  reason: string;
+  silencedBy: string;
+  createdAt: string;    // ISO8601
+}
+
+function loadRules(): SilenceRule[] {
+  try {
+    const raw = readFileSync(SILENCES_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as SilenceRule[];
+  } catch {
+    // missing or corrupt — return empty
+  }
+  return [];
+}
+
+function saveRules(rules: SilenceRule[]): void {
+  if (!existsSync(CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  }
+  writeFileSync(SILENCES_FILE, JSON.stringify(rules, null, 2) + '\n', { mode: 0o600 });
+}
+
+export function isInstanceSilenced(name: string): boolean {
+  const now = new Date();
+  return loadRules().some(
+    (r) => r.instance === name && new Date(r.until) > now,
+  );
+}
+
+export function listActiveSilences(): SilenceRule[] {
+  const now = new Date();
+  return loadRules().filter((r) => new Date(r.until) > now);
+}
+
+export function addSilence(
+  instance: string,
+  durationMinutes: number,
+  reason: string,
+  silencedBy: string,
+): SilenceRule {
+  const rules = loadRules().filter((r) => r.instance !== instance);
+  const now = new Date();
+  const until = new Date(now.getTime() + durationMinutes * 60 * 1000);
+  const rule: SilenceRule = {
+    instance,
+    until: until.toISOString(),
+    reason,
+    silencedBy,
+    createdAt: now.toISOString(),
+  };
+  rules.push(rule);
+  saveRules(rules);
+  return rule;
+}
+
+export function removeSilence(instance: string): boolean {
+  const rules = loadRules();
+  const filtered = rules.filter((r) => r.instance !== instance);
+  if (filtered.length === rules.length) return false;
+  saveRules(filtered);
+  return true;
+}

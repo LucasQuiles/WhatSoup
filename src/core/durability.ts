@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import { emitAlert } from '../lib/emit-alert.ts';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import { toConversationKey } from './conversation-key.ts';
+import { config } from '../config.ts';
 
 const log = createChildLogger('durability');
 
@@ -738,6 +740,12 @@ export class DurabilityEngine {
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
             );
+            emitAlert(
+              config.botName,
+              'outbound_quarantined',
+              `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+              `replay_policy=${op.replay_policy} wa_message_id=${op.wa_message_id ?? 'none'} reason=not_confirmed_non_safe`,
+            );
           }
         } else {
           // No wa_message_id: definitely not delivered; apply replay policy
@@ -754,6 +762,12 @@ export class DurabilityEngine {
             log.warn(
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
+            );
+            emitAlert(
+              config.botName,
+              'outbound_quarantined',
+              `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
+              `replay_policy=${op.replay_policy} wa_message_id=none reason=no_wa_id_non_safe`,
             );
           }
         }

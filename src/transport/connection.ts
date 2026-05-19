@@ -50,6 +50,8 @@ export interface ConnectionStateSnapshot {
   firstFailureAt: string | null;
   lastPingAt: string | null;
   lastPongAt: string | null;
+  lastDisconnectReason: string | null;
+  lastStatusCode: number | null;
 }
 
 /** Maximum time to wait for a send operation before aborting. */
@@ -170,6 +172,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private restartRequiredTimestamps: number[] = [];
   private lastPingAt: number | null = null;
   private lastPongAt: number | null = null;
+  private lastDisconnectReason: string | null = null;
+  private lastStatusCode: number | null = null;
   private connectionState: ConnectionLifecycleState = 'disconnected';
   private stateChangedAt = Date.now();
   private static readonly MAX_FAILURE_DURATION_MS = 30 * 60 * 1000;
@@ -456,6 +460,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       firstFailureAt: toIso(this.firstFailureAt),
       lastPingAt: toIso(this.lastPingAt),
       lastPongAt: toIso(this.lastPongAt),
+      lastDisconnectReason: this.lastDisconnectReason,
+      lastStatusCode: this.lastStatusCode,
     };
   }
 
@@ -847,6 +853,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const statusCode: number | undefined = (lastDisconnect?.error as any)?.output?.statusCode;
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? 'Unknown') : 'Unknown';
 
+      this.lastStatusCode = statusCode ?? null;
+      this.lastDisconnectReason = reason;
+
       this.log.warn({ statusCode, reason }, 'WhatsApp connection closed');
 
       // Invalidate the stale socket before deciding whether to reconnect
@@ -919,7 +928,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         config.botName,
         'connection_exhausted',
         `whatsoup@${config.botName} connection exhausted after ${Math.round(elapsedMs / 60_000)}min`,
-        `Reconnect phases exhausted. Elapsed: ${Math.round(elapsedMs / 1000)}s`,
+        `Reconnect phases exhausted. Elapsed: ${Math.round(elapsedMs / 1000)}s. Last disconnect: ${this.lastDisconnectReason ?? 'unknown'} (code ${this.lastStatusCode ?? 'none'})`,
       );
       this.emit('exhausted');
       return;
