@@ -263,16 +263,18 @@ describe('loadInstance — error: invalid type', () => {
   });
 });
 
-describe('loadInstance — error: agent without accessMode self_only', () => {
-  it('throws when type is "agent" but accessMode is not "self_only"', () => {
+describe('loadInstance — agent without agentOptions accepts any accessMode', () => {
+  it('accepts type "agent" with non-self_only accessMode and no agentOptions (AE1-AE4 protections live)', () => {
     writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
       name: 'test-agent',
       type: 'agent',
-      systemPrompt: 'Agent without self_only accessMode.',
+      systemPrompt: 'Agent without agentOptions.',
       adminPhones: ['15551234567'],
       accessMode: 'allowlist',
     });
-    expect(() => loadInstance('test-agent')).toThrow(/accessMode.*self_only|self_only/i);
+    loadInstance('test-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.accessMode).toBe('allowlist');
   });
 });
 
@@ -383,8 +385,8 @@ describe('loadInstance — agentOptions: sessionScope "shared" allows non-self_o
   });
 });
 
-describe('loadInstance — agentOptions: sessionScope "single" still requires self_only', () => {
-  it('rejects agent with agentOptions + sessionScope:"single" + accessMode:"allowlist"', () => {
+describe('loadInstance — agentOptions: sessionScope "single" accepts any accessMode', () => {
+  it('accepts agent with agentOptions + sessionScope:"single" + accessMode:"allowlist" (AE1-AE4 protections live)', () => {
     writeInstance(path.join(tmpDir, 'config'), 'single-agent', {
       name: 'single-agent',
       type: 'agent',
@@ -395,7 +397,10 @@ describe('loadInstance — agentOptions: sessionScope "single" still requires se
         cwd: '/tmp',
       },
     });
-    expect(() => loadInstance('single-agent')).toThrow(/accessMode.*self_only|self_only/i);
+    loadInstance('single-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.accessMode).toBe('allowlist');
+    expect(parsed.agentOptions.sessionScope).toBe('single');
   });
 });
 

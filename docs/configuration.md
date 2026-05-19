@@ -177,7 +177,7 @@ into place during deployment.
 
 | Value | Description |
 |-------|-------------|
-| `self_only` | Only `adminPhones` can interact. Required for `passive`; required for `agent` with `sessionScope: single` or no `agentOptions`. |
+| `self_only` | Only `adminPhones` can interact. Required for `passive`. |
 | `allowlist` | Only approved users (managed via MCP access-list tools) can interact. |
 | `open_dm` | Any direct message is accepted. |
 | `groups_only` | Only group chats are accepted. |
@@ -431,7 +431,7 @@ include `agentOptions` should keep these fields explicit.
 
 | Value | Behavior | Access mode constraint |
 |-------|----------|------------------------|
-| `single` | One shared Claude Code session for all chats. | Must be `self_only`. |
+| `single` | One shared agent session for all chats. | Any valid access mode (anti-echo AE1-AE4 runtime protections cover group resume safety). |
 | `shared` | One shared session, multiple users welcomed. | Any valid access mode. |
 | `per_chat` | One isolated Claude Code session per chat. | Any valid access mode. |
 
@@ -524,7 +524,6 @@ The loader enforces these constraints before the process starts:
 - `agent` instances with hand-written `agentOptions` must have a valid `sessionScope`; an empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
-- `agent` with `sessionScope: single` must use `accessMode: self_only`.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
 
