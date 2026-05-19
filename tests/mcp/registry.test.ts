@@ -541,4 +541,17 @@ describe('ToolRegistry', () => {
     expect(schema.properties['tags'].type).toBe('array');
     expect(schema.properties['tags'].items).toEqual({ type: 'string' });
   });
+
+  it('converts ZodRecord to JSON Schema object', () => {
+    registry.register(
+      makeTool({
+        schema: z.object({ metadata: z.record(z.unknown()) }),
+      }),
+    );
+    const tools = registry.listTools(makeSession());
+    const schema = tools[0].inputSchema as {
+      properties: Record<string, { type: string }>;
+    };
+    expect(schema.properties['metadata']).toEqual({ type: 'object' });
+  });
 });
