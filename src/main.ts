@@ -46,6 +46,7 @@ import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/datab
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
+import { shutdownExitCode } from './main-shutdown-policy.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -813,7 +814,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(timeout);
     // Flush pino-roll transport before exit (async — waits up to 2s)
     await flushLogger();
-    process.exit(0);
+    process.exit(shutdownExitCode(signal));
   }
 }
 
@@ -823,15 +824,15 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
-  if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
-  const done = shutdown('uncaughtException').then(() => process.exit(1));
+  if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
+  const done = shutdown('uncaughtException');
   setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
-  if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
-  const done = shutdown('unhandledRejection').then(() => process.exit(1));
+  if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
+  const done = shutdown('unhandledRejection');
   setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
@@ -844,5 +845,5 @@ process.on('exit', (code) => {
 
 start().catch((err) => {
   log.fatal({ err }, 'failed to start');
-  shutdown('startupError').then(() => process.exit(1));
+  shutdown('startupError').catch(() => process.exit(1));
 });
