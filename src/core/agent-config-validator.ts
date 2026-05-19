@@ -317,6 +317,22 @@ function validateAgentOptions(
     );
   }
 
+  if (opts['autoCompactInputTokens'] !== undefined) {
+    const threshold = opts['autoCompactInputTokens'];
+    if (
+      typeof threshold !== 'number' ||
+      !Number.isFinite(threshold) ||
+      !Number.isInteger(threshold) ||
+      threshold < 50_000 ||
+      threshold > 100_000_000
+    ) {
+      return err(
+        'agentOptions.autoCompactInputTokens',
+        'agentOptions.autoCompactInputTokens must be an integer between 50,000 and 100,000,000',
+      );
+    }
+  }
+
   // provider: must be a canonical ID from the shared registry (#447). The
   // session.ts switches throw on unknown IDs, so rejecting drift here gives
   // the operator a clear 400-class error instead of a runtime crash.

@@ -241,19 +241,28 @@ if (instanceType === 'agent') {
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
+    autoCompactInputTokens?: number;
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
+  const instanceModels = instanceConfig?.models as Record<string, string> | undefined;
+  const agentModel =
+    typeof instanceConfig?.model === 'string' && instanceConfig.model.trim() !== ''
+      ? instanceConfig.model
+      : typeof instanceModels?.conversation === 'string' && instanceModels.conversation.trim() !== ''
+        ? instanceModels.conversation
+        : undefined;
   runtime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
     instructionsPath: agentOpts?.instructionsPath,
     sandbox: agentOpts?.sandbox,
-    model: instanceConfig?.model as string | undefined,
+    model: agentModel,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
     pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
+    autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
   });
 } else if (instanceType === 'passive') {
   runtime = new PassiveRuntime(db, connectionManager, {

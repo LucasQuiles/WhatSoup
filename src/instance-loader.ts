@@ -41,6 +41,7 @@ interface AgentOptions {
   perUserDirs?: unknown;
   sandboxPerChat?: boolean;
   enabledPlugins?: Record<string, boolean>;
+  autoCompactInputTokens?: number;
   /** Provider identifier — maps to the registry. Defaults to 'claude-cli'. */
   provider?: string;
   /** Provider-specific configuration overrides. */

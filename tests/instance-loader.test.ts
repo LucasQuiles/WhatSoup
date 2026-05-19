@@ -531,6 +531,42 @@ describe('loadInstance — agentOptions: providerConfig validation', () => {
   });
 });
 
+describe('loadInstance — agentOptions: autoCompactInputTokens validation', () => {
+  it('preserves a valid autoCompactInputTokens threshold', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'compact-agent', {
+      name: 'compact-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        autoCompactInputTokens: 500000,
+      },
+    });
+
+    loadInstance('compact-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.agentOptions.autoCompactInputTokens).toBe(500000);
+  });
+
+  it('rejects invalid autoCompactInputTokens thresholds', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'compact-agent-bad', {
+      name: 'compact-agent-bad',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        autoCompactInputTokens: 1000,
+      },
+    });
+
+    expect(() => loadInstance('compact-agent-bad')).toThrow(
+      /agentOptions\.autoCompactInputTokens.*50,000/,
+    );
+  });
+});
+
 describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope', () => {
   it('rejects agent with sandboxPerChat:true and sessionScope:"shared"', () => {
     writeInstance(path.join(tmpDir, 'config'), 'sandbox-bad-scope', {

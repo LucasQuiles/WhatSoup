@@ -88,9 +88,17 @@ const { mockGetActiveSession } = vi.hoisted(() => {
   return { mockGetActiveSession: vi.fn(() => null as ActiveSessionRow) };
 });
 
-const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat } = vi.hoisted(() => ({
+const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat, mockGetSessionTokenSnapshot, mockMarkSessionCompacted, mockAccumulateTokensWithEvent } = vi.hoisted(() => ({
   mockBackfillWorkspaceKeys: vi.fn(),
   mockGetResumableSessionForChat: vi.fn(() => null as { id: number; session_id: string; chat_jid: string } | null),
+  mockGetSessionTokenSnapshot: vi.fn(() => null as {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    lastCompactInputTokens: number;
+    lastCompactOutputTokens: number;
+  } | null),
+  mockMarkSessionCompacted: vi.fn(),
+  mockAccumulateTokensWithEvent: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -105,6 +113,9 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   markOrphaned: vi.fn(),
   getResumableSessionForChat: mockGetResumableSessionForChat,
   backfillSessionProvider: vi.fn(),
+  accumulateTokensWithEvent: mockAccumulateTokensWithEvent,
+  getSessionTokenSnapshot: mockGetSessionTokenSnapshot,
+  markSessionCompacted: mockMarkSessionCompacted,
 }));
 
 vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
@@ -464,8 +475,12 @@ describe('AgentRuntime', () => {
     mockSession.spawnSession.mockResolvedValue(undefined);
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
+    mockSession.getDbRowId.mockReturnValue(null);
     mockGetActiveSession.mockReturnValue(null);
     mockGetResumableSessionForChat.mockReturnValue(null);
+    mockGetSessionTokenSnapshot.mockReturnValue(null);
+    mockMarkSessionCompacted.mockClear();
+    mockAccumulateTokensWithEvent.mockClear();
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, chatJid: string) => {
       const key = chatJid.replace('@s.whatsapp.net', '').replace('@lid', '');
       return { kind: 'dm' as const, workspaceKey: key, workspacePath: `/tmp/${key}` };
@@ -589,6 +604,78 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       allowM365Mutations: true,
     });
+  });
+
+  it('auto-compacts silently after the configured input-token threshold', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 150,
+      totalOutputTokens: 5,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 150, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+  });
+
+  it('waits for an in-flight auto-compact before sending the next turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 150,
+      totalOutputTokens: 5,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 150, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(1, 'hello');
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(2, '/compact');
+
+    const followUp = sendAndDrain(runtime, makeMsg({ content: 'follow-up' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
+
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+    await followUp;
+
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(3, 'follow-up');
   });
 
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {

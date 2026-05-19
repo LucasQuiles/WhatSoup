@@ -29,6 +29,9 @@ export function ensureAgentSchema(db: Database): void {
     ['workspace_key', 'TEXT'],
     ['total_input_tokens', 'INTEGER DEFAULT 0'],
     ['total_output_tokens', 'INTEGER DEFAULT 0'],
+    ['last_compact_at', 'TEXT'],
+    ['last_compact_input_tokens', 'INTEGER DEFAULT 0'],
+    ['last_compact_output_tokens', 'INTEGER DEFAULT 0'],
     ['provider', 'TEXT'],
   ] as [string, string][]) {
     try {
@@ -189,6 +192,53 @@ export function accumulateTokensWithEvent(
     log.error({ agentSessionId: rowId, inputTokens, outputTokens, err }, 'token_event.write_fail');
     throw err;
   }
+}
+
+export interface SessionTokenSnapshot {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  lastCompactInputTokens: number;
+  lastCompactOutputTokens: number;
+}
+
+/** Return token totals for compaction budgeting, or null when the row is gone. */
+export function getSessionTokenSnapshot(db: Database, rowId: number): SessionTokenSnapshot | null {
+  const row = db.raw
+    .prepare(
+      `SELECT total_input_tokens, total_output_tokens,
+              last_compact_input_tokens, last_compact_output_tokens
+       FROM agent_sessions
+       WHERE id = ?`,
+    )
+    .get(rowId) as
+    | {
+        total_input_tokens: number | null;
+        total_output_tokens: number | null;
+        last_compact_input_tokens: number | null;
+        last_compact_output_tokens: number | null;
+      }
+    | undefined;
+
+  if (!row) return null;
+  return {
+    totalInputTokens: row.total_input_tokens ?? 0,
+    totalOutputTokens: row.total_output_tokens ?? 0,
+    lastCompactInputTokens: row.last_compact_input_tokens ?? 0,
+    lastCompactOutputTokens: row.last_compact_output_tokens ?? 0,
+  };
+}
+
+/** Mark the current token totals as the baseline for future compaction checks. */
+export function markSessionCompacted(db: Database, rowId: number): void {
+  db.raw
+    .prepare(
+      `UPDATE agent_sessions
+       SET last_compact_at = datetime('now'),
+           last_compact_input_tokens = total_input_tokens,
+           last_compact_output_tokens = total_output_tokens
+       WHERE id = ?`,
+    )
+    .run(rowId);
 }
 
 const TERMINAL_STATUSES = new Set(['ended', 'completed', 'crashed', 'resume_failed', 'orphaned']);
