@@ -750,6 +750,24 @@ export class AgentRuntime implements Runtime {
     if (inputSinceCompact < this.autoCompactInputTokens) return;
 
     const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+
+    // Rollout bootstrap: existing sessions that already accumulated past the
+    // threshold before this knob was enabled would otherwise fire /compact
+    // on their very next turn — a fleet-wide enable could trigger a compact
+    // storm. Detect by lastCompactInputTokens=0 + totalInputTokens above
+    // threshold, advance the baseline once silently, and let the natural
+    // threshold cycle take over from there.
+    if (snapshot.lastCompactInputTokens === 0 && snapshot.totalInputTokens > this.autoCompactInputTokens) {
+      markSessionCompacted(this.db, rowId);
+      log.info({
+        scopeKey,
+        rowId,
+        totalInputTokens: snapshot.totalInputTokens,
+        threshold: this.autoCompactInputTokens,
+      }, 'auto compact baseline initialised for existing session');
+      return;
+    }
+
     if (this.autoCompactWaiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
 
     const cooldownUntil = this.autoCompactCooldownUntil.get(scopeKey);
@@ -760,7 +778,10 @@ export class AgentRuntime implements Runtime {
 
     let resolveWaiter!: () => void;
     const timer = setTimeout(() => {
-      log.warn({ scopeKey, rowId, backoffMs: AUTO_COMPACT_TIMEOUT_BACKOFF_MS }, 'auto compact timed out');
+      log.error(
+        { scopeKey, rowId, timeoutMs: AUTO_COMPACT_TIMEOUT_MS, backoffMs: AUTO_COMPACT_TIMEOUT_BACKOFF_MS },
+        'auto compact timed out',
+      );
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
       this.autoCompactCooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
@@ -2657,8 +2678,18 @@ export class AgentRuntime implements Runtime {
           // the process crashes after send but before completeInbound runs.
           queue.markLastTerminal();
         }
+        // Only advance the compact baseline when the SDK actually emitted a
+        // compact_boundary on this turn. wasSilentCompact alone means "we
+        // suppressed user-facing chrome for an auto-trigger"; it does not
+        // prove the /compact succeeded. A failed compact must not reset the
+        // baseline, otherwise auto-compact silently disables itself for
+        // another full threshold's worth of tokens. The waiter still
+        // unblocks in either case so the next user turn is not stuck behind
+        // a failed compact.
+        if (hadCompactBoundary && rowId !== null) {
+          markSessionCompacted(this.db, rowId);
+        }
         if (wasSilentCompact || hadCompactBoundary) {
-          if (rowId !== null) markSessionCompacted(this.db, rowId);
           this.finishAutoCompact(compactScopeKey);
         } else {
           this.maybeStartAutoCompact(session, mapKey);
@@ -3738,6 +3769,11 @@ export class AgentRuntime implements Runtime {
     // Shutdown operation tracker on crash (timers must be cleared)
     this.operationTracker?.shutdown();
     this.operationTracker = null;
+    // Drop any auto-compact state captured before the crash so a stale
+    // compact_boundary flag does not advance the baseline on the next turn.
+    this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
+    this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
+    this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
@@ -3747,6 +3783,11 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
+    // Drop any auto-compact state captured before the crash so a stale
+    // compact_boundary flag does not advance the baseline on the next turn.
+    this.consumeCompactBoundary(mapKey);
+    this.finishAutoCompact(mapKey);
+    this.clearSilentCompact(mapKey);
   }
 
   /**
@@ -4120,8 +4161,12 @@ export class AgentRuntime implements Runtime {
           // the process crashes after send but before completeInbound runs.
           queue.markLastTerminal();
         }
+        // See the per_chat handler for the rationale: only a real
+        // compact_boundary advances the baseline.
+        if (hadCompactBoundary && rowId !== null) {
+          markSessionCompacted(this.db, rowId);
+        }
         if (wasSilentCompact || hadCompactBoundary) {
-          if (rowId !== null) markSessionCompacted(this.db, rowId);
           this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
         } else {
           this.maybeStartAutoCompact(this.session);
