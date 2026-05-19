@@ -606,7 +606,49 @@ describe('AgentRuntime', () => {
     });
   });
 
-  it('auto-compacts silently after the configured input-token threshold', async () => {
+  it('auto-compacts silently and advances baseline only after compact_boundary', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot
+      .mockReturnValueOnce({
+        totalInputTokens: 250,
+        totalOutputTokens: 5,
+        lastCompactInputTokens: 100,
+        lastCompactOutputTokens: 0,
+      })
+      .mockReturnValue({
+        totalInputTokens: 260,
+        totalOutputTokens: 6,
+        lastCompactInputTokens: 260,
+        lastCompactOutputTokens: 6,
+      });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    // Emit the SDK's compact_boundary first, then the terminating result.
+    capturedOnEventRef.current?.({ type: 'compact_boundary' });
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+  });
+
+  it('does not advance the baseline when the auto-compact result arrives without a compact_boundary', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
@@ -620,23 +662,54 @@ describe('AgentRuntime', () => {
     });
     mockSession.getDbRowId.mockReturnValue(42);
     mockGetSessionTokenSnapshot.mockReturnValue({
-      totalInputTokens: 150,
+      totalInputTokens: 250,
       totalOutputTokens: 5,
+      lastCompactInputTokens: 100,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    // No compact_boundary — only a terminating result (failed compact case).
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('initialises baseline silently for existing sessions already over threshold (no compact storm on rollout)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    // lastCompactInputTokens=0 + totalInputTokens past threshold = bootstrap path
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 5_000_000,
+      totalOutputTokens: 1000,
       lastCompactInputTokens: 0,
       lastCompactOutputTokens: 0,
     });
 
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
-    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 150, outputTokens: 5 });
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 5_000_000, outputTokens: 1000 });
     await Promise.resolve();
 
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
-
-    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
-
+    // Baseline initialised silently; /compact never fired on the agent.
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
-    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
   });
 
   it('waits for an in-flight auto-compact before sending the next turn', async () => {
@@ -652,16 +725,23 @@ describe('AgentRuntime', () => {
       lastMessageAt: null,
     });
     mockSession.getDbRowId.mockReturnValue(42);
-    mockGetSessionTokenSnapshot.mockReturnValue({
-      totalInputTokens: 150,
-      totalOutputTokens: 5,
-      lastCompactInputTokens: 0,
-      lastCompactOutputTokens: 0,
-    });
+    mockGetSessionTokenSnapshot
+      .mockReturnValueOnce({
+        totalInputTokens: 250,
+        totalOutputTokens: 5,
+        lastCompactInputTokens: 100,
+        lastCompactOutputTokens: 0,
+      })
+      .mockReturnValue({
+        totalInputTokens: 260,
+        totalOutputTokens: 6,
+        lastCompactInputTokens: 260,
+        lastCompactOutputTokens: 6,
+      });
 
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
-    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 150, outputTokens: 5 });
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
     await Promise.resolve();
 
     expect(mockSession.sendTurn).toHaveBeenNthCalledWith(1, 'hello');
@@ -672,6 +752,7 @@ describe('AgentRuntime', () => {
     await Promise.resolve();
     expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
 
+    capturedOnEventRef.current?.({ type: 'compact_boundary' });
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
     await followUp;
 
@@ -693,16 +774,19 @@ describe('AgentRuntime', () => {
         lastMessageAt: null,
       });
       mockSession.getDbRowId.mockReturnValue(42);
+      // lastCompactInputTokens > 0 so the rollout-bootstrap path does not
+      // kick in for this scenario; we want to exercise the cooldown branch
+      // after a real /compact attempt times out.
       mockGetSessionTokenSnapshot.mockReturnValue({
-        totalInputTokens: 150,
+        totalInputTokens: 250,
         totalOutputTokens: 5,
-        lastCompactInputTokens: 0,
+        lastCompactInputTokens: 100,
         lastCompactOutputTokens: 0,
       });
 
       await runtime.start();
       await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
-      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 150, outputTokens: 5 });
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
       await Promise.resolve();
 
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');

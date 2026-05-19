@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
@@ -244,13 +245,7 @@ if (instanceType === 'agent') {
     autoCompactInputTokens?: number;
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
-  const instanceModels = instanceConfig?.models as Record<string, string> | undefined;
-  const agentModel =
-    typeof instanceConfig?.model === 'string' && instanceConfig.model.trim() !== ''
-      ? instanceConfig.model
-      : typeof instanceModels?.conversation === 'string' && instanceModels.conversation.trim() !== ''
-        ? instanceModels.conversation
-        : undefined;
+  const agentModel = resolveAgentModel(instanceConfig);
   runtime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,

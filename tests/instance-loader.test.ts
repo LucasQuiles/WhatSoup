@@ -565,6 +565,29 @@ describe('loadInstance — agentOptions: autoCompactInputTokens validation', () 
       /agentOptions\.autoCompactInputTokens.*50,000/,
     );
   });
+
+  it.each([
+    ['below lower bound', 49_999],
+    ['above upper bound', 100_000_001],
+    ['non-integer', 50_000.5],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['string', 'one hundred thousand' as unknown as number],
+  ])('rejects autoCompactInputTokens: %s', (_label, threshold) => {
+    writeInstance(path.join(tmpDir, 'config'), 'compact-agent-bound', {
+      name: 'compact-agent-bound',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        autoCompactInputTokens: threshold,
+      },
+    });
+    expect(() => loadInstance('compact-agent-bound')).toThrow(
+      /agentOptions\.autoCompactInputTokens/,
+    );
+  });
 });
 
 describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope', () => {
@@ -764,5 +787,50 @@ describe('loadInstance — XDG fallback', () => {
     expect(config.paths.lockPath).toBe(
       path.join(fallbackState, 'whatsoup', 'instances', 'xdg-fallback-instance', 'whatsoup.lock'),
     );
+  });
+});
+
+describe('resolveAgentModel', () => {
+  it('returns the top-level model when set', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ model: 'claude-opus-4-7' })).toBe('claude-opus-4-7');
+  });
+
+  it('top-level model wins over models.conversation', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({
+        model: 'claude-opus-4-7',
+        models: { conversation: 'claude-haiku-4-5' },
+      }),
+    ).toBe('claude-opus-4-7');
+  });
+
+  it('falls back to models.conversation when top-level model is unset', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ models: { conversation: 'claude-haiku-4-5' } })).toBe(
+      'claude-haiku-4-5',
+    );
+  });
+
+  it('falls back to models.conversation when top-level model is an empty string', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({ model: '   ', models: { conversation: 'claude-haiku-4-5' } }),
+    ).toBe('claude-haiku-4-5');
+  });
+
+  it('returns undefined when nothing is set', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({})).toBeUndefined();
+    expect(resolveAgentModel(null)).toBeUndefined();
+    expect(resolveAgentModel(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when models.conversation is empty/non-string', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ models: { conversation: '' } })).toBeUndefined();
+    expect(resolveAgentModel({ models: { conversation: 42 as unknown as string } })).toBeUndefined();
+    expect(resolveAgentModel({ models: {} })).toBeUndefined();
   });
 });
