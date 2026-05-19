@@ -100,6 +100,9 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:336` | stable | active | Self-update trigger |
 | `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:337` | stable | active | List cross-instance LID mappings |
 | `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:338` | stable | active | Sync mappings between instances |
+| `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:287` | beta | active | List active fleet-wide alert silences |
+| `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:288` | beta | active | Add a silence rule (instance, duration). Persisted under `~/.config/whatsoup/fleet-silences.json`. |
+| `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:289` | beta | active | Remove a named silence rule |
 | `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:759`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer required) |
 | `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:785`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer required) |
 | `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |

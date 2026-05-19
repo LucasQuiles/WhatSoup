@@ -57,6 +57,7 @@ jobs:
           chmod 700 "$HOME/.ssh"
           printf '%s\n' "$TEST_INTEGRITY_DEPLOY_KEY" > "$HOME/.ssh/test_integrity_deploy"
           chmod 600 "$HOME/.ssh/test_integrity_deploy"
+          trap 'rm -f "$HOME/.ssh/test_integrity_deploy"' EXIT
           ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
           GIT_SSH_COMMAND="ssh -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             git clone --depth 1 git@github.com:LucasQuiles/test-integrity.git "$HOME/.claude/plugins/test-integrity"
