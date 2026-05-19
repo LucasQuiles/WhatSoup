@@ -266,7 +266,7 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
 
     if (fixtureFiles.has(filePath)) continue;
     if (
-      filePath.startsWith('src/')
+      /^(?:src|console\/src)\//.test(filePath)
       && !srcConsoleAllowedFiles.has(filePath)
       && /\bconsole\.(?:debug|error|info|log|warn)\s*\(/.test(line.text)
     ) {
