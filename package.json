@@ -63,7 +63,7 @@
     "qrcode-terminal": "0.12.0",
     "sharp": "^0.34.5",
     "tsx": "^4.21.0",
-    "ws": "^8.20.0",
+    "ws": "^8.20.1",
     "zod": "3.25.76"
   },
   "devDependencies": {
