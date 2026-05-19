@@ -258,7 +258,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
-| `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when plugin absent |
+| `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |

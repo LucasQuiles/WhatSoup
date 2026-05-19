@@ -7,18 +7,20 @@
 # the baseline file pass through.
 #
 # Skips gracefully (exit 0) when the test-integrity plugin is not installed on
-# the runner. This lets the gate add value in dev environments and local
-# pre-push paths today without breaking CI on runners that do not yet have the
-# plugin provisioned. Once the plugin is installed in CI, set
-# WHATSOUP_REQUIRE_TEST_INTEGRITY=1 to make absence fail instead of skip.
+# a local developer machine. In CI, absence is a hard failure so the release
+# gate cannot silently pass without running the baseline.
 
 set -euo pipefail
 
 PLUGIN_BIN="${TEST_INTEGRITY_BIN:-$HOME/.claude/plugins/test-integrity/scripts/test-integrity}"
 
 if [[ ! -x "$PLUGIN_BIN" ]]; then
-  if [[ "${WHATSOUP_REQUIRE_TEST_INTEGRITY:-0}" == "1" ]]; then
-    echo "test-integrity plugin not found at $PLUGIN_BIN (WHATSOUP_REQUIRE_TEST_INTEGRITY=1)" >&2
+  if [[ "${WHATSOUP_REQUIRE_TEST_INTEGRITY:-0}" == "1" || "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    reason="required"
+    [[ "${WHATSOUP_REQUIRE_TEST_INTEGRITY:-0}" == "1" ]] && reason="WHATSOUP_REQUIRE_TEST_INTEGRITY=1"
+    [[ "${CI:-}" == "true" ]] && reason="CI=true"
+    [[ "${GITHUB_ACTIONS:-}" == "true" ]] && reason="GITHUB_ACTIONS=true"
+    echo "test-integrity plugin not found at $PLUGIN_BIN ($reason)" >&2
     exit 2
   fi
   echo "test-integrity plugin not found at $PLUGIN_BIN; skipping (set WHATSOUP_REQUIRE_TEST_INTEGRITY=1 to fail instead)" >&2
