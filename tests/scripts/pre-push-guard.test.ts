@@ -143,8 +143,8 @@ describe('quality workflow composition', () => {
 
     expect(installIndex).toBeGreaterThanOrEqual(0);
     expect(gateIndex).toBeGreaterThan(installIndex);
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_REPO_TOKEN');
-    expect(qualityWorkflow).toContain('github.com/LucasQuiles/test-integrity.git');
+    expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
+    expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
     expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
   });
 });
