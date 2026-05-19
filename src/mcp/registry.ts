@@ -8,6 +8,7 @@ import {
   ZodArray,
   ZodEnum,
   ZodObject,
+  ZodRecord,
 } from 'zod';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
@@ -52,6 +53,10 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
       type: 'string',
       enum: schema.options as string[],
     };
+  }
+
+  if (schema instanceof ZodRecord) {
+    return { type: 'object' };
   }
 
   if (schema instanceof ZodObject) {
