@@ -754,15 +754,21 @@ export class AgentRuntime implements Runtime {
     // Rollout bootstrap: existing sessions that already accumulated past the
     // threshold before this knob was enabled would otherwise fire /compact
     // on their very next turn — a fleet-wide enable could trigger a compact
-    // storm. Detect by lastCompactInputTokens=0 + totalInputTokens above
-    // threshold, advance the baseline once silently, and let the natural
-    // threshold cycle take over from there.
-    if (snapshot.lastCompactInputTokens === 0 && snapshot.totalInputTokens > this.autoCompactInputTokens) {
+    // storm. Detect by lastCompactInputTokens=0 + totalInputTokens at or
+    // above threshold (matches the outer gate's >= semantics), advance the
+    // baseline once silently, and let the natural threshold cycle take over.
+    //
+    // Side effect to be aware of: a brand-new session whose first turn
+    // happens to cross the threshold (large file ingestion, very low
+    // threshold) will also take this path and silently skip its first real
+    // compact. Same anti-storm behaviour; documented in docs/runbook.md.
+    if (snapshot.lastCompactInputTokens === 0 && snapshot.totalInputTokens >= this.autoCompactInputTokens) {
       markSessionCompacted(this.db, rowId);
       log.info({
         scopeKey,
         rowId,
         totalInputTokens: snapshot.totalInputTokens,
+        lastCompactInputTokens: snapshot.lastCompactInputTokens,
         threshold: this.autoCompactInputTokens,
       }, 'auto compact baseline initialised for existing session');
       return;
@@ -3769,8 +3775,11 @@ export class AgentRuntime implements Runtime {
     // Shutdown operation tracker on crash (timers must be cleared)
     this.operationTracker?.shutdown();
     this.operationTracker = null;
-    // Drop any auto-compact state captured before the crash so a stale
-    // compact_boundary flag does not advance the baseline on the next turn.
+    // If a compact_boundary was already observed before the crash, the SDK
+    // produced a fresh compacted context — persist the baseline before
+    // dropping the flag, so the next turn doesn't immediately re-fire
+    // /compact against a stale lastCompactInputTokens.
+    this.persistBaselineIfBoundaryObserved(GLOBAL_TOOL_SCOPE_KEY, this.session?.getDbRowId() ?? null);
     this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
     this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
     this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
@@ -3783,11 +3792,26 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
-    // Drop any auto-compact state captured before the crash so a stale
-    // compact_boundary flag does not advance the baseline on the next turn.
+    // Persist baseline first if compact_boundary was observed — see
+    // cleanupSharedCrashTurnState for rationale.
+    this.persistBaselineIfBoundaryObserved(mapKey, this.chatSessions.get(mapKey)?.getDbRowId() ?? null);
     this.consumeCompactBoundary(mapKey);
     this.finishAutoCompact(mapKey);
     this.clearSilentCompact(mapKey);
+  }
+
+  /**
+   * On crash cleanup, if compact_boundary was already observed for `scopeKey`
+   * (the SDK emitted boundary but the `result` event never landed), persist
+   * the baseline now. Otherwise the next turn re-fires /compact against a
+   * stale lastCompactInputTokens — one redundant compact per
+   * crash-during-compact.
+   */
+  private persistBaselineIfBoundaryObserved(scopeKey: string, rowId: number | null): void {
+    if (rowId === null) return;
+    if (!this.compactBoundaryScopes.has(scopeKey)) return;
+    markSessionCompacted(this.db, rowId);
+    log.info({ scopeKey, rowId }, 'auto compact baseline persisted on crash cleanup (compact_boundary observed pre-crash)');
   }
 
   /**
@@ -4161,8 +4185,12 @@ export class AgentRuntime implements Runtime {
           // the process crashes after send but before completeInbound runs.
           queue.markLastTerminal();
         }
-        // See the per_chat handler for the rationale: only a real
-        // compact_boundary advances the baseline.
+        // Only advance the compact baseline when the SDK actually emitted a
+        // compact_boundary. wasSilentCompact alone means "we suppressed
+        // user-facing chrome for an auto-trigger" and doesn't prove /compact
+        // succeeded — advancing on it silently disables auto-compact for
+        // another threshold's worth of tokens. See the per_chat handler for
+        // the parallel gate.
         if (hadCompactBoundary && rowId !== null) {
           markSessionCompacted(this.db, rowId);
         }

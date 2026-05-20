@@ -645,6 +645,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
 
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
   });
 
@@ -709,6 +710,7 @@ describe('AgentRuntime', () => {
 
     // Baseline initialised silently; /compact never fired on the agent.
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
     expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
   });
 
