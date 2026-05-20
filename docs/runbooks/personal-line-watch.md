@@ -198,6 +198,19 @@ For each *delivered* kind, the poller:
 6. Handles `terminal_at` expiry — sets trigger status to `expired`, fires
    the `on_terminal` action (notify / silent / reopen_bead)
 
+### Safety behaviours
+
+The poller enforces three defensive policies that bound the blast radius
+of misconfigured or compromised triggers:
+
+- **Circuit breaker (auto-pause).** After `MAX_CONSECUTIVE_FAILURES` (default 5) consecutive failed runs for the same trigger, the poller transitions it to `status='paused'`, clears `next_fire_at`, writes a `trigger_paused` bead_event with `{ reason: 'consecutive_failures', failure_count }`, and dispatches a pause notification to `report_chat_jid` (unless `on_terminal='silent'`). A successful or noop run breaks the streak. Common case it prevents: a `poll.sqlite` trigger against a table that got dropped by a migration, otherwise retrying every 60s forever.
+- **Read-only SQL guard.** `poll.sqlite` spec SQL runs inside a `PRAGMA query_only = ON` / `OFF` envelope. Write attempts (`DELETE`, `UPDATE`, `DROP`, `INSERT`) fail with a SQLite "attempt to write a readonly database" error which the existing `sql_error` path captures into `trigger_runs`. Restoration is in a `finally` block so the poller's own follow-up writes (`UPDATE bead_triggers`, `INSERT trigger_runs`) still succeed. Bounds the blast radius of a compromised bead or confused-deputy injection.
+- **Notification throttle.** Per-trigger minimum interval between dispatches, default `NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC = 300` (5 min). When the previous dispatch was within the window, the current run is still recorded `status='ok' fired=true` but with `{ throttled: true, throttleRemainingSec: N }` in `output_json` — `messenger.sendMessage` is not called. Prevents wire-speed spam when `fire_when='rows_returned'` SQL matches permanently. The throttle reference is the last NOTIFICATION timestamp (queried from `trigger_runs.output_json LIKE '%deliveredWaMessageId%'`), not `bead_triggers.last_fire_at` (which advances every tick, including noops).
+
+All three can be overridden per-poller via `TriggerPollerOptions` for tests
+and operator tuning (e.g. `maxConsecutiveFailures`,
+`notificationThrottleMinIntervalSec`).
+
 ### Remaining work
 
 Each not-yet-implemented kind needs its executor wired in
