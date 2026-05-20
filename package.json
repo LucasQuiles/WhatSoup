@@ -18,6 +18,7 @@
     "auth:instance": "node --experimental-strip-types src/bootstrap-auth.ts",
     "audit:instance-plugins": "node --experimental-strip-types scripts/audit-instance-plugin-coverage.ts",
     "backfill-enrichment": "node --experimental-strip-types scripts/backfill-enrichment.ts",
+    "token-window": "node --experimental-strip-types scripts/token-window.ts",
     "guard:publication": "node --experimental-strip-types scripts/publication-guard.ts",
     "guard:publication:all": "npm run guard:publication -- --all",
     "guard:publication:release": "npm run guard:publication -- --release",
