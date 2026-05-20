@@ -104,6 +104,16 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
+  it('verify:push:branch invokes the test-integrity baseline gate', () => {
+    // Regression guard: PR #677 surfaced that verify:push:branch did NOT run
+    // guard:test-integrity, so a weak-assertion violation slipped past the
+    // local pre-push hook and was caught only by CI. The CI quality job runs
+    // this gate; the local push gate must too so the dev cycle is fail-fast.
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
+  });
+
   it('verify:release invokes the standalone whatsoup guard package checks', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
