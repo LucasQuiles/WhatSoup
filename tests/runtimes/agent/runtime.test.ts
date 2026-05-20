@@ -11,6 +11,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   const capturedSessionManagerOptsRef: {
     current: {
       allowM365Mutations?: boolean;
+      configSystemPrompt?: string;
       whatsoupInstance?: string;
       whatsoupMcpSocket?: string;
     } | null;
@@ -127,6 +128,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   SessionManager: vi.fn().mockImplementation(function (
     opts: {
       allowM365Mutations?: boolean;
+      configSystemPrompt?: string;
       whatsoupInstance?: string;
       whatsoupMcpSocket?: string;
       onEvent: (event: AgentEvent) => void;
@@ -891,6 +893,22 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       whatsoupInstance: 'line-a',
       whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
+    });
+  });
+
+  it('forwards configured system prompt into created sessions', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'line-a', {
+      cwd: '/tmp/config-prompt',
+      configSystemPrompt: 'Configured operator prompt.',
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
+
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      configSystemPrompt: 'Configured operator prompt.',
     });
   });
 
