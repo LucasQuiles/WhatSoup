@@ -113,6 +113,31 @@ Generic `poll.sqlite` example (placeholders in `<>` brackets):
 poll's row count — useful when the watch wants to surface only new activity
 rather than re-firing on every poll while a match remains in the window.
 
+### 4.1 Placeholder substitution
+
+The recipe's bracketed placeholders map to instance-specific values as
+follows. Source values once from the running instance — values change after
+re-pairing or after an admin rotates contact metadata.
+
+| Placeholder | Type | Where to source | Example |
+|---|---|---|---|
+| `<GROUP_JID>` | string | The group's `chat_jid` column in the instance `chats` table, or the value returned by `list_chats`. Project convention treats `conversation_key` (also on the row) as the canonical chat identity for reads — `chat_jid` is fine for filtering on the historical `messages` table, but if you build longer-lived queries prefer `conversation_key = '<GROUP_CK>'` against `idx_messages_conversation_ts`. | `111111100000000@g.us` |
+| `<CONTACT_JID>` | string | The contact's `@s.whatsapp.net` JID — `messages.sender_jid` for any message the contact has sent into the group. | `15555550100@s.whatsapp.net` |
+| `<CONTACT_LID>` | string | The contact's `@lid` alias — also surfaces in `messages.sender_jid`, depending on which delivery channel the message arrived on. Both forms must be matched because WhatsApp interleaves them across messages from the same contact. | `1111111100000@lid` |
+| `<WINDOW_SECONDS>` | integer | The look-back window in seconds. Match it to `interval_seconds` (or a small multiple) so each poll covers the window since the last poll without large overlap. | `1800` (30 minutes) |
+| `<REPORT_CHAT_JID>` | string | The `conversation_key` of the chat that should receive the notification (typically the operator's admin DM). | `15555550100@s.whatsapp.net` |
+| `<CONTACT_LABEL>` | string | Free-form display label for the watch title. | `Alice Example` |
+| `<GROUP_LABEL>` | string | Free-form display label for the watch title. | `Eng Standup` |
+
+For the §7 workaround, also:
+
+| Placeholder | Type | Where to source | Example |
+|---|---|---|---|
+| `<INSTANCE_BOT_DB_PATH>` | path | Per the XDG layout — usually `~/.local/share/whatsoup/instances/<instance>/bot.db`. See `docs/configuration.md` for overrides. | `~/.local/share/whatsoup/instances/ml-bot/bot.db` |
+| `<TITLE>` | string | Watch title (free-form). | `personal-line: Alice in Eng Standup` |
+| `<OWNER_JID>` | string | The agent's own `botJid` — visible in `agent_runtime.connection` startup logs. | `15555550100@s.whatsapp.net` |
+| `<SQL>` | string | The complete SQL string — **use the corrected query in §4 as-is** to avoid silently re-introducing the seconds-vs-milliseconds bug fixed in PR #670. | (full §4 query) |
+
 ## 5. ZodRecord serialisation fix (2026-05-19)
 
 Operators on `main` prior to PR #666 will see `create_watch` reject
@@ -178,7 +203,24 @@ This is a tracked WhatSoup enhancement; see the substrate roadmap.
 
 When `create_watch` over MCP is unavailable (pre-PR-#666 instance, or any
 other tooling outage), watches can be inserted directly. Substitute the
-bracketed placeholders with the target instance's values.
+bracketed placeholders with the target instance's values (see §4.1).
+
+**What this workaround does NOT do**, vs `createTrigger` in
+`src/core/substrate/triggers.ts`:
+
+- **Skips Zod validation** of `spec_json` against `SPEC_REGISTRY[kind]`. A
+  malformed spec is rejected by the runtime poller but persists in the
+  database, polluting `list_triggers` output and `bead_triggers` audits.
+  Run the spec through the running instance's `create_watch` MCP tool
+  whenever it is available; reach for this workaround only when MCP is
+  genuinely unreachable.
+- **Skips the `trigger_created` `bead_event`.** This row writes a
+  `status_change` event for the bead, but the trigger itself has no
+  corresponding event row. Substrate audits that walk `bead_events` looking
+  for trigger lifecycle will show a half-formed history.
+- **Skips Obsidian projection.** Vault sync happens through `create_watch`,
+  not through SQLite triggers; manually-inserted watches will not appear in
+  the operator's vault until the next full reconciliation.
 
 ```python
 import sqlite3, json, time
@@ -196,7 +238,10 @@ db.execute("""
 """, (now, now))
 bead_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-# 2. Create trigger
+# 2. Create trigger.
+# IMPORTANT: <SQL> must be the corrected query from §4 — the column
+# `messages.timestamp` is unix seconds, not milliseconds. PR #670 fixed a
+# silent-failure bug where an `* 1000` form returned zero rows forever.
 spec = {"sql": "<SQL>", "fire_when": "rows_returned"}
 db.execute("""
     INSERT INTO bead_triggers (bead_id, kind, spec_json, spec_version, status,
