@@ -1941,6 +1941,100 @@ describe('AgentRuntime', () => {
     expect(mockQueue.flush).toHaveBeenCalled();
   });
 
+  it('assistant_text after result event is suppressed (post-turn gate)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    // Complete the turn
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    // Reset mocks to isolate post-turn behavior
+    mockQueue.enqueueStreamingText.mockClear();
+    mockQueue.enqueueText.mockClear();
+    mockQueue.enqueueResultText.mockClear();
+
+    // SDK injects system-reminder, model reacts with assistant_text
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'I am still working on this.' });
+
+    // Post-turn gate should suppress this — nothing enqueued
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+  });
+
+  it('post-turn gate clears when next user message arrives', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    // Complete turn 1
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    // Send a new user message — this should clear the gate
+    mockQueue.enqueueStreamingText.mockClear();
+    mockQueue.flush.mockClear();
+    mockSession.sendTurn.mockClear();
+    await runtime.handleMessage(makeMsg({ content: 'follow up' }));
+    // Wait for the turn chain to settle — sendTurnNonShared runs async
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('follow up'));
+
+    // Now assistant_text for turn 2 should go through
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Turn 2 response' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Turn 2 response');
+  });
+
+  it('tool_use after result event is suppressed (post-turn gate)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    // Complete the turn
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    // Reset mocks
+    mockQueue.enqueueToolUpdate.mockClear();
+
+    // SDK phantom: model tries to use a tool post-turn
+    capturedOnEventRef.current!({ type: 'tool_use', toolId: 'phantom-1', toolName: 'TodoWrite', toolInput: {} });
+
+    // Should be suppressed
+    expect(mockQueue.enqueueToolUpdate).not.toHaveBeenCalled();
+  });
+
+  it('second result event after gate does not throw', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello' });
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    await vi.waitFor(() => expect(mockQueue.flush).toHaveBeenCalled());
+
+    // Phantom result from SDK — should not throw
+    expect(() => {
+      capturedOnEventRef.current!({ type: 'result', text: null });
+    }).not.toThrow();
+  });
+
   it('tool_result with isError enqueues tool error update', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

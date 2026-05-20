@@ -15,6 +15,9 @@ import type {
 import { parseEvent } from '../stream-parser.ts';
 import { buildChildEnv } from '../session.ts';
 import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
+import { createChildLogger } from '../../../logger.ts';
+
+const log = createChildLogger('claude-cli-provider');
 
 // ---------------------------------------------------------------------------
 // Static descriptor

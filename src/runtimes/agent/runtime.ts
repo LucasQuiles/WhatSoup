@@ -622,6 +622,17 @@ export class AgentRuntime implements Runtime {
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /**
+   * Post-turn event gate — tracks mapKeys where a 'result' event has been
+   * processed but no new user message has arrived yet. Events arriving while
+   * the gate is active are SDK-injected artifacts (system-reminders that
+   * trigger phantom model output) and must be suppressed.
+   *
+   * Set: on 'result' event in handleEventWithContext
+   * Cleared: in sendTurnPerChat when the next user message initiates a turn
+   */
+  private postTurnGate = new Set<string>();
+
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
   // so health reporting can surface recent failures until a successful respawn decays them.
@@ -2333,6 +2344,8 @@ export class AgentRuntime implements Runtime {
    * Send a turn in non-shared (legacy) mode.
    */
   private async sendTurnNonShared(chatJid: string, text: string, actorJid: string): Promise<void> {
+    // Clear post-turn gate for shared session scope
+    this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
     this.currentTurnChatJid = chatJid;
     this.turnHadVisibleOutput = false;
     await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid);
@@ -2348,6 +2361,9 @@ export class AgentRuntime implements Runtime {
     mapKey: string = this.resolvePerChatMapKey(chatJid),
     actorJid?: string,
   ): Promise<void> {
+    // Clear post-turn gate — legitimate new user turn begins
+    this.postTurnGate.delete(mapKey);
+
     // When sandboxPerChat=true maps are keyed by workspaceKey, not raw chatJid
     // Store the turn text so it can be replayed if a session resume fails
     // before the agent can process it.
@@ -2426,6 +2442,13 @@ export class AgentRuntime implements Runtime {
       case 'assistant_text':
         session?.tickWatchdog();
         tracker?.onAnyActivity();
+        // Post-turn gate: suppress assistant_text events that arrive after a result
+        // but before the next user message. These are model reactions to SDK-injected
+        // system-reminders (e.g., TodoWrite) and must not trigger typing or outbound messages.
+        if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
+          log.info({ mapKey, textPreview: event.text.slice(0, 200) }, 'post-turn gate: suppressed phantom assistant_text');
+          break;
+        }
         if (this.isSilentCompact(mapKey)) break;
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
@@ -2446,6 +2469,11 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
+        // Post-turn gate: suppress phantom tool_use events (same rationale as assistant_text)
+        if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
+          log.info({ mapKey, toolName: event.toolName }, 'post-turn gate: suppressed phantom tool_use');
+          break;
+        }
         if (this.isSilentCompact(mapKey)) break;
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         {
@@ -2491,6 +2519,10 @@ export class AgentRuntime implements Runtime {
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(toolScopeKey);
+        // Activate post-turn gate — suppress any SDK-injected events until next user turn
+        if (mapKey !== undefined) {
+          this.postTurnGate.add(mapKey);
+        }
         if (event.text) {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
@@ -2947,6 +2979,7 @@ export class AgentRuntime implements Runtime {
       clearTimeout(timer);
     }
     this.silentCompactScopes.clear();
+    this.postTurnGate.clear();
     this.replyGuarantee?.shutdown();
     this.replyGuarantee = null;
 
@@ -3859,6 +3892,11 @@ export class AgentRuntime implements Runtime {
       case 'assistant_text':
         this.session?.tickWatchdog();
         tracker?.onAnyActivity();
+        // Post-turn gate: suppress phantom assistant_text (same as handleEventWithContext)
+        if (this.postTurnGate.has(GLOBAL_TOOL_SCOPE_KEY)) {
+          log.info({ textPreview: event.text.slice(0, 200) }, 'post-turn gate: suppressed phantom assistant_text (shared)');
+          break;
+        }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
@@ -3878,6 +3916,11 @@ export class AgentRuntime implements Runtime {
       case 'tool_use':
         this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
+        // Post-turn gate: suppress phantom tool_use (same as handleEventWithContext)
+        if (this.postTurnGate.has(GLOBAL_TOOL_SCOPE_KEY)) {
+          log.info({ toolName: event.toolName }, 'post-turn gate: suppressed phantom tool_use (shared)');
+          break;
+        }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
         {
@@ -3934,6 +3977,8 @@ export class AgentRuntime implements Runtime {
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
+        // Activate post-turn gate — suppress any SDK-injected events until next user turn
+        this.postTurnGate.add(GLOBAL_TOOL_SCOPE_KEY);
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
           // Suppress usage-limit messages — log and kill session instead of forwarding
