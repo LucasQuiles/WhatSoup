@@ -48,6 +48,7 @@ describe('AgentRuntime structural policy', () => {
       'this.perChatAssistantItemText.delete(mapKey);',
       'this.pendingTurnText.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
+      'this.postTurnGate.delete(mapKey);',
       'this.compactBoundaryScopes.delete(mapKey);',
       'this.autoCompactCooldownUntil.delete(mapKey);',
       'this.operationTrackers.delete(mapKey);',

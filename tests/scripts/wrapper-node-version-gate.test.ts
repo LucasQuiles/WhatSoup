@@ -211,34 +211,36 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     );
   });
 
-  it('Test 3: command -v fallback path is also gated (old system node fails)', () => {
-    // Simulate: HOME has no nvm dir → DEFAULT_NODE missing → wrapper falls
-    // through to `command -v node`. But the `node` on PATH is too old (major 20).
+  it('Test 3: missing pinned Node fails before any system-node fallback', () => {
+    // Simulate: HOME has no nvm dir → DEFAULT_NODE missing. The wrapper must
+    // fail here instead of falling through to an older `node` on PATH.
     const binDir = makeTmpDir('whatsoup-gate-fallback-bin-');
     const home = makeBareHome(); // no ~/.nvm/versions/…
 
-    // Write an old fake `node` into binDir — wrapper's `command -v node` will find it
+    // Write an old fake `node` into binDir. If the wrapper regresses to PATH
+    // fallback, this fake node will print "gate-passed" during exec.
     writeFakeNode(binDir, '20');
 
     // Build a controlled PATH that puts our fake node first.
-    // Do NOT set WHATSOUP_NODE so the wrapper uses the DEFAULT_NODE → fallback path.
+    // Do NOT set WHATSOUP_NODE so the wrapper uses the missing DEFAULT_NODE path.
     const controlledPath = `${binDir}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`;
 
     const { stdout, stderr, exitCode } = runWrapper({
       home,
       env: {
         PATH: controlledPath,
-        // Explicitly unset WHATSOUP_NODE to trigger the fallback path
+        // Explicitly unset WHATSOUP_NODE to exercise the missing pinned-node path.
       },
     });
 
-    // Gate must fire on the fallback path too
-    expect(exitCode, 'fallback-path gate must prevent execution').not.toBe(0);
-    expect(exitCode, 'fallback-path gate must exit 1, not 9').toBe(1);
-    expect(stderr, 'stderr must contain pinned major in fallback case').toContain('24');
-    expect(stderr, 'stderr must contain resolved major in fallback case').toContain('20');
+    // Missing pinned Node must fail cleanly without invoking PATH fallback.
+    expect(exitCode, 'missing pinned node must prevent execution').not.toBe(0);
+    expect(exitCode, 'missing pinned node must exit 1, not 9').toBe(1);
+    expect(stderr, 'stderr must contain pinned major in missing-node case').toContain('24');
+    expect(stderr, 'stderr must not run the PATH-node compatibility gate').not.toContain('resolved Node is incompatible');
+    expect(stderr, 'stderr must not report a resolved PATH node version').not.toContain('Version:');
     // Must not have hit exec — fake node prints "gate-passed" only when exec succeeds
-    expect(stdout, 'must not have reached exec via fallback path (no gate-passed in stdout)').not.toContain(
+    expect(stdout, 'must not have reached exec via PATH fallback (no gate-passed in stdout)').not.toContain(
       'gate-passed',
     );
   });
