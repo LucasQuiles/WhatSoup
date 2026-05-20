@@ -320,7 +320,7 @@ and exits 0. Below threshold: exits 0 with no stdout.
 
 **Fail-open** on any infrastructure error: parse fail, missing env, unwritable state, corrupt state. All errors go to stderr; exit 0; tool call proceeds.
 
-**State:** `~/Library/Application Support/<bot>-tokenomics/browser-loop/<sha1[:16]>.jsonl` per session, sanitized via sha1 hash to prevent path-escape. Atomic write via tempfile + `os.replace`.
+**State:** `~/Library/Application Support/<bot>-tokenomics/browser-loop/<sha256[:16]>.jsonl` per session, sanitized via a SHA-256 digest to prevent path-escape. Atomic write via tempfile + `os.replace`.
 
 **hooks.json must use the top-level `hooks` wrapper** (B1):
 

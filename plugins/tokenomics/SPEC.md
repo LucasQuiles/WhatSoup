@@ -347,7 +347,7 @@ The PostToolUse entry belongs to component M and is registered but inert when `a
 State file:
 
 ```text
-~/Library/Application Support/<bot>-tokenomics/browser-loop/<sha1_session_id[:16]>.jsonl
+~/Library/Application Support/<bot>-tokenomics/browser-loop/<sha256_session_id[:16]>.jsonl
 ```
 
 Allow path:
@@ -631,7 +631,7 @@ Operator can override via `agentOptions.tokenomics.playwrightProfile`. Source: P
 +-- watchdog.runlock          # per-bot overlap lock used by A and H
 +-- lock-skip.log             # append-only log of skipped invocations from overlap-lock losers
 +-- browser-loop/
-|   +-- <sha1[:16]>.jsonl
+|   +-- <sha256[:16]>.jsonl
 +-- output-cache/
 |   +-- <sha256[:16]>.txt
 +-- STALL.flag

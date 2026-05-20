@@ -14,7 +14,7 @@ TOOL_NAME = "mcp__superpowers-chrome_chrome__use_browser"
 
 
 def session_state_path(state_root: pathlib.Path, session_id: str) -> pathlib.Path:
-    digest = hashlib.sha1(session_id.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
     return state_root / "browser-loop" / f"{digest}.jsonl"
 
 
@@ -120,7 +120,7 @@ def test_path_like_session_id_is_hashed_inside_state_dir(tmp_path):
     state_path = session_state_path(tmp_path, session_id)
     assert state_path.exists()
     assert state_path.parent == tmp_path / "browser-loop"
-    assert state_path.name == hashlib.sha1(session_id.encode("utf-8")).hexdigest()[:16] + ".jsonl"
+    assert state_path.name == hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16] + ".jsonl"
 
 
 def test_empty_stdin_fails_open(tmp_path):

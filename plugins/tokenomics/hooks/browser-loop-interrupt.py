@@ -55,7 +55,7 @@ def build_deny_reason(extra: str = "") -> str:
 
 
 def hashed_session_id(session_id: str) -> str:
-    return hashlib.sha1(session_id.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
 
 
 def state_root(bot: str) -> Path:
