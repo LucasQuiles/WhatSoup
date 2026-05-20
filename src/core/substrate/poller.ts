@@ -227,9 +227,19 @@ export class TriggerPoller {
   private executeSqlite(t: TriggerRow, spec: SqliteSpec): ExecuteOutcome {
     let rows: Record<string, unknown>[];
     try {
-      const stmt = this.db.prepare(spec.sql);
-      const bindArgs = spec.binds ? toBindArgs(spec.binds) : [];
-      rows = stmt.all(...bindArgs) as unknown as Record<string, unknown>[];
+      // Operator-stored SQL runs against the live bot.db. Bound the blast
+      // radius of a compromised or confused-deputy spec by flipping the
+      // connection to read-only for the duration of this query. The OFF
+      // restoration MUST be in finally so the poller's own follow-up writes
+      // (UPDATE bead_triggers, INSERT trigger_runs) still succeed.
+      this.db.exec('PRAGMA query_only = ON');
+      try {
+        const stmt = this.db.prepare(spec.sql);
+        const bindArgs = spec.binds ? toBindArgs(spec.binds) : [];
+        rows = stmt.all(...bindArgs) as unknown as Record<string, unknown>[];
+      } finally {
+        this.db.exec('PRAGMA query_only = OFF');
+      }
     } catch (err) {
       return {
         status: 'failed',

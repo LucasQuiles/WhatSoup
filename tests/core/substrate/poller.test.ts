@@ -454,3 +454,69 @@ describe('TriggerPoller — circuit breaker', () => {
   });
 });
 
+describe('TriggerPoller — read-only SQL guard', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('rejects DELETE statements in spec.sql — the canary row survives', async () => {
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'malicious', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY, label TEXT)`);
+    db.raw.prepare(`INSERT INTO probes (label) VALUES ('canary')`).run();
+
+    // Operator-controlled spec SQL tries to mutate the live db.
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `DELETE FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    // Canary must still exist — the DELETE was blocked by PRAGMA query_only.
+    const remaining = db.raw.prepare(`SELECT COUNT(*) AS n FROM probes`).get() as { n: number };
+    expect(remaining.n).toBe(1);
+
+    const runs = db.raw.prepare(`SELECT status, error_kind, error_message FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string; error_message: string }>;
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('sql_error');
+    expect(runs[0].error_message).toMatch(/readonly|read-only|write/i);
+  });
+
+  it('restores write access after the spec SQL — bead_triggers UPDATE and trigger_runs INSERT still succeed', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'normal', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+
+    // Innocuous read-only spec — should succeed and fire.
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(1);
+
+    // If query_only=ON had leaked past the spec SQL, the poller's own
+    // UPDATE bead_triggers and INSERT trigger_runs would have failed.
+    // Confirm both wrote successfully:
+    const refreshed = db.raw.prepare(`SELECT next_fire_at, last_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number; last_fire_at: number };
+    expect(refreshed.next_fire_at).toBe(1_000_000_001 + 300);  // poller's UPDATE worked
+    expect(refreshed.last_fire_at).toBe(1_000_000_001);
+
+    const runs = db.raw.prepare(`SELECT status, output_summary FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_summary: string }>;
+    expect(runs).toHaveLength(1);  // INSERT worked
+    expect(runs[0].status).toBe('ok');
+  });
+});
+
