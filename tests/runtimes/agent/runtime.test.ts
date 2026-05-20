@@ -2035,6 +2035,44 @@ describe('AgentRuntime', () => {
     }).not.toThrow();
   });
 
+  it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+
+    const state = runtime as unknown as {
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      turnHadVisibleOutput: boolean;
+      outboundQueues: Map<string, IOutboundQueue>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.session = Object.assign({}, mockSession, {
+      getDbRowId: vi.fn(() => null),
+      clearTurnWatchdog: vi.fn(),
+    });
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.turnHadVisibleOutput = true;
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    // Simulate a turn with text + result
+    state.handleEvent({ type: 'assistant_text', text: 'Hello' });
+    state.handleEvent({ type: 'result', text: null });
+
+    // Reset mocks to isolate post-turn behavior
+    (queue.enqueueStreamingText as ReturnType<typeof vi.fn>).mockClear();
+    (queue.enqueueText as ReturnType<typeof vi.fn>).mockClear();
+
+    // Phantom assistant_text after result — should be suppressed by gate
+    state.handleEvent({ type: 'assistant_text', text: 'Phantom from SDK reminder' });
+
+    expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(queue.enqueueText).not.toHaveBeenCalled();
+  });
+
   it('tool_result with isError enqueues tool error update', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
