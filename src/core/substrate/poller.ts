@@ -1,0 +1,417 @@
+// src/core/substrate/poller.ts
+//
+// Substrate slice-3 trigger poller. Drains `bead_triggers.next_fire_at` on
+// an interval, runs per-kind executors, writes `trigger_runs`, dispatches
+// notifications to the trigger's `report_chat_jid`, and handles
+// `terminal_at` expiry.
+//
+// Scope (per maintainer scoping decision, 2026-05-19):
+//   - poll.sqlite     — workhorse kind for personal-line watches
+//   - schedule.cron   — fires on cron expression
+//   - schedule.at_time — one-shot at fire_at, expires after
+//   - terminal_at expiry — sets status='expired', fires on_terminal action
+//
+// Other kinds in SPEC_REGISTRY (poll.shell, poll.url, poll.email,
+// poll.file, poll.pinecone, event.message) are recognised but not yet
+// executed; the poller logs a warn and bumps `next_fire_at` so the row
+// does not hot-loop. Their executors are tracked as follow-up work.
+
+import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { nowUnixSec } from './time.ts';
+import { dueTriggers } from './triggers.ts';
+import { writeBeadEvent } from './events.ts';
+import { nextCronRun } from '../cron.ts';
+import type { TriggerKind, TriggerRow } from './types.ts';
+import type { Messenger } from '../types.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('substrate.trigger-poller');
+
+const DEFAULT_INTERVAL_MS = 30_000;
+const DEFAULT_BATCH_SIZE = 50;
+/** Cooldown applied when a kind is not yet implemented — avoids tight loops. */
+const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
+/** Cooldown applied after a transient failure so the poller does not spin. */
+const FAILED_RETRY_COOLDOWN_SEC = 60;
+
+export interface TriggerPollerOptions {
+  /** How often to call dueTriggers. Default 30s. */
+  intervalMs?: number;
+  /** Max triggers fetched per tick. Default 50. */
+  batchSize?: number;
+  /** Injectable clock for tests. Returns unix seconds. */
+  now?: () => number;
+  /** Injectable timers for tests. */
+  setTimeoutImpl?: typeof setTimeout;
+  clearTimeoutImpl?: typeof clearTimeout;
+}
+
+interface SqliteSpec {
+  sql: string;
+  binds?: Record<string, unknown>;
+  fire_when: 'rows_returned' | 'rowcount_changed';
+}
+
+interface ExecuteOutcome {
+  status: 'ok' | 'noop' | 'failed';
+  fired: boolean;
+  outputSummary: string;
+  outputJson: Record<string, unknown>;
+  errorKind?: string;
+  errorMessage?: string;
+}
+
+export class TriggerPoller {
+  private timer: NodeJS.Timeout | null = null;
+  private stopped = false;
+  private readonly db: DatabaseSync;
+  private readonly messenger: Messenger;
+  private readonly intervalMs: number;
+  private readonly batchSize: number;
+  private readonly nowFn: () => number;
+  private readonly setTimeoutImpl: typeof setTimeout;
+  private readonly clearTimeoutImpl: typeof clearTimeout;
+  public lastRunAt: string | null = null;
+
+  constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
+    this.db = db;
+    this.messenger = messenger;
+    this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
+    this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+    this.nowFn = opts.now ?? nowUnixSec;
+    this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
+    this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
+  }
+
+  start(): void {
+    if (this.timer !== null) {
+      log.warn('TriggerPoller.start() called while already running');
+      return;
+    }
+    this.stopped = false;
+    log.info({ intervalMs: this.intervalMs, batchSize: this.batchSize }, 'trigger poller starting');
+    this.scheduleNext();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== null) {
+      this.clearTimeoutImpl(this.timer);
+      this.timer = null;
+      log.info('trigger poller stopped');
+    }
+  }
+
+  /**
+   * Run one cycle synchronously. Returns the number of triggers processed.
+   * Public for tests; production code goes through start()/tick().
+   */
+  async tickOnce(): Promise<number> {
+    const now = this.nowFn();
+    const due = dueTriggers(this.db, now, this.batchSize);
+    let processed = 0;
+    for (const t of due) {
+      try {
+        await this.processTrigger(t, now);
+        processed++;
+      } catch (err) {
+        log.error(
+          { err, triggerId: t.id, kind: t.kind },
+          'trigger run failed unexpectedly',
+        );
+      }
+    }
+    this.lastRunAt = new Date(now * 1000).toISOString();
+    return processed;
+  }
+
+  private scheduleNext(): void {
+    this.timer = this.setTimeoutImpl(() => void this.tick(), this.intervalMs);
+  }
+
+  private async tick(): Promise<void> {
+    this.timer = null;
+    try {
+      await this.tickOnce();
+    } catch (err) {
+      log.error({ err }, 'unexpected error in tick — rescheduling');
+    }
+    if (!this.stopped) this.scheduleNext();
+  }
+
+  private async processTrigger(t: TriggerRow, now: number): Promise<void> {
+    if (t.terminal_at !== null && t.terminal_at !== undefined && t.terminal_at <= now) {
+      this.expireTrigger(t, now);
+      return;
+    }
+
+    const runId = this.insertRun(t, now);
+    let outcome: ExecuteOutcome;
+    try {
+      outcome = await this.executeTrigger(t);
+    } catch (err) {
+      outcome = {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'executor threw',
+        outputJson: {},
+        errorKind: 'execute_throw',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    let deliveredWaId: string | null = null;
+    if (outcome.fired) {
+      deliveredWaId = await this.dispatchNotification(t, outcome);
+    }
+
+    const finishedAt = this.nowFn();
+    this.finishRun(runId, now, finishedAt, outcome, deliveredWaId);
+    this.scheduleNextFire(t, now, outcome);
+  }
+
+  private async executeTrigger(t: TriggerRow): Promise<ExecuteOutcome> {
+    const kind = t.kind as TriggerKind;
+    let spec: unknown;
+    try {
+      spec = JSON.parse(t.spec_json);
+    } catch (err) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'spec_json is not valid JSON',
+        outputJson: {},
+        errorKind: 'spec_parse',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    if (kind === 'poll.sqlite') return this.executeSqlite(t, spec as SqliteSpec);
+    if (kind === 'schedule.cron' || kind === 'schedule.at_time') {
+      return {
+        status: 'ok',
+        fired: true,
+        outputSummary: kind === 'schedule.at_time' ? 'scheduled one-shot fired' : 'cron tick fired',
+        outputJson: { kind },
+      };
+    }
+    // Other kinds: recognised but not yet wired.
+    return {
+      status: 'noop',
+      fired: false,
+      outputSummary: `kind ${kind} not yet implemented`,
+      outputJson: { kind, reason: 'not_implemented' },
+    };
+  }
+
+  private executeSqlite(t: TriggerRow, spec: SqliteSpec): ExecuteOutcome {
+    let rows: Record<string, unknown>[];
+    try {
+      const stmt = this.db.prepare(spec.sql);
+      const bindArgs = spec.binds ? toBindArgs(spec.binds) : [];
+      rows = stmt.all(...bindArgs) as unknown as Record<string, unknown>[];
+    } catch (err) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'SQL execution failed',
+        outputJson: { sql: spec.sql },
+        errorKind: 'sql_error',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      };
+    }
+    const rowCount = rows.length;
+
+    if (spec.fire_when === 'rows_returned') {
+      return {
+        status: rowCount > 0 ? 'ok' : 'noop',
+        fired: rowCount > 0,
+        outputSummary: rowCount > 0
+          ? `SQL returned ${rowCount} row${rowCount === 1 ? '' : 's'}`
+          : 'SQL returned 0 rows',
+        outputJson: { rowCount, sampleRow: rows[0] ?? null },
+      };
+    }
+
+    // rowcount_changed: compare to the previous run's rowCount.
+    const lastRowCount = this.lastRowCountFor(t.id);
+    const changed = lastRowCount === null ? rowCount > 0 : rowCount !== lastRowCount;
+    return {
+      status: changed ? 'ok' : 'noop',
+      fired: changed,
+      outputSummary: changed
+        ? `rowcount changed: ${lastRowCount ?? 'first run'} -> ${rowCount}`
+        : `rowcount unchanged at ${rowCount}`,
+      outputJson: { rowCount, lastRowCount },
+    };
+  }
+
+  private lastRowCountFor(triggerId: number): number | null {
+    const row = this.db.prepare(
+      `SELECT output_json FROM trigger_runs
+       WHERE trigger_id = ? AND status IN ('ok','noop')
+       ORDER BY started_at DESC
+       LIMIT 1`,
+    ).get(triggerId) as { output_json: string | null } | undefined;
+    if (!row?.output_json) return null;
+    try {
+      const parsed = JSON.parse(row.output_json) as { rowCount?: unknown };
+      return typeof parsed.rowCount === 'number' ? parsed.rowCount : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async dispatchNotification(t: TriggerRow, outcome: ExecuteOutcome): Promise<string | null> {
+    if (t.on_terminal === 'silent') return null;
+    const text = formatNotification(t, outcome);
+    try {
+      const receipt = await this.messenger.sendMessage(t.report_chat_jid, text);
+      return receipt.waMessageId ?? null;
+    } catch (err) {
+      log.error(
+        { err, triggerId: t.id, reportChatJid: t.report_chat_jid },
+        'failed to dispatch trigger notification',
+      );
+      return null;
+    }
+  }
+
+  private insertRun(t: TriggerRow, startedAt: number): number {
+    const info = this.db.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, attempt, metadata_json
+       ) VALUES (?, ?, 'running', ?, 1, '{}')`,
+    ).run(t.id, t.bead_id, startedAt);
+    return Number(info.lastInsertRowid);
+  }
+
+  private finishRun(
+    runId: number,
+    startedAt: number,
+    finishedAt: number,
+    outcome: ExecuteOutcome,
+    deliveredWaId: string | null,
+  ): void {
+    const durationMs = Math.max(0, (finishedAt - startedAt) * 1000);
+    const outputJson = deliveredWaId
+      ? { ...outcome.outputJson, deliveredWaMessageId: deliveredWaId }
+      : outcome.outputJson;
+    this.db.prepare(
+      `UPDATE trigger_runs
+       SET status = ?, finished_at = ?, duration_ms = ?,
+           output_summary = ?, output_json = ?,
+           error_kind = ?, error_message = ?
+       WHERE id = ?`,
+    ).run(
+      outcome.status,
+      finishedAt,
+      durationMs,
+      outcome.outputSummary,
+      JSON.stringify(outputJson),
+      outcome.errorKind ?? null,
+      outcome.errorMessage ?? null,
+      runId,
+    );
+  }
+
+  private scheduleNextFire(t: TriggerRow, now: number, outcome: ExecuteOutcome): void {
+    let nextFireAt: number | null = null;
+
+    if (t.kind === 'schedule.at_time') {
+      // One-shot: expire after firing rather than rescheduling.
+      this.markExpired(t, now, 'one_shot_completed');
+      return;
+    }
+
+    if (t.kind === 'schedule.cron') {
+      try {
+        const parsed = JSON.parse(t.spec_json) as { expr: string };
+        nextFireAt = nextCronRun(parsed.expr, now);
+      } catch (err) {
+        log.error({ err, triggerId: t.id }, 'cron next-fire computation failed');
+        nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;
+      }
+    } else if (outcome.outputJson.reason === 'not_implemented') {
+      nextFireAt = now + NOT_IMPLEMENTED_COOLDOWN_SEC;
+    } else if (outcome.status === 'failed') {
+      nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;
+    } else if (t.interval_seconds && t.interval_seconds > 0) {
+      nextFireAt = now + t.interval_seconds;
+    } else {
+      // No interval and not a schedule — disable to avoid re-firing.
+      nextFireAt = null;
+    }
+
+    this.db.prepare(
+      `UPDATE bead_triggers
+       SET next_fire_at = ?, last_fire_at = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(nextFireAt, now, now, t.id);
+  }
+
+  private expireTrigger(t: TriggerRow, now: number): void {
+    this.markExpired(t, now, 'terminal_at_reached');
+  }
+
+  private markExpired(t: TriggerRow, now: number, reason: string): void {
+    try {
+      this.db.prepare(
+        `UPDATE bead_triggers
+         SET status = 'expired', next_fire_at = NULL, updated_at = ?
+         WHERE id = ?`,
+      ).run(now, t.id);
+      writeBeadEvent(this.db, {
+        beadId: t.bead_id,
+        eventType: 'trigger_expired',
+        actor: 'trigger-poller',
+        payload: { trigger_id: t.id, reason, on_terminal: t.on_terminal },
+        at: now,
+      });
+      this.db.prepare(
+        `INSERT INTO trigger_runs (
+           trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+           output_summary, output_json, attempt, metadata_json
+         ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
+      ).run(
+        t.id, t.bead_id, now, now,
+        `trigger expired: ${reason}`,
+        JSON.stringify({ reason, on_terminal: t.on_terminal }),
+      );
+    } catch (err) {
+      log.error({ err, triggerId: t.id }, 'failed to expire trigger');
+      return;
+    }
+
+    if (t.on_terminal === 'notify') {
+      void this.messenger.sendMessage(
+        t.report_chat_jid,
+        formatExpiryNotification(t, reason),
+      ).catch((err: unknown) => {
+        log.error({ err, triggerId: t.id }, 'failed to dispatch expiry notification');
+      });
+    }
+  }
+}
+
+function formatNotification(t: TriggerRow, outcome: ExecuteOutcome): string {
+  const heading = t.kind === 'schedule.at_time'
+    ? 'Scheduled fire'
+    : t.kind === 'schedule.cron'
+      ? 'Cron tick'
+      : 'Watch fired';
+  return `*${heading}* (trigger ${t.id}) — ${outcome.outputSummary}`;
+}
+
+function formatExpiryNotification(t: TriggerRow, reason: string): string {
+  return `*Watch expired* (trigger ${t.id}, bead ${t.bead_id}) — ${reason}`;
+}
+
+function toBindArgs(binds: Record<string, unknown>): SQLInputValue[] {
+  // node:sqlite supports positional binds via .all(...args); named binds are
+  // not part of the public API. Callers must build SQL with positional `?`
+  // and pass a plain object whose enumeration order matches placeholder order.
+  // For watch recipes this is typically empty; binds are reserved for
+  // future use.
+  return Object.values(binds) as SQLInputValue[];
+}
