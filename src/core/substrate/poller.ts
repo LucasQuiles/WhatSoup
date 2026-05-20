@@ -33,6 +33,8 @@ const DEFAULT_BATCH_SIZE = 50;
 const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
 /** Cooldown applied after a transient failure so the poller does not spin. */
 const FAILED_RETRY_COOLDOWN_SEC = 60;
+/** Auto-pause a trigger after this many consecutive failed runs. */
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
@@ -44,6 +46,8 @@ export interface TriggerPollerOptions {
   /** Injectable timers for tests. */
   setTimeoutImpl?: typeof setTimeout;
   clearTimeoutImpl?: typeof clearTimeout;
+  /** Auto-pause threshold for consecutive failed runs. Default 5. */
+  maxConsecutiveFailures?: number;
 }
 
 interface SqliteSpec {
@@ -71,6 +75,7 @@ export class TriggerPoller {
   private readonly nowFn: () => number;
   private readonly setTimeoutImpl: typeof setTimeout;
   private readonly clearTimeoutImpl: typeof clearTimeout;
+  private readonly maxConsecutiveFailures: number;
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -81,6 +86,7 @@ export class TriggerPoller {
     this.nowFn = opts.now ?? nowUnixSec;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
+    this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;
   }
 
   start(): void {
@@ -349,6 +355,15 @@ export class TriggerPoller {
     } else if (outcome.outputJson.reason === 'not_implemented') {
       nextFireAt = now + NOT_IMPLEMENTED_COOLDOWN_SEC;
     } else if (outcome.status === 'failed') {
+      // Circuit breaker: count consecutive failures including this one.
+      // If we've hit the threshold, pause the trigger instead of scheduling
+      // another retry — otherwise auto-compact-style retry storms blow up
+      // when a target table disappears or a remote service stays down.
+      const consecutiveFailures = this.countConsecutiveFailures(t.id);
+      if (consecutiveFailures >= this.maxConsecutiveFailures) {
+        this.markPausedOnFailures(t, now, consecutiveFailures);
+        return;
+      }
       nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;
     } else if (t.interval_seconds && t.interval_seconds > 0) {
       nextFireAt = now + t.interval_seconds;
@@ -362,6 +377,55 @@ export class TriggerPoller {
        SET next_fire_at = ?, last_fire_at = ?, updated_at = ?
        WHERE id = ?`,
     ).run(nextFireAt, now, now, t.id);
+  }
+
+  /**
+   * Counts consecutive failed runs in trigger_runs, ordered by most recent
+   * first, stopping at the first non-failed run. A successful or noop run
+   * resets the implicit counter.
+   */
+  private countConsecutiveFailures(triggerId: number): number {
+    const recent = this.db.prepare(
+      `SELECT status FROM trigger_runs
+       WHERE trigger_id = ?
+       ORDER BY started_at DESC, id DESC
+       LIMIT ?`,
+    ).all(triggerId, this.maxConsecutiveFailures) as Array<{ status: string }>;
+    let count = 0;
+    for (const row of recent) {
+      if (row.status === 'failed') count++;
+      else break;
+    }
+    return count;
+  }
+
+  private markPausedOnFailures(t: TriggerRow, now: number, failureCount: number): void {
+    try {
+      this.db.prepare(
+        `UPDATE bead_triggers
+         SET status = 'paused', next_fire_at = NULL, updated_at = ?
+         WHERE id = ?`,
+      ).run(now, t.id);
+      writeBeadEvent(this.db, {
+        beadId: t.bead_id,
+        eventType: 'trigger_paused',
+        actor: 'trigger-poller',
+        payload: { trigger_id: t.id, reason: 'consecutive_failures', failure_count: failureCount },
+        at: now,
+      });
+    } catch (err) {
+      log.error({ err, triggerId: t.id }, 'failed to pause trigger after consecutive failures');
+      return;
+    }
+
+    if (t.on_terminal !== 'silent') {
+      void this.messenger.sendMessage(
+        t.report_chat_jid,
+        formatPauseNotification(t, failureCount),
+      ).catch((err: unknown) => {
+        log.error({ err, triggerId: t.id }, 'failed to dispatch pause notification');
+      });
+    }
   }
 
   private expireTrigger(t: TriggerRow, now: number): void {
@@ -426,6 +490,10 @@ function formatNotification(t: TriggerRow, outcome: ExecuteOutcome): string {
 
 function formatExpiryNotification(t: TriggerRow, reason: string): string {
   return `*Watch expired* (trigger ${t.id}, bead ${t.bead_id}) — ${reason}`;
+}
+
+function formatPauseNotification(t: TriggerRow, failureCount: number): string {
+  return `*Watch paused* (trigger ${t.id}, bead ${t.bead_id}) — paused after ${failureCount} consecutive failures. Inspect via list_triggers; resume with extend_trigger or recreate.`;
 }
 
 function toBindArgs(binds: Record<string, unknown>): SQLInputValue[] {

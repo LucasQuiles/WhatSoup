@@ -363,3 +363,94 @@ describe('TriggerPoller — start/stop lifecycle', () => {
     expect(cleared).toHaveLength(1);
   });
 });
+
+describe('TriggerPoller — circuit breaker', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('pauses a trigger after maxConsecutiveFailures consecutive SQL failures', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'flaky', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM table_that_does_not_exist`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    // Override max to 2 so the test runs in 2 ticks instead of 5.
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      maxConsecutiveFailures: 2,
+    });
+
+    // Failure 1 — trigger still active, next_fire_at bumped by FAILED_RETRY_COOLDOWN_SEC.
+    await poller.tickOnce();
+    const afterFirst = db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string };
+    expect(afterFirst.status).toBe('active');
+
+    // Failure 2 — count reaches 2, trigger paused with notification.
+    now = 1_000_000_100;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+
+    const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
+    expect(refreshed.status).toBe('paused');
+    expect(refreshed.next_fire_at).toBeNull();
+
+    const pauseEvents = db.raw.prepare(`SELECT event_type, payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_paused'`).all(bead.id) as Array<{ event_type: string; payload_json: string }>;
+    expect(pauseEvents).toHaveLength(1);
+    expect(JSON.parse(pauseEvents[0].payload_json)).toMatchObject({ reason: 'consecutive_failures' });
+
+    expect(calls.some(c => c.text.includes('paused') && c.text.includes('consecutive'))).toBe(true);
+
+    // Third tick: paused trigger is not due, returns 0.
+    now = 1_000_000_200;
+    const processed = await poller.tickOnce();
+    expect(processed).toBe(0);
+  });
+
+  it('does NOT pause when a success resets the consecutive-failure streak', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'recovering', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    // First failure: drop the probes table.
+    db.raw.exec(`DROP TABLE probes`);
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      maxConsecutiveFailures: 2,
+    });
+    await poller.tickOnce();
+
+    // Recreate the table with a row — next tick succeeds and fires.
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    now = 1_000_000_100;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+    expect(calls.length).toBeGreaterThanOrEqual(1);  // fired
+
+    // Drop the table again — failure 1, but streak was reset by the success.
+    // Trigger must remain active.
+    db.raw.exec(`DROP TABLE probes`);
+    now = 1_000_000_200;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+
+    const refreshed = db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string };
+    expect(refreshed.status).toBe('active');
+  });
+});
+
