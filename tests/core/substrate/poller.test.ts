@@ -175,8 +175,12 @@ describe('TriggerPoller — schedule kinds', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].text).toContain('Scheduled fire');
     const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
-    expect(refreshed.status).toBe('expired');
     expect(refreshed.next_fire_at).toBeNull();
+    expect(refreshed.status).toBe('expired');
+
+    // Strong behavioural assertion: a second tick must not re-fire the one-shot.
+    await poller.tickOnce();
+    expect(calls).toHaveLength(1);
   });
 
   it('schedule.cron: fires and advances next_fire_at via nextCronRun', async () => {
