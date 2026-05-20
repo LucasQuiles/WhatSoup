@@ -645,6 +645,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
 
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
   });
 
@@ -708,6 +709,79 @@ describe('AgentRuntime', () => {
     await Promise.resolve();
 
     // Baseline initialised silently; /compact never fired on the agent.
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+  });
+
+  it('persists baseline on crash cleanup when compact_boundary was observed before the crash', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const scopeKey = 'test@s.whatsapp.net';
+    (runtime as unknown as { compactBoundaryScopes: Set<string> }).compactBoundaryScopes.add(scopeKey);
+
+    (runtime as unknown as {
+      persistBaselineIfBoundaryObserved: (k: string, r: number | null) => void;
+    }).persistBaselineIfBoundaryObserved(scopeKey, 42);
+
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not persist baseline on crash cleanup when no compact_boundary was observed', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const scopeKey = 'test@s.whatsapp.net';
+
+    (runtime as unknown as {
+      persistBaselineIfBoundaryObserved: (k: string, r: number | null) => void;
+    }).persistBaselineIfBoundaryObserved(scopeKey, 42);
+
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('does not persist baseline on crash cleanup when rowId is null even if boundary was observed', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const scopeKey = 'test@s.whatsapp.net';
+    (runtime as unknown as { compactBoundaryScopes: Set<string> }).compactBoundaryScopes.add(scopeKey);
+
+    (runtime as unknown as {
+      persistBaselineIfBoundaryObserved: (k: string, r: number | null) => void;
+    }).persistBaselineIfBoundaryObserved(scopeKey, null);
+
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('initialises baseline at the exact threshold boundary (>= not >)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    // total === threshold exactly: bootstrap MUST trigger; pre-fix used > and missed this case.
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 100,
+      totalOutputTokens: 0,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 100, outputTokens: 0 });
+    await Promise.resolve();
+
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
     expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
   });
