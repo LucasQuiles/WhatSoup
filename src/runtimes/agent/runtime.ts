@@ -954,6 +954,7 @@ export class AgentRuntime implements Runtime {
     this.perChatAssistantItemText.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
+    this.postTurnGate.delete(mapKey);
     // Cancel any pending image coalesce buffer
     this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
     // Clean up operation tracker for this chat
@@ -2210,6 +2211,9 @@ export class AgentRuntime implements Runtime {
   private async processTurn(turn: QueuedTurn): Promise<void> {
     const { chatJid, senderJid, senderName, text, isGroup } = turn;
 
+    // Clear post-turn gate — legitimate new user turn begins (shared mode)
+    this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
+
     // Ensure outbound queue exists for this chat
     this.ensureOutboundQueue(chatJid);
 
@@ -2500,6 +2504,9 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+        // Note: tool_result is NOT gated. Phantom tool_use is already blocked,
+        // so phantom tool_result cannot arrive. Gating tool_result would break
+        // legitimate session-replacement scenarios where two sessions share a mapKey.
         if (this.isSilentCompact(mapKey)) break;
         const toolNames = this.activeToolNames.get(toolScopeKey);
         if (event.isError) {
