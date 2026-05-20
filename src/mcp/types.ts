@@ -65,6 +65,22 @@ export interface ToolCallResult {
   isError?: boolean;
 }
 
+const TOOL_ERROR = Symbol('whatsoup.toolError');
+
+export type ToolErrorPayload<T extends Record<string, unknown> = Record<string, unknown>> = T & {
+  readonly [TOOL_ERROR]: true;
+};
+
+export function toolError<T extends Record<string, unknown>>(payload: T): ToolErrorPayload<T> {
+  const result = { ...payload };
+  Object.defineProperty(result, TOOL_ERROR, { value: true });
+  return result as ToolErrorPayload<T>;
+}
+
+export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {
+  return typeof value === 'object' && value !== null && (value as { [TOOL_ERROR]?: unknown })[TOOL_ERROR] === true;
+}
+
 export function resolveConversationKey(session: SessionContext, callerKey: string): string {
   return session.tier === 'chat-scoped' ? session.conversationKey! : callerKey;
 }

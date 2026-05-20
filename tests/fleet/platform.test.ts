@@ -88,6 +88,19 @@ describe('platform', () => {
       expect(plist).toContain('stdout.log');
       expect(plist).toContain('stderr.log');
     });
+
+    it('pins TMPDIR to the instance media tmp directory', () => {
+      const origDataHome = process.env.XDG_DATA_HOME;
+      process.env.XDG_DATA_HOME = '/owned/data';
+      try {
+        const plist = buildPlist('media-bot');
+        expect(plist).toContain('<key>TMPDIR</key>');
+        expect(plist).toContain('<string>/owned/data/whatsoup/tmp/media-bot</string>');
+      } finally {
+        if (origDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = origDataHome;
+      }
+    });
   });
 
   describe('parseInstanceName', () => {

@@ -41,6 +41,7 @@ interface AgentOptions {
   perUserDirs?: unknown;
   sandboxPerChat?: boolean;
   enabledPlugins?: Record<string, boolean>;
+  autoCompactInputTokens?: number;
   /** Provider identifier — maps to the registry. Defaults to 'claude-cli'. */
   provider?: string;
   /** Provider-specific configuration overrides. */
@@ -80,6 +81,31 @@ interface InstanceConfig {
   agentOptions?: AgentOptions;
   // Resolved paths (added by loader)
   paths: InstancePaths;
+}
+
+function pinProcessTmpDir(paths: InstancePaths): void {
+  fs.mkdirSync(paths.tmpDir, { recursive: true, mode: 0o700 });
+  process.env.TMPDIR = paths.tmpDir;
+}
+
+/**
+ * Resolve the agent subprocess model from an instance config. Prefers the
+ * top-level `model`; falls back to `models.conversation` so per-role models
+ * declared in the canonical models map propagate to the agent runtime even
+ * when the top-level field is unset. Returns undefined when neither is set
+ * or both are empty/non-string.
+ */
+export function resolveAgentModel(
+  cfg: { model?: unknown; models?: unknown } | null | undefined,
+): string | undefined {
+  const top = cfg?.model;
+  if (typeof top === 'string' && top.trim() !== '') return top;
+  const models = cfg?.models;
+  if (models && typeof models === 'object') {
+    const conv = (models as Record<string, unknown>)['conversation'];
+    if (typeof conv === 'string' && conv.trim() !== '') return conv;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +159,7 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
 
   // 5. Resolve paths
   const paths = instancePaths(name);
+  pinProcessTmpDir(paths);
 
   // 6. Build config — cast through unknown since validateInstance already
   // verified the required fields; TS cannot narrow from Record<string,unknown>

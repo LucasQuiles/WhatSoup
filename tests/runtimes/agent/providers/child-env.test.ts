@@ -15,6 +15,7 @@ const MANAGED_ENV_KEYS = [
   'XDG_RUNTIME_DIR',
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
+  'TMPDIR',
   'SUDO_ASKPASS',
   'OPENAI_API_KEY',
   'ANTHROPIC_API_KEY',
@@ -63,6 +64,7 @@ describe('buildBaseChildEnv', () => {
       HOME: '/tmp/child-home',
       LANG: 'en_US.UTF-8',
       XDG_CONFIG_HOME: '/tmp/child-config',
+      TMPDIR: '/tmp/owned-whatsoup',
       OPENAI_API_KEY: 'openai-secret',
       ANTHROPIC_API_KEY: 'anthropic-secret',
       PINECONE_API_KEY: 'pinecone-secret',
@@ -76,6 +78,7 @@ describe('buildBaseChildEnv', () => {
       HOME: '/tmp/child-home',
       LANG: 'en_US.UTF-8',
       XDG_CONFIG_HOME: '/tmp/child-config',
+      TMPDIR: '/tmp/owned-whatsoup',
     });
     expect(env).not.toHaveProperty('OPENAI_API_KEY');
     expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');

@@ -100,6 +100,9 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:336` | stable | active | Self-update trigger |
 | `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:337` | stable | active | List cross-instance LID mappings |
 | `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:338` | stable | active | Sync mappings between instances |
+| `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:287` | beta | active | List active fleet-wide alert silences |
+| `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:288` | beta | active | Add a silence rule (instance, duration). Persisted under `~/.config/whatsoup/fleet-silences.json`. |
+| `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:289` | beta | active | Remove a named silence rule |
 | `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:759`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer required) |
 | `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:785`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer required) |
 | `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
@@ -258,7 +261,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
-| `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when plugin absent |
+| `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
@@ -328,9 +331,12 @@ stability for backup, migration, and disaster-recovery procedures.
 | `artifact:instance.db` | `<dataRoot>/instances/<name>/bot.db` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Per-instance SQLite; migration chain canonical |
 | `artifact:fleet.tokens` | `<configRoot>/fleet-tokens.json` | [README §Fleet API](../README.md#fleet-api) | stable | active | Active root token + rotated accept-list |
 | `artifact:fleet.token-legacy` | `<configRoot>/fleet-token` | [README §Fleet API](../README.md#fleet-api) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0. Migrated on first read to `fleet-tokens.json`; retained for rollback |
+| `artifact:fleet.silences` | `<configRoot>/fleet-silences.json` | [`src/fleet/silence-manager.ts`](../src/fleet/silence-manager.ts) | beta | active | Operator-managed alert silence rules; mode `0600`. Managed via `http:fleet.silences.*` routes. Safe to delete (re-bootstraps empty) |
+| `artifact:fleet.alert-throttle` | `<configRoot>/fleet-alert-throttle.json` | [`src/fleet/alert-throttle-store.ts`](../src/fleet/alert-throttle-store.ts) | beta | active | Per-instance `lastAlertAt` cache used by `health-poller` to suppress duplicate alerts across restarts; mode `0600`; stale entries (>15min) auto-pruned at load. Safe to delete (re-bootstraps empty, worst case one batch of alerts re-fires) |
 | `artifact:tokens.env` | `<configRoot>/instances/<name>/tokens.env` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Per-instance health tokens; shape stable |
 | `artifact:lid-mappings.db` | `<dataRoot>/instances/<name>/bot.db` table `lid_mappings*` | [docs/configuration.md §Database Migration History](configuration.md#database-migration-history) | stable | active | Cross-instance LID-to-phone mapping; #251 freshness-gated history retained |
 | `artifact:logs.dir` | `<dataRoot>/logs/` | [docs/configuration.md §Logging](configuration.md#logging) | stable | active | Pino daily-rotated logs |
+| `artifact:process-tmp.dir` | `$XDG_DATA_HOME/whatsoup/tmp/<name>/` | [docs/configuration.md §XDG Directory Layout](configuration.md#xdg-directory-layout) | stable | active | Per-instance runtime `TMPDIR`; swept hourly after 3 hours |
 
 ---
 

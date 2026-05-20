@@ -60,6 +60,7 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `XDG_CONFIG_HOME` | path | `~/.config` | XDG config base. |
 | `XDG_DATA_HOME` | path | `~/.local/share` | XDG data base. |
 | `XDG_STATE_HOME` | path | `~/.local/state` | XDG state base. |
+| `TMPDIR` | path | `<dataRoot>/tmp` or `$XDG_DATA_HOME/whatsoup/tmp/<name>` | Runtime process temp directory. The wrapper, launchd plist generation, and bootstrap pin this to a WhatSoup-owned per-instance path. |
 
 ### Pinecone
 
@@ -177,7 +178,7 @@ into place during deployment.
 
 | Value | Description |
 |-------|-------------|
-| `self_only` | Only `adminPhones` can interact. Required for `passive`; required for `agent` with `sessionScope: single` or no `agentOptions`. |
+| `self_only` | Only `adminPhones` can interact. Required for `passive`. |
 | `allowlist` | Only approved users (managed via MCP access-list tools) can interact. |
 | `open_dm` | Any direct message is accepted. |
 | `groups_only` | Only group chats are accepted. |
@@ -425,13 +426,14 @@ include `agentOptions` should keep these fields explicit.
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the Claude Code subprocess. |
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
+| `autoCompactInputTokens` | number | no | disabled | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. |
 | `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
 
 #### Session Scopes
 
 | Value | Behavior | Access mode constraint |
 |-------|----------|------------------------|
-| `single` | One shared Claude Code session for all chats. | Must be `self_only`. |
+| `single` | One shared agent session for all chats. | Any valid access mode (anti-echo AE1-AE4 runtime protections cover group resume safety). |
 | `shared` | One shared session, multiple users welcomed. | Any valid access mode. |
 | `per_chat` | One isolated Claude Code session per chat. | Any valid access mode. |
 
@@ -524,7 +526,6 @@ The loader enforces these constraints before the process starts:
 - `agent` instances with hand-written `agentOptions` must have a valid `sessionScope`; an empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
-- `agent` with `sessionScope: single` must use `accessMode: self_only`.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
 
@@ -543,6 +544,9 @@ $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
   bot.db            — SQLite database (messages, contacts, access list, sessions, outbound_sends audit)
   logs/             — Pino log files (daily rotation via pino-roll)
   media/tmp/        — Temporary media files for agent Read access
+
+$XDG_DATA_HOME/whatsoup/tmp/<name>/           (default: ~/.local/share/...)
+  process temp      — Runtime `TMPDIR`; old files are swept hourly after 3 hours
 
 $XDG_STATE_HOME/whatsoup/instances/<name>/    (default: ~/.local/state/...)
   whatsoup.lock     — PID lock file (prevents double-start)

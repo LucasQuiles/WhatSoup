@@ -249,13 +249,6 @@ function validateAgentOptions(
   const agentOpts = raw['agentOptions'];
 
   if (agentOpts === undefined || agentOpts === null) {
-    // No agentOptions: existing rule — requires self_only.
-    if (raw['accessMode'] !== undefined && raw['accessMode'] !== 'self_only') {
-      return err(
-        'accessMode',
-        `Agent instances require accessMode "self_only", got "${String(raw['accessMode'])}"`,
-      );
-    }
     return null;
   }
 
@@ -324,6 +317,22 @@ function validateAgentOptions(
     );
   }
 
+  if (opts['autoCompactInputTokens'] !== undefined) {
+    const threshold = opts['autoCompactInputTokens'];
+    if (
+      typeof threshold !== 'number' ||
+      !Number.isFinite(threshold) ||
+      !Number.isInteger(threshold) ||
+      threshold < 50_000 ||
+      threshold > 100_000_000
+    ) {
+      return err(
+        'agentOptions.autoCompactInputTokens',
+        'agentOptions.autoCompactInputTokens must be an integer between 50,000 and 100,000,000',
+      );
+    }
+  }
+
   // provider: must be a canonical ID from the shared registry (#447). The
   // session.ts switches throw on unknown IDs, so rejecting drift here gives
   // the operator a clear 400-class error instead of a runtime crash.
@@ -364,23 +373,6 @@ function validateAgentOptions(
         );
       }
     }
-  }
-
-  // Cross-field: sessionScope === 'single' requires accessMode === 'self_only'.
-  if (scope === 'single' && raw['accessMode'] !== 'self_only') {
-    if (ctx.mode === 'create') {
-      return err(
-        'accessMode',
-        'agent with sessionScope "single" requires accessMode "self_only"',
-      );
-    }
-    if (ctx.mode === 'patch') {
-      return err('accessMode', 'sessionScope "single" requires accessMode "self_only"');
-    }
-    return err(
-      'accessMode',
-      `Agent instances require accessMode "self_only", got "${String(raw['accessMode'])}"`,
-    );
   }
 
   return null;

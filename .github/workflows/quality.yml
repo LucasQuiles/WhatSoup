@@ -45,7 +45,26 @@ jobs:
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
+      - name: Install test-integrity plugin
+        env:
+          TEST_INTEGRITY_DEPLOY_KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}
+        run: |
+          if [ -z "$TEST_INTEGRITY_DEPLOY_KEY" ]; then
+            echo "::error::TEST_INTEGRITY_DEPLOY_KEY secret is required to install the private LucasQuiles/test-integrity plugin"
+            exit 2
+          fi
+          mkdir -p "$HOME/.claude/plugins" "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$TEST_INTEGRITY_DEPLOY_KEY" > "$HOME/.ssh/test_integrity_deploy"
+          chmod 600 "$HOME/.ssh/test_integrity_deploy"
+          trap 'rm -f "$HOME/.ssh/test_integrity_deploy"' EXIT
+          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+            git clone --depth 1 git@github.com:LucasQuiles/test-integrity.git "$HOME/.claude/plugins/test-integrity"
+
       - name: Test integrity baseline check
+        env:
+          WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'
         run: npm run guard:test-integrity
 
       - name: Repo hygiene commit-message smoke

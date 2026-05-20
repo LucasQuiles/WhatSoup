@@ -24,7 +24,7 @@ import { isGroupConversationKey, conversationKeyToJid } from '../../core/convers
 import { toPersonalJid } from '../../core/jid-constants.ts';
 import type { FleetRealtimePublisher } from '../realtime-publisher.ts';
 import { publishInstanceStatus, publishMessageReceived, publishChatUpdated, publishAccessChanged, publishFeedEvent } from '../realtime-publisher.ts';
-import type { ServiceManager } from '../platform.ts';
+import { systemdUnitName, type ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
@@ -381,6 +381,39 @@ async function handleServiceAction(
   }
 }
 
+function serviceErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function serviceErrorExitCode(err: unknown): number | string | undefined {
+  return typeof err === 'object' && err !== null && 'code' in err
+    ? (err as { code?: number | string }).code
+    : undefined;
+}
+
+function isBenignServiceTeardownError(err: unknown, name: string): boolean {
+  const message = serviceErrorMessage(err);
+  if (/\bcommand\s+not\s+found\b/iu.test(message)) return false;
+
+  const systemdUnit = escapeRegExp(systemdUnitName(name));
+  const systemdAbsent = new RegExp(
+    String.raw`\b(?:unit|unit file|service)\s+${systemdUnit}\b[^\n]*(?:not\s+(?:found|loaded|running|active|installed)|could\s+not\s+be\s+found|does\s+not\s+exist|already\s+(?:stopped|disabled|inactive|removed))\b`,
+    'iu',
+  );
+  if (systemdAbsent.test(message)) return true;
+
+  const launchdLabel = escapeRegExp(`com.whatsoup.${name}`);
+  const launchdStopCommand = new RegExp(
+    String.raw`\blaunchctl\s+stop\s+${launchdLabel}\b`,
+    'iu',
+  );
+  return serviceErrorExitCode(err) === 3 && launchdStopCommand.test(message);
+}
+
 /** POST /api/lines/:name/restart — restart the service. */
 export async function handleRestart(
   _req: IncomingMessage,
@@ -581,11 +614,36 @@ export async function handleDeleteLine(
 ): Promise<void> {
   if (!validateInstanceName(params.name, res)) return;
 
-  // 1. Stop the service (ignore failure — may already be stopped/gone)
-  try { await deps.serviceManager.stop(params.name); } catch { /* ok */ }
+  // 1. Stop the service. Only service-absence errors are idempotent; other
+  // failures may leave the instance running, so state must not be deleted.
+  try {
+    await deps.serviceManager.stop(params.name);
+  } catch (err) {
+    if (!isBenignServiceTeardownError(err, params.name)) {
+      log.error({ err, instance: params.name }, 'delete line: service stop failed');
+      jsonResponse(res, 500, {
+        error: `stop failed: ${serviceErrorMessage(err)}`,
+        instance: params.name,
+      });
+      return;
+    }
+    log.warn({ err, instance: params.name }, 'delete line: service already stopped or absent');
+  }
 
-  // 2. Disable the service (ignore failure — may not be enabled)
-  try { await deps.serviceManager.disable(params.name); } catch { /* ok */ }
+  // 2. Disable the service. As above, unknown disable failures block deletion.
+  try {
+    await deps.serviceManager.disable(params.name);
+  } catch (err) {
+    if (!isBenignServiceTeardownError(err, params.name)) {
+      log.error({ err, instance: params.name }, 'delete line: service disable failed');
+      jsonResponse(res, 500, {
+        error: `disable failed: ${serviceErrorMessage(err)}`,
+        instance: params.name,
+      });
+      return;
+    }
+    log.warn({ err, instance: params.name }, 'delete line: service already disabled or absent');
+  }
 
   // 3. Remove config, data, and state directories
   cleanupPartial(params.name);
@@ -962,10 +1020,6 @@ export async function handleCreateLine(
       jsonResponse(res, 400, { error: 'agentOptions.sessionScope must be single, shared, or per_chat' });
       return;
     }
-    if (ao.sessionScope === 'single' && accessMode !== 'self_only') {
-      jsonResponse(res, 400, { error: 'agent with sessionScope "single" requires accessMode "self_only"' });
-      return;
-    }
     if (resolveAndValidateAgentCwd(name, ao, res) === null) return;
     // Confine pluginDirs to user home directory
     if (Array.isArray(ao.pluginDirs)) {
@@ -1017,6 +1071,7 @@ export async function handleCreateLine(
 
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
+  let serviceEnabled = false;
   try {
     fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { mode: 0o700 });
@@ -1083,6 +1138,7 @@ export async function handleCreateLine(
 
     // --- Enable service ---
     await deps.serviceManager.enable(name);
+    serviceEnabled = true;
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -1091,6 +1147,21 @@ export async function handleCreateLine(
     publishFeedEvent(deps.realtime, name);
     jsonResponse(res, 201, { name, healthPort });
   } catch (err) {
+    if (serviceEnabled) {
+      try {
+        await deps.serviceManager.disable(name);
+      } catch (rollbackErr) {
+        log.error(
+          { err: rollbackErr, originalErr: err, instance: name },
+          'failed to disable service after instance creation failure',
+        );
+        jsonResponse(res, 500, {
+          error: `instance creation failed: ${(err as Error).message}`,
+          rollbackError: `service disable failed: ${(rollbackErr as Error).message}`,
+        });
+        return;
+      }
+    }
     cleanupPartial(name, createdExtras);
     jsonResponse(res, 500, { error: `instance creation failed: ${(err as Error).message}` });
   }
@@ -1138,8 +1209,12 @@ export async function handleAuth(
     'Connection': 'keep-alive',
   });
 
-  // Stop the running instance so the lock file is released for auth
-  try { await deps.serviceManager.stop(params.name); } catch { /* may not be running */ }
+  // Stop the running instance so the lock file is released for auth.
+  let stoppedForAuth = false;
+  try {
+    await deps.serviceManager.stop(params.name);
+    stoppedForAuth = true;
+  } catch { /* may not be running */ }
 
   // Auth bootstrap is an admin-only operation that needs full environment access
   // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
@@ -1160,16 +1235,27 @@ export async function handleAuth(
 
   // Guard against double res.end() — declared before any event handlers
   let authTimer: ReturnType<typeof setTimeout> | null = null;
+  let connected = false;
+  let restoreRequested = false;
   const { writeSSE, endOnce } = createSSEWriter(res, () => {
     activeAuthProcesses.delete(params.name);
     authInFlight.delete(params.name);
     if (authTimer) clearTimeout(authTimer);
   });
 
+  const restoreStoppedInstance = (reason: string) => {
+    if (!stoppedForAuth || connected || restoreRequested) return;
+    restoreRequested = true;
+    deps.serviceManager.startFire(params.name, (err: Error | null) => {
+      if (err) log.error({ err, instance: params.name, reason }, 'post-auth failure restart failed');
+    });
+  };
+
   // Wall-clock timeout — prevents auth process from hanging forever
   authTimer = setTimeout(() => {
     writeSSE('error', { message: 'Authentication timed out. QR codes expire after ~60 seconds. Please retry.' });
     child.kill('SIGTERM');
+    restoreStoppedInstance('timeout');
     endOnce();
   }, AUTH_TIMEOUT_MS);
 
@@ -1186,6 +1272,7 @@ export async function handleAuth(
         if (!ALLOWED_SSE_EVENTS.has(evt.event)) continue;
         writeSSE(evt.event, evt.data ?? {});
         if (evt.event === 'connected') {
+          connected = true;
           // Reset introSent so the instance sends an introduction on next boot
           try {
             const cfgPath = instance.configPath;
@@ -1214,11 +1301,13 @@ export async function handleAuth(
   // Forward errors
   child.on('error', (err) => {
     writeSSE('error', { message: err.message });
+    restoreStoppedInstance('child-error');
     endOnce();
   });
   child.on('exit', (code) => {
     if (code !== 0) {
       writeSSE('error', { message: `auth exited with code ${code}` });
+      restoreStoppedInstance('child-exit');
     }
     endOnce();
   });

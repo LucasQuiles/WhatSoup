@@ -41,6 +41,7 @@ beforeEach(() => {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME,
     INSTANCE_CONFIG: process.env.INSTANCE_CONFIG,
+    TMPDIR: process.env.TMPDIR,
     HOME: process.env.HOME,
   };
 
@@ -54,6 +55,7 @@ beforeEach(() => {
 
   // Clear any existing INSTANCE_CONFIG
   delete process.env.INSTANCE_CONFIG;
+  delete process.env.TMPDIR;
 });
 
 afterEach(() => {
@@ -101,6 +103,9 @@ describe('loadInstance — happy path: chat', () => {
     expect(p.logDir).toBe(path.join(dataRoot, 'logs'));
     expect(p.lockPath).toBe(path.join(stateRoot, 'whatsoup.lock'));
     expect(p.mediaDir).toBe(path.join(dataRoot, 'media', 'tmp'));
+    expect(p.tmpDir).toBe(path.join(tmpDir, 'data', 'whatsoup', 'tmp', 'test-chat'));
+    expect(process.env.TMPDIR).toBe(p.tmpDir);
+    expect(fs.statSync(process.env.TMPDIR!).isDirectory()).toBe(true);
 
     // Cross-root checks: data/state must not bleed into config
     expect(p.dataRoot).toContain('/data/whatsoup/instances/');
@@ -134,6 +139,7 @@ describe('loadInstance — happy path: agent', () => {
       logDir: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'logs'),
       lockPath: path.join(tmpDir, 'state', 'whatsoup', 'instances', 'test-agent', 'whatsoup.lock'),
       mediaDir: path.join(tmpDir, 'data', 'whatsoup', 'instances', 'test-agent', 'media', 'tmp'),
+      tmpDir: path.join(tmpDir, 'data', 'whatsoup', 'tmp', 'test-agent'),
     });
   });
 });
@@ -263,16 +269,18 @@ describe('loadInstance — error: invalid type', () => {
   });
 });
 
-describe('loadInstance — error: agent without accessMode self_only', () => {
-  it('throws when type is "agent" but accessMode is not "self_only"', () => {
+describe('loadInstance — agent without agentOptions accepts any accessMode', () => {
+  it('accepts type "agent" with non-self_only accessMode and no agentOptions (AE1-AE4 protections live)', () => {
     writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
       name: 'test-agent',
       type: 'agent',
-      systemPrompt: 'Agent without self_only accessMode.',
+      systemPrompt: 'Agent without agentOptions.',
       adminPhones: ['15551234567'],
       accessMode: 'allowlist',
     });
-    expect(() => loadInstance('test-agent')).toThrow(/accessMode.*self_only|self_only/i);
+    loadInstance('test-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.accessMode).toBe('allowlist');
   });
 });
 
@@ -383,8 +391,8 @@ describe('loadInstance — agentOptions: sessionScope "shared" allows non-self_o
   });
 });
 
-describe('loadInstance — agentOptions: sessionScope "single" still requires self_only', () => {
-  it('rejects agent with agentOptions + sessionScope:"single" + accessMode:"allowlist"', () => {
+describe('loadInstance — agentOptions: sessionScope "single" accepts any accessMode', () => {
+  it('accepts agent with agentOptions + sessionScope:"single" + accessMode:"allowlist" (AE1-AE4 protections live)', () => {
     writeInstance(path.join(tmpDir, 'config'), 'single-agent', {
       name: 'single-agent',
       type: 'agent',
@@ -395,7 +403,10 @@ describe('loadInstance — agentOptions: sessionScope "single" still requires se
         cwd: '/tmp',
       },
     });
-    expect(() => loadInstance('single-agent')).toThrow(/accessMode.*self_only|self_only/i);
+    loadInstance('single-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.accessMode).toBe('allowlist');
+    expect(parsed.agentOptions.sessionScope).toBe('single');
   });
 });
 
@@ -516,6 +527,65 @@ describe('loadInstance — agentOptions: providerConfig validation', () => {
 
     expect(() => loadInstance('bad-provider-budget-agent')).toThrow(
       /agentOptions\.providerConfig\.budget.*object/,
+    );
+  });
+});
+
+describe('loadInstance — agentOptions: autoCompactInputTokens validation', () => {
+  it('preserves a valid autoCompactInputTokens threshold', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'compact-agent', {
+      name: 'compact-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        autoCompactInputTokens: 500000,
+      },
+    });
+
+    loadInstance('compact-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.agentOptions.autoCompactInputTokens).toBe(500000);
+  });
+
+  it('rejects invalid autoCompactInputTokens thresholds', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'compact-agent-bad', {
+      name: 'compact-agent-bad',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        autoCompactInputTokens: 1000,
+      },
+    });
+
+    expect(() => loadInstance('compact-agent-bad')).toThrow(
+      /agentOptions\.autoCompactInputTokens.*50,000/,
+    );
+  });
+
+  it.each([
+    ['below lower bound', 49_999],
+    ['above upper bound', 100_000_001],
+    ['non-integer', 50_000.5],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['string', 'one hundred thousand' as unknown as number],
+  ])('rejects autoCompactInputTokens: %s', (_label, threshold) => {
+    writeInstance(path.join(tmpDir, 'config'), 'compact-agent-bound', {
+      name: 'compact-agent-bound',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'single',
+        autoCompactInputTokens: threshold,
+      },
+    });
+    expect(() => loadInstance('compact-agent-bound')).toThrow(
+      /agentOptions\.autoCompactInputTokens/,
     );
   });
 });
@@ -717,5 +787,50 @@ describe('loadInstance — XDG fallback', () => {
     expect(config.paths.lockPath).toBe(
       path.join(fallbackState, 'whatsoup', 'instances', 'xdg-fallback-instance', 'whatsoup.lock'),
     );
+  });
+});
+
+describe('resolveAgentModel', () => {
+  it('returns the top-level model when set', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ model: 'claude-opus-4-7' })).toBe('claude-opus-4-7');
+  });
+
+  it('top-level model wins over models.conversation', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({
+        model: 'claude-opus-4-7',
+        models: { conversation: 'claude-haiku-4-5' },
+      }),
+    ).toBe('claude-opus-4-7');
+  });
+
+  it('falls back to models.conversation when top-level model is unset', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ models: { conversation: 'claude-haiku-4-5' } })).toBe(
+      'claude-haiku-4-5',
+    );
+  });
+
+  it('falls back to models.conversation when top-level model is an empty string', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(
+      resolveAgentModel({ model: '   ', models: { conversation: 'claude-haiku-4-5' } }),
+    ).toBe('claude-haiku-4-5');
+  });
+
+  it('returns undefined when nothing is set', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({})).toBeUndefined();
+    expect(resolveAgentModel(null)).toBeUndefined();
+    expect(resolveAgentModel(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when models.conversation is empty/non-string', async () => {
+    const { resolveAgentModel } = await import('../src/instance-loader.ts');
+    expect(resolveAgentModel({ models: { conversation: '' } })).toBeUndefined();
+    expect(resolveAgentModel({ models: { conversation: 42 as unknown as string } })).toBeUndefined();
+    expect(resolveAgentModel({ models: {} })).toBeUndefined();
   });
 });

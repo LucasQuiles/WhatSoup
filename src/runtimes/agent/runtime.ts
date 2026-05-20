@@ -26,6 +26,8 @@ import {
   insertTokenEvent,
   accumulateTokensWithEvent,
   backfillSessionProvider,
+  getSessionTokenSnapshot,
+  markSessionCompacted,
 } from './session-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
@@ -119,6 +121,8 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+const AUTO_COMPACT_TIMEOUT_MS = 2 * 60 * 1000;
+const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 15 * 60 * 1000;
 
 class AgentCommandRuntimeError extends Error {
   readonly code: string;
@@ -301,6 +305,8 @@ export interface AgentRuntimeOptions {
   enabledPlugins?: Record<string, boolean>;
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
   allowM365Mutations?: boolean;
+  /** Automatically run a silent /compact after this many input tokens since the last compact. */
+  autoCompactInputTokens?: number;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
 }
@@ -577,6 +583,7 @@ export class AgentRuntime implements Runtime {
   private readonly pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
   private readonly replyGuaranteeTimeoutMs: number;
@@ -621,6 +628,13 @@ export class AgentRuntime implements Runtime {
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
+  private compactBoundaryScopes = new Set<string>();
+  private autoCompactCooldownUntil = new Map<string, number>();
+  private autoCompactWaiters = new Map<string, {
+    promise: Promise<void>;
+    resolve: () => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
 
   /**
    * Post-turn event gate — tracks mapKeys where a 'result' event has been
@@ -716,6 +730,99 @@ export class AgentRuntime implements Runtime {
     const timer = this.silentCompactScopes.get(scopeKey);
     if (timer) clearTimeout(timer);
     this.silentCompactScopes.delete(scopeKey);
+  }
+
+  private finishAutoCompact(scopeKey: string): void {
+    const waiter = this.autoCompactWaiters.get(scopeKey);
+    if (!waiter) return;
+    clearTimeout(waiter.timer);
+    this.autoCompactWaiters.delete(scopeKey);
+    waiter.resolve();
+  }
+
+  private consumeCompactBoundary(scopeKey: string): boolean {
+    const hadBoundary = this.compactBoundaryScopes.has(scopeKey);
+    this.compactBoundaryScopes.delete(scopeKey);
+    return hadBoundary;
+  }
+
+  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
+    if (this.autoCompactInputTokens === undefined || session === null) return;
+    if (this.sessionScope === 'shared') return;
+    if (!session.getStatus().active) return;
+
+    const rowId = session.getDbRowId();
+    if (rowId === null) return;
+
+    const snapshot = getSessionTokenSnapshot(this.db, rowId);
+    if (!snapshot) return;
+
+    const inputSinceCompact = Math.max(0, snapshot.totalInputTokens - snapshot.lastCompactInputTokens);
+    if (inputSinceCompact < this.autoCompactInputTokens) return;
+
+    const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+
+    // Rollout bootstrap: existing sessions that already accumulated past the
+    // threshold before this knob was enabled would otherwise fire /compact
+    // on their very next turn — a fleet-wide enable could trigger a compact
+    // storm. Detect by lastCompactInputTokens=0 + totalInputTokens at or
+    // above threshold (matches the outer gate's >= semantics), advance the
+    // baseline once silently, and let the natural threshold cycle take over.
+    //
+    // Side effect to be aware of: a brand-new session whose first turn
+    // happens to cross the threshold (large file ingestion, very low
+    // threshold) will also take this path and silently skip its first real
+    // compact. Same anti-storm behaviour; documented in docs/runbook.md.
+    if (snapshot.lastCompactInputTokens === 0 && snapshot.totalInputTokens >= this.autoCompactInputTokens) {
+      markSessionCompacted(this.db, rowId);
+      log.info({
+        scopeKey,
+        rowId,
+        totalInputTokens: snapshot.totalInputTokens,
+        lastCompactInputTokens: snapshot.lastCompactInputTokens,
+        threshold: this.autoCompactInputTokens,
+      }, 'auto compact baseline initialised for existing session');
+      return;
+    }
+
+    if (this.autoCompactWaiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
+
+    const cooldownUntil = this.autoCompactCooldownUntil.get(scopeKey);
+    if (cooldownUntil !== undefined) {
+      if (Date.now() < cooldownUntil) return;
+      this.autoCompactCooldownUntil.delete(scopeKey);
+    }
+
+    let resolveWaiter!: () => void;
+    const timer = setTimeout(() => {
+      log.error(
+        { scopeKey, rowId, timeoutMs: AUTO_COMPACT_TIMEOUT_MS, backoffMs: AUTO_COMPACT_TIMEOUT_BACKOFF_MS },
+        'auto compact timed out',
+      );
+      this.clearSilentCompact(scopeKey);
+      this.finishAutoCompact(scopeKey);
+      this.autoCompactCooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
+    }, AUTO_COMPACT_TIMEOUT_MS);
+    timer.unref?.();
+
+    const promise = new Promise<void>((resolve) => {
+      resolveWaiter = resolve;
+    });
+    this.autoCompactWaiters.set(scopeKey, { promise, resolve: resolveWaiter, timer });
+    this.beginSilentCompact(scopeKey);
+
+    log.info({
+      scopeKey,
+      rowId,
+      inputSinceCompact,
+      threshold: this.autoCompactInputTokens,
+    }, 'auto compact triggered');
+
+    void session.sendTurn('/compact').catch((err) => {
+      log.warn({ err, scopeKey, rowId }, 'auto compact send failed');
+      this.clearSilentCompact(scopeKey);
+      this.finishAutoCompact(scopeKey);
+    });
   }
 
   private assertNoActiveUserTurn(scopeKey: string): void {
@@ -955,6 +1062,10 @@ export class AgentRuntime implements Runtime {
     this.pendingTurnText.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
+    this.compactBoundaryScopes.delete(mapKey);
+    this.autoCompactCooldownUntil.delete(mapKey);
+    this.finishAutoCompact(mapKey);
+    this.clearSilentCompact(mapKey);
     // Cancel any pending image coalesce buffer
     this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
     // Clean up operation tracker for this chat
@@ -1130,6 +1241,12 @@ export class AgentRuntime implements Runtime {
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
+    this.autoCompactInputTokens =
+      typeof options?.autoCompactInputTokens === 'number' &&
+      Number.isFinite(options.autoCompactInputTokens) &&
+      options.autoCompactInputTokens > 0
+        ? Math.floor(options.autoCompactInputTokens)
+        : undefined;
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
@@ -2278,6 +2395,8 @@ export class AgentRuntime implements Runtime {
       ? chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspaceKey
       : undefined;
     const crashScopeKey = this.getCrashScopeKey(chatJid);
+    const autoCompact = this.autoCompactWaiters.get(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+    if (autoCompact) await autoCompact.promise;
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
@@ -2490,6 +2609,7 @@ export class AgentRuntime implements Runtime {
       case 'compact_boundary':
         session?.tickWatchdog();
         tracker?.onAnyActivity();
+        this.compactBoundaryScopes.add(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
         if (this.isSilentCompact(mapKey)) {
           log.info({ chatJid: queue.targetChatJid }, 'silent agent compact boundary observed');
           break;
@@ -2523,6 +2643,8 @@ export class AgentRuntime implements Runtime {
 
       case 'result': {
         const wasSilentCompact = this.isSilentCompact(mapKey);
+        const compactScopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+        const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(toolScopeKey);
@@ -2600,6 +2722,22 @@ export class AgentRuntime implements Runtime {
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
           queue.markLastTerminal();
+        }
+        // Only advance the compact baseline when the SDK actually emitted a
+        // compact_boundary on this turn. wasSilentCompact alone means "we
+        // suppressed user-facing chrome for an auto-trigger"; it does not
+        // prove the /compact succeeded. A failed compact must not reset the
+        // baseline, otherwise auto-compact silently disables itself for
+        // another full threshold's worth of tokens. The waiter still
+        // unblocks in either case so the next user turn is not stuck behind
+        // a failed compact.
+        if (hadCompactBoundary && rowId !== null) {
+          markSessionCompacted(this.db, rowId);
+        }
+        if (wasSilentCompact || hadCompactBoundary) {
+          this.finishAutoCompact(compactScopeKey);
+        } else {
+          this.maybeStartAutoCompact(session, mapKey);
         }
         {
           // Capture voice reply context before flush (SP4)
@@ -2987,6 +3125,12 @@ export class AgentRuntime implements Runtime {
     }
     this.silentCompactScopes.clear();
     this.postTurnGate.clear();
+    for (const waiter of this.autoCompactWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+    this.autoCompactWaiters.clear();
+    this.compactBoundaryScopes.clear();
     this.replyGuarantee?.shutdown();
     this.replyGuarantee = null;
 
@@ -3671,6 +3815,14 @@ export class AgentRuntime implements Runtime {
     // Shutdown operation tracker on crash (timers must be cleared)
     this.operationTracker?.shutdown();
     this.operationTracker = null;
+    // If a compact_boundary was already observed before the crash, the SDK
+    // produced a fresh compacted context — persist the baseline before
+    // dropping the flag, so the next turn doesn't immediately re-fire
+    // /compact against a stale lastCompactInputTokens.
+    this.persistBaselineIfBoundaryObserved(GLOBAL_TOOL_SCOPE_KEY, this.session?.getDbRowId() ?? null);
+    this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
+    this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
+    this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
   }
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
@@ -3680,6 +3832,26 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
+    // Persist baseline first if compact_boundary was observed — see
+    // cleanupSharedCrashTurnState for rationale.
+    this.persistBaselineIfBoundaryObserved(mapKey, this.chatSessions.get(mapKey)?.getDbRowId() ?? null);
+    this.consumeCompactBoundary(mapKey);
+    this.finishAutoCompact(mapKey);
+    this.clearSilentCompact(mapKey);
+  }
+
+  /**
+   * On crash cleanup, if compact_boundary was already observed for `scopeKey`
+   * (the SDK emitted boundary but the `result` event never landed), persist
+   * the baseline now. Otherwise the next turn re-fires /compact against a
+   * stale lastCompactInputTokens — one redundant compact per
+   * crash-during-compact.
+   */
+  private persistBaselineIfBoundaryObserved(scopeKey: string, rowId: number | null): void {
+    if (rowId === null) return;
+    if (!this.compactBoundaryScopes.has(scopeKey)) return;
+    markSessionCompacted(this.db, rowId);
+    log.info({ scopeKey, rowId }, 'auto compact baseline persisted on crash cleanup (compact_boundary observed pre-crash)');
   }
 
   /**
@@ -3942,6 +4114,7 @@ export class AgentRuntime implements Runtime {
       case 'compact_boundary':
         this.session?.tickWatchdog();
         tracker?.onAnyActivity();
+        this.compactBoundaryScopes.add(GLOBAL_TOOL_SCOPE_KEY);
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) {
           log.info({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid }, 'silent agent compact boundary observed');
           break;
@@ -3981,6 +4154,7 @@ export class AgentRuntime implements Runtime {
 
       case 'result': {
         const wasSilentCompact = this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
+        const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
@@ -4062,6 +4236,20 @@ export class AgentRuntime implements Runtime {
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
           queue.markLastTerminal();
+        }
+        // Only advance the compact baseline when the SDK actually emitted a
+        // compact_boundary. wasSilentCompact alone means "we suppressed
+        // user-facing chrome for an auto-trigger" and doesn't prove /compact
+        // succeeded — advancing on it silently disables auto-compact for
+        // another threshold's worth of tokens. See the per_chat handler for
+        // the parallel gate.
+        if (hadCompactBoundary && rowId !== null) {
+          markSessionCompacted(this.db, rowId);
+        }
+        if (wasSilentCompact || hadCompactBoundary) {
+          this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
+        } else {
+          this.maybeStartAutoCompact(this.session);
         }
         {
           // Capture voice reply context before flush (SP4)

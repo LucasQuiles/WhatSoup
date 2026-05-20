@@ -333,7 +333,7 @@ Create an agent job bead and schedule trigger. Admin only.
 
 ### create_watch
 
-Create a watch bead and poll trigger. Admin only. TTL defaults and caps come from memory watch policy.
+Create a watch bead and poll trigger. Admin only. TTL defaults and caps come from memory watch policy. See [`docs/runbooks/personal-line-watch.md`](runbooks/personal-line-watch.md) for the personal-line watch recipe, the supported trigger kinds, the `dueTriggers()` runtime gap, and a direct-DB workaround for instances that pre-date the ZodRecord serialisation fix.
 
 | | |
 |---|---|

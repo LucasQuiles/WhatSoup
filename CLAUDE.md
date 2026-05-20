@@ -33,6 +33,8 @@ Four independent processes managed by the platform-appropriate service manager �
 - `sandbox-agent` — sandboxed per-chat agent (tier: chat-scoped per workspace)
 - `chat-bot` — chat API bot, no MCP, no agent
 
+`tier` here is the MCP `SessionContext.tier` (controls tool scope), independent of `agentOptions.sessionScope` (controls agent-session lifetime: `single`/`shared`/`per_chat`).
+
 ### Per-Instance Plugin Scoping
 
 Each agent instance controls which Claude Code plugins it loads via `enabledPlugins` in `agentOptions` (config.json) and `.claude/settings.json` (project-level). Plugins disabled at the instance level are not loaded into the session, saving context.
@@ -50,6 +52,21 @@ Key files:
 - Real SQLite in tests (`:memory:` or temp files), real Unix sockets where needed
 - Tests mirror source structure under `tests/`
 - Run tests with `--pool=forks` for stability: `npx vitest run --pool=forks`
+
+## PR Discipline
+
+**Runbook-and-PR co-update.** When a PR closes a gap that is documented in a runbook (a "not yet wired", "TODO", "not implemented", "runtime gap", or similar marker calling out missing behaviour), the documenting runbook MUST be updated in the same PR. Doc-lying-about-code is a release-blocking defect, not a follow-up. This rule generalises the PR #677/§6 staleness incident.
+
+The fastest check before filing a PR:
+
+```bash
+# Are any of the files I'm touching referenced from a runbook line that
+# claims the behaviour is "not wired" / "TODO" / "not yet implemented"?
+git diff --name-only origin/main..HEAD | xargs -I{} \
+  grep -l "not yet wired\|not wired\|TODO\|not yet implemented\|runtime gap" docs/runbooks/ 2>/dev/null
+```
+
+If anything turns up, read the matched line in context — if your PR closes the gap it describes, update the runbook in the same diff.
 
 ## Documentation
 

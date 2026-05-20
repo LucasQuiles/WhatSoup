@@ -14,6 +14,7 @@ import {
   handleRestart,
   handleConfigUpdate,
   handleCreateLine,
+  handleDeleteLine,
   handleAuth,
 } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
@@ -212,6 +213,78 @@ describe('handleAuth', () => {
 
     child.emit('exit', 0);
     expect(res._ended).toBe(true);
+  });
+
+  it('restarts a stopped instance when auth exits nonzero before connecting', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.emit('exit', 1);
+
+    expect(svc.stop).toHaveBeenCalledWith('test-line');
+    expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._chunks.join('')).toContain('auth exited with code 1');
+    expect(res._ended).toBe(true);
+  });
+
+  it('restarts a stopped instance when auth spawn reports an error before connecting', async () => {
+    const inst = fakeInstance({ name: 'test-line' });
+    const child = fakeChildProcess();
+    vi.mocked(spawn).mockReturnValue(child as any);
+
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+    const req = mockReq('', '/api/lines/test-line/auth');
+    const res = mockSseRes();
+
+    await handleAuth(req, res, deps, { name: 'test-line' });
+    child.emit('error', new Error('spawn failed'));
+
+    expect(svc.stop).toHaveBeenCalledWith('test-line');
+    expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+    expect(res._chunks.join('')).toContain('spawn failed');
+    expect(res._ended).toBe(true);
+  });
+
+  it('restarts a stopped instance when auth times out before connecting', async () => {
+    vi.useFakeTimers();
+    try {
+      const inst = fakeInstance({ name: 'test-line' });
+      const child = fakeChildProcess();
+      vi.mocked(spawn).mockReturnValue(child as any);
+
+      const svc = mockServiceManager();
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), scan: vi.fn() } as any,
+        serviceManager: svc,
+      });
+      const req = mockReq('', '/api/lines/test-line/auth');
+      const res = mockSseRes();
+
+      await handleAuth(req, res, deps, { name: 'test-line' });
+      vi.advanceTimersByTime(5 * 60 * 1000);
+
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(svc.stop).toHaveBeenCalledWith('test-line');
+      expect(svc.startFire).toHaveBeenCalledWith('test-line', expect.any(Function));
+      expect(res._chunks.join('')).toContain('Authentication timed out');
+      expect(res._ended).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -557,6 +630,168 @@ describe('handleRestart', () => {
     await handleRestart(mockReq(), res, deps, { name: 'test-line' });
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body).error).toMatch(/unit not found/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleDeleteLine
+// ---------------------------------------------------------------------------
+
+describe('handleDeleteLine', () => {
+  let tmpDir: string;
+  let originalConfigHome: string | undefined;
+  let originalDataHome: string | undefined;
+  let originalStateHome: string | undefined;
+
+  function seedInstanceDirs(name: string): { configDir: string; dataDir: string; stateDir: string } {
+    const configDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name);
+    const dataDir = path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name);
+    const stateDir = path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name);
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'config.json'), '{"name":"delete-line"}\n');
+    fs.writeFileSync(path.join(dataDir, 'bot.db'), 'db');
+    fs.writeFileSync(path.join(stateDir, 'whatsoup.lock'), 'lock');
+    return { configDir, dataDir, stateDir };
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-delete-test-'));
+    originalConfigHome = process.env.XDG_CONFIG_HOME;
+    originalDataHome = process.env.XDG_DATA_HOME;
+    originalStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'config');
+    process.env.XDG_DATA_HOME = path.join(tmpDir, 'data');
+    process.env.XDG_STATE_HOME = path.join(tmpDir, 'state');
+  });
+
+  afterEach(() => {
+    if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalDataHome;
+    if (originalStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = originalStateHome;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('preserves instance state when service stop fails with a non-benign error', async () => {
+    const name = 'delete-line';
+    const dirs = seedInstanceDirs(name);
+    const svc = mockServiceManager();
+    svc.stop.mockRejectedValueOnce(new Error('systemd timed out while stopping'));
+    const deps = makeDeps({
+      discovery: { scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    expect(svc.disable).not.toHaveBeenCalled();
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(fs.existsSync(dirs.configDir)).toBe(true);
+    expect(fs.existsSync(dirs.dataDir)).toBe(true);
+    expect(fs.existsSync(dirs.stateDir)).toBe(true);
+  });
+
+  it('preserves instance state when service disable fails with a non-benign error', async () => {
+    const name = 'delete-line';
+    const dirs = seedInstanceDirs(name);
+    const svc = mockServiceManager();
+    svc.disable.mockRejectedValueOnce(new Error('permission denied disabling service'));
+    const deps = makeDeps({
+      discovery: { scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/disable failed/);
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(fs.existsSync(dirs.configDir)).toBe(true);
+    expect(fs.existsSync(dirs.dataDir)).toBe(true);
+    expect(fs.existsSync(dirs.stateDir)).toBe(true);
+  });
+
+  it('deletes instance state when service stop and disable report already absent', async () => {
+    const name = 'delete-line';
+    const dirs = seedInstanceDirs(name);
+    const svc = mockServiceManager();
+    const unit = ['whatsoup', `${name}.service`].join('@');
+    svc.stop.mockRejectedValueOnce(new Error(`unit ${unit} not found`));
+    svc.disable.mockRejectedValueOnce(new Error(`unit ${unit} not loaded`));
+    const deps = makeDeps({
+      discovery: { scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual({ deleted: name });
+    expect(deps.discovery.scan).toHaveBeenCalledTimes(1);
+    expect(deps.realtime.publish).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(dirs.configDir)).toBe(false);
+    expect(fs.existsSync(dirs.dataDir)).toBe(false);
+    expect(fs.existsSync(dirs.stateDir)).toBe(false);
+  });
+
+  it('deletes instance state when launchd stop reports the service is already absent', async () => {
+    const name = 'delete-line';
+    const dirs = seedInstanceDirs(name);
+    const svc = mockServiceManager();
+    svc.stop.mockRejectedValueOnce(Object.assign(
+      new Error('Command failed: launchctl stop com.whatsoup.delete-line'),
+      { code: 3 },
+    ));
+    const deps = makeDeps({
+      discovery: { scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+
+    expect(res._status).toBe(200);
+    expect(JSON.parse(res._body)).toEqual({ deleted: name });
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(deps.discovery.scan).toHaveBeenCalledTimes(1);
+    expect(deps.realtime.publish).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(dirs.configDir)).toBe(false);
+    expect(fs.existsSync(dirs.dataDir)).toBe(false);
+    expect(fs.existsSync(dirs.stateDir)).toBe(false);
+  });
+
+  it('preserves instance state when a non-service command is missing', async () => {
+    const name = 'delete-line';
+    const dirs = seedInstanceDirs(name);
+    const svc = mockServiceManager();
+    svc.stop.mockRejectedValueOnce(new Error('command not found: launchctl stop com.whatsoup.delete-line'));
+    const deps = makeDeps({
+      discovery: { scan: vi.fn() } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleDeleteLine(mockReq('', `/api/lines/${name}`), res, deps, { name });
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    expect(svc.disable).not.toHaveBeenCalled();
+    expect(deps.discovery.scan).not.toHaveBeenCalled();
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    expect(fs.existsSync(dirs.configDir)).toBe(true);
+    expect(fs.existsSync(dirs.dataDir)).toBe(true);
+    expect(fs.existsSync(dirs.stateDir)).toBe(true);
   });
 });
 
@@ -932,6 +1167,80 @@ describe('handleCreateLine', () => {
     expect(res._status).toBe(409);
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).sentinel).toBe(true);
     expect(svc.enable).not.toHaveBeenCalled();
+  });
+
+  it('disables the service when creation fails after enabling it', async () => {
+    const name = 'enable-rollback';
+    const svc = mockServiceManager();
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(() => {
+          throw new Error('scan failed after enable');
+        }),
+      } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'chat',
+        adminPhones: ['18459780919'],
+        healthPort: 3202,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body).error).toMatch(/scan failed after enable/);
+    expect(svc.enable).toHaveBeenCalledWith(name);
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+  });
+
+  it('preserves partial state when post-enable rollback cannot disable the service', async () => {
+    const name = 'enable-rollback-fails';
+    const svc = mockServiceManager();
+    svc.disable.mockRejectedValueOnce(new Error('disable failed'));
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(() => {
+          throw new Error('scan failed after enable');
+        }),
+      } as any,
+      serviceManager: svc,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name,
+        type: 'chat',
+        adminPhones: ['18459780919'],
+        healthPort: 3203,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toEqual({
+      error: 'instance creation failed: scan failed after enable',
+      rollbackError: 'service disable failed: disable failed',
+    });
+    expect(svc.enable).toHaveBeenCalledWith(name);
+    expect(svc.disable).toHaveBeenCalledWith(name);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(true);
+    expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(true);
+    expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(true);
   });
 });
 

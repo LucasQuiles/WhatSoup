@@ -44,7 +44,10 @@ Node commands manually:
 export PATH=/opt/homebrew/bin:$PATH
 ```
 
-Launch agent plists should set the same PATH in `EnvironmentVariables`.
+Launch agent plists should set the same PATH in `EnvironmentVariables`. Generated
+WhatSoup instance plists also set `TMPDIR` to a per-instance directory under
+`$XDG_DATA_HOME/whatsoup/tmp/<name>/` so process temp files stay out of macOS
+system-cleaned `/var/folders`.
 
 ## Services
 

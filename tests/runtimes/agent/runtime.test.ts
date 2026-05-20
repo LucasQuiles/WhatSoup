@@ -30,7 +30,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     tickWatchdog: vi.fn(() => {}),
     trackToolStart: vi.fn((_toolId: string) => {}),
     trackToolEnd: vi.fn((_toolId: string) => {}),
-    getDbRowId: vi.fn(() => null),
+    getDbRowId: vi.fn((): number | null => null),
     setDurability: vi.fn((_durability: unknown) => {}),
   };
 
@@ -88,9 +88,17 @@ const { mockGetActiveSession } = vi.hoisted(() => {
   return { mockGetActiveSession: vi.fn(() => null as ActiveSessionRow) };
 });
 
-const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat } = vi.hoisted(() => ({
+const { mockBackfillWorkspaceKeys, mockGetResumableSessionForChat, mockGetSessionTokenSnapshot, mockMarkSessionCompacted, mockAccumulateTokensWithEvent } = vi.hoisted(() => ({
   mockBackfillWorkspaceKeys: vi.fn(),
   mockGetResumableSessionForChat: vi.fn(() => null as { id: number; session_id: string; chat_jid: string } | null),
+  mockGetSessionTokenSnapshot: vi.fn(() => null as {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    lastCompactInputTokens: number;
+    lastCompactOutputTokens: number;
+  } | null),
+  mockMarkSessionCompacted: vi.fn(),
+  mockAccumulateTokensWithEvent: vi.fn(),
 }));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
@@ -105,6 +113,9 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   markOrphaned: vi.fn(),
   getResumableSessionForChat: mockGetResumableSessionForChat,
   backfillSessionProvider: vi.fn(),
+  accumulateTokensWithEvent: mockAccumulateTokensWithEvent,
+  getSessionTokenSnapshot: mockGetSessionTokenSnapshot,
+  markSessionCompacted: mockMarkSessionCompacted,
 }));
 
 vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
@@ -464,8 +475,12 @@ describe('AgentRuntime', () => {
     mockSession.spawnSession.mockResolvedValue(undefined);
     mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.sendTurn.mockResolvedValue(undefined);
+    mockSession.getDbRowId.mockReturnValue(null);
     mockGetActiveSession.mockReturnValue(null);
     mockGetResumableSessionForChat.mockReturnValue(null);
+    mockGetSessionTokenSnapshot.mockReturnValue(null);
+    mockMarkSessionCompacted.mockClear();
+    mockAccumulateTokensWithEvent.mockClear();
     mockChatJidToWorkspace.mockImplementation((_instanceCwd: string, chatJid: string) => {
       const key = chatJid.replace('@s.whatsapp.net', '').replace('@lid', '');
       return { kind: 'dm' as const, workspaceKey: key, workspacePath: `/tmp/${key}` };
@@ -589,6 +604,280 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       allowM365Mutations: true,
     });
+  });
+
+  it('auto-compacts silently and advances baseline only after compact_boundary', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot
+      .mockReturnValueOnce({
+        totalInputTokens: 250,
+        totalOutputTokens: 5,
+        lastCompactInputTokens: 100,
+        lastCompactOutputTokens: 0,
+      })
+      .mockReturnValue({
+        totalInputTokens: 260,
+        totalOutputTokens: 6,
+        lastCompactInputTokens: 260,
+        lastCompactOutputTokens: 6,
+      });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    // Emit the SDK's compact_boundary first, then the terminating result.
+    capturedOnEventRef.current?.({ type: 'compact_boundary' });
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
+    expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
+  });
+
+  it('does not advance the baseline when the auto-compact result arrives without a compact_boundary', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 250,
+      totalOutputTokens: 5,
+      lastCompactInputTokens: 100,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+    // No compact_boundary — only a terminating result (failed compact case).
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('initialises baseline silently for existing sessions already over threshold (no compact storm on rollout)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    // lastCompactInputTokens=0 + totalInputTokens past threshold = bootstrap path
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 5_000_000,
+      totalOutputTokens: 1000,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 5_000_000, outputTokens: 1000 });
+    await Promise.resolve();
+
+    // Baseline initialised silently; /compact never fired on the agent.
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+  });
+
+  it('persists baseline on crash cleanup when compact_boundary was observed before the crash', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const scopeKey = 'test@s.whatsapp.net';
+    (runtime as unknown as { compactBoundaryScopes: Set<string> }).compactBoundaryScopes.add(scopeKey);
+
+    (runtime as unknown as {
+      persistBaselineIfBoundaryObserved: (k: string, r: number | null) => void;
+    }).persistBaselineIfBoundaryObserved(scopeKey, 42);
+
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not persist baseline on crash cleanup when no compact_boundary was observed', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const scopeKey = 'test@s.whatsapp.net';
+
+    (runtime as unknown as {
+      persistBaselineIfBoundaryObserved: (k: string, r: number | null) => void;
+    }).persistBaselineIfBoundaryObserved(scopeKey, 42);
+
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('does not persist baseline on crash cleanup when rowId is null even if boundary was observed', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const scopeKey = 'test@s.whatsapp.net';
+    (runtime as unknown as { compactBoundaryScopes: Set<string> }).compactBoundaryScopes.add(scopeKey);
+
+    (runtime as unknown as {
+      persistBaselineIfBoundaryObserved: (k: string, r: number | null) => void;
+    }).persistBaselineIfBoundaryObserved(scopeKey, null);
+
+    expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('initialises baseline at the exact threshold boundary (>= not >)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    // total === threshold exactly: bootstrap MUST trigger; pre-fix used > and missed this case.
+    mockGetSessionTokenSnapshot.mockReturnValue({
+      totalInputTokens: 100,
+      totalOutputTokens: 0,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 100, outputTokens: 0 });
+    await Promise.resolve();
+
+    expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
+    expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+  });
+
+  it('waits for an in-flight auto-compact before sending the next turn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'session-1',
+      startedAt: '2026-05-18T00:00:00.000Z',
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    mockSession.getDbRowId.mockReturnValue(42);
+    mockGetSessionTokenSnapshot
+      .mockReturnValueOnce({
+        totalInputTokens: 250,
+        totalOutputTokens: 5,
+        lastCompactInputTokens: 100,
+        lastCompactOutputTokens: 0,
+      })
+      .mockReturnValue({
+        totalInputTokens: 260,
+        totalOutputTokens: 6,
+        lastCompactInputTokens: 260,
+        lastCompactOutputTokens: 6,
+      });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+    await Promise.resolve();
+
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(1, 'hello');
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(2, '/compact');
+
+    const followUp = sendAndDrain(runtime, makeMsg({ content: 'follow-up' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
+
+    capturedOnEventRef.current?.({ type: 'compact_boundary' });
+    capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
+    await followUp;
+
+    expect(mockSession.sendTurn).toHaveBeenNthCalledWith(3, 'follow-up');
+  });
+
+  it('does not retry auto-compact within the cooldown window after a timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockSession.getStatus.mockReturnValue({
+        active: true,
+        pid: 123,
+        sessionId: 'session-1',
+        startedAt: '2026-05-18T00:00:00.000Z',
+        messageCount: 1,
+        lastMessageAt: null,
+      });
+      mockSession.getDbRowId.mockReturnValue(42);
+      // lastCompactInputTokens > 0 so the rollout-bootstrap path does not
+      // kick in for this scenario; we want to exercise the cooldown branch
+      // after a real /compact attempt times out.
+      mockGetSessionTokenSnapshot.mockReturnValue({
+        totalInputTokens: 250,
+        totalOutputTokens: 5,
+        lastCompactInputTokens: 100,
+        lastCompactOutputTokens: 0,
+      });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+      await Promise.resolve();
+
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      // Advance past the 2-minute compact timeout - no compact_boundary event arrived.
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000 + 100);
+
+      // A subsequent result event would normally trigger maybeStartAutoCompact again.
+      // With the cooldown in place, /compact must NOT be re-sent.
+      mockSession.sendTurn.mockClear();
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 200, outputTokens: 10 });
+      await Promise.resolve();
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {

@@ -3,11 +3,12 @@
 // Ported from legacy whatsapp-bot/src/runtimes/agent/media-bridge.ts.
 
 import { createServer, type Server, type Socket } from 'node:net';
-import { createReadStream, statSync, unlinkSync, realpathSync } from 'node:fs';
+import { statSync, unlinkSync, realpathSync } from 'node:fs';
 import { resolve, extname, dirname, basename, join } from 'node:path';
 import type { Messenger, OutboundMedia } from '../../core/types.ts';
 import { isPathWithinAllowedRoot } from '../../mcp/types.ts';
 import { createChildLogger } from '../../logger.ts';
+import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 
 const log = createChildLogger('media-bridge');
 
@@ -63,6 +64,25 @@ function destroyOutboundMediaStream(media: OutboundMedia): void {
   if (media.stream === undefined) return;
   media.stream.on('error', () => {});
   media.stream.destroy();
+}
+
+function buildOutboundMediaFromPath(
+  mediaType: MediaType,
+  resolvedPath: string,
+  filename: string,
+  mimetype: string,
+  caption: string | undefined,
+): OutboundMedia {
+  switch (mediaType) {
+    case 'image':
+      return { type: 'image', stream: createMediaReadStream(resolvedPath, log), mimetype, caption };
+    case 'audio':
+      return { type: 'audio', stream: createMediaReadStream(resolvedPath, log), mimetype };
+    case 'video':
+      return { type: 'video', stream: createMediaReadStream(resolvedPath, log), mimetype, caption };
+    default:
+      return { type: 'document', stream: createMediaReadStream(resolvedPath, log), filename, mimetype, caption };
+  }
 }
 
 // ─── Bridge handle ────────────────────────────────────────────────────────────
@@ -248,29 +268,23 @@ async function handleRequest(
       ? req.filename
       : resolvedPath.split('/').pop() ?? 'file';
 
-  let media: OutboundMedia;
-  switch (mediaType) {
-    case 'image':
-      media = { type: 'image', stream: createReadStream(resolvedPath), mimetype, caption };
-      break;
-    case 'audio':
-      media = { type: 'audio', stream: createReadStream(resolvedPath), mimetype };
-      break;
-    case 'video':
-      media = { type: 'video', stream: createReadStream(resolvedPath), mimetype, caption };
-      break;
-    default:
-      media = { type: 'document', stream: createReadStream(resolvedPath), filename, mimetype, caption };
-      break;
-  }
-
-  try {
-    await messenger.sendMedia(chatJid, media);
-    log.info({ chatJid, mediaType, ext }, 'media sent');
-    return { ok: true };
-  } catch (err) {
-    destroyOutboundMediaStream(media);
-    log.error({ err, chatJid }, 'sendMedia failed');
-    return { ok: false, error: 'failed to send media — try again' };
+  for (let attempt = 0; ; attempt += 1) {
+    const media = buildOutboundMediaFromPath(mediaType, resolvedPath, filename, mimetype, caption);
+    try {
+      await messenger.sendMedia(chatJid, media);
+      log.info({ chatJid, mediaType, ext }, 'media sent');
+      return { ok: true };
+    } catch (err) {
+      destroyOutboundMediaStream(media);
+      if (attempt === 0 && isBaileysEncryptedTmpEnoent(err)) {
+        log.warn(
+          { err, chatJid, mediaType, path: err.path },
+          'baileys encrypted tmp file vanished during media bridge send; retrying with fresh stream',
+        );
+        continue;
+      }
+      log.error({ err, chatJid }, 'sendMedia failed');
+      return { ok: false, error: 'failed to send media — try again' };
+    }
   }
 }

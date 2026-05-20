@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
 import { createAnthropicProvider } from './runtimes/chat/providers/anthropic.ts';
@@ -42,10 +43,13 @@ import { isAdminPhone } from './lib/phone.ts';
 import { handleGroupsUpsert, handleGroupsUpdate } from './core/group-sync.ts';
 import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
+import { ProcessTmpRetentionTimer, DEFAULT_PROCESS_TMP_RETENTION } from './core/process-tmp-retention.ts';
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
+import { TriggerPoller } from './core/substrate/poller.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
+import { shutdownExitCode } from './main-shutdown-policy.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -239,19 +243,22 @@ if (instanceType === 'agent') {
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
+    autoCompactInputTokens?: number;
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
+  const agentModel = resolveAgentModel(instanceConfig);
   runtime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
     instructionsPath: agentOpts?.instructionsPath,
     sandbox: agentOpts?.sandbox,
-    model: instanceConfig?.model as string | undefined,
+    model: agentModel,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
     pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
+    autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
   });
 } else if (instanceType === 'passive') {
   runtime = new PassiveRuntime(db, connectionManager, {
@@ -649,6 +656,12 @@ const mediaRetentionTimer = new MediaRetentionTimer(mediaBaseDir, db, {
 });
 mediaRetentionTimer.start(config.mediaRetention.intervalHours * 60 * 60 * 1000);
 
+const processTmpRetentionTimer = new ProcessTmpRetentionTimer(
+  process.env.TMPDIR ?? join(config.dataRoot, 'tmp'),
+  DEFAULT_PROCESS_TMP_RETENTION,
+);
+processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
+
 const databaseRetentionTimer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
 
@@ -695,6 +708,13 @@ const messageScheduler = new MessageScheduler(db, connectionManager, {
 });
 messageScheduler.recoverStale();
 messageScheduler.start();
+
+// 16a. Substrate trigger poller — drains bead_triggers.next_fire_at on a
+// 30s interval and dispatches poll.sqlite / schedule.* watches to their
+// report_chat_jid. Other kinds in SPEC_REGISTRY are recognised but no-op
+// for now (see src/core/substrate/poller.ts header).
+const triggerPoller = new TriggerPoller(db.raw, connectionManager);
+triggerPoller.start();
 
 // 17. Seed contacts directory from message history (so @name mentions work after restart)
 {
@@ -792,12 +812,14 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(metricsInterval);
     clearInterval(retentionInterval);
     mediaRetentionTimer.stop();
+    processTmpRetentionTimer.stop();
     databaseRetentionTimer.stop();
     await memoryConsolidationScheduler?.stop();
     clearInterval(echoTimeoutInterval);
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
     messageScheduler.stop();
+    triggerPoller.stop();
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally
@@ -813,7 +835,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(timeout);
     // Flush pino-roll transport before exit (async — waits up to 2s)
     await flushLogger();
-    process.exit(0);
+    process.exit(shutdownExitCode(signal));
   }
 }
 
@@ -831,15 +853,15 @@ process.on('uncaughtException', (err) => {
   }
 
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
-  if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
-  const done = shutdown('uncaughtException').then(() => process.exit(1));
+  if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
+  const done = shutdown('uncaughtException');
   setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
-  if (shutdownInProgress) return;  // Don't race with clean shutdown's process.exit(0)
-  const done = shutdown('unhandledRejection').then(() => process.exit(1));
+  if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
+  const done = shutdown('unhandledRejection');
   setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
@@ -852,5 +874,5 @@ process.on('exit', (code) => {
 
 start().catch((err) => {
   log.fatal({ err }, 'failed to start');
-  shutdown('startupError').then(() => process.exit(1));
+  shutdown('startupError').catch(() => process.exit(1));
 });

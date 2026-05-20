@@ -393,6 +393,11 @@ process.env.LOG_DIR = logDir;
 
 const mediaDir = instance ? (instance.paths.mediaDir as string) : join(dataRoot, 'media', 'tmp');
 mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
+const processTmpDir = instance && typeof instance.paths.tmpDir === 'string'
+  ? instance.paths.tmpDir as string
+  : join(dataRoot, 'tmp');
+mkdirSync(processTmpDir, { recursive: true, mode: 0o700 });
+process.env.TMPDIR = processTmpDir;
 // Ensure media/cache/ sibling directory exists alongside media/tmp/ (SP7)
 mkdirSync(join(mediaDir, '..', 'cache'), { recursive: true, mode: 0o700 });
 
@@ -818,6 +823,7 @@ export const config = {
 
   // Media
   mediaDir,
+  tmpDir: processTmpDir,
 
   // Per-instance seed data for chat_aliases.
   chatAliases: stringRecordProp(instance, 'chatAliases'),

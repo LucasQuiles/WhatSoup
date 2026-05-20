@@ -2,7 +2,7 @@
 // Media sending tool with filesystem boundary enforcement.
 
 import { z } from 'zod';
-import { createReadStream, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
 import { extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
@@ -13,11 +13,16 @@ import { createChildLogger } from '../../logger.ts';
 import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
-import { assertConversationAccess, isPathWithinAllowedRoot, type SessionContext } from '../types.ts';
+import { assertConversationAccess, isPathWithinAllowedRoot, toolError, type SessionContext } from '../types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
+import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 
 const log = createChildLogger('mcp:media');
+
+function errorResult<T extends Record<string, unknown>>(payload: T) {
+  return toolError(payload);
+}
 
 // ---------------------------------------------------------------------------
 // Deps interface
@@ -63,6 +68,35 @@ function destroyOutboundMediaStream(media: OutboundMedia): void {
   if (media.stream === undefined) return;
   media.stream.on('error', () => {});
   media.stream.destroy();
+}
+
+function buildSendMediaPayload(
+  type: OutboundMedia['type'],
+  resolved: string,
+  basename: string,
+  mime: string,
+  params: {
+    caption?: string;
+    viewOnce?: boolean;
+    ptt?: boolean;
+    seconds?: number;
+    ptv?: boolean;
+    gifPlayback?: boolean;
+    isAnimated?: boolean;
+  },
+): OutboundMedia {
+  switch (type) {
+    case 'image':
+      return { type: 'image', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, viewOnce: params.viewOnce };
+    case 'document':
+      return { type: 'document', stream: createMediaReadStream(resolved, log), filename: basename, mimetype: mime, caption: params.caption };
+    case 'audio':
+      return { type: 'audio', stream: createMediaReadStream(resolved, log), mimetype: mime, ptt: params.ptt, seconds: params.seconds };
+    case 'video':
+      return { type: 'video', stream: createMediaReadStream(resolved, log), caption: params.caption, mimetype: mime, ptv: params.ptv, gifPlayback: params.gifPlayback, viewOnce: params.viewOnce };
+    case 'sticker':
+      return { type: 'sticker', stream: createMediaReadStream(resolved, log), mimetype: mime, isAnimated: params.isAnimated };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,11 +155,11 @@ export function registerMediaTools(
       try {
         resolved = realpathSync(filePath);
       } catch {
-        return { error: `File not found: ${filePath}` };
+        return errorResult({ error: `File not found: ${filePath}` });
       }
 
       if (!isPathWithinAllowedRoot(resolved, session.allowedRoot)) {
-        return { error: `Path outside workspace: ${filePath}` };
+        return errorResult({ error: `Path outside workspace: ${filePath}` });
       }
 
       // ── File size check ────────────────────────────────────────────────
@@ -135,13 +169,13 @@ export function registerMediaTools(
         const stat = statSync(resolved);
         fileSize = stat.size;
       } catch {
-        return { error: `Cannot stat file: ${filePath}` };
+        return errorResult({ error: `Cannot stat file: ${filePath}` });
       }
 
       if (fileSize > MAX_FILE_SIZE_BYTES) {
-        return {
+        return errorResult({
           error: `File too large: ${(fileSize / 1024 / 1024).toFixed(1)} MB (limit 50 MB)`,
-        };
+        });
       }
 
       // ── MIME inference ────────────────────────────────────────────────
@@ -149,41 +183,31 @@ export function registerMediaTools(
       const ext = extname(resolved).toLowerCase();
       const mediaInfo = EXTENSION_MAP[ext];
       if (!mediaInfo) {
-        return {
+        return errorResult({
           error: `Unsupported file extension "${ext}". Supported: ${Object.keys(EXTENSION_MAP).join(', ')}`,
-        };
+        });
       }
 
       // ── Build OutboundMedia ───────────────────────────────────────────
 
-      let media: OutboundMedia;
       const basename = filenameOverride ?? resolved.split('/').pop() ?? 'file';
       const effectiveType = mediaTypeOverride ?? mediaInfo.type;
       const mime = mediaInfo.mime;
+      const mediaParams = { caption, viewOnce, ptt, seconds, ptv, gifPlayback, isAnimated };
 
-      switch (effectiveType) {
-        case 'image':
-          media = { type: 'image', stream: createReadStream(resolved), caption, mimetype: mime, viewOnce };
+      for (let attempt = 0; ; attempt += 1) {
+        const media = buildSendMediaPayload(effectiveType, resolved, basename, mime, mediaParams);
+        try {
+          await connection.sendMedia(chatJid, media);
           break;
-        case 'document':
-          media = { type: 'document', stream: createReadStream(resolved), filename: basename, mimetype: mime, caption };
-          break;
-        case 'audio':
-          media = { type: 'audio', stream: createReadStream(resolved), mimetype: mime, ptt, seconds };
-          break;
-        case 'video':
-          media = { type: 'video', stream: createReadStream(resolved), caption, mimetype: mime, ptv, gifPlayback, viewOnce };
-          break;
-        case 'sticker':
-          media = { type: 'sticker', stream: createReadStream(resolved), mimetype: mime, isAnimated };
-          break;
-      }
-
-      try {
-        await connection.sendMedia(chatJid, media);
-      } catch (err) {
-        destroyOutboundMediaStream(media);
-        throw err;
+        } catch (err) {
+          destroyOutboundMediaStream(media);
+          if (attempt > 0 || !isBaileysEncryptedTmpEnoent(err)) throw err;
+          log.warn(
+            { chatJid, mediaType: effectiveType, path: err.path },
+            'baileys encrypted tmp file vanished during send_media; retrying with fresh stream',
+          );
+        }
       }
 
       return {
@@ -221,14 +245,14 @@ export function registerMediaTools(
       ).get(messageId) as Pick<MessageRow, 'message_id' | 'conversation_key' | 'content_type' | 'media_path'> & { raw_message: string | null } | undefined;
 
       if (!row) {
-        return { error: 'not_found', message: `No message found with ID: ${messageId}` };
+        return errorResult({ error: 'not_found', message: `No message found with ID: ${messageId}` });
       }
 
       assertConversationAccess(row.conversation_key, session, 'Media message');
 
       // Reject non-media types unless we are explicitly targeting quoted media.
       if (!quoted && !MEDIA_CONTENT_TYPES.has(row.content_type)) {
-        return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
+        return errorResult({ error: 'unsupported_type', message: 'Message does not contain downloadable media.' });
       }
 
       // Return cached path if file still exists on disk — but only if it's under the managed
@@ -257,7 +281,7 @@ export function registerMediaTools(
 
       // Need raw_message to attempt download
       if (!row.raw_message) {
-        return { error: 'no_raw_message', message: 'Message has no raw data for media download. Media may not have been stored.' };
+        return errorResult({ error: 'no_raw_message', message: 'Message has no raw data for media download. Media may not have been stored.' });
       }
 
       // Parse raw_message and attempt download
@@ -265,12 +289,12 @@ export function registerMediaTools(
       try {
         rawMsg = JSON.parse(row.raw_message);
       } catch {
-        return { error: 'no_raw_message', message: 'Cannot parse raw message data.' };
+        return errorResult({ error: 'no_raw_message', message: 'Cannot parse raw message data.' });
       }
 
       const quotedMedia = quoted ? extractQuotedMedia(rawMsg) : null;
       if (quoted && !quotedMedia) {
-        return { error: 'no_quoted_media', message: 'Message does not quote downloadable media.' };
+        return errorResult({ error: 'no_quoted_media', message: 'Message does not quote downloadable media.' });
       }
 
       const effectiveContentType = quotedMedia?.contentType ?? row.content_type;
@@ -287,7 +311,7 @@ export function registerMediaTools(
 
       const typeInfo = mimeMap[effectiveContentType];
       if (!typeInfo) {
-        return { error: 'unsupported_type', message: 'Message does not contain downloadable media.' };
+        return errorResult({ error: 'unsupported_type', message: 'Message does not contain downloadable media.' });
       }
 
       const mime = extractRawMime(downloadTarget, effectiveContentType) ?? typeInfo.defaultMime;
@@ -305,17 +329,17 @@ export function registerMediaTools(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/timed? ?out/i.test(msg)) {
-          return { error: 'download_timeout', message: 'Media download timed out after 30s.' };
+          return errorResult({ error: 'download_timeout', message: 'Media download timed out after 30s.' });
         }
         if (/404|410|gone|expired/i.test(msg)) {
-          return { error: 'media_expired', message: 'WhatsApp media URL has expired. Media is only available for download within hours of receipt.' };
+          return errorResult({ error: 'media_expired', message: 'WhatsApp media URL has expired. Media is only available for download within hours of receipt.' });
         }
         log.error({ err, messageId }, 'download_media failed');
-        return { error: 'download_failed', message: 'Media download failed.' };
+        return errorResult({ error: 'download_failed', message: 'Media download failed.' });
       }
 
       if (!result) {
-        return { error: 'download_failed', message: 'Media download failed. The URL may have expired or the file exceeds the 25MB limit.' };
+        return errorResult({ error: 'download_failed', message: 'Media download failed. The URL may have expired or the file exceeds the 25MB limit.' });
       }
 
       // Determine file extension — for documents, try original filename
@@ -377,13 +401,13 @@ export function registerMediaTools(
       } | undefined;
 
       if (!row) {
-        return { error: 'not_found', message: `No message found with ID: ${messageId}` };
+        return errorResult({ error: 'not_found', message: `No message found with ID: ${messageId}` });
       }
 
       assertConversationAccess(row.conversation_key, session, 'Audio message');
 
       if (row.content_type !== 'audio') {
-        return { error: 'not_audio', message: `Message is type "${row.content_type}", not audio.` };
+        return errorResult({ error: 'not_audio', message: `Message is type "${row.content_type}", not audio.` });
       }
 
       // Check for cached transcription in content_text
@@ -419,7 +443,7 @@ export function registerMediaTools(
         try {
           rawMsg = JSON.parse(row.raw_message);
         } catch {
-          return { error: 'no_audio_data', message: 'Cannot parse raw message data for audio download.' };
+          return errorResult({ error: 'no_audio_data', message: 'Cannot parse raw message data for audio download.' });
         }
 
         const mime = extractRawMime(rawMsg, 'audio') ?? 'audio/ogg';
@@ -443,14 +467,14 @@ export function registerMediaTools(
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           if (/404|410|gone|expired/i.test(msg)) {
-            return { error: 'media_expired', message: 'Audio media URL has expired.' };
+            return errorResult({ error: 'media_expired', message: 'Audio media URL has expired.' });
           }
-          return { error: 'download_failed', message: 'Failed to download audio for transcription.' };
+          return errorResult({ error: 'download_failed', message: 'Failed to download audio for transcription.' });
         }
       }
 
       if (!audioBuffer) {
-        return { error: 'no_audio_data', message: 'No audio data available. Media path missing and raw message unavailable.' };
+        return errorResult({ error: 'no_audio_data', message: 'No audio data available. Media path missing and raw message unavailable.' });
       }
 
       // Transcribe via the shared transcription chain
@@ -458,7 +482,7 @@ export function registerMediaTools(
       const transcription = await transcribeAudio(audioBuffer, audioMime);
 
       if (!transcription || transcription.includes('transcription unavailable')) {
-        return { error: 'transcription_failed', message: 'Transcription failed or is unavailable.' };
+        return errorResult({ error: 'transcription_failed', message: 'Transcription failed or is unavailable.' });
       }
 
       // Persist transcription

@@ -26,6 +26,13 @@ if [ -z "$NVMRC_VERSION" ]; then
   echo "FATAL: cannot read Node version from $REPO_ROOT/.nvmrc" >&2
   exit 1
 fi
+# Gate requires a dotted version (e.g. 24.15.0) for the -lt arithmetic
+# comparison. lts/iron, latest, or any non-numeric leading value would
+# silently disable the gate.
+if ! printf '%s' "$NVMRC_VERSION" | grep -qE '^[0-9]'; then
+  echo "FATAL: .nvmrc must be a dotted version (e.g. 24.15.0), not '$NVMRC_VERSION'" >&2
+  exit 1
+fi
 DEFAULT_NODE="$HOME/.nvm/versions/node/v${NVMRC_VERSION}/bin/node"
 NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
 if [ ! -x "$NODE" ]; then
@@ -33,6 +40,32 @@ if [ ! -x "$NODE" ]; then
 fi
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
   echo "FATAL: node not found. Set WHATSOUP_NODE or install node v${NVMRC_VERSION}." >&2
+  exit 1
+fi
+
+# Version-compatibility gate: the entrypoint passes --experimental-strip-types,
+# which requires Node >= 22.6 (and the repo pins a specific major via .nvmrc).
+# Without this gate, a wrapper that resolved to a too-old Node via the
+# command -v fallback would exec, hit status 9 on the unknown option, and
+# crash-loop under systemd. See incident 2026-05-18 17:12 EDT.
+required_major="${NVMRC_VERSION%%.*}"
+node_major="$("$NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ -z "$node_major" ] || [ "$node_major" -lt "$required_major" ] 2>/dev/null; then
+  resolved_version="$("$NODE" --version 2>/dev/null || echo "unknown")"
+  cat >&2 <<EOF
+FATAL: resolved Node is incompatible with WhatSoup entrypoint
+  Pinned (.nvmrc): v${NVMRC_VERSION} (requires major >= ${required_major})
+  Resolved:        ${NODE}
+  Version:         ${resolved_version}
+
+The entrypoint requires Node >= 22.6 for native TypeScript stripping.
+A resolved Node older than the pinned major will exit status 9 at exec.
+
+Install the pinned version on this host:
+  . \$HOME/.nvm/nvm.sh && nvm install ${NVMRC_VERSION}
+
+Or override with WHATSOUP_NODE=/path/to/compatible/node.
+EOF
   exit 1
 fi
 

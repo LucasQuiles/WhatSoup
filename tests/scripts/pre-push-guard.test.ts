@@ -15,6 +15,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
+const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
 
 describe('pre-push guard classifier', () => {
   it('classifies delete-only ref updates as metadata-only', () => {
@@ -96,6 +97,31 @@ describe('verify chain composition (package.json)', () => {
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:work-index\b/);
   });
+
+  it('verify:release invokes the test-integrity baseline gate', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
+  });
+
+  it('verify:push:branch invokes the test-integrity baseline gate', () => {
+    // Regression guard: PR #677 surfaced that verify:push:branch did NOT run
+    // guard:test-integrity, so a weak-assertion violation slipped past the
+    // local pre-push hook and was caught only by CI. The CI quality job runs
+    // this gate; the local push gate must too so the dev cycle is fail-fast.
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
+  });
+
+  it('verify:release invokes the standalone whatsoup guard package checks', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard ci\b/);
+    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard run typecheck\b/);
+    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard test\b/);
+  });
+
   it('verify:release invokes full publication audit guard', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
@@ -117,5 +143,18 @@ describe('verify chain composition (package.json)', () => {
     expect(chain.indexOf('npm run guard:publication:release')).toBeLessThan(
       chain.indexOf('npm run verify:release'),
     );
+  });
+});
+
+describe('quality workflow composition', () => {
+  it('installs the private test-integrity plugin before requiring the baseline gate', () => {
+    const installIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
+    const gateIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
+
+    expect(installIndex).toBeGreaterThanOrEqual(0);
+    expect(gateIndex).toBeGreaterThan(installIndex);
+    expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
+    expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
+    expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
   });
 });

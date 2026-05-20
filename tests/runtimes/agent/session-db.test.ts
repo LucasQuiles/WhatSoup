@@ -14,6 +14,8 @@ import {
   accumulateSessionTokens,
   insertTokenEvent,
   accumulateTokensWithEvent,
+  getSessionTokenSnapshot,
+  markSessionCompacted,
   backfillWorkspaceKeys,
   markOrphaned,
   getResumableSessionForChat,
@@ -365,6 +367,42 @@ describe('agent session-db', () => {
     expect(eventSum.total_out).toBe(session.total_output_tokens);
     expect(eventSum.total_in).toBe(350);
     expect(eventSum.total_out).toBe(150);
+  });
+
+  it('tracks the token baseline from the last successful compact', () => {
+    const id = createSession(db, 80003, '/tmp/token-compact');
+    accumulateSessionTokens(db, id, 600, 25);
+
+    const before = getSessionTokenSnapshot(db, id);
+    expect(before).toEqual({
+      totalInputTokens: 600,
+      totalOutputTokens: 25,
+      lastCompactInputTokens: 0,
+      lastCompactOutputTokens: 0,
+    });
+
+    markSessionCompacted(db, id);
+
+    const afterCompact = db.raw.prepare(
+      `SELECT last_compact_at, last_compact_input_tokens, last_compact_output_tokens
+       FROM agent_sessions WHERE id = ?`,
+    ).get(id) as {
+      last_compact_at: string | null;
+      last_compact_input_tokens: number;
+      last_compact_output_tokens: number;
+    };
+
+    expect(afterCompact.last_compact_at).toMatch(sqliteTimestampPattern);
+    expect(afterCompact.last_compact_input_tokens).toBe(600);
+    expect(afterCompact.last_compact_output_tokens).toBe(25);
+
+    accumulateSessionTokens(db, id, 40, 5);
+    expect(getSessionTokenSnapshot(db, id)).toEqual({
+      totalInputTokens: 640,
+      totalOutputTokens: 30,
+      lastCompactInputTokens: 600,
+      lastCompactOutputTokens: 25,
+    });
   });
 
   it('updateSessionStatus sets ended_at for terminal statuses', () => {

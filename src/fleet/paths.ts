@@ -30,6 +30,10 @@ export function dataRoot(name: string): string {
   return path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'instances', name);
 }
 
+export function tmpRoot(name: string): string {
+  return path.join(xdgDir('XDG_DATA_HOME', '.local/share'), 'whatsoup', 'tmp', name);
+}
+
 export function stateRoot(name: string): string {
   return path.join(xdgDir('XDG_STATE_HOME', '.local/state'), 'whatsoup', 'instances', name);
 }
@@ -43,6 +47,7 @@ export interface InstancePaths {
   logDir: string;
   lockPath: string;
   mediaDir: string;
+  tmpDir: string;
 }
 
 export function instancePaths(name: string): InstancePaths {
@@ -59,5 +64,6 @@ export function instancePaths(name: string): InstancePaths {
     logDir: path.join(data, 'logs'),
     lockPath: path.join(state, 'whatsoup.lock'),
     mediaDir: path.join(data, 'media', 'tmp'),
+    tmpDir: tmpRoot(name),
   };
 }

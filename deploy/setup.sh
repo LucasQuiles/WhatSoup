@@ -88,6 +88,9 @@ echo "  ✓ whatsoup → $REPO_ROOT/deploy/whatsoup"
 ln -sf "$REPO_ROOT/deploy/whatsoup-fleet" "$BIN_DIR/whatsoup-fleet"
 chmod +x "$REPO_ROOT/deploy/whatsoup-fleet"
 echo "  ✓ whatsoup-fleet → $REPO_ROOT/deploy/whatsoup-fleet"
+ln -sf "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh" "$BIN_DIR/whatsoup-ensure-node"
+chmod +x "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
+echo "  ✓ whatsoup-ensure-node → $REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then

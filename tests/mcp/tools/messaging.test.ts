@@ -166,7 +166,7 @@ describe('registerMessagingTools', () => {
         { tier: 'global' },
       );
 
-      expect(result.isError).toBeUndefined();
+      expect(result.isError).toBe(true);
       expect(calls).toHaveLength(0);
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('alias not found: missing');
@@ -185,7 +185,7 @@ describe('registerMessagingTools', () => {
         { tier: 'global' },
       );
 
-      expect(result.isError).toBeUndefined();
+      expect(result.isError).toBe(true);
       expect(calls).toHaveLength(0);
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('chatJid and to are mutually exclusive; provide exactly one');
@@ -200,7 +200,7 @@ describe('registerMessagingTools', () => {
         { tier: 'global', conversationKey: '1234567890' },
       );
 
-      expect(result.isError).toBeUndefined();
+      expect(result.isError).toBe(true);
       expect(calls).toHaveLength(0);
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toMatch(/does not match session conversation/);

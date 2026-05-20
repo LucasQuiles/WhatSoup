@@ -4,11 +4,14 @@ import { z } from 'zod';
 import { JID_PERSONAL } from '../../core/jid-constants.ts';
 import { rowToMessage, type MessageRow } from '../../core/messages.ts';
 import type { Database } from '../../core/database.ts';
+import { createChildLogger } from '../../logger.ts';
+import { isBaileysEncryptedTmpEnoent } from '../../transport/baileys-media-errors.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { isPathWithinAllowedRoot, type SessionContext, type ToolDeclaration, type ExtendedBaileysSocket } from '../types.ts';
 
 const STATUS_BROADCAST_JID = 'status@broadcast';
 const MAX_STATUS_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+const log = createChildLogger('mcp:status');
 
 const STATUS_MEDIA_MAP = {
   '.png': { type: 'image', mimetype: 'image/png' },
@@ -120,6 +123,28 @@ function parseStatusKey(row: StatusRow): Record<string, unknown> {
   }
 }
 
+async function sendStatusWithRetry(
+  sock: ExtendedBaileysSocket,
+  content: Record<string, unknown>,
+  options: Record<string, unknown>,
+  statusType: 'text' | 'image' | 'video',
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await sock.sendMessage(STATUS_BROADCAST_JID, content as any, options as any);
+    } catch (err) {
+      if (statusType === 'text' || attempt > 0 || !isBaileysEncryptedTmpEnoent(err)) {
+        throw err;
+      }
+
+      log.warn(
+        { statusType, path: err.path },
+        'baileys encrypted tmp file vanished during post_status; retrying once',
+      );
+    }
+  }
+}
+
 function makePostStatus(deps: StatusDeps): ToolDeclaration {
   const { db, getSock } = deps;
 
@@ -168,7 +193,7 @@ function makePostStatus(deps: StatusDeps): ToolDeclaration {
         if (font !== undefined) options['font'] = font;
       }
 
-      const result = await sock.sendMessage(STATUS_BROADCAST_JID, content as any, options as any);
+      const result = await sendStatusWithRetry(sock, content, options, statusType);
 
       return {
         sent: true,
