@@ -1,10 +1,11 @@
 import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
+import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottle, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
-const MIN_ALERT_INTERVAL_MS = 15 * 60 * 1000;
+const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
 
 export interface InstanceHealth {
   name: string;
@@ -35,6 +36,7 @@ export class HealthPoller {
   private getSelfHealth: () => Record<string, unknown>;
   private intervalMs: number;
   private statusChangeListeners: StatusChangeCallback[] = [];
+  private persistedAlertThrottle: Map<string, string>;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -46,6 +48,7 @@ export class HealthPoller {
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
+    this.persistedAlertThrottle = loadAlertThrottle();
   }
 
   /** Register a callback for instance status changes. */
@@ -90,6 +93,10 @@ export class HealthPoller {
     return this.statuses.get(name);
   }
 
+  private lastAlertAtFor(name: string, existing: InstanceStatus | undefined): string | null {
+    return existing?.lastAlertAt ?? this.persistedAlertThrottle.get(name) ?? null;
+  }
+
   private async poll(): Promise<void> {
     const instances = this.getInstances();
 
@@ -106,7 +113,7 @@ export class HealthPoller {
             consecutiveFailures: 0,
             status: 'online',
             error: null,
-            lastAlertAt: existing?.lastAlertAt ?? null,
+            lastAlertAt: this.lastAlertAtFor(name, existing),
             silencedUntil: existing?.silencedUntil ?? null,
           });
         } catch (err) {
@@ -163,7 +170,7 @@ export class HealthPoller {
           consecutiveFailures: 0,
           status: 'online',
           error: null,
-          lastAlertAt: existing?.lastAlertAt ?? null,
+          lastAlertAt: this.lastAlertAtFor(name, existing),
           silencedUntil: existing?.silencedUntil ?? null,
         });
         if (prevStatus !== 'online') {
@@ -198,7 +205,7 @@ export class HealthPoller {
       consecutiveFailures: failures,
       status: newStatus,
       error,
-      lastAlertAt: existing?.lastAlertAt ?? null,
+      lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
     });
 
@@ -231,7 +238,7 @@ export class HealthPoller {
       consecutiveFailures: existing?.consecutiveFailures ?? 0,
       status: newStatus,
       error: null,
-      lastAlertAt: existing?.lastAlertAt ?? null,
+      lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
     });
 
@@ -270,7 +277,14 @@ export class HealthPoller {
 
     // Set lastAlertAt BEFORE emitting to prevent races
     if (existing) {
-      existing.lastAlertAt = new Date().toISOString();
+      const now = new Date().toISOString();
+      existing.lastAlertAt = now;
+      this.persistedAlertThrottle.set(name, now);
+      try {
+        recordAlertThrottle(name, now);
+      } catch (err) {
+        log.warn({ err, name, source }, 'failed to persist alert throttle');
+      }
     }
 
     emitAlert(name, source, summary, evidence);

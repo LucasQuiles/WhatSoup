@@ -1,12 +1,29 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 
+const emitAlert = vi.hoisted(() => vi.fn());
 const logger = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
   debug: vi.fn(),
 }));
+const alertThrottleStore = vi.hoisted(() => ({
+  loadAlertThrottle: vi.fn(() => new Map<string, string>()),
+  recordAlertThrottle: vi.fn(),
+}));
+const silenceManager = vi.hoisted(() => ({
+  isInstanceSilenced: vi.fn(() => false),
+}));
+
+vi.mock('../../src/lib/emit-alert.ts', () => ({ emitAlert }));
+
+vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
+  ALERT_THROTTLE_INTERVAL_MS: 15 * 60 * 1000,
+  ...alertThrottleStore,
+}));
+
+vi.mock('../../src/fleet/silence-manager.ts', () => silenceManager);
 
 // Suppress pino output during tests
 vi.mock('../../src/logger.ts', () => ({
@@ -40,8 +57,15 @@ describe('HealthPoller', () => {
     logger.warn.mockClear();
     logger.error.mockClear();
     logger.debug.mockClear();
+    emitAlert.mockClear();
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.recordAlertThrottle.mockClear();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
     vi.stubGlobal('fetch', mockFetch);
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
   });
 
   afterEach(() => {
@@ -357,6 +381,81 @@ describe('HealthPoller', () => {
     expect(statuses.has('self')).toBe(true);
     expect(statuses.has('remote-1')).toBe(true);
     expect(statuses.has('remote-2')).toBe(true);
+
+    poller.stop();
+  });
+
+  it('hydrates lastAlertAt from the persisted alert throttle store', async () => {
+    const lastAlertAt = '2026-05-20T11:55:00.000Z';
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map([['remote-1', lastAlertAt]]));
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ status: 'healthy' }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')!.lastAlertAt).toBe(lastAlertAt);
+
+    poller.stop();
+  });
+
+  it('persists lastAlertAt when an alert is emitted', async () => {
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      'remote-1',
+      '2026-05-20T12:00:02.000Z',
+    );
+    expect(emitAlert).toHaveBeenCalledOnce();
+
+    poller.stop();
+  });
+
+  it('suppresses restart-cycle alerts using persisted lastAlertAt', async () => {
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map([
+      ['remote-1', '2026-05-20T11:55:00.000Z'],
+    ]));
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(emitAlert).not.toHaveBeenCalled();
+    expect(alertThrottleStore.recordAlertThrottle).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'remote-1',
+        source: 'instance_unreachable',
+      }),
+      'alert suppressed — rate limit (15min)',
+    );
 
     poller.stop();
   });
