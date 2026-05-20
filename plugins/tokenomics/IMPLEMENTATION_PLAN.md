@@ -419,13 +419,13 @@ Template:
 </plist>
 ```
 
-`render-plist.py` substitutes `$BOT`, `$PLUGIN_ROOT`, `$HOME`, `$INSTANCE_PATH`, `$CEILING`, `$WHATSOUP_REPO` from CLI args. No shell at runtime.
+`render-plist.py` substitutes `$BOT`, `$PLUGIN_ROOT`, `$HOME`, `$INSTANCE_PATH`, `$CEILING`, `$COOLDOWN`, `$WHATSOUP_REPO` from CLI args. No shell at runtime.
 
 **Install (v1 manual):** the operator runs `render-plist.py` to produce a concrete plist, copies it to `~/Library/LaunchAgents/`, and `launchctl bootstrap gui/$(id -u)` it. No full installer framework in v1 - manual is fine for a 1-host pilot. The README captures the steps.
 
 **Steps:**
 
-- [ ] Write `test_render_plist.py` asserting: a rendered plist parses via `plistlib.loads`, has the correct `Label`, contains expected absolute paths (no `$` literals remain), and sets the four `EnvironmentVariables`.
+- [ ] Write `test_render_plist.py` asserting: a rendered plist parses via `plistlib.loads`, has the correct `Label`, contains expected absolute paths (no `$` literals remain), and sets the five `EnvironmentVariables`.
 - [ ] Write `test_token_budget_watchdog.py` covering: helper non-zero exit produces no alert and no history append; helper available=false produces no alert; below-ceiling cycle produces a history line but no syslog warning; above-ceiling cycle produces both; cooldown suppresses a second alert within the configured window; cooldown expiry allows a fresh alert; concurrent appends to history.jsonl do not corrupt lines (two threads, 50 lines each, every line round-trips as valid JSON).
 - [ ] Assert the watchdog is alert-only: no code path sends WhatsApp messages, kills agent sessions, changes WhatSoup config, or writes anything outside its tokenomics state/log paths.
 - [ ] Run tests (expect FAIL).

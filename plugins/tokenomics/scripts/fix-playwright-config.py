@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 INTENDED_VALUES: tuple[tuple[str, str, str], ...] = (
@@ -50,7 +50,7 @@ def enforce_values(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_atomic(path: Path, config: dict[str, Any]) -> None:
-    tmp_name: str | None = None
+    tmp_name: Optional[str] = None
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
