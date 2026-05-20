@@ -101,7 +101,10 @@ export class TriggerPoller {
 
   start(): void {
     if (this.timer !== null) {
-      log.warn('TriggerPoller.start() called while already running');
+      log.warn(
+        { intervalMs: this.intervalMs, batchSize: this.batchSize },
+        'TriggerPoller.start() called while already running',
+      );
       return;
     }
     this.stopped = false;
@@ -114,7 +117,7 @@ export class TriggerPoller {
     if (this.timer !== null) {
       this.clearTimeoutImpl(this.timer);
       this.timer = null;
-      log.info('trigger poller stopped');
+      log.info({ intervalMs: this.intervalMs }, 'trigger poller stopped');
     }
   }
 
@@ -221,9 +224,11 @@ export class TriggerPoller {
     }
 
     if (postCommitActions.pauseNotificationFailureCount != null) {
-      this.dispatchPauseNotification(t, postCommitActions.pauseNotificationFailureCount);
+      await this.dispatchPauseNotification(t, postCommitActions.pauseNotificationFailureCount);
     }
     if (shouldDispatchNotification) {
+      // Notification dispatch is intentionally post-commit. A crash between
+      // COMMIT and sendMessage is at-most-once delivery for this poller tick.
       const deliveredWaId = await this.dispatchNotification(t, outcome);
       if (deliveredWaId) {
         try {
@@ -419,14 +424,11 @@ export class TriggerPoller {
   }
 
   private recordDeliveredWaMessageId(runId: number, deliveredWaId: string): void {
-    const row = this.db.prepare(
-      `SELECT output_json FROM trigger_runs WHERE id = ?`,
-    ).get(runId) as { output_json: string | null } | undefined;
-    if (!row) return;
-    const outputJson = row.output_json ? JSON.parse(row.output_json) as Record<string, unknown> : {};
     this.db.prepare(
-      `UPDATE trigger_runs SET output_json = ? WHERE id = ?`,
-    ).run(JSON.stringify({ ...outputJson, deliveredWaMessageId: deliveredWaId }), runId);
+      `UPDATE trigger_runs
+       SET output_json = json_set(COALESCE(output_json, '{}'), '$.deliveredWaMessageId', ?)
+       WHERE id = ?`,
+    ).run(deliveredWaId, runId);
   }
 
   private scheduleNextFire(
@@ -516,13 +518,15 @@ export class TriggerPoller {
     return t.on_terminal !== 'silent';
   }
 
-  private dispatchPauseNotification(t: TriggerRow, failureCount: number): void {
-    void this.messenger.sendMessage(
-      t.report_chat_jid,
-      formatPauseNotification(t, failureCount),
-    ).catch((err: unknown) => {
+  private async dispatchPauseNotification(t: TriggerRow, failureCount: number): Promise<void> {
+    try {
+      await this.messenger.sendMessage(
+        t.report_chat_jid,
+        formatPauseNotification(t, failureCount),
+      );
+    } catch (err) {
       log.error({ err, triggerId: t.id }, 'failed to dispatch pause notification');
-    });
+    }
   }
 
   private expireTrigger(t: TriggerRow, now: number): void {

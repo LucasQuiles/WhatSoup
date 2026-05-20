@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
+import { constants as sqliteConstants } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
@@ -218,6 +219,43 @@ describe('TriggerPoller — poll.sqlite', () => {
     const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; output_json: string }>;
     expect(runs[0].status).toBe('ok');
     expect(JSON.parse(runs[0].output_json)).toMatchObject({ deliveredWaMessageId: 'wa-1' });
+  });
+
+  it('records delivered receipt without a standalone trigger_runs SELECT', () => {
+    const { messenger } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'atomic receipt', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const trigger = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+    const info = db.raw.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'ok', ?, ?, 0, 'ok', ?, 1, '{}')`,
+    ).run(trigger.id, bead.id, 1_000_000_000, 1_000_000_001, JSON.stringify({ rowCount: 2 }));
+    const runId = Number(info.lastInsertRowid);
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 });
+
+    db.raw.setAuthorizer((actionCode) => (
+      actionCode === sqliteConstants.SQLITE_SELECT
+        ? sqliteConstants.SQLITE_DENY
+        : sqliteConstants.SQLITE_OK
+    ));
+    try {
+      (poller as unknown as {
+        recordDeliveredWaMessageId(runId: number, deliveredWaId: string): void;
+      }).recordDeliveredWaMessageId(runId, 'wa-atomic');
+    } finally {
+      db.raw.setAuthorizer(null);
+    }
+
+    const row = db.raw.prepare(`SELECT output_json FROM trigger_runs WHERE id = ?`).get(runId) as { output_json: string };
+    expect(JSON.parse(row.output_json)).toMatchObject({ rowCount: 2, deliveredWaMessageId: 'wa-atomic' });
   });
 
   it('rolls back run writes and does not notify when rescheduling fails', async () => {
@@ -588,8 +626,10 @@ describe('TriggerPoller — circuit breaker', () => {
     expect(processed).toBe(0);
   });
 
-  it('dispatches pause notification only after pause writes commit', async () => {
+  it('awaits pause notification only after pause writes commit', async () => {
     const calls: Array<{ transactionWasOpen: boolean }> = [];
+    let releaseSend: () => void = () => {};
+    const sendCanResolve = new Promise<void>((resolve) => { releaseSend = resolve; });
     const messenger: Messenger = {
       async sendMessage(): Promise<SubmissionReceipt> {
         let transactionWasOpen = false;
@@ -600,6 +640,7 @@ describe('TriggerPoller — circuit breaker', () => {
           transactionWasOpen = true;
         }
         calls.push({ transactionWasOpen });
+        await sendCanResolve;
         return { waMessageId: 'wa-pause' };
       },
       async sendMedia() { throw new Error('not used'); },
@@ -621,9 +662,15 @@ describe('TriggerPoller — circuit breaker', () => {
     await poller.tickOnce();
     now = 1_000_000_100;
     db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
-    await poller.tickOnce();
+    let tickResolved = false;
+    const tick = poller.tickOnce().then(() => { tickResolved = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(calls).toEqual([{ transactionWasOpen: false }]);
+    expect(tickResolved).toBe(false);
+    releaseSend();
+    await tick;
+    expect(tickResolved).toBe(true);
     const refreshed = db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string };
     expect(refreshed.status).toBe('paused');
   });
