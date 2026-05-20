@@ -77,10 +77,9 @@ fi
 DEFAULT_NODE="$HOME/.nvm/versions/node/v${NVMRC_VERSION}/bin/node"
 NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
 if [ ! -x "$NODE" ]; then
-  NODE="$(command -v node || true)"
-fi
-if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
-  echo "FATAL: node not found. Set WHATSOUP_NODE or install node v${NVMRC_VERSION}." >&2
+  # Do NOT fall back to system node — it likely lacks --experimental-strip-types
+  # and would burn through systemd restart budget with repeated failures.
+  echo "FATAL: node v${NVMRC_VERSION} not found at $NODE. Set WHATSOUP_NODE or run: nvm install ${NVMRC_VERSION}" >&2
   exit 1
 fi
 

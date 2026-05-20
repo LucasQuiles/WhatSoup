@@ -343,9 +343,9 @@ describe('WhatSoupError construction via Database operations', () => {
     expect(err.name).toBe('WhatSoupError');
   });
 
-  it('WhatSoupError with SEND_FAILED is not retryable', () => {
+  it('WhatSoupError with SEND_FAILED is retryable', () => {
     const err = new WhatSoupError('send timed out', 'SEND_FAILED');
-    expect(err.retryable).toBe(false);
+    expect(err.retryable).toBe(true);
   });
 
   it('WhatSoupError with CONNECTION_UNAVAILABLE is retryable', () => {
