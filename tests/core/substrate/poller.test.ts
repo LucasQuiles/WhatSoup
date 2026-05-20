@@ -132,11 +132,15 @@ describe('TriggerPoller — poll.sqlite', () => {
   it('SQL execution failure: records status=failed, schedules retry cooldown', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+    // Use intervalSeconds != FAILED_RETRY_COOLDOWN_SEC so the assertion can
+    // actually distinguish "applied cooldown" from "applied normal interval".
+    // The 60s normal interval would alias to the cooldown and mask a bug
+    // where the production code mistakenly used t.interval_seconds on failure.
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'poll.sqlite',
       spec: { sql: `SELECT * FROM table_that_does_not_exist`, fire_when: 'rows_returned' },
       reportChatJid: 'admin@s.whatsapp.net',
-      intervalSeconds: 60, nextFireAt: 1_000_000_000,
+      intervalSeconds: 300, nextFireAt: 1_000_000_000,
       actor: 'u',
     });
 
@@ -150,7 +154,10 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(runs[0].error_message).toMatch(/table_that_does_not_exist|no such table/i);
 
     const refreshed = db.raw.prepare(`SELECT next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { next_fire_at: number };
-    expect(refreshed.next_fire_at).toBe(1_000_000_001 + 60);  // FAILED_RETRY_COOLDOWN_SEC
+    // FAILED_RETRY_COOLDOWN_SEC = 60. interval_seconds is 300. If the
+    // production code regresses to using interval_seconds on failure,
+    // next_fire_at would be 1_000_000_301 and this expect would fail.
+    expect(refreshed.next_fire_at).toBe(1_000_000_001 + 60);
   });
 });
 
