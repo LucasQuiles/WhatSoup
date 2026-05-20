@@ -73,6 +73,14 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       ALLOW_M365_MUTATIONS: allowM365,
       // Sudo support
       SUDO_ASKPASS: process.env.SUDO_ASKPASS,
+      // Tokenomics pilot controls: forward only operator-provided values.
+      ENABLE_TOOL_SEARCH: process.env.ENABLE_TOOL_SEARCH,
+      TOKENOMICS_BOT: process.env.TOKENOMICS_BOT,
+      BASH_MAX_OUTPUT_LENGTH: process.env.BASH_MAX_OUTPUT_LENGTH,
+      MAX_MCP_OUTPUT_TOKENS: process.env.MAX_MCP_OUTPUT_TOKENS,
+      CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS,
+      CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT: process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT,
+      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,
       // Reply Guarantee Protocol hook context. These are explicit instance
       // fields, not inherited parent env, so child sessions only see the socket
       // they are meant to use.

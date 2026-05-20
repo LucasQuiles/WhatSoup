@@ -440,9 +440,10 @@ F.7 - Runbook fix:
 
 F.8 - Child-env allowlist extension:
 
-- Extend `buildBaseChildEnv` (or equivalent) to passthrough `ENABLE_TOOL_SEARCH`, `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `TOKENOMICS_BOT`, `PLAYWRIGHT_MCP_SNAPSHOT_MODE`, `PLAYWRIGHT_MCP_OUTPUT_MODE`, `PLAYWRIGHT_MCP_CONSOLE_LEVEL`.
+- Extend `buildBaseChildEnv` (or equivalent) to passthrough `ENABLE_TOOL_SEARCH`, `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, and `TOKENOMICS_BOT`.
 - Each var passes through only when set in the parent env; missing values do not synthesize defaults.
 - Default behavior unchanged for hosts that do not set these vars.
+- Playwright MCP env vars are handled by the installer/config-file path, not by WhatSoup child-env passthrough in v1.
 - See Blocking Clarification B2.
 
 Deferred:
@@ -965,9 +966,10 @@ Required (added to F as F.8):
 
 - F.8 - Env allowlist extension:
   - Locate WhatSoup's child-env construction (typically `src/core/child-env.ts` or equivalent; verify against current source at implementation time).
-  - Extend the allowlist to include: `ENABLE_TOOL_SEARCH`, `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `TOKENOMICS_BOT`, `PLAYWRIGHT_MCP_SNAPSHOT_MODE`, `PLAYWRIGHT_MCP_OUTPUT_MODE`, `PLAYWRIGHT_MCP_CONSOLE_LEVEL`.
+  - Extend the allowlist to include: `ENABLE_TOOL_SEARCH`, `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, and `TOKENOMICS_BOT`.
   - Each var is passed through only when set in the parent env; missing values do not synthesize defaults.
   - Default behavior unchanged for hosts that do not set these vars.
+  - Do not forward `PLAYWRIGHT_MCP_*` through `buildBaseChildEnv` in v1; Playwright MCP mode changes are installed and verified through the plugin/config-file surface.
 
 - Maps to test 5.4.14 (installed plist contains the configured value), a new test 5.3.22 (`buildBaseChildEnv` forwards every allowlisted var when set in parent env; omits when unset), and a new live-validation step under 5.7: confirm `ENABLE_TOOL_SEARCH` appears in the spawned agent process environment using `ps -E` or `/proc` equivalent.
 
