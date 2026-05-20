@@ -18,10 +18,10 @@
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { nowUnixSec } from './time.ts';
-import { dueTriggers } from './triggers.ts';
+import { dueTriggers, validateTriggerSpec } from './triggers.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
-import type { TriggerKind, TriggerRow } from './types.ts';
+import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
 import type { Messenger } from '../types.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -67,6 +67,10 @@ interface ExecuteOutcome {
   outputJson: Record<string, unknown>;
   errorKind?: string;
   errorMessage?: string;
+}
+
+interface PostCommitActions {
+  pauseNotificationFailureCount?: number;
 }
 
 export class TriggerPoller {
@@ -171,7 +175,6 @@ export class TriggerPoller {
   private async processTrigger(t: TriggerRow, now: number): Promise<void> {
     // Terminal-at expiry is handled by the expiry sweep in tickOnce; dueTriggers
     // already filters out rows past terminal_at, so we should never see one here.
-    const runId = this.insertRun(t, now);
     let outcome: ExecuteOutcome;
     try {
       outcome = await this.executeTrigger(t);
@@ -186,7 +189,7 @@ export class TriggerPoller {
       };
     }
 
-    let deliveredWaId: string | null = null;
+    let shouldDispatchNotification = false;
     if (outcome.fired) {
       const throttleRemaining = this.throttleRemainingFor(t.id, now);
       if (throttleRemaining > 0) {
@@ -199,13 +202,37 @@ export class TriggerPoller {
           throttleRemainingSec: throttleRemaining,
         };
       } else {
-        deliveredWaId = await this.dispatchNotification(t, outcome);
+        shouldDispatchNotification = true;
       }
     }
 
     const finishedAt = this.nowFn();
-    this.finishRun(runId, now, finishedAt, outcome, deliveredWaId);
-    this.scheduleNextFire(t, now, outcome);
+    let runId = 0;
+    const postCommitActions: PostCommitActions = {};
+    this.db.exec('BEGIN');
+    try {
+      runId = this.insertRun(t, now);
+      this.finishRun(runId, now, finishedAt, outcome, null);
+      this.scheduleNextFire(t, now, outcome, postCommitActions);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* best effort */ }
+      throw err;
+    }
+
+    if (postCommitActions.pauseNotificationFailureCount != null) {
+      this.dispatchPauseNotification(t, postCommitActions.pauseNotificationFailureCount);
+    }
+    if (shouldDispatchNotification) {
+      const deliveredWaId = await this.dispatchNotification(t, outcome);
+      if (deliveredWaId) {
+        try {
+          this.recordDeliveredWaMessageId(runId, deliveredWaId);
+        } catch (err) {
+          log.error({ err, triggerId: t.id, runId }, 'failed to record trigger notification receipt');
+        }
+      }
+    }
   }
 
   /**
@@ -237,6 +264,18 @@ export class TriggerPoller {
         outputSummary: 'spec_json is not valid JSON',
         outputJson: {},
         errorKind: 'spec_parse',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      };
+    }
+    try {
+      spec = validateTriggerSpec(kind, spec);
+    } catch (err) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'spec_json failed SPEC_REGISTRY validation',
+        outputJson: { kind },
+        errorKind: 'spec_invalid',
         errorMessage: err instanceof Error ? err.message : String(err),
       };
     }
@@ -328,7 +367,6 @@ export class TriggerPoller {
   }
 
   private async dispatchNotification(t: TriggerRow, outcome: ExecuteOutcome): Promise<string | null> {
-    if (t.on_terminal === 'silent') return null;
     const text = formatNotification(t, outcome);
     try {
       const receipt = await this.messenger.sendMessage(t.report_chat_jid, text);
@@ -380,7 +418,23 @@ export class TriggerPoller {
     );
   }
 
-  private scheduleNextFire(t: TriggerRow, now: number, outcome: ExecuteOutcome): void {
+  private recordDeliveredWaMessageId(runId: number, deliveredWaId: string): void {
+    const row = this.db.prepare(
+      `SELECT output_json FROM trigger_runs WHERE id = ?`,
+    ).get(runId) as { output_json: string | null } | undefined;
+    if (!row) return;
+    const outputJson = row.output_json ? JSON.parse(row.output_json) as Record<string, unknown> : {};
+    this.db.prepare(
+      `UPDATE trigger_runs SET output_json = ? WHERE id = ?`,
+    ).run(JSON.stringify({ ...outputJson, deliveredWaMessageId: deliveredWaId }), runId);
+  }
+
+  private scheduleNextFire(
+    t: TriggerRow,
+    now: number,
+    outcome: ExecuteOutcome,
+    postCommitActions: PostCommitActions,
+  ): void {
     let nextFireAt: number | null = null;
 
     if (t.kind === 'schedule.at_time') {
@@ -406,7 +460,9 @@ export class TriggerPoller {
       // when a target table disappears or a remote service stays down.
       const consecutiveFailures = this.countConsecutiveFailures(t.id);
       if (consecutiveFailures >= this.maxConsecutiveFailures) {
-        this.markPausedOnFailures(t, now, consecutiveFailures);
+        if (this.markPausedOnFailures(t, now, consecutiveFailures)) {
+          postCommitActions.pauseNotificationFailureCount = consecutiveFailures;
+        }
         return;
       }
       nextFireAt = now + FAILED_RETRY_COOLDOWN_SEC;
@@ -444,37 +500,49 @@ export class TriggerPoller {
     return count;
   }
 
-  private markPausedOnFailures(t: TriggerRow, now: number, failureCount: number): void {
-    try {
-      this.db.prepare(
-        `UPDATE bead_triggers
-         SET status = 'paused', next_fire_at = NULL, updated_at = ?
-         WHERE id = ?`,
-      ).run(now, t.id);
-      writeBeadEvent(this.db, {
-        beadId: t.bead_id,
-        eventType: 'trigger_paused',
-        actor: 'trigger-poller',
-        payload: { trigger_id: t.id, reason: 'consecutive_failures', failure_count: failureCount },
-        at: now,
-      });
-    } catch (err) {
-      log.error({ err, triggerId: t.id }, 'failed to pause trigger after consecutive failures');
-      return;
-    }
+  private markPausedOnFailures(t: TriggerRow, now: number, failureCount: number): boolean {
+    this.db.prepare(
+      `UPDATE bead_triggers
+       SET status = 'paused', next_fire_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    ).run(now, t.id);
+    writeBeadEvent(this.db, {
+      beadId: t.bead_id,
+      eventType: 'trigger_paused',
+      actor: 'trigger-poller',
+      payload: { trigger_id: t.id, reason: 'consecutive_failures', failure_count: failureCount },
+      at: now,
+    });
+    return t.on_terminal !== 'silent';
+  }
 
-    if (t.on_terminal !== 'silent') {
-      void this.messenger.sendMessage(
-        t.report_chat_jid,
-        formatPauseNotification(t, failureCount),
-      ).catch((err: unknown) => {
-        log.error({ err, triggerId: t.id }, 'failed to dispatch pause notification');
-      });
-    }
+  private dispatchPauseNotification(t: TriggerRow, failureCount: number): void {
+    void this.messenger.sendMessage(
+      t.report_chat_jid,
+      formatPauseNotification(t, failureCount),
+    ).catch((err: unknown) => {
+      log.error({ err, triggerId: t.id }, 'failed to dispatch pause notification');
+    });
   }
 
   private expireTrigger(t: TriggerRow, now: number): void {
-    this.markExpired(t, now, 'terminal_at_reached');
+    let shouldDispatchExpiryNotification = false;
+    this.db.exec('BEGIN');
+    try {
+      shouldDispatchExpiryNotification = this.markExpired(t, now, 'terminal_at_reached');
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* best effort */ }
+      throw err;
+    }
+    if (shouldDispatchExpiryNotification) {
+      void this.messenger.sendMessage(
+        t.report_chat_jid,
+        formatExpiryNotification(t, 'terminal_at_reached'),
+      ).catch((err: unknown) => {
+        log.error({ err, triggerId: t.id }, 'failed to dispatch expiry notification');
+      });
+    }
   }
 
   /**
@@ -484,43 +552,59 @@ export class TriggerPoller {
    */
   private static readonly SILENT_EXPIRY_REASONS = new Set(['one_shot_completed']);
 
-  private markExpired(t: TriggerRow, now: number, reason: string): void {
-    try {
-      this.db.prepare(
-        `UPDATE bead_triggers
-         SET status = 'expired', next_fire_at = NULL, updated_at = ?
-         WHERE id = ?`,
-      ).run(now, t.id);
-      writeBeadEvent(this.db, {
-        beadId: t.bead_id,
-        eventType: 'trigger_expired',
-        actor: 'trigger-poller',
-        payload: { trigger_id: t.id, reason, on_terminal: t.on_terminal },
-        at: now,
-      });
-      this.db.prepare(
-        `INSERT INTO trigger_runs (
-           trigger_id, bead_id, status, started_at, finished_at, duration_ms,
-           output_summary, output_json, attempt, metadata_json
-         ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
-      ).run(
-        t.id, t.bead_id, now, now,
-        `trigger expired: ${reason}`,
-        JSON.stringify({ reason, on_terminal: t.on_terminal }),
-      );
-    } catch (err) {
-      log.error({ err, triggerId: t.id }, 'failed to expire trigger');
-      return;
+  private markExpired(t: TriggerRow, now: number, reason: string): boolean {
+    this.db.prepare(
+      `UPDATE bead_triggers
+       SET status = 'expired', next_fire_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    ).run(now, t.id);
+    writeBeadEvent(this.db, {
+      beadId: t.bead_id,
+      eventType: 'trigger_expired',
+      actor: 'trigger-poller',
+      payload: { trigger_id: t.id, reason, on_terminal: t.on_terminal },
+      at: now,
+    });
+    this.db.prepare(
+      `INSERT INTO trigger_runs (
+         trigger_id, bead_id, status, started_at, finished_at, duration_ms,
+         output_summary, output_json, attempt, metadata_json
+       ) VALUES (?, ?, 'terminal_fired', ?, ?, 0, ?, ?, 1, '{}')`,
+    ).run(
+      t.id, t.bead_id, now, now,
+      `trigger expired: ${reason}`,
+      JSON.stringify({ reason, on_terminal: t.on_terminal }),
+    );
+    if (t.on_terminal === 'reopen_bead') {
+      this.reopenTerminalBead(t, now, reason);
     }
+    return t.on_terminal === 'notify' && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason);
+  }
 
-    if (t.on_terminal === 'notify' && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason)) {
-      void this.messenger.sendMessage(
-        t.report_chat_jid,
-        formatExpiryNotification(t, reason),
-      ).catch((err: unknown) => {
-        log.error({ err, triggerId: t.id }, 'failed to dispatch expiry notification');
-      });
-    }
+  private reopenTerminalBead(t: TriggerRow, now: number, reason: string): void {
+    const bead = this.db.prepare(
+      `SELECT status FROM beads WHERE id = ?`,
+    ).get(t.bead_id) as { status: BeadStatus } | undefined;
+    if (!bead || !['completed', 'cancelled', 'failed'].includes(bead.status)) return;
+
+    this.db.prepare(
+      `UPDATE beads
+       SET status = 'active', completed_at = NULL, cancelled_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    ).run(now, t.bead_id);
+    writeBeadEvent(this.db, {
+      beadId: t.bead_id,
+      eventType: 'status_change',
+      actor: 'trigger-poller',
+      payload: {
+        from: bead.status,
+        to: 'active',
+        reason: 'trigger_terminal_reopen',
+        trigger_id: t.id,
+        trigger_reason: reason,
+      },
+      at: now,
+    });
   }
 }
 
