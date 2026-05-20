@@ -3955,6 +3955,57 @@ describe('AgentRuntime', () => {
     expect(handleNewCalls).not.toContain('222');
   });
 
+  it('per_chat handleEventWithContext: assistant_text after result is suppressed (post-turn gate)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    // Turn with text + result
+    handleEventWithContext(
+      { type: 'assistant_text', text: 'Hello' },
+      queue, null, undefined, undefined, '111', '111#session',
+    );
+    handleEventWithContext(
+      { type: 'result', text: null },
+      queue, null, undefined, undefined, '111', '111#session',
+    );
+
+    // Reset mocks
+    (queue.enqueueStreamingText as ReturnType<typeof vi.fn>).mockClear();
+    (queue.enqueueText as ReturnType<typeof vi.fn>).mockClear();
+    (queue.enqueueToolUpdate as ReturnType<typeof vi.fn>).mockClear();
+
+    // Phantom assistant_text — should be suppressed
+    handleEventWithContext(
+      { type: 'assistant_text', text: 'Phantom from SDK reminder' },
+      queue, null, undefined, undefined, '111', '111#session',
+    );
+
+    // Phantom tool_use — should also be suppressed
+    handleEventWithContext(
+      { type: 'tool_use', toolName: 'TodoWrite', toolId: 'phantom-todo', toolInput: {} },
+      queue, null, undefined, undefined, '111', '111#session',
+    );
+
+    expect(queue.enqueueStreamingText).not.toHaveBeenCalled();
+    expect(queue.enqueueText).not.toHaveBeenCalled();
+    expect(queue.enqueueToolUpdate).not.toHaveBeenCalled();
+  });
+
   it('per_chat late result from a replaced session does not wipe the new session tool name scope', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
