@@ -520,3 +520,77 @@ describe('TriggerPoller — read-only SQL guard', () => {
   });
 });
 
+describe('TriggerPoller — notification throttle', () => {
+  let path: string; let db: Database;
+  beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
+  afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
+
+  it('suppresses dispatch when the previous notification was within the throttle window', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'spammy', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 30, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    // Override throttle to 100s so the test runs quickly.
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      notificationThrottleMinIntervalSec: 100,
+    });
+
+    // First tick: dispatches normally.
+    await poller.tickOnce();
+    expect(calls).toHaveLength(1);
+
+    // Second tick 30s later: SQL still matches, but throttle blocks the dispatch.
+    now = 1_000_000_031;
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+    expect(calls).toHaveLength(1);  // dispatch suppressed
+
+    // The trigger_run still records ok+fired, but with the throttled marker.
+    const runs = db.raw.prepare(`SELECT status, output_json FROM trigger_runs WHERE trigger_id = ? ORDER BY id DESC LIMIT 1`).all(t.id) as Array<{ status: string; output_json: string }>;
+    expect(runs[0].status).toBe('ok');
+    const parsed = JSON.parse(runs[0].output_json);
+    expect(parsed.throttled).toBe(true);
+    expect(parsed.throttleRemainingSec).toBeGreaterThan(0);
+  });
+
+  it('dispatches normally after the throttle window expires', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'spammy', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    db.raw.prepare(`INSERT INTO probes DEFAULT VALUES`).run();
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: `SELECT * FROM probes`, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net',
+      intervalSeconds: 30, nextFireAt: 1_000_000_000,
+      actor: 'u',
+    });
+
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => now,
+      notificationThrottleMinIntervalSec: 100,
+    });
+
+    // First tick: dispatches.
+    await poller.tickOnce();
+    expect(calls).toHaveLength(1);
+
+    // Second tick past the window: dispatches again.
+    now = 1_000_000_200;  // 199s after first dispatch — past 100s window
+    db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = ? WHERE id = ?`).run(now - 1, t.id);
+    await poller.tickOnce();
+    expect(calls).toHaveLength(2);
+  });
+});
+

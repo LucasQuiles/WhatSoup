@@ -35,6 +35,8 @@ const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
 const FAILED_RETRY_COOLDOWN_SEC = 60;
 /** Auto-pause a trigger after this many consecutive failed runs. */
 const MAX_CONSECUTIVE_FAILURES = 5;
+/** Minimum seconds between WhatsApp notifications per trigger. */
+const NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC = 300;
 
 export interface TriggerPollerOptions {
   /** How often to call dueTriggers. Default 30s. */
@@ -48,6 +50,8 @@ export interface TriggerPollerOptions {
   clearTimeoutImpl?: typeof clearTimeout;
   /** Auto-pause threshold for consecutive failed runs. Default 5. */
   maxConsecutiveFailures?: number;
+  /** Minimum seconds between dispatches per trigger. Default 300 (5 min). */
+  notificationThrottleMinIntervalSec?: number;
 }
 
 interface SqliteSpec {
@@ -76,6 +80,7 @@ export class TriggerPoller {
   private readonly setTimeoutImpl: typeof setTimeout;
   private readonly clearTimeoutImpl: typeof clearTimeout;
   private readonly maxConsecutiveFailures: number;
+  private readonly notificationThrottleMinIntervalSec: number;
   public lastRunAt: string | null = null;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -87,6 +92,7 @@ export class TriggerPoller {
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
     this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;
+    this.notificationThrottleMinIntervalSec = opts.notificationThrottleMinIntervalSec ?? NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC;
   }
 
   start(): void {
@@ -182,12 +188,41 @@ export class TriggerPoller {
 
     let deliveredWaId: string | null = null;
     if (outcome.fired) {
-      deliveredWaId = await this.dispatchNotification(t, outcome);
+      const throttleRemaining = this.throttleRemainingFor(t.id, now);
+      if (throttleRemaining > 0) {
+        // Suppress the WhatsApp dispatch but still record fired=true on the
+        // run with a throttled marker. Operators inspecting trigger_runs see
+        // that the watch matched without their report chat getting spammed.
+        outcome.outputJson = {
+          ...outcome.outputJson,
+          throttled: true,
+          throttleRemainingSec: throttleRemaining,
+        };
+      } else {
+        deliveredWaId = await this.dispatchNotification(t, outcome);
+      }
     }
 
     const finishedAt = this.nowFn();
     this.finishRun(runId, now, finishedAt, outcome, deliveredWaId);
     this.scheduleNextFire(t, now, outcome);
+  }
+
+  /**
+   * Seconds remaining until the next dispatch is allowed for this trigger.
+   * 0 means no throttle (no prior dispatch in trigger_runs, or window elapsed).
+   */
+  private throttleRemainingFor(triggerId: number, now: number): number {
+    const row = this.db.prepare(
+      `SELECT started_at FROM trigger_runs
+       WHERE trigger_id = ? AND status = 'ok' AND output_json LIKE '%deliveredWaMessageId%'
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    ).get(triggerId) as { started_at: number } | undefined;
+    if (!row) return 0;
+    const elapsed = now - row.started_at;
+    if (elapsed >= this.notificationThrottleMinIntervalSec) return 0;
+    return this.notificationThrottleMinIntervalSec - elapsed;
   }
 
   private async executeTrigger(t: TriggerRow): Promise<ExecuteOutcome> {
