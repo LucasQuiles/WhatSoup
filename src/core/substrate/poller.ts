@@ -103,13 +103,30 @@ export class TriggerPoller {
   }
 
   /**
-   * Run one cycle synchronously. Returns the number of triggers processed.
-   * Public for tests; production code goes through start()/tick().
+   * Run one cycle synchronously. Returns the number of triggers processed
+   * (sum of expirations + dispatched runs). Public for tests; production
+   * code goes through start()/tick().
    */
   async tickOnce(): Promise<number> {
     const now = this.nowFn();
-    const due = dueTriggers(this.db, now, this.batchSize);
     let processed = 0;
+    // 1. Expiry sweep — dueTriggers filters out triggers past terminal_at,
+    //    so without this sweep they would stay status='active' forever.
+    const overdue = this.db.prepare(
+      `SELECT * FROM bead_triggers
+       WHERE status = 'active' AND terminal_at IS NOT NULL AND terminal_at <= ?
+       LIMIT ?`,
+    ).all(now, this.batchSize) as unknown as TriggerRow[];
+    for (const t of overdue) {
+      try {
+        this.expireTrigger(t, now);
+        processed++;
+      } catch (err) {
+        log.error({ err, triggerId: t.id }, 'trigger expiry failed unexpectedly');
+      }
+    }
+    // 2. Due triggers — normal poll/schedule execution path.
+    const due = dueTriggers(this.db, now, this.batchSize);
     for (const t of due) {
       try {
         await this.processTrigger(t, now);
@@ -140,11 +157,8 @@ export class TriggerPoller {
   }
 
   private async processTrigger(t: TriggerRow, now: number): Promise<void> {
-    if (t.terminal_at !== null && t.terminal_at !== undefined && t.terminal_at <= now) {
-      this.expireTrigger(t, now);
-      return;
-    }
-
+    // Terminal-at expiry is handled by the expiry sweep in tickOnce; dueTriggers
+    // already filters out rows past terminal_at, so we should never see one here.
     const runId = this.insertRun(t, now);
     let outcome: ExecuteOutcome;
     try {
@@ -354,6 +368,13 @@ export class TriggerPoller {
     this.markExpired(t, now, 'terminal_at_reached');
   }
 
+  /**
+   * Reasons that should NOT trigger an on_terminal='notify' message because
+   * the trigger just successfully fired and the user already received the
+   * fire notification. Adding a second "expired" message would double-notify.
+   */
+  private static readonly SILENT_EXPIRY_REASONS = new Set(['one_shot_completed']);
+
   private markExpired(t: TriggerRow, now: number, reason: string): void {
     try {
       this.db.prepare(
@@ -383,7 +404,7 @@ export class TriggerPoller {
       return;
     }
 
-    if (t.on_terminal === 'notify') {
+    if (t.on_terminal === 'notify' && !TriggerPoller.SILENT_EXPIRY_REASONS.has(reason)) {
       void this.messenger.sendMessage(
         t.report_chat_jid,
         formatExpiryNotification(t, reason),
