@@ -53,6 +53,21 @@ Key files:
 - Tests mirror source structure under `tests/`
 - Run tests with `--pool=forks` for stability: `npx vitest run --pool=forks`
 
+## PR Discipline
+
+**Runbook-and-PR co-update.** When a PR closes a gap that is documented in a runbook (a "not yet wired", "TODO", "not implemented", "runtime gap", or similar marker calling out missing behaviour), the documenting runbook MUST be updated in the same PR. Doc-lying-about-code is a release-blocking defect, not a follow-up. This rule generalises the PR #677/§6 staleness incident.
+
+The fastest check before filing a PR:
+
+```bash
+# Are any of the files I'm touching referenced from a runbook line that
+# claims the behaviour is "not wired" / "TODO" / "not yet implemented"?
+git diff --name-only origin/main..HEAD | xargs -I{} \
+  grep -l "not yet wired\|not wired\|TODO\|not yet implemented\|runtime gap" docs/runbooks/ 2>/dev/null
+```
+
+If anything turns up, read the matched line in context — if your PR closes the gap it describes, update the runbook in the same diff.
+
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
