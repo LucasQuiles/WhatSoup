@@ -20,7 +20,7 @@ def test_manifest_declares_tokenomics_source():
 
 
 def test_v1_scaffold_directories_are_empty_placeholders():
-    for dirname in ("lib", "scripts", "launchd"):
+    for dirname in ("lib", "launchd"):
         directory = PLUGIN_ROOT / dirname
         assert directory.is_dir()
         assert sorted(path.name for path in directory.iterdir()) == [".gitkeep"]
