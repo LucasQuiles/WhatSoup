@@ -244,6 +244,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.auth-instance` | `npm run auth:instance` | `package.json` | stable | active | QR-code authentication for a specific instance |
 | `cli:npm.audit-instance-plugins` | `npm run audit:instance-plugins` | `package.json` | stable | active | Audit plugin allowlists across instances |
 | `cli:npm.backfill-enrichment` | `npm run backfill-enrichment` | `package.json` | stable | active | One-shot enrichment backfill |
+| `cli:npm.token-window` | `npm run token-window` | `package.json` | beta | active | Tokenomics pilot helper; reports rolling agent-token totals from an instance `bot.db` |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
 | `cli:npm.leaks-anonymize` | `npm run leaks:anonymize` | `package.json` | stable | active | Report-first private literal anonymizer; pass `--write` to update files |
