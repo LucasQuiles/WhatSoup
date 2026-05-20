@@ -35,11 +35,13 @@ create_watch (MCP tool)
   ├─ creates trigger in `bead_triggers` table
   └─ projects to Obsidian vault (if configured)
 
-dueTriggers(db, now, batchSize)   ← runtime poller (not yet wired — see §6)
+TriggerPoller (src/core/substrate/poller.ts)   ← wired in main.ts since PR #677
   │
-  ├─ queries: status=active, next_fire_at <= now, not expired
-  ├─ executes poll (kind-specific: SQL query, shell cmd, HTTP, etc.)
-  └─ writes result to trigger_runs, fires notification to report_chat_jid
+  ├─ expiry sweep: status='active' AND terminal_at <= now → expireTrigger
+  ├─ dueTriggers(db, now, batchSize) → process each
+  ├─ per-kind executor (poll.sqlite + schedule.* implemented; others no-op)
+  ├─ writes trigger_runs row (status: running → ok/noop/failed/terminal_fired)
+  └─ on fire, sends notification to report_chat_jid via Messenger
 ```
 
 Tables involved:
@@ -68,7 +70,7 @@ Defined in `src/core/substrate/triggers.ts` (`SPEC_REGISTRY`):
 | `poll.sqlite` | `sql`, `fire_when` (rows_returned/rowcount_changed), `binds?` | SQLite query polling — the workhorse for personal-line watches |
 | `poll.pinecone` | `index`, `namespace`, `query`, `top_k?`, `threshold?` | Pinecone similarity search |
 | `poll.shell` | `argv[]`, `fire_when` (exit_zero/stdout_nonempty/stdout_regex), `cwd?`, `regex?` | Shell command polling |
-| `event.message` | `match` (sender_jid/regex/mention), `value`, `chat_jid?` | Inbound message matching (runtime not wired — see §6) |
+| `event.message` | `match` (sender_jid/regex/mention), `value`, `chat_jid?` | Inbound message matching (poller recognises but does not yet execute — see §6) |
 
 ## 4. Personal-line watch recipe
 
@@ -158,46 +160,62 @@ PR #666 emits `{ "type": "object" }` for ZodRecord. The fix lands once the
 WhatSoup instance restarts; until then, the workaround in §7 below inserts
 the watch directly into SQLite.
 
-## 6. Runtime gap: `dueTriggers()` not wired
+## 6. Runtime poller status
 
-`dueTriggers()` (`src/core/substrate/triggers.ts:183`) is exported and unit
-tested but **never imported or called** anywhere in the WhatSoup runtime.
-The consequence:
-
-- Triggers are validated and stored correctly
-- `bead_triggers` rows are well-formed with `next_fire_at` timestamps
-- But no runtime loop picks them up — no polling, no execution, no
-  `trigger_runs` entries
+`TriggerPoller` (`src/core/substrate/poller.ts`) is wired into `main.ts`
+as of PR #677. It drains `bead_triggers.next_fire_at` on a 30s interval
+and runs per-kind executors. **Not every kind has an executor yet** —
+the first cut shipped only the kinds needed for personal-line watches.
 
 | Kind | Stored? | Fires? | Notes |
 |---|---|---|---|
-| `poll.sqlite` | yes | no | SQL never executed on interval |
-| `poll.shell` | yes | no | Shell command never run |
-| `poll.url` | yes | no | URL never fetched |
-| `poll.email` | yes | no | Email never checked |
-| `poll.file` | yes | no | File never stat'd |
-| `poll.pinecone` | yes | no | Pinecone never queried |
-| `event.message` | yes | no | No inbound message matching |
+| `poll.sqlite` | yes | **yes** | SQL executed; `fire_when` (`rows_returned` / `rowcount_changed`) evaluated |
+| `schedule.cron` | yes | **yes** | Fires on cron expression; `next_fire_at` advanced via `nextCronRun` |
+| `schedule.at_time` | yes | **yes** | One-shot at `fire_at`, then transitions to `status='expired'` |
+| `poll.shell` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
+| `poll.url` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
+| `poll.email` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
+| `poll.file` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
+| `poll.pinecone` | yes | no | Recognised; logs `not_implemented`, 1h cooldown |
+| `event.message` | yes | no | Event-driven; needs message-bus integration, not a poller |
 
-Until the poller lands, watches function as **durable intent records** —
-useful for record-keeping, vault projection, and `list_beads`/`list_triggers`
-audits, but they do not auto-fire.
+**Terminal expiry is handled** by a separate sweep at the start of each
+tick — the `dueTriggers` query filters out rows past `terminal_at`, so
+without this sweep they would stay `status='active'` forever. The sweep
+sets `status='expired'`, writes a `trigger_expired` bead_event, records
+a `terminal_fired` row in `trigger_runs`, and (when `on_terminal='notify'`)
+sends an expiry notification.
 
-### Required to activate
+### Behaviour per kind (delivered)
 
-A poller loop (likely in `src/main.ts` or a new
-`src/core/substrate/poller.ts`) that:
+For each *delivered* kind, the poller:
 
-1. Calls `dueTriggers(db, now, batchSize)` on an interval (e.g. every 30s)
-2. For each due trigger, executes the kind-specific check (run the SQL,
-   exec the argv, fetch the URL, etc.)
-3. Records the result in `trigger_runs`
-4. If fired, sends the notification to `report_chat_jid`
-5. Updates `next_fire_at` to `now + interval_seconds`
+1. Calls `dueTriggers(db, now, batchSize)` on the 30s interval
+2. Executes the kind-specific check (run the SQL, advance the schedule)
+3. Records the result in `trigger_runs` with status `ok` / `noop` / `failed`
+4. If fired, sends the notification to `report_chat_jid` via `Messenger`
+5. Updates `next_fire_at` to `now + interval_seconds` (or the next cron tick)
 6. Handles `terminal_at` expiry — sets trigger status to `expired`, fires
-   the `on_terminal` action
+   the `on_terminal` action (notify / silent / reopen_bead)
 
-This is a tracked WhatSoup enhancement; see the substrate roadmap.
+### Safety behaviours
+
+The poller enforces three defensive policies that bound the blast radius
+of misconfigured or compromised triggers:
+
+- **Circuit breaker (auto-pause).** After `MAX_CONSECUTIVE_FAILURES` (default 5) consecutive failed runs for the same trigger, the poller transitions it to `status='paused'`, clears `next_fire_at`, writes a `trigger_paused` bead_event with `{ reason: 'consecutive_failures', failure_count }`, and dispatches a pause notification to `report_chat_jid` (unless `on_terminal='silent'`). A successful or noop run breaks the streak. Common case it prevents: a `poll.sqlite` trigger against a table that got dropped by a migration, otherwise retrying every 60s forever.
+- **Read-only SQL guard.** `poll.sqlite` spec SQL runs inside a `PRAGMA query_only = ON` / `OFF` envelope. Write attempts (`DELETE`, `UPDATE`, `DROP`, `INSERT`) fail with a SQLite "attempt to write a readonly database" error which the existing `sql_error` path captures into `trigger_runs`. Restoration is in a `finally` block so the poller's own follow-up writes (`UPDATE bead_triggers`, `INSERT trigger_runs`) still succeed. Bounds the blast radius of a compromised bead or confused-deputy injection.
+- **Notification throttle.** Per-trigger minimum interval between dispatches, default `NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC = 300` (5 min). When the previous dispatch was within the window, the current run is still recorded `status='ok' fired=true` but with `{ throttled: true, throttleRemainingSec: N }` in `output_json` — `messenger.sendMessage` is not called. Prevents wire-speed spam when `fire_when='rows_returned'` SQL matches permanently. The throttle reference is the last NOTIFICATION timestamp (queried from `trigger_runs.output_json LIKE '%deliveredWaMessageId%'`), not `bead_triggers.last_fire_at` (which advances every tick, including noops).
+
+All three can be overridden per-poller via `TriggerPollerOptions` for tests
+and operator tuning (e.g. `maxConsecutiveFailures`,
+`notificationThrottleMinIntervalSec`).
+
+### Remaining work
+
+Each not-yet-implemented kind needs its executor wired in
+`poller.ts:executeTrigger()` and a per-kind branch in `scheduleNextFire`
+where appropriate. Tracked separately in the substrate roadmap.
 
 ## 7. Workaround: direct DB insertion
 

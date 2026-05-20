@@ -47,6 +47,7 @@ import { ProcessTmpRetentionTimer, DEFAULT_PROCESS_TMP_RETENTION } from './core/
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
+import { TriggerPoller } from './core/substrate/poller.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 
@@ -708,6 +709,13 @@ const messageScheduler = new MessageScheduler(db, connectionManager, {
 messageScheduler.recoverStale();
 messageScheduler.start();
 
+// 16a. Substrate trigger poller — drains bead_triggers.next_fire_at on a
+// 30s interval and dispatches poll.sqlite / schedule.* watches to their
+// report_chat_jid. Other kinds in SPEC_REGISTRY are recognised but no-op
+// for now (see src/core/substrate/poller.ts header).
+const triggerPoller = new TriggerPoller(db.raw, connectionManager);
+triggerPoller.start();
+
 // 17. Seed contacts directory from message history (so @name mentions work after restart)
 {
   // Inject DB into contacts directory so LID→phone resolution works for @mentions
@@ -811,6 +819,7 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(lidReconcileInterval);
     if (degradationInterval) clearInterval(degradationInterval);
     messageScheduler.stop();
+    triggerPoller.stop();
     healthServer.close();
     // Flush runtime queue before closing transport so queued messages can be delivered
     // runtime.shutdown() stops enrichment poller internally
