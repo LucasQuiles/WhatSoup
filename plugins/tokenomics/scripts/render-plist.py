@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 from string import Template
+from xml.sax.saxutils import escape
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -28,23 +31,44 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def render(args: argparse.Namespace) -> str:
     template = Template(TEMPLATE_PATH.read_text(encoding="utf-8"))
+    values = {
+        "BOT": args.bot,
+        "PLUGIN_ROOT": args.plugin_root,
+        "HOME": args.home,
+        "INSTANCE_PATH": args.instance_path,
+        "CEILING": args.ceiling,
+        "COOLDOWN": args.cooldown,
+        "WHATSOUP_REPO": args.whatsoup_repo,
+    }
     return template.substitute(
-        BOT=args.bot,
-        PLUGIN_ROOT=args.plugin_root,
-        HOME=args.home,
-        INSTANCE_PATH=args.instance_path,
-        CEILING=args.ceiling,
-        COOLDOWN=args.cooldown,
-        WHATSOUP_REPO=args.whatsoup_repo,
+        {key: escape(value) for key, value in values.items()}
     )
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name: str | None = None
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as handle:
+        tmp_name = handle.name
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(tmp_name, path)
+    except Exception:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+        raise
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     rendered = render(args)
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(rendered, encoding="utf-8")
+    write_text_atomic(out_path, rendered)
     return 0
 
 

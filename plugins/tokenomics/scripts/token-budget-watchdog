@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ WINDOW = "5h"
 ALERT_PCT = 0.75
 DEFAULT_COOLDOWN_SECONDS = 1800
 HELPER_TIMEOUT_SECONDS = 30
+REQUIRED_NODE_MAJOR = 24
 
 
 class HelperResult:
@@ -72,37 +74,94 @@ def _parse_positive_int(value: str, key: str) -> int:
     return parsed
 
 
+def state_dir_name(bot: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", bot).strip("._-")
+    return f"{(slug or 'bot')[:80]}-tokenomics"
+
+
 def state_root(env: Mapping[str, str]) -> Path:
     override = env.get("TOKENOMICS_STATE_DIR")
     if override:
         return Path(override)
     bot = _require_env(env, "TOKENOMICS_BOT")
     home = Path(env.get("HOME") or str(Path.home()))
-    return home / "Library" / "Application Support" / f"{bot}-tokenomics"
+    return home / "Library" / "Application Support" / state_dir_name(bot)
+
+
+def _node_major(node_bin: str) -> Optional[int]:
+    try:
+        completed = subprocess.run(
+            [node_bin, "-p", "process.versions.node.split('.')[0]"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return int(completed.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _compatible_node(node_bin: str) -> bool:
+    major = _node_major(node_bin)
+    return major is not None and major >= REQUIRED_NODE_MAJOR
+
+
+def _version_key(path: str) -> tuple[int, ...]:
+    version = Path(path).parents[1].name.removeprefix("v")
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return ()
+
+
+def _node_candidates(env: Mapping[str, str]) -> list[str]:
+    candidates: list[str] = []
+    repo = env.get("WHATSOUP_REPO")
+    home = Path(env.get("HOME") or str(Path.home()))
+    if repo:
+        try:
+            pinned = (Path(repo) / ".nvmrc").read_text(encoding="utf-8").strip()
+        except OSError:
+            pinned = ""
+        if pinned:
+            candidates.append(str(home / ".nvm" / "versions" / "node" / f"v{pinned}" / "bin" / "node"))
+
+    found = shutil.which("node")
+    if found:
+        candidates.append(found)
+
+    nvm_matches = sorted(
+        glob.glob(str(home / ".nvm" / "versions" / "node" / "v*" / "bin" / "node")),
+        key=_version_key,
+        reverse=True,
+    )
+    candidates.extend(nvm_matches)
+    candidates.extend(["/opt/homebrew/bin/node", "/usr/local/bin/node", "node"])
+    return candidates
 
 
 def resolve_node_bin(env: Mapping[str, str]) -> str:
     override = env.get("TOKENOMICS_NODE_BIN")
     if override:
+        if not _compatible_node(override):
+            raise ValueError(f"TOKENOMICS_NODE_BIN must resolve to Node >= {REQUIRED_NODE_MAJOR}")
         return override
 
-    found = shutil.which("node")
-    if found:
-        return found
-
-    home = Path(env.get("HOME") or str(Path.home()))
-    nvm_matches = sorted(
-        glob.glob(str(home / ".nvm" / "versions" / "node" / "v*" / "bin" / "node")),
-        reverse=True,
-    )
-    if nvm_matches:
-        return nvm_matches[0]
-
-    for candidate in ("/opt/homebrew/bin/node", "/usr/local/bin/node"):
-        if Path(candidate).exists():
+    seen: set[str] = set()
+    for candidate in _node_candidates(env):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if _compatible_node(candidate):
             return candidate
 
-    return "node"
+    raise ValueError(f"no compatible Node >= {REQUIRED_NODE_MAJOR} found")
 
 
 def load_config(env: Mapping[str, str] = os.environ) -> WatchdogConfig:

@@ -24,7 +24,8 @@ def test_hooks_json_registers_only_browser_loop_interrupt():
     command = hooks[0]["command"]
     assert hooks[0]["type"] == "command"
     assert hooks[0]["timeout"] == 5
-    assert "TOKENOMICS_BOT" in command
+    assert "TOKENOMICS_BOT" not in command
+    assert "target bot" not in command
     assert "${CLAUDE_PLUGIN_ROOT}" in command
     assert "browser-loop-interrupt.py" in command
 

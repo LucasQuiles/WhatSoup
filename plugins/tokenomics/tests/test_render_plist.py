@@ -83,3 +83,40 @@ def test_rendered_plist_parses_and_has_no_placeholders(tmp_path):
         "TOKENOMICS_ALERT_COOLDOWN_SECONDS": "1800",
         "WHATSOUP_REPO": WHATSOUP_REPO,
     }
+
+
+def test_rendered_plist_escapes_xml_values(tmp_path):
+    out_path = tmp_path / "escaped.plist"
+    bot = "target&<bot>"
+    instance_path = "/tmp/tokenomics&target/instances/<bot>"
+    args = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--bot",
+        bot,
+        "--plugin-root",
+        "/tmp/plugin&root",
+        "--home",
+        "/tmp/home&root",
+        "--instance-path",
+        instance_path,
+        "--ceiling",
+        "103000000",
+        "--cooldown",
+        "1800",
+        "--whatsoup-repo",
+        "/tmp/repo&root",
+        "--out",
+        str(out_path),
+    ]
+
+    result = subprocess.run(args, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    raw = out_path.read_bytes()
+    assert b"target&<bot>" not in raw
+    assert b"target&amp;&lt;bot&gt;" in raw
+    plist = plistlib.loads(raw)
+    assert plist["Label"] == f"com.{bot}.token-budget-watchdog"
+    assert plist["EnvironmentVariables"]["TOKENOMICS_BOT"] == bot
+    assert plist["EnvironmentVariables"]["TOKENOMICS_INSTANCE_PATH"] == instance_path

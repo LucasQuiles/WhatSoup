@@ -35,6 +35,21 @@ def make_env(tmp_path, *, ceiling="1000", cooldown="1800", state_override=True):
     return env
 
 
+def write_fake_node(path: pathlib.Path, major: int) -> pathlib.Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-p\" ]; then\n"
+        f"  echo {major}\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
 def helper_output(module, total_tokens, *, available=True):
     return module.HelperResult(
         exit_code=0,
@@ -217,6 +232,47 @@ def test_watchdog_source_has_no_chat_network_or_config_mutation_imports():
     assert ".config/whatsoup" not in source
 
 
+def test_state_root_sanitizes_bot_path_segment(tmp_path):
+    module = load_watchdog()
+    env = make_env(tmp_path, state_override=False)
+    env["TOKENOMICS_BOT"] = "../../evil bot"
+
+    root = module.state_root(env)
+
+    assert root == pathlib.Path(env["HOME"]) / "Library" / "Application Support" / "evil_bot-tokenomics"
+
+
+def test_node_resolver_skips_incompatible_path_node_for_repo_pin(tmp_path, monkeypatch):
+    module = load_watchdog()
+    repo = tmp_path / "WhatSoup"
+    repo.mkdir()
+    (repo / ".nvmrc").write_text("24.15.0\n", encoding="utf-8")
+    old_node = write_fake_node(tmp_path / "old" / "node", 20)
+    pinned_node = write_fake_node(
+        tmp_path / "home" / ".nvm" / "versions" / "node" / "v24.15.0" / "bin" / "node",
+        24,
+    )
+    env = make_env(tmp_path)
+    env["HOME"] = str(tmp_path / "home")
+    env["WHATSOUP_REPO"] = str(repo)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: str(old_node))
+
+    assert module.resolve_node_bin(env) == str(pinned_node)
+
+
+def test_explicit_node_override_must_be_compatible(tmp_path):
+    module = load_watchdog()
+    env = make_env(tmp_path)
+    env["TOKENOMICS_NODE_BIN"] = str(write_fake_node(tmp_path / "node20", 20))
+
+    try:
+        module.resolve_node_bin(env)
+    except ValueError as err:
+        assert "Node >= 24" in str(err)
+    else:
+        raise AssertionError("incompatible TOKENOMICS_NODE_BIN should fail")
+
+
 def test_invokes_token_window_helper_with_resolved_node_and_timeout(tmp_path):
     module = load_watchdog()
     repo = tmp_path / "WhatSoup"
@@ -225,7 +281,8 @@ def test_invokes_token_window_helper_with_resolved_node_and_timeout(tmp_path):
     script.write_text("// helper\n", encoding="utf-8")
     env = make_env(tmp_path)
     env["WHATSOUP_REPO"] = str(repo)
-    env["TOKENOMICS_NODE_BIN"] = "/custom/node"
+    custom_node = write_fake_node(tmp_path / "custom" / "node", 24)
+    env["TOKENOMICS_NODE_BIN"] = str(custom_node)
     seen = {}
 
     def fake_run(args, **kwargs):
@@ -237,7 +294,7 @@ def test_invokes_token_window_helper_with_resolved_node_and_timeout(tmp_path):
 
     assert result.exit_code == 0
     assert seen["args"] == [
-        "/custom/node",
+        str(custom_node),
         "--experimental-strip-types",
         str(script),
         "--instance",

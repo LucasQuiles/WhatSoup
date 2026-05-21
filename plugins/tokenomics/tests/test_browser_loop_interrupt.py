@@ -18,6 +18,15 @@ def session_state_path(state_root: pathlib.Path, session_id: str) -> pathlib.Pat
     return state_root / "browser-loop" / f"{digest}.jsonl"
 
 
+def load_hook_module():
+    spec = importlib.util.spec_from_file_location("browser_loop_interrupt", HOOK_PATH)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_hook(state_root: pathlib.Path, payload: dict | None, *, bot: str | None = "target-bot"):
     env = os.environ.copy()
     env["TOKENOMICS_STATE_DIR"] = str(state_root)
@@ -123,6 +132,16 @@ def test_path_like_session_id_is_hashed_inside_state_dir(tmp_path):
     assert state_path.name == hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16] + ".jsonl"
 
 
+def test_path_like_bot_uses_sanitized_default_state_root(tmp_path, monkeypatch):
+    module = load_hook_module()
+    monkeypatch.delenv("TOKENOMICS_STATE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    root = module.state_root("../../evil bot")
+
+    assert root == pathlib.Path.home() / "Library" / "Application Support" / "evil_bot-tokenomics"
+
+
 def test_empty_stdin_fails_open(tmp_path):
     result = run_hook(tmp_path, None)
 
@@ -161,11 +180,7 @@ def test_unwritable_state_path_fails_open(tmp_path):
 
 
 def test_deny_reason_truncates_to_2000_bytes():
-    spec = importlib.util.spec_from_file_location("browser_loop_interrupt", HOOK_PATH)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    module = load_hook_module()
 
     reason = module.build_deny_reason(extra="x" * 5000)
 

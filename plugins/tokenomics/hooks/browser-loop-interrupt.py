@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,11 @@ WINDOW_SECONDS = 60.0
 THRESHOLD = 8
 MAX_REASON_BYTES = 2000
 TOOL_NAME = "mcp__superpowers-chrome_chrome__use_browser"
+
+
+def state_dir_name(bot: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", bot).strip("._-")
+    return f"{(slug or 'bot')[:80]}-tokenomics"
 
 
 def fail_open(message: str) -> int:
@@ -62,7 +68,7 @@ def state_root(bot: str) -> Path:
     override = os.environ.get("TOKENOMICS_STATE_DIR")
     if override:
         return Path(override)
-    return Path.home() / "Library" / "Application Support" / f"{bot}-tokenomics"
+    return Path.home() / "Library" / "Application Support" / state_dir_name(bot)
 
 
 def state_path(root: Path, session_id: str) -> Path:

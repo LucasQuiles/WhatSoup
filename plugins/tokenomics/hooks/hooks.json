@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENOMICS_BOT=\"${TOKENOMICS_BOT:-target bot}\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/browser-loop-interrupt.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/browser-loop-interrupt.py\"",
             "timeout": 5
           }
         ]
