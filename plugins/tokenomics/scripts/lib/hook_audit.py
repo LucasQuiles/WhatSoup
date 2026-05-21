@@ -119,3 +119,15 @@ def require_no_conflict(records: Sequence[ConflictRecord]) -> None:
     if records:
         raise HookConflict(records)
     return None
+
+
+__all__ = [
+    "BROWSER_MATCHER",
+    "ConflictRecord",
+    "HookConflict",
+    "audit_hook_surfaces",
+    "require_no_conflict",
+    "scan_hookify_file",
+    "scan_plugin_hooks_json",
+    "scan_settings_json",
+]

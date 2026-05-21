@@ -129,7 +129,7 @@ class RollbackJournal:
 - Create: `plugins/tokenomics/scripts/lib/rollback.py`
 - Create test: `plugins/tokenomics/tests/test_rollback.py`
 
-- [ ] **Step 2.1: Write the failing test file (all 9 tests)**
+- [x] **Step 2.1: Write the failing test file (all 9 tests)**
 
 Create `plugins/tokenomics/tests/test_rollback.py` with the following content:
 
@@ -283,7 +283,7 @@ def test_from_path_reloads_journal_for_out_of_process_rollback(tmp_path):
     assert not target.exists()
 ```
 
-- [ ] **Step 2.2: Run the test to confirm it fails**
+- [x] **Step 2.2: Run the test to confirm it fails**
 
 Run:
 
@@ -293,7 +293,7 @@ bash scripts/run-tokenomics-pytests.sh -k rollback
 
 Expected: collection error / 10 errors with `ModuleNotFoundError: No module named 'rollback'` or `FileNotFoundError` resolving `ROLLBACK_PATH`. This proves the test file is wired correctly and the module is absent.
 
-- [ ] **Step 2.3: Implement the minimal module**
+- [x] **Step 2.3: Implement the minimal module**
 
 Create `plugins/tokenomics/scripts/lib/rollback.py` with the following content:
 
@@ -418,7 +418,7 @@ class RollbackJournal:
         return inst
 ```
 
-- [ ] **Step 2.4: Run the test to confirm it passes**
+- [x] **Step 2.4: Run the test to confirm it passes**
 
 Run:
 
@@ -430,7 +430,7 @@ Expected: 11 passed (10 from the original design plus 1 defensive direct test fo
 
 Note: `scripts/run-tokenomics-pytests.sh` ignores extra args (it `exec`s pytest with a fixed argv), so `-k rollback` is dropped and the full suite always runs. Use `python3 -m pytest -q plugins/tokenomics/tests/test_rollback.py` for file-scoped runs.
 
-- [ ] **Step 2.5: Run the whole tokenomics test suite to confirm no regression**
+- [x] **Step 2.5: Run the whole tokenomics test suite to confirm no regression**
 
 Run:
 
@@ -440,7 +440,7 @@ bash scripts/run-tokenomics-pytests.sh
 
 Expected: all previously-passing tests still pass plus the 11 new rollback tests (56 passed total at the time of writing).
 
-- [ ] **Step 2.6: Commit**
+- [x] **Step 2.6: Commit**
 
 ```bash
 git add plugins/tokenomics/scripts/lib/rollback.py plugins/tokenomics/tests/test_rollback.py plugins/tokenomics/INSTALLER_PLAN.md
@@ -483,6 +483,26 @@ already shipped at b3dac2d6) and Task 2 (this commit)."
 **SPEC.md coverage:** §728 (hook-surface audit), §5.4 cases 2 (settings.json conflict), 3 (plugin hooks.json conflict), 4 (hookify rules conflict).
 
 **Out of scope for Task 3:** path discovery (the orchestrator passes concrete paths in); exit-code mapping (orchestrator concern); live host scan (orchestrator runs the audit against real paths under the user's home).
+
+---
+
+### Review fixes (post Tasks 2 + 3, applied before draft PR)
+
+A pre-PR code review flagged two Important issues that were addressed before pushing:
+
+1. **`RollbackJournal.undo` now persists `undone` state after each mutating entry.** Without this, a crash-recovery `from_path()` followed by a second `undo()` could re-execute `command` undos (e.g., double-issue `launchctl unload`). `_persist_state()` atomically rewrites the JSONL via `tempfile.NamedTemporaryFile` + `os.replace`. Verified with red-green: the new regression test `test_undo_persists_done_state_so_reload_does_not_double_execute` fails (marker has `ran\nran\n`) when persistence is disabled, passes when enabled.
+
+2. **Real LIFO ordering test.** The original `test_undo_is_lifo` only proved both entries were marked undone — it didn't actually prove reverse order, because both ops succeed regardless of sequence. Replaced with:
+   - `test_undo_executes_entries_in_reverse_of_record_order` — uses `record_command` to append "first" / "second" to an order file in record order; asserts the file contents are `["second", "first"]` after undo.
+   - `test_undo_unwinds_file_before_parent_dir_so_rmdir_succeeds` — exercises a real installer-style dependency: record parent dir then child file, undo, assert both removed (would fail with forward iteration since `rmdir` on non-empty dir is recorded as a failure not data loss).
+
+   Both proven to bite under forward iteration.
+
+3. **`hook_audit.py` adds an `__all__` export list** to make the public surface explicit and discoverable.
+
+Test count after fixes: **74 passed** (was 72; net +2: removed weak LIFO test, added 3 new tests — real LIFO, parent/child unwind, double-execute regression).
+
+Deferred to follow-up (reviewer "Minor"): public accessor for `_entries` (currently tests poke at the private list); `ensure_dir` race catch on `FileExistsError`; uniformly tighter type annotations.
 
 ---
 

@@ -74,19 +74,49 @@ def test_ensure_dir_records_only_when_newly_created(tmp_path):
     assert not new_dir.exists()
 
 
-def test_undo_is_lifo(tmp_path):
+def test_undo_executes_entries_in_reverse_of_record_order(tmp_path):
+    """LIFO contract: the LAST recorded entry undoes FIRST. Proven by
+    capturing real execution order via record_command markers; file ops
+    alone would not detect a regression to forward iteration."""
     module = _load_module()
-    f1 = tmp_path / "1.txt"
-    f1.write_text("1", encoding="utf-8")
-    f2 = tmp_path / "2.txt"
-    f2.write_text("2", encoding="utf-8")
+    order_file = tmp_path / "order.txt"
     journal = module.RollbackJournal()
-    journal.record_file(f1)
-    journal.record_file(f2)
+    journal.record_command([
+        sys.executable, "-c",
+        f"open({str(order_file)!r}, 'a').write('first\\n')",
+    ])
+    journal.record_command([
+        sys.executable, "-c",
+        f"open({str(order_file)!r}, 'a').write('second\\n')",
+    ])
+
     failures = journal.undo()
+
     assert failures == []
-    assert all(e.undone for e in journal._entries)
-    assert [e.path for e in journal._entries] == [str(f1), str(f2)]
+    lines = order_file.read_text(encoding="utf-8").splitlines()
+    # LIFO: the SECOND command (recorded last) ran first
+    assert lines == ["second", "first"]
+
+
+def test_undo_unwinds_file_before_parent_dir_so_rmdir_succeeds(tmp_path):
+    """LIFO contract under real installer-style sequencing: record the
+    parent dir, then a child file; on undo the file must be removed
+    before the empty-dir removal of the parent."""
+    module = _load_module()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    child = parent / "child.txt"
+    child.write_text("x", encoding="utf-8")
+
+    journal = module.RollbackJournal()
+    journal.record_dir(parent)
+    journal.record_file(child)
+
+    failures = journal.undo()
+
+    assert failures == []
+    assert not child.exists()
+    assert not parent.exists()
 
 
 def test_undo_is_idempotent_on_rerun(tmp_path):
@@ -136,6 +166,33 @@ def test_from_path_reloads_journal_for_out_of_process_rollback(tmp_path):
     failures = reloaded.undo()
     assert failures == []
     assert not target.exists()
+
+
+def test_undo_persists_done_state_so_reload_does_not_double_execute(tmp_path):
+    """Regression: a crash-recovery rollback that reloads the journal
+    after a successful undo MUST NOT re-execute command undos. The
+    journal file is rewritten atomically per-entry as undo proceeds,
+    so a subsequent from_path() sees the same entries with undone=True."""
+    module = _load_module()
+    journal_path = tmp_path / "j.jsonl"
+    marker = tmp_path / "marker.txt"
+    journal = module.RollbackJournal(journal_path=journal_path)
+    journal.record_command([
+        sys.executable, "-c",
+        # Each execution appends "ran\n" so a double-run produces two lines
+        f"open({str(marker)!r}, 'a').write('ran\\n')",
+    ])
+
+    journal.undo()
+    assert marker.read_text(encoding="utf-8") == "ran\n"
+
+    # Simulate a fresh process re-reading the same journal file after
+    # the prior rollback succeeded.
+    reloaded = module.RollbackJournal.from_path(journal_path)
+    reloaded.undo()
+
+    # No second execution
+    assert marker.read_text(encoding="utf-8") == "ran\n"
 
 
 def test_undo_never_removes_unrecorded_pre_existing_files(tmp_path):
