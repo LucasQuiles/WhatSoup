@@ -161,6 +161,42 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(refreshed.next_fire_at).toBe(1_000_000_001 + 60);
   });
 
+  it('invalid spec_json syntax records spec_parse before validation or execution', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'invalid json', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec(`CREATE TABLE probes (id INTEGER PRIMARY KEY)`);
+    const now = 1_000_000_000;
+    const info = db.raw.prepare(
+      `INSERT INTO bead_triggers (
+         bead_id, kind, spec_json, spec_version, status, interval_seconds,
+         next_fire_at, last_fire_at, terminal_at, on_terminal, report_chat_jid,
+         dedupe_key, created_at, updated_at
+       ) VALUES (?, 'poll.sqlite', ?, 1, 'active', 300, ?, NULL, NULL, 'notify', ?, NULL, ?, ?)`,
+    ).run(
+      bead.id,
+      '{"sql":',
+      now,
+      'admin@s.whatsapp.net',
+      now,
+      now,
+    );
+    const triggerId = Number(info.lastInsertRowid);
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => now + 1 });
+    await poller.tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(
+      `SELECT status, error_kind, output_summary, output_json
+       FROM trigger_runs WHERE trigger_id = ?`,
+    ).all(triggerId) as Array<{ status: string; error_kind: string; output_summary: string; output_json: string }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].error_kind).toBe('spec_parse');
+    expect(runs[0].output_summary).toMatch(/not valid JSON/i);
+    expect(JSON.parse(runs[0].output_json)).toEqual({});
+  });
+
   it('invalid spec_json shape fails SPEC_REGISTRY validation before execution', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, { kind: 'watch', title: 'invalid spec', ownerJid: 'mw', actor: 'u' });
