@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 stdlib only (`json`, `pathlib`, `dataclasses`, `subprocess`, `os`, `tempfile`). pytest for tests. Existing convention: tests load library modules via `importlib.util` from absolute paths (see `plugins/tokenomics/tests/test_install_config.py`).
 
-**Scope of this plan:** Tasks 1–2 only. Task 1 is already shipped (HEAD `b3dac2d6`) and is documented here for chain-of-custody. Task 2 is the next active task. Subsequent installer tasks (hook-surface audit, toolchain baseline, doctor gate, plist materialization, manifest emission, install orchestrator) will be appended as separate tasks in follow-on revisions of this plan.
+**Scope of this plan:** Tasks 1–3 shipped. Task 1 (`b3dac2d6`) shipped before this plan was written and is documented here for chain-of-custody. Tasks 2 and 3 ship under this plan. Subsequent installer tasks (toolchain baseline, doctor gate, plist materialization, manifest emission, install orchestrator) will be appended as separate tasks in follow-on revisions of this plan.
 
 **Working directory:** the WhatSoup repo worktree on branch `feat/tokenomics-installer-20260521`. Run all commands from the repository root.
 
@@ -26,9 +26,11 @@
 | Path | Status | Responsibility |
 |---|---|---|
 | `plugins/tokenomics/scripts/lib/install_config.py` | exists (`b3dac2d6`) | Parse + validate installer JSON config into typed `InstallConfig` |
-| `plugins/tokenomics/scripts/lib/rollback.py` | **new (Task 2)** | `RollbackJournal` — record installer-created files/dirs/commands; undo in LIFO with pre-existing-state preservation |
+| `plugins/tokenomics/scripts/lib/rollback.py` | shipped (Task 2) | `RollbackJournal` — record installer-created files/dirs/commands; undo in LIFO with pre-existing-state preservation |
+| `plugins/tokenomics/scripts/lib/hook_audit.py` | shipped (Task 3) | `audit_hook_surfaces` — scan settings.json / hookify rules / other plugin hooks.json for conflicting PreToolUse browser-matcher; raises `HookConflict` |
 | `plugins/tokenomics/tests/test_install_config.py` | exists (`b3dac2d6`) | Unit tests for `install_config.py` |
-| `plugins/tokenomics/tests/test_rollback.py` | **new (Task 2)** | Unit tests for `rollback.py` |
+| `plugins/tokenomics/tests/test_rollback.py` | shipped (Task 2) | Unit tests for `rollback.py` |
+| `plugins/tokenomics/tests/test_hook_audit.py` | shipped (Task 3) | Unit tests for `hook_audit.py` |
 | `plugins/tokenomics/scripts/install.py` | future (later task) | Top-level installer orchestrator that uses `InstallConfig` + `RollbackJournal` + hook-audit + toolchain-baseline + doctor + plist-renderer |
 
 Module boundary rule: `rollback.py` knows nothing about hooks, plists, or the doctor; it is a pure recorder/undoer of filesystem and command operations. This keeps it composable with whatever the installer orchestrator decides to do.
@@ -460,24 +462,47 @@ already shipped at b3dac2d6) and Task 2 (this commit)."
 
 ---
 
-## Tasks 3+ (not in this revision)
+### Task 3: Hook-surface audit — **DONE**
+
+**Files (shipped):**
+- `plugins/tokenomics/scripts/lib/hook_audit.py`
+- `plugins/tokenomics/tests/test_hook_audit.py`
+
+**What shipped:**
+- `BROWSER_MATCHER` constant: `"mcp__superpowers-chrome_chrome__use_browser"`.
+- `ConflictRecord(path, surface, detail)` frozen dataclass.
+- `HookConflict(RuntimeError)` carries `.conflicts` list.
+- `scan_settings_json(path)` and `scan_plugin_hooks_json(path)` — JSON parse, walk `hooks.PreToolUse[*].matcher`, return tagged records.
+- `scan_hookify_file(path)` — substring scan for the browser matcher in hookify `.local.md` content (hookify's `event:` taxonomy doesn't map 1:1 to agent runtime matchers, so substring on the literal tool name is the conservative check).
+- `_matcher_targets_browser(matcher)` — tries regex `re.search` first (agent runtime matchers are regex; both literal and patterns like `mcp__superpowers-chrome_chrome__.*` match); falls back to substring on invalid regex.
+- `audit_hook_surfaces(*, settings_paths, hookify_paths, plugin_hooks_paths, exclude_paths)` — composes the three scanners; resolves and excludes the tokenomics plugin's own hooks.json so it doesn't self-conflict.
+- `require_no_conflict(records)` — raises `HookConflict` if non-empty; returns `None` otherwise. The orchestrator (future Task 8) is responsible for translating `HookConflict` into `EX_HOOK_CONFLICT=78`.
+
+**Tests (16):** missing file, no hooks block, no browser matcher, literal matcher, regex matcher (`.*` suffix), invalid-regex substring fallback, PostToolUse-only ignored, malformed JSON, hookify missing/no-mention/mention, plugin-tag, own-plugin exclusion, three-surface aggregation, `require_no_conflict` empty no-op, `require_no_conflict` raise with `.conflicts` attached.
+
+**SPEC.md coverage:** §728 (hook-surface audit), §5.4 cases 2 (settings.json conflict), 3 (plugin hooks.json conflict), 4 (hookify rules conflict).
+
+**Out of scope for Task 3:** path discovery (the orchestrator passes concrete paths in); exit-code mapping (orchestrator concern); live host scan (orchestrator runs the audit against real paths under the user's home).
+
+---
+
+## Tasks 4+ (not in this revision)
 
 Reserved for follow-on revisions of this plan. Sketch only — these are **not** to be executed under this revision:
 
-- **Task 3:** Hook-surface audit (`hook_audit.py`) — scan `~/.claude/settings.json`, `~/LAB/.claude/hookify.*.local.md`, and other plugin `hooks.json` files for a pre-existing `PreToolUse` matcher on `mcp__superpowers-chrome_chrome__use_browser`; raise `HookConflict` (exit code 78 at the orchestrator boundary). SPEC.md §728, §5.4 cases 2–4.
 - **Task 4:** Search-toolchain baseline (`toolchain.py`) — verify `rg` is on `PATH` (hard fail, exit 79); warn on missing `fd`/`rga`/`ast-grep`. SPEC.md §738, §5.4 case 16.
 - **Task 5:** Doctor gate wrapper — invoke `tokenomics-doctor --json` and bail on any `fail` record (exit 80). Depends on Doctor (L) existing or being mocked. SPEC.md §748, §5.4 cases 17–18.
 - **Task 6:** Plugin-manifest emitter — write `tokenomics/.claude-plugin/plugin.json` with `name`, `version`, `sourceRepo`. SPEC.md §752, §5.4 case 19.
 - **Task 7:** Plist materialization via existing `render-plist.py` + `launchctl load`, recorded as `record_command(["launchctl", "unload", ...])` on the journal. SPEC.md §5.4 cases 1, 9, 14.
-- **Task 8:** Top-level orchestrator `scripts/install.py` — composes Tasks 1–7 in order, instantiates one `RollbackJournal`, calls `journal.undo()` on any exception, and on success leaves the journal in place for forensic inspection.
+- **Task 8:** Top-level orchestrator `scripts/install.py` — composes Tasks 1–7 in order, instantiates one `RollbackJournal`, calls `journal.undo()` on any exception, translates `HookConflict`/`InstallConfigError`/missing-toolchain/doctor-fail into the named exit codes (`EX_HOOK_CONFLICT=78`, `EX_INSTRUCTION_BLOAT=77`, `EX_MISSING_TOOLCHAIN=79`, `EX_DOCTOR_RED_FINDING=80`), and on success leaves the journal in place for forensic inspection.
 
-Each becomes its own labeled task with its own TDD steps once Task 2 is merged.
+Each becomes its own labeled task with its own TDD steps once Task 3 is merged.
 
 ---
 
 ## Self-review
 
-- **Spec coverage in this revision:** Task 1 covers config validation (no specific SPEC.md test case — defensive baseline). Task 2 covers SPEC.md §5.4 cases 5, 6, 7, 8, 9 — case 6 is covered by the defensive direct test `test_undo_never_removes_unrecorded_pre_existing_files` added at approval time (proves pre-existing `history.jsonl` / `threshold.json` survive undo because the journal only records what the current install created).
+- **Spec coverage in this revision:** Task 1 covers config validation (no specific SPEC.md test case — defensive baseline). Task 2 covers SPEC.md §5.4 cases 5, 6, 7, 8, 9 — case 6 via the defensive direct test `test_undo_never_removes_unrecorded_pre_existing_files`. Task 3 covers SPEC.md §728 plus §5.4 cases 2, 3, 4 (hook conflict detection across settings.json, plugin hooks.json, and hookify rules).
 - **Placeholder scan:** All steps contain runnable code or runnable commands. No "TBD", "appropriate", "similar to".
 - **Type consistency:** `JournalEntry` field names (`op`, `path`, `undo_cmd`, `undone`) are identical in the dataclass, the JSONL records, the `from_path` reload, and the test assertions. `record_file`/`record_dir`/`record_command`/`ensure_dir`/`undo` signatures match between the design block, the implementation, and the tests.
 - **Cross-file consistency:** `_load_module()` in `test_rollback.py` mirrors the pattern in the existing `test_install_config.py`. Test command (`bash scripts/run-tokenomics-pytests.sh`) matches the script that exists on disk.
