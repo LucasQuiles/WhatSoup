@@ -491,14 +491,13 @@ curl -s http://127.0.0.1:9091/health | python3 -c \
 
 **Symptoms:** User sees "stuck" or "retrying" messages, or an agent session restarts unexpectedly during a long tool invocation.
 
-The operation tracker monitors each tool invocation and thinking gap. When a tool exceeds its stall threshold, automatic recovery kicks in:
+The operation tracker monitors each tool invocation and thinking gap. It reports stalls and probes liveness, but stream-json stalled-recovery is a no-op. The hard watchdog at `src/runtimes/agent/session.ts:43` handles termination after the configured active-turn budget.
 
 **Recovery cascade:**
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
-   - Tracker sends `\x03` (Ctrl+C) to the provider's stdin
-   - User receives a stall warning (format depends on `toolUpdateMode`)
-   - Provider is expected to abort the tool and continue
+   - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
+   - For stream-json providers, soft stalled-recovery is a structured no-op; the hard watchdog remains the termination backstop
 
 2. **Thinking stall detected** — no events from the provider for `thinkingStallMs` (default 5 min)
    - Tracker sends a newline (`\n`) to stdin as a liveness probe

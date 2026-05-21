@@ -251,6 +251,7 @@ if (instanceType === 'agent') {
     shared: agentOpts?.sessionScope === 'shared',
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
+    configSystemPrompt: instanceConfig?.systemPrompt as string | undefined,
     instructionsPath: agentOpts?.instructionsPath,
     sandbox: agentOpts?.sandbox,
     model: agentModel,

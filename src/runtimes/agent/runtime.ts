@@ -293,6 +293,7 @@ export interface AgentRuntimeOptions {
   /** Session scope: 'single' (one chat), 'shared' (one session, many chats), 'per_chat' (one session per chat). */
   sessionScope?: SessionScope;
   cwd?: string;
+  configSystemPrompt?: string;
   instructionsPath?: string;
   sandbox?: SandboxPolicy;
   /** Claude model identifier to pass via --model flag (e.g. 'claude-opus-4-6[1m]'). */
@@ -576,6 +577,7 @@ export class AgentRuntime implements Runtime {
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
   private readonly cwd: string | undefined;
+  private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly sandbox: SandboxPolicy | undefined;
   private readonly model: string | undefined;
@@ -1234,6 +1236,7 @@ export class AgentRuntime implements Runtime {
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
     this.cwd = options?.cwd;
+    this.configSystemPrompt = options?.configSystemPrompt;
     this.instructionsPath = options?.instructionsPath;
     this.sandbox = options?.sandbox;
     this.model = options?.model;
@@ -3415,6 +3418,7 @@ export class AgentRuntime implements Runtime {
       onCrash: opts.onCrash,
       notifyUser: opts.notifyUser,
       cwd: opts.cwd,
+      configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
       model: this.model,
       pluginDirs: this.pluginDirs,

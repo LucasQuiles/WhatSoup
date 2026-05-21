@@ -60,6 +60,24 @@ describe('repo hygiene guard', () => {
     expect(issues.map((issue) => issue.code)).toEqual(['whatsapp-group-jid']);
   });
 
+  it('allows npm registry tarball URLs in package-lock without hiding internal labels elsewhere', () => {
+    const issues = scanAddedLines([
+      {
+        filePath: 'package-lock.json',
+        line: 6489,
+        text: '      "resolved": "https://registry.npmjs.org/ws/-/ws-8.20.1.tgz",',
+      },
+      {
+        filePath: 'docs/example.md',
+        line: 3,
+        text: 'The internal label WS-8 must not be published.',
+      },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual(['internal-workstream-label']);
+    expect(issues.map((issue) => `${issue.filePath}:${issue.line}`)).toEqual(['docs/example.md:3']);
+  });
+
   it('allows detector literals in the guard fixture files only', () => {
     const fixtureIssues = scanAddedLines([
       {

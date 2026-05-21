@@ -21,11 +21,32 @@ const MANAGED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'PINECONE_API_KEY',
   'CUSTOM_SECRET',
+  'TOKENOMICS_SECRET',
   'ALLOW_M365_MUTATIONS',
   'WHATSOUP_CONNECTOR_FAILCLOSED',
   'WHATSOUP_INSTANCE',
   'WHATSOUP_MCP_SOCKET',
+  'ENABLE_TOOL_SEARCH',
+  'TOKENOMICS_BOT',
+  'BASH_MAX_OUTPUT_LENGTH',
+  'MAX_MCP_OUTPUT_TOKENS',
+  'CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS',
+  'CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT',
+  'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE',
+  'PLAYWRIGHT_MCP_SNAPSHOT_MODE',
+  'PLAYWRIGHT_MCP_OUTPUT_MODE',
+  'PLAYWRIGHT_MCP_CONSOLE_LEVEL',
 ] as const;
+
+const TOKENOMICS_ENV_VARS = {
+  ENABLE_TOOL_SEARCH: 'auto:5',
+  TOKENOMICS_BOT: 'target-bot',
+  BASH_MAX_OUTPUT_LENGTH: '120000',
+  MAX_MCP_OUTPUT_TOKENS: '64000',
+  CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: '96000',
+  CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT: '1',
+  CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '0.72',
+} as const;
 
 let savedEnv: Record<string, string | undefined>;
 
@@ -144,6 +165,38 @@ describe('buildBaseChildEnv', () => {
       WHATSOUP_INSTANCE: 'line-a',
       WHATSOUP_MCP_SOCKET: '/tmp/line-a.sock',
     });
+  });
+
+  it('passes tokenomics env vars through only when parent set and still strips unrelated or Playwright env', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      ...TOKENOMICS_ENV_VARS,
+      TOKENOMICS_SECRET: 'must-not-leak',
+      CUSTOM_SECRET: 'custom-secret',
+      PLAYWRIGHT_MCP_SNAPSHOT_MODE: 'full',
+      PLAYWRIGHT_MCP_OUTPUT_MODE: 'file',
+      PLAYWRIGHT_MCP_CONSOLE_LEVEL: 'warning',
+    });
+
+    const env = buildBaseChildEnv();
+
+    expect(env).toMatchObject(TOKENOMICS_ENV_VARS);
+    expect(env).not.toHaveProperty('TOKENOMICS_SECRET');
+    expect(env).not.toHaveProperty('CUSTOM_SECRET');
+    expect(env).not.toHaveProperty('PLAYWRIGHT_MCP_SNAPSHOT_MODE');
+    expect(env).not.toHaveProperty('PLAYWRIGHT_MCP_OUTPUT_MODE');
+    expect(env).not.toHaveProperty('PLAYWRIGHT_MCP_CONSOLE_LEVEL');
+
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+    });
+
+    const unsetEnv = buildBaseChildEnv();
+    for (const key of Object.keys(TOKENOMICS_ENV_VARS)) {
+      expect(unsetEnv).not.toHaveProperty(key);
+    }
   });
 });
 

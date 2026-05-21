@@ -28,6 +28,7 @@ import {
   assertNeverProvider,
   type ProviderId,
 } from './providers/index.ts';
+import { composeWithExactLineDedup } from './prompt-compose.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -71,6 +72,7 @@ export interface SessionManagerOptions {
   onCrash?: (info: SessionCrashInfo) => void;
   notifyUser?: (msg: string) => void;
   cwd?: string;
+  configSystemPrompt?: string;
   instructionsPath?: string;
   model?: string;
   pluginDirs?: string[];
@@ -290,6 +292,7 @@ export class SessionManager {
   private readonly onEvent: (event: AgentEvent) => void;
   private readonly instanceName: string;
   private configuredCwd: string | undefined;
+  private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
   private readonly pluginDirs: string[];
@@ -371,6 +374,7 @@ export class SessionManager {
     this.onCrash = opts.onCrash;
     this.notifyUser = opts.notifyUser;
     this.configuredCwd = opts.cwd;
+    this.configSystemPrompt = opts.configSystemPrompt;
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
     this.pluginDirs = opts.pluginDirs ?? [];
@@ -441,6 +445,42 @@ export class SessionManager {
   private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
     return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, this.model, this.pluginDirs);
+  }
+
+  buildSystemPrompt(): string {
+    const cwd = this.configuredCwd ?? homedir();
+    const displayName = PROVIDER_DISPLAY_NAMES[this.provider] ?? this.provider;
+    const transportPrelude = [
+      `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp.`,
+      'Your responses are sent as WhatsApp messages — keep them concise.',
+      'You have full access to the local machine via bypassPermissions mode.',
+      `Working directory: ${cwd}`,
+    ].join('\n');
+    const sources = [transportPrelude];
+
+    if (this.configSystemPrompt) {
+      sources.push(this.configSystemPrompt);
+    }
+
+    if (this.instructionsPath) {
+      const fullInstructionsPath = join(cwd, this.instructionsPath);
+      let instructionsContent: string;
+      try {
+        instructionsContent = readFileSync(fullInstructionsPath, 'utf8');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to read instructionsPath "${fullInstructionsPath}": ${message}`);
+      }
+      if (instructionsContent) {
+        sources.push(instructionsContent);
+      }
+    }
+
+    const systemPrompt = composeWithExactLineDedup(sources);
+    if (systemPrompt.trim().length === 0) {
+      throw new Error('Failed to build system prompt: composed prompt is empty');
+    }
+    return systemPrompt;
   }
 
   private getParser(): (line: string) => AgentEvent | null {
@@ -712,27 +752,7 @@ export class SessionManager {
     const cwd = this.configuredCwd ?? homedir();
     const workspaceKey = toConversationKey(this.chatJid);
 
-    const displayName = PROVIDER_DISPLAY_NAMES[this.provider] ?? this.provider;
-
-    let systemPrompt: string;
-    if (this.instructionsPath) {
-      const fullInstructionsPath = join(cwd, this.instructionsPath);
-      let instructionsContent: string;
-      try {
-        instructionsContent = readFileSync(fullInstructionsPath, 'utf8');
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`Failed to read instructionsPath "${fullInstructionsPath}": ${message}`);
-      }
-      systemPrompt = `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp. ${instructionsContent}`;
-    } else {
-      systemPrompt = [
-        `You are "${this.instanceName}", a personal ${displayName} agent running over WhatsApp.`,
-        `Your responses are sent as WhatsApp messages — keep them concise.`,
-        `You have full access to the local machine via bypassPermissions mode.`,
-        `Working directory: ${cwd}`,
-      ].join(' ');
-    }
+    const systemPrompt = this.buildSystemPrompt();
 
     if (this.isManagedLoopProvider) {
       const providerSession = this.createManagedProviderSession();

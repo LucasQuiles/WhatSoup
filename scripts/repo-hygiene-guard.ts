@@ -257,6 +257,11 @@ function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: stri
   return null;
 }
 
+function isPackageLockResolvedUrlLine(filePath: string, text: string): boolean {
+  return normalizeRepoPath(filePath) === 'package-lock.json'
+    && /^\s*"resolved":\s*"https:\/\/registry\.npmjs\.org\//.test(text);
+}
+
 export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
@@ -310,6 +315,9 @@ export function scanAddedLines(lines: AddedLine[]): GuardIssue[] {
       });
     }
     for (const pattern of addedLinePatterns) {
+      if (pattern.code === 'internal-workstream-label' && isPackageLockResolvedUrlLine(filePath, line.text)) {
+        continue;
+      }
       if (findDisallowedMatch(filePath, pattern, line.text)) {
         issues.push({
           code: pattern.code,
