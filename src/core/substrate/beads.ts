@@ -15,7 +15,7 @@ export interface CreateBeadArgs {
   actor: string;
 }
 
-const TERMINAL: BeadStatus[] = ['completed', 'cancelled', 'failed'];
+export const TERMINAL: readonly BeadStatus[] = ['completed', 'cancelled', 'failed'];
 const PROTECTED = new Set(['id', 'kind', 'owner_jid', 'status', 'created_at']);
 
 // Per spec §8.5: hard cap 64KB of UTF-8 bytes on bead.body (not UTF-16 code

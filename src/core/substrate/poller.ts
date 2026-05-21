@@ -19,6 +19,7 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { nowUnixSec } from './time.ts';
 import { dueTriggers, validateTriggerSpec } from './triggers.ts';
+import { TERMINAL } from './beads.ts';
 import { writeBeadEvent } from './events.ts';
 import { nextCronRun } from '../cron.ts';
 import type { BeadStatus, TriggerKind, TriggerRow } from './types.ts';
@@ -589,8 +590,11 @@ export class TriggerPoller {
     const bead = this.db.prepare(
       `SELECT status FROM beads WHERE id = ?`,
     ).get(t.bead_id) as { status: BeadStatus } | undefined;
-    if (!bead || !['completed', 'cancelled', 'failed'].includes(bead.status)) return;
+    if (!bead || !TERMINAL.includes(bead.status)) return;
 
+    // This is the inverse of the normal terminal transition: transition()
+    // intentionally rejects terminal beads, so reopen_bead writes the status
+    // and matching status_change event directly inside the expiry transaction.
     this.db.prepare(
       `UPDATE beads
        SET status = 'active', completed_at = NULL, cancelled_at = NULL, updated_at = ?
