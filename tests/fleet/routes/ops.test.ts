@@ -1632,55 +1632,63 @@ describe('handleConfigUpdate', () => {
   });
 
   it('rejects agent cwd symlinks that resolve outside home', async () => {
-    const outsideCwd = path.join(tmpDir, 'outside-cwd');
-    fs.mkdirSync(outsideCwd, { recursive: true });
-    const symlinkCwd = path.join(agentCwd, 'cwd-link');
-    fs.symlinkSync(outsideCwd, symlinkCwd, 'dir');
+    // Use /var/tmp to guarantee a path outside $HOME (os.tmpdir() may be home-relative)
+    const outsideCwd = fs.mkdtempSync(path.join('/var/tmp/', 'whatsoup-outside-'));
+    try {
+      const symlinkCwd = path.join(agentCwd, 'cwd-link');
+      fs.symlinkSync(outsideCwd, symlinkCwd, 'dir');
 
-    const configPath = path.join(tmpDir, 'config.json');
-    fs.writeFileSync(configPath, JSON.stringify({
-      type: 'agent',
-      healthPort: 3010,
-      accessMode: 'self_only',
-      agentOptions: { cwd: symlinkCwd, sessionScope: 'per_chat' },
-    }));
-    const inst = fakeInstance({ type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: symlinkCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
-    const res = mockRes();
-    await handleConfigUpdate(
-      mockReq(JSON.stringify({ accessMode: 'self_only' })),
-      res, deps, { name: 'test-line' },
-    );
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ accessMode: 'self_only' })),
+        res, deps, { name: 'test-line' },
+      );
 
-    expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/cwd.*home directory/);
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/cwd.*home directory/);
+    } finally {
+      fs.rmSync(outsideCwd, { recursive: true, force: true });
+    }
   });
 
   it('rejects pluginDirs symlinks that resolve outside home', async () => {
-    const outsidePluginDir = path.join(tmpDir, 'outside-plugin-dir');
-    fs.mkdirSync(outsidePluginDir, { recursive: true });
-    const symlinkPluginDir = path.join(agentCwd, 'plugin-link');
-    fs.symlinkSync(outsidePluginDir, symlinkPluginDir, 'dir');
+    // Use /var/tmp to guarantee a path outside $HOME (os.tmpdir() may be home-relative)
+    const outsidePluginDir = fs.mkdtempSync(path.join('/var/tmp/', 'whatsoup-outside-'));
+    try {
+      const symlinkPluginDir = path.join(agentCwd, 'plugin-link');
+      fs.symlinkSync(outsidePluginDir, symlinkPluginDir, 'dir');
 
-    const configPath = path.join(tmpDir, 'config.json');
-    fs.writeFileSync(configPath, JSON.stringify({
-      type: 'agent',
-      healthPort: 3010,
-      accessMode: 'self_only',
-      agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
-    }));
-    const inst = fakeInstance({ type: 'agent', configPath });
-    const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({
+        type: 'agent',
+        healthPort: 3010,
+        accessMode: 'self_only',
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+      }));
+      const inst = fakeInstance({ type: 'agent', configPath });
+      const deps = makeDeps({ discovery: { getInstance: vi.fn(() => inst) } as any });
 
-    const res = mockRes();
-    await handleConfigUpdate(
-      mockReq(JSON.stringify({ agentOptions: { pluginDirs: [symlinkPluginDir] } })),
-      res, deps, { name: 'test-line' },
-    );
+      const res = mockRes();
+      await handleConfigUpdate(
+        mockReq(JSON.stringify({ agentOptions: { pluginDirs: [symlinkPluginDir] } })),
+        res, deps, { name: 'test-line' },
+      );
 
-    expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/pluginDirs.*home directory/);
+      expect(res._status).toBe(400);
+      expect(JSON.parse(res._body).error).toMatch(/pluginDirs.*home directory/);
+    } finally {
+      fs.rmSync(outsidePluginDir, { recursive: true, force: true });
+    }
   });
 
   it('returns 500 when config file cannot be read', async () => {
