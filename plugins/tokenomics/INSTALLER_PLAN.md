@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 stdlib only (`json`, `pathlib`, `dataclasses`, `subprocess`, `os`, `tempfile`). pytest for tests. Existing convention: tests load library modules via `importlib.util` from absolute paths (see `plugins/tokenomics/tests/test_install_config.py`).
 
-**Scope of this plan:** Tasks 1–3 shipped. Task 1 (`b3dac2d6`) shipped before this plan was written and is documented here for chain-of-custody. Tasks 2 and 3 ship under this plan. Subsequent installer tasks (toolchain baseline, doctor gate, plist materialization, manifest emission, install orchestrator) will be appended as separate tasks in follow-on revisions of this plan.
+**Scope of this plan:** Tasks 1–4 shipped (all stacked on draft PR #685). Task 1 (`b3dac2d6`) shipped before this plan was written and is documented here for chain-of-custody. Tasks 2, 3, and 4 ship under this plan. Subsequent installer tasks (doctor gate, plist materialization, manifest emission, install orchestrator) will be appended as separate tasks in follow-on revisions of this plan.
 
 **Working directory:** the WhatSoup repo worktree on branch `feat/tokenomics-installer-20260521`. Run all commands from the repository root.
 
@@ -28,9 +28,11 @@
 | `plugins/tokenomics/scripts/lib/install_config.py` | exists (`b3dac2d6`) | Parse + validate installer JSON config into typed `InstallConfig` |
 | `plugins/tokenomics/scripts/lib/rollback.py` | shipped (Task 2) | `RollbackJournal` — record installer-created files/dirs/commands; undo in LIFO with pre-existing-state preservation |
 | `plugins/tokenomics/scripts/lib/hook_audit.py` | shipped (Task 3) | `audit_hook_surfaces` — scan settings.json / hookify rules / other plugin hooks.json for conflicting PreToolUse browser-matcher; raises `HookConflict` |
+| `plugins/tokenomics/scripts/lib/toolchain.py` | shipped (Task 4) | `check_toolchain` — verify `rg` present (hard fail), `fd`/`rga`/`ast-grep` present (warn-only); raises `MissingToolchainError` |
 | `plugins/tokenomics/tests/test_install_config.py` | exists (`b3dac2d6`) | Unit tests for `install_config.py` |
 | `plugins/tokenomics/tests/test_rollback.py` | shipped (Task 2) | Unit tests for `rollback.py` |
 | `plugins/tokenomics/tests/test_hook_audit.py` | shipped (Task 3) | Unit tests for `hook_audit.py` |
+| `plugins/tokenomics/tests/test_toolchain.py` | shipped (Task 4) | Unit tests for `toolchain.py` |
 | `plugins/tokenomics/scripts/install.py` | future (later task) | Top-level installer orchestrator that uses `InstallConfig` + `RollbackJournal` + hook-audit + toolchain-baseline + doctor + plist-renderer |
 
 Module boundary rule: `rollback.py` knows nothing about hooks, plists, or the doctor; it is a pure recorder/undoer of filesystem and command operations. This keeps it composable with whatever the installer orchestrator decides to do.
@@ -506,11 +508,33 @@ Deferred to follow-up (reviewer "Minor"): public accessor for `_entries` (curren
 
 ---
 
-## Tasks 4+ (not in this revision)
+### Task 4: Search-toolchain baseline — **DONE**
+
+**Files (shipped):**
+- `plugins/tokenomics/scripts/lib/toolchain.py`
+- `plugins/tokenomics/tests/test_toolchain.py`
+
+**What shipped:**
+- `REQUIRED_TOOLS = ("rg",)` and `RECOMMENDED_TOOLS = ("fd", "rga", "ast-grep")` per SPEC §738. `ugrep` is intentionally absent from both lists (SPEC: "optional and unblocked").
+- `ToolchainReport(required, missing_required, missing_recommended)` frozen dataclass. `required` is a `{name: path|None}` map so the orchestrator can log resolved paths.
+- `MissingToolchainError(RuntimeError)` carries `.missing` list of absent required tools.
+- `check_toolchain(*, which_fn=shutil.which)` — injectable `which_fn` for tests; production callers use the default. Pure function, no global state.
+- `require_toolchain(report)` — raises `MissingToolchainError` if `missing_required` non-empty; `missing_recommended` is informational only. Orchestrator (Task 8) translates the exception to `EX_MISSING_TOOLCHAIN=79`.
+
+**Tests (12):** all-present, missing-rg (required), each recommended-tool missing individually, ugrep-missing-is-invisible, all-recommended-missing-with-rg-present, everything-missing, require-noop-on-empty, require-raises-on-required, require-ignores-recommended-warnings, live PATH integration (asserts shape, not host content).
+
+**SPEC.md coverage:** §738 (toolchain baseline), §5.4 case 16 (missing `rg` exits `EX_MISSING_TOOLCHAIN=79` — primitive detection; exit-code mapping is orchestrator concern).
+
+**Design choices:**
+- `which_fn` injection (kwarg-only) keeps tests hermetic — no need to mock PATH or use `monkeypatch.setenv`. Production callers omit the kwarg and get live `shutil.which`.
+- `RECOMMENDED_TOOLS` is a tuple constant, not enum, to keep the diff small. Promotion to enum becomes obvious only if the recommendations grow per-host conditions.
+
+---
+
+## Tasks 5+ (not in this revision)
 
 Reserved for follow-on revisions of this plan. Sketch only — these are **not** to be executed under this revision:
 
-- **Task 4:** Search-toolchain baseline (`toolchain.py`) — verify `rg` is on `PATH` (hard fail, exit 79); warn on missing `fd`/`rga`/`ast-grep`. SPEC.md §738, §5.4 case 16.
 - **Task 5:** Doctor gate wrapper — invoke `tokenomics-doctor --json` and bail on any `fail` record (exit 80). Depends on Doctor (L) existing or being mocked. SPEC.md §748, §5.4 cases 17–18.
 - **Task 6:** Plugin-manifest emitter — write `tokenomics/.claude-plugin/plugin.json` with `name`, `version`, `sourceRepo`. SPEC.md §752, §5.4 case 19.
 - **Task 7:** Plist materialization via existing `render-plist.py` + `launchctl load`, recorded as `record_command(["launchctl", "unload", ...])` on the journal. SPEC.md §5.4 cases 1, 9, 14.
@@ -522,7 +546,7 @@ Each becomes its own labeled task with its own TDD steps once Task 3 is merged.
 
 ## Self-review
 
-- **Spec coverage in this revision:** Task 1 covers config validation (no specific SPEC.md test case — defensive baseline). Task 2 covers SPEC.md §5.4 cases 5, 6, 7, 8, 9 — case 6 via the defensive direct test `test_undo_never_removes_unrecorded_pre_existing_files`. Task 3 covers SPEC.md §728 plus §5.4 cases 2, 3, 4 (hook conflict detection across settings.json, plugin hooks.json, and hookify rules).
+- **Spec coverage in this revision:** Task 1 covers config validation (no specific SPEC.md test case — defensive baseline). Task 2 covers SPEC.md §5.4 cases 5, 6, 7, 8, 9 — case 6 via the defensive direct test `test_undo_never_removes_unrecorded_pre_existing_files`. Task 3 covers SPEC.md §728 plus §5.4 cases 2, 3, 4 (hook conflict detection across settings.json, plugin hooks.json, and hookify rules). Task 4 covers SPEC.md §738 plus §5.4 case 16 (toolchain baseline: `rg` hard fail, `fd`/`rga`/`ast-grep` warn-only, `ugrep` invisible).
 - **Placeholder scan:** All steps contain runnable code or runnable commands. No "TBD", "appropriate", "similar to".
 - **Type consistency:** `JournalEntry` field names (`op`, `path`, `undo_cmd`, `undone`) are identical in the dataclass, the JSONL records, the `from_path` reload, and the test assertions. `record_file`/`record_dir`/`record_command`/`ensure_dir`/`undo` signatures match between the design block, the implementation, and the tests.
 - **Cross-file consistency:** `_load_module()` in `test_rollback.py` mirrors the pattern in the existing `test_install_config.py`. Test command (`bash scripts/run-tokenomics-pytests.sh`) matches the script that exists on disk.
