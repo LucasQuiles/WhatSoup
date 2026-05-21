@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs';
 import type { ZodType } from 'zod';
 import type { WhatsAppSocket } from '../transport/connection.ts';
+import { toConversationKey } from '../core/conversation-key.ts';
 
 export type ToolScope = 'chat' | 'global';
 export type TargetMode = 'injected' | 'caller-supplied';
@@ -81,8 +82,15 @@ export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {
   return typeof value === 'object' && value !== null && (value as { [TOOL_ERROR]?: unknown })[TOOL_ERROR] === true;
 }
 
+/**
+ * Normalize a caller-supplied key that may be a raw JID (`…@g.us`) into the
+ * `_at_` encoded conversation_key used in the DB.  When the session is
+ * chat-scoped the already-normalized session key wins.
+ */
 export function resolveConversationKey(session: SessionContext, callerKey: string): string {
-  return session.tier === 'chat-scoped' ? session.conversationKey! : callerKey;
+  if (session.tier === 'chat-scoped') return session.conversationKey!;
+  // Caller may pass a raw JID — normalize it to the DB encoding.
+  try { return toConversationKey(callerKey); } catch { return callerKey; }
 }
 
 export function assertConversationAccess(

@@ -260,7 +260,10 @@ function makeGetChat(db: Database): ToolDeclaration {
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { conversation_key } = GetChatSchema.parse(params);
+      const { conversation_key: rawKey } = GetChatSchema.parse(params);
+      // Normalize raw JID (e.g. "…@g.us") to DB key format ("…_at_g.us")
+      let conversation_key: string;
+      try { conversation_key = toConversationKey(rawKey); } catch { conversation_key = rawKey; }
 
       const row = db.raw
         .prepare(
