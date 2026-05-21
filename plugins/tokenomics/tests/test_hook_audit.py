@@ -91,11 +91,15 @@ def test_scan_settings_json_only_inspects_pretooluse(tmp_path):
     assert module.scan_settings_json(p) == []
 
 
-def test_scan_settings_json_malformed_json_returns_empty(tmp_path):
+def test_scan_settings_json_malformed_json_fails_closed(tmp_path):
     module = _load_module()
     p = tmp_path / "settings.json"
     p.write_text("not json", encoding="utf-8")
-    assert module.scan_settings_json(p) == []
+    with pytest.raises(module.HookAuditError) as exc_info:
+        module.scan_settings_json(p)
+    assert exc_info.value.path == str(p)
+    assert exc_info.value.surface == "settings"
+    assert "malformed JSON" in str(exc_info.value)
 
 
 # ---- scan_hookify_file -----------------------------------------------------
@@ -141,6 +145,17 @@ def test_scan_plugin_hooks_json_browser_matcher_tagged_plugin(tmp_path):
     records = module.scan_plugin_hooks_json(p)
     assert len(records) == 1
     assert records[0].surface == "plugin"
+
+
+def test_scan_plugin_hooks_json_malformed_json_fails_closed(tmp_path):
+    module = _load_module()
+    p = tmp_path / "other-plugin" / "hooks" / "hooks.json"
+    p.parent.mkdir(parents=True)
+    p.write_text("{", encoding="utf-8")
+    with pytest.raises(module.HookAuditError) as exc_info:
+        module.scan_plugin_hooks_json(p)
+    assert exc_info.value.path == str(p)
+    assert exc_info.value.surface == "plugin"
 
 
 # ---- audit_hook_surfaces ---------------------------------------------------

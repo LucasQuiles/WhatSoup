@@ -24,6 +24,14 @@ class HookConflict(RuntimeError):
         )
 
 
+class HookAuditError(RuntimeError):
+    def __init__(self, *, path: pathlib.Path, surface: str, reason: str) -> None:
+        self.path = str(path)
+        self.surface = surface
+        self.reason = reason
+        super().__init__(f"could not audit {surface} hook surface {path}: {reason}")
+
+
 def _matcher_targets_browser(matcher: object) -> bool:
     if not isinstance(matcher, str) or not matcher:
         return False
@@ -39,9 +47,13 @@ def _scan_json_hooks(path: pathlib.Path, surface: str) -> list[ConflictRecord]:
     if not path.exists():
         return []
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
+        text = path.read_text(encoding="utf-8")
+    except OSError as err:
+        raise HookAuditError(path=path, surface=surface, reason=str(err)) from err
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as err:
+        raise HookAuditError(path=path, surface=surface, reason=f"malformed JSON: {err.msg}") from err
     if not isinstance(payload, dict):
         return []
     hooks_block = payload.get("hooks")
@@ -76,8 +88,8 @@ def scan_hookify_file(path: pathlib.Path) -> list[ConflictRecord]:
         return []
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
-        return []
+    except OSError as err:
+        raise HookAuditError(path=path, surface="hookify", reason=str(err)) from err
     if BROWSER_MATCHER not in text:
         return []
     return [ConflictRecord(
@@ -124,6 +136,7 @@ def require_no_conflict(records: Sequence[ConflictRecord]) -> None:
 __all__ = [
     "BROWSER_MATCHER",
     "ConflictRecord",
+    "HookAuditError",
     "HookConflict",
     "audit_hook_surfaces",
     "require_no_conflict",

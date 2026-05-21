@@ -27,7 +27,7 @@
 |---|---|---|
 | `plugins/tokenomics/scripts/lib/install_config.py` | exists (`b3dac2d6`) | Parse + validate installer JSON config into typed `InstallConfig` |
 | `plugins/tokenomics/scripts/lib/rollback.py` | shipped (Task 2) | `RollbackJournal` — record installer-created files/dirs/commands; undo in LIFO with pre-existing-state preservation |
-| `plugins/tokenomics/scripts/lib/hook_audit.py` | shipped (Task 3) | `audit_hook_surfaces` — scan settings.json / hookify rules / other plugin hooks.json for conflicting PreToolUse browser-matcher; raises `HookConflict` |
+| `plugins/tokenomics/scripts/lib/hook_audit.py` | shipped (Task 3) | `audit_hook_surfaces` — scan settings.json / hookify rules / other plugin hooks.json for conflicting PreToolUse browser-matcher; raises `HookConflict`; raises `HookAuditError` when an existing surface cannot be audited |
 | `plugins/tokenomics/scripts/lib/toolchain.py` | shipped (Task 4) | `check_toolchain` — verify `rg` present (hard fail), `fd`/`rga`/`ast-grep` present (warn-only); raises `MissingToolchainError` |
 | `plugins/tokenomics/tests/test_install_config.py` | exists (`b3dac2d6`) | Unit tests for `install_config.py` |
 | `plugins/tokenomics/tests/test_rollback.py` | shipped (Task 2) | Unit tests for `rollback.py` |
@@ -474,13 +474,14 @@ already shipped at b3dac2d6) and Task 2 (this commit)."
 - `BROWSER_MATCHER` constant: `"mcp__superpowers-chrome_chrome__use_browser"`.
 - `ConflictRecord(path, surface, detail)` frozen dataclass.
 - `HookConflict(RuntimeError)` carries `.conflicts` list.
+- `HookAuditError(RuntimeError)` carries `.path`, `.surface`, and `.reason` when an existing hook surface cannot be read or parsed; this preserves the installer fail-closed contract ("unknown state means no install") for future Task 8.
 - `scan_settings_json(path)` and `scan_plugin_hooks_json(path)` — JSON parse, walk `hooks.PreToolUse[*].matcher`, return tagged records.
 - `scan_hookify_file(path)` — substring scan for the browser matcher in hookify `.local.md` content (hookify's `event:` taxonomy doesn't map 1:1 to agent runtime matchers, so substring on the literal tool name is the conservative check).
 - `_matcher_targets_browser(matcher)` — tries regex `re.search` first (agent runtime matchers are regex; both literal and patterns like `mcp__superpowers-chrome_chrome__.*` match); falls back to substring on invalid regex.
 - `audit_hook_surfaces(*, settings_paths, hookify_paths, plugin_hooks_paths, exclude_paths)` — composes the three scanners; resolves and excludes the tokenomics plugin's own hooks.json so it doesn't self-conflict.
 - `require_no_conflict(records)` — raises `HookConflict` if non-empty; returns `None` otherwise. The orchestrator (future Task 8) is responsible for translating `HookConflict` into `EX_HOOK_CONFLICT=78`.
 
-**Tests (16):** missing file, no hooks block, no browser matcher, literal matcher, regex matcher (`.*` suffix), invalid-regex substring fallback, PostToolUse-only ignored, malformed JSON, hookify missing/no-mention/mention, plugin-tag, own-plugin exclusion, three-surface aggregation, `require_no_conflict` empty no-op, `require_no_conflict` raise with `.conflicts` attached.
+**Tests (17):** missing file, no hooks block, no browser matcher, literal matcher, regex matcher (`.*` suffix), invalid-regex substring fallback, PostToolUse-only ignored, malformed settings JSON fail-closed, malformed plugin hooks JSON fail-closed, hookify missing/no-mention/mention, plugin-tag, own-plugin exclusion, three-surface aggregation, `require_no_conflict` empty no-op, `require_no_conflict` raise with `.conflicts` attached.
 
 **SPEC.md coverage:** §728 (hook-surface audit), §5.4 cases 2 (settings.json conflict), 3 (plugin hooks.json conflict), 4 (hookify rules conflict).
 
@@ -502,7 +503,9 @@ A pre-PR code review flagged two Important issues that were addressed before pus
 
 3. **`hook_audit.py` adds an `__all__` export list** to make the public surface explicit and discoverable.
 
-Test count after fixes: **74 passed** (was 72; net +2: removed weak LIFO test, added 3 new tests — real LIFO, parent/child unwind, double-execute regression).
+4. **`hook_audit.py` fails closed on unknown hook-surface state.** Post-Task-4 review found that malformed JSON in existing `settings.json` / plugin `hooks.json` returned `[]`, making it indistinguishable from "no conflict." Added `HookAuditError` and tests proving malformed JSON now blocks at the primitive layer so Task 8 can map the condition to a named installer exit.
+
+Test count after fixes: **87 passed** (was 86 before the `HookAuditError` fail-closed regression; Task 2/3 review-fix baseline was 74).
 
 Deferred to follow-up (reviewer "Minor"): public accessor for `_entries` (currently tests poke at the private list); `ensure_dir` race catch on `FileExistsError`; uniformly tighter type annotations.
 
