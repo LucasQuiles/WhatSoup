@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
-import { emitAlert } from '../lib/emit-alert.ts';
+import { emitAlert, clearAlertSource } from '../lib/emit-alert.ts';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -778,6 +778,10 @@ export class DurabilityEngine {
 
     // Step 3: Log recovery run
     this.logRecoveryRun('post_connect', stats);
+
+    // Clear quarantine alert source now that recovery is complete — prevents
+    // stale sweep retries when the instance is healthy.
+    clearAlertSource(config.botName, 'outbound_quarantined');
 
     log.info(stats, 'postConnectRecovery: complete');
     return stats;

@@ -10,9 +10,17 @@
  * Plus full coverage of preConnectRecovery() and postConnectRecovery() phases.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+
+const emitAlert = vi.hoisted(() => vi.fn());
+const clearAlertSource = vi.hoisted(() => vi.fn());
+
+vi.mock('../../src/lib/emit-alert.ts', () => ({
+  emitAlert,
+  clearAlertSource,
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,6 +73,8 @@ describe('DurabilityEngine — preConnectRecovery()', () => {
   beforeEach(() => {
     db = makeDb();
     engine = new DurabilityEngine(db);
+    emitAlert.mockClear();
+    clearAlertSource.mockClear();
   });
 
   afterEach(() => { db.close(); });
@@ -326,6 +336,8 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
   beforeEach(() => {
     db = makeDb();
     engine = new DurabilityEngine(db);
+    emitAlert.mockClear();
+    clearAlertSource.mockClear();
   });
 
   afterEach(() => { db.close(); });
@@ -416,6 +428,14 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
 
     expect(getOutbound(db, opId)['status']).toBe('quarantined');
     expect(stats.outboundQuarantined).toBe(1);
+  });
+
+  it('clears outbound quarantine alert source after post-connect recovery completes', () => {
+    const stats = engine.postConnectRecovery();
+
+    expect(stats.outboundQuarantined).toBe(0);
+    expect(clearAlertSource).toHaveBeenCalledOnce();
+    expect(clearAlertSource).toHaveBeenCalledWith('Loops', 'outbound_quarantined');
   });
 
   // ── Risk 3: history-sync timeout scenario ─────────────────────────────
