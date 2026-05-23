@@ -135,6 +135,7 @@ describe('poll vote bridge', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.useFakeTimers();
     const result = makeMockSocket();
     mockSock = result.mockSock;
     emit = result.emit;
@@ -147,6 +148,7 @@ describe('poll vote bridge', () => {
 
   afterEach(async () => {
     await cm.shutdown();
+    vi.useRealTimers();
   });
 
   describe('sendPollMessage', () => {
@@ -210,10 +212,9 @@ describe('poll vote bridge', () => {
       await cm.sendPollMessage(VOTER_LID, 'Which runtime?', ['Node.js', 'Python', 'Go'], 1);
     });
 
-    it('tries LID JIDs first and emits pollVoteReceived on success', async () => {
+    it('tries LID JIDs first and emits pollVoteReceived after grace window', async () => {
       // decryptPollVote succeeds on LID candidate
       mockDecryptPollVote.mockImplementation((_vote: any, ctx: any) => {
-        // Verify LID JIDs are passed first
         if (ctx.voterJid === VOTER_LID && ctx.pollCreatorJid === BOT_LID) {
           return { selectedOptions: [optionHash('Node.js')] };
         }
@@ -231,8 +232,13 @@ describe('poll vote bridge', () => {
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
 
-      // Wait for async decryption
-      await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+      // Wait for async decryption to buffer the vote
+      await vi.advanceTimersByTimeAsync(0);
+      // Vote should NOT be emitted yet (grace window)
+      expect(handler).not.toHaveBeenCalled();
+
+      // Advance past 5s grace window
+      await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).toHaveBeenCalledWith({
         pollMessageId: POLL_MSG_ID,
@@ -266,8 +272,7 @@ describe('poll vote bridge', () => {
       });
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
-
-      await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).toHaveBeenCalledWith({
         pollMessageId: POLL_MSG_ID,
@@ -297,9 +302,7 @@ describe('poll vote bridge', () => {
       });
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
-
-      // Give async time to settle
-      await new Promise(r => setTimeout(r, 50));
+      await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).not.toHaveBeenCalled();
       expect(mockDecryptPollVote).toHaveBeenCalledTimes(2);
@@ -336,12 +339,59 @@ describe('poll vote bridge', () => {
       });
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
-
-      await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).toHaveBeenCalledWith(
         expect.objectContaining({
           selectedOptions: ['Node.js', 'Go'],
+        }),
+      );
+    });
+
+    it('replaces buffered vote when user changes answer within grace window', async () => {
+      mockDecryptPollVote.mockReturnValue({
+        selectedOptions: [optionHash('Node.js')],
+      });
+
+      const handler = vi.fn();
+      cm.on('pollVoteReceived', handler);
+
+      // First vote: Node.js
+      const vote1 = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+      emit({ 'messages.upsert': { messages: [vote1], type: 'notify' } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Not emitted yet (grace window)
+      expect(handler).not.toHaveBeenCalled();
+
+      // 2s later: user changes to Go
+      await vi.advanceTimersByTimeAsync(2_000);
+      mockDecryptPollVote.mockReturnValue({
+        selectedOptions: [optionHash('Go')],
+      });
+      const vote2 = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+      emit({ 'messages.upsert': { messages: [vote2], type: 'notify' } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Still not emitted — grace window restarted
+      expect(handler).not.toHaveBeenCalled();
+
+      // Advance remaining 5s
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // Only one emission with the FINAL answer
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selectedOptions: ['Go'],
         }),
       );
     });

@@ -244,6 +244,21 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }>();
   private static readonly PENDING_POLL_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+  // Vote grace window: buffer decoded votes for 5s so vote changes
+  // (user taps a different option) replace the previous selection.
+  // After 5s the final selection is emitted via pollVoteReceived.
+  private static readonly POLL_VOTE_GRACE_MS = 5_000;
+  private voteGraceTimers = new Map<string, {
+    timer: ReturnType<typeof setTimeout>;
+    pendingEmit: {
+      pollMessageId: string;
+      chatJid: string;
+      voterJid: string;
+      selectedOptions: string[];
+      jidType: string;
+    };
+  }>();
+
   /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
   getSocket(): WhatsAppSocket | null {
     return this.sock;
@@ -471,12 +486,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     return { waMessageId, hasSecret: false };
   }
 
-  /** Evict pending polls older than TTL to prevent memory leaks. */
+  /** Evict pending polls older than TTL and their grace timers to prevent memory leaks. */
   private evictStalePolls(): void {
     const cutoff = Date.now() - ConnectionManager.PENDING_POLL_TTL_MS;
     for (const [id, poll] of this.pendingPolls) {
       if (poll.createdAt < cutoff) {
         this.pendingPolls.delete(id);
+        const grace = this.voteGraceTimers.get(id);
+        if (grace) {
+          clearTimeout(grace.timer);
+          this.voteGraceTimers.delete(id);
+        }
       }
     }
   }
@@ -562,6 +582,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.setConnectionState('shutting_down');
     this.clearReconnectTimers();
     this.stopKeepalive();
+    // Clear poll vote grace timers to prevent post-shutdown emissions
+    for (const [id, grace] of this.voteGraceTimers) {
+      clearTimeout(grace.timer);
+      this.voteGraceTimers.delete(id);
+    }
     if (this.sock) {
       try {
         this.sock.end(undefined);
@@ -1252,19 +1277,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         }
 
         if (selectedOptions.length > 0) {
-          this.emit('pollVoteReceived', {
+          this.bufferVoteWithGrace(creationKey.id, {
             pollMessageId: creationKey.id,
             chatJid: stored.chatJid,
             voterJid: candidate.voterJid,
             selectedOptions,
-          });
-          this.pendingPolls.delete(creationKey.id);
-          this.log.info({
-            pollMessageId: creationKey.id,
-            chatJid: stored.chatJid,
-            selectedOptions,
             jidType: candidate.label,
-          }, 'poll vote decrypted and emitted');
+          });
         }
         return; // success — stop trying candidates
       } catch {
@@ -1275,6 +1294,43 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     // All candidates exhausted
     this.log.error({ pollMessageId: creationKey.id, candidateCount: candidates.length }, 'poll vote decryption failed with all JID candidates');
+  }
+
+  /**
+   * Buffer a decoded vote for POLL_VOTE_GRACE_MS. If a new vote arrives
+   * for the same poll within the window (user changed their answer), the
+   * previous selection is replaced. After the grace period, the final
+   * selection is emitted and the poll is cleaned up.
+   */
+  private bufferVoteWithGrace(
+    pollMessageId: string,
+    data: { pollMessageId: string; chatJid: string; voterJid: string; selectedOptions: string[]; jidType: string },
+  ): void {
+    const existing = this.voteGraceTimers.get(pollMessageId);
+    if (existing) {
+      // Vote changed within grace window — replace buffered result, reset timer
+      clearTimeout(existing.timer);
+      this.log.info({ pollMessageId, newOptions: data.selectedOptions, prevOptions: existing.pendingEmit.selectedOptions }, 'poll vote changed within grace window');
+    }
+
+    const timer = setTimeout(() => {
+      this.voteGraceTimers.delete(pollMessageId);
+      this.pendingPolls.delete(pollMessageId);
+      this.emit('pollVoteReceived', {
+        pollMessageId: data.pollMessageId,
+        chatJid: data.chatJid,
+        voterJid: data.voterJid,
+        selectedOptions: data.selectedOptions,
+      });
+      this.log.info({
+        pollMessageId: data.pollMessageId,
+        chatJid: data.chatJid,
+        selectedOptions: data.selectedOptions,
+        jidType: data.jidType,
+      }, 'poll vote decrypted and emitted');
+    }, ConnectionManager.POLL_VOTE_GRACE_MS);
+
+    this.voteGraceTimers.set(pollMessageId, { timer, pendingEmit: data });
   }
 
   // -------------------------------------------------------------------------
