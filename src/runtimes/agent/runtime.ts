@@ -312,6 +312,86 @@ export interface AgentRuntimeOptions {
   replyGuaranteeTimeoutMs?: number;
 }
 
+// ---------------------------------------------------------------------------
+// AskUserQuestion → Poll formatting
+// ---------------------------------------------------------------------------
+
+/** Conservative WhatsApp poll limits. */
+const POLL_QUESTION_MAX_CHARS = 900;
+const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
+
+/**
+ * Format an AskUserQuestion question for WhatsApp poll rendering.
+ *
+ * - Question text: up to 900 chars, truncated with "…" suffix if longer.
+ * - Option values: `label — description` when it fits within the option budget.
+ *   Falls back to bare `label` when combined text exceeds the limit.
+ * - `needsFollowUp`: true when any description was omitted or truncated,
+ *   signaling the caller to send a follow-up text with full descriptions.
+ *
+ * Exported for unit testing.
+ */
+export function formatPollQuestion(q: {
+  question: string;
+  options: Array<{ label: string; description: string }>;
+}): {
+  pollName: string;
+  pollValues: string[];
+  needsFollowUp: boolean;
+} {
+  // Question text: truncate to budget
+  const pollName = q.question.length > POLL_QUESTION_MAX_CHARS
+    ? q.question.slice(0, POLL_QUESTION_MAX_CHARS - 1) + '…'
+    : q.question;
+
+  // Option values: combine label + description, truncating description
+  // to fit within budget. Only drop to bare label when the label itself
+  // consumes the budget.
+  let anyTruncated = false;
+  const SEPARATOR = ' — ';
+  const ELLIPSIS = '…';
+
+  const pollValues = q.options.map(o => {
+    if (!o.description || o.description.trim().length === 0) {
+      // No description — use label, truncate if needed
+      if (o.label.length > POLL_OPTION_MAX_CHARS) {
+        anyTruncated = true;
+        return o.label.slice(0, POLL_OPTION_MAX_CHARS - 1) + ELLIPSIS;
+      }
+      return o.label;
+    }
+
+    const rich = `${o.label}${SEPARATOR}${o.description}`;
+    if (rich.length <= POLL_OPTION_MAX_CHARS) {
+      // Full rich text fits
+      return rich;
+    }
+
+    // Rich text doesn't fit — truncate description portion
+    const prefixLen = o.label.length + SEPARATOR.length;
+    const descBudget = POLL_OPTION_MAX_CHARS - prefixLen - ELLIPSIS.length;
+
+    if (descBudget >= 10) {
+      // Enough room for a meaningful description prefix
+      anyTruncated = true;
+      return `${o.label}${SEPARATOR}${o.description.slice(0, descBudget)}${ELLIPSIS}`;
+    }
+
+    // Label itself nearly fills the budget — bare label only
+    anyTruncated = true;
+    if (o.label.length > POLL_OPTION_MAX_CHARS) {
+      return o.label.slice(0, POLL_OPTION_MAX_CHARS - 1) + ELLIPSIS;
+    }
+    return o.label;
+  });
+
+  return {
+    pollName,
+    pollValues,
+    needsFollowUp: anyTruncated,
+  };
+}
+
 /**
  * Build a structured ToolUpdate from a tool_use event.
  * detail is capped at 80 visible chars.
@@ -2637,16 +2717,16 @@ export class AgentRuntime implements Runtime {
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
+    const formattedQuestions = questions.map(q => ({
+      question: q,
+      formatted: formatPollQuestion(q),
+    }));
 
-    for (const q of questions) {
-      const labels = q.options.map(o => o.label);
-      const pollName = q.question.length > 255
-        ? q.question.slice(0, 252) + '...'
-        : q.question;
+    for (const { question: q, formatted } of formattedQuestions) {
       const selectableCount = q.multiSelect ? q.options.length : 1;
 
       try {
-        const result = await connection.sendPollMessage(chatJid, pollName, labels, selectableCount);
+        const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
         if (result.waMessageId) {
           pollMessageIds.push(result.waMessageId);
         }
@@ -2660,22 +2740,21 @@ export class AgentRuntime implements Runtime {
     }
 
     if (pollMessageIds.length === 0 || !allHaveSecret) {
-      // Fall back: send as text with numbered options
+      // Fall back: send as text with numbered options.
+      // Text fallback already includes full descriptions — no follow-up needed.
       log.warn({ chatJid, toolId }, 'poll send failed or missing secret — falling back to text question');
-      for (const q of questions) {
+      for (const { question: q } of formattedQuestions) {
         const optionLines = q.options.map((o, i) => `${i + 1}. *${o.label}* — ${o.description}`).join('\n');
         queue.enqueueText(`${q.question}\n\n${optionLines}\n\n_Reply with option number or text._`);
       }
-    }
-
-    // State already registered synchronously at method entry.
-
-    // Also send option descriptions as context (poll values are short labels;
-    // descriptions help the user understand each option)
-    for (const q of questions) {
-      if (q.options.some(o => o.description && o.description.length > 10)) {
-        const descLines = q.options.map(o => `• *${o.label}*: ${o.description}`).join('\n');
-        queue.enqueueText(descLines);
+    } else {
+      // Poll send succeeded — send follow-up only for questions where
+      // at least one description was truncated in the poll option text.
+      for (const { question: q, formatted } of formattedQuestions) {
+        if (formatted.needsFollowUp) {
+          const descLines = q.options.map(o => `• *${o.label}*: ${o.description}`).join('\n');
+          queue.enqueueText(descLines);
+        }
       }
     }
 
