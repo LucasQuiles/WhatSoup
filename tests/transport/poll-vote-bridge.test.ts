@@ -289,13 +289,15 @@ describe('poll vote bridge', () => {
       expect(mockDecryptPollVote.mock.calls[1][1].voterJid).toBe(VOTER_PHONE);
     });
 
-    it('does not emit when all candidates fail', async () => {
+    it('emits pollVoteFailed when all decrypt candidates fail', async () => {
       mockDecryptPollVote.mockImplementation(() => {
         throw new Error('Unsupported state or unable to authenticate data');
       });
 
       const handler = vi.fn();
+      const failed = vi.fn();
       cm.on('pollVoteReceived', handler);
+      cm.on('pollVoteFailed', failed);
 
       const voteMsg = makePollVoteMessage({
         pollMsgId: POLL_MSG_ID,
@@ -304,10 +306,15 @@ describe('poll vote bridge', () => {
       });
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).not.toHaveBeenCalled();
-      expect(mockDecryptPollVote).toHaveBeenCalledTimes(2);
+      expect(failed).toHaveBeenCalledWith({
+        pollMessageId: POLL_MSG_ID,
+        chatJid: VOTER_LID,
+        reason: 'decrypt_failed',
+      });
     });
 
     it('ignores votes for untracked polls', () => {

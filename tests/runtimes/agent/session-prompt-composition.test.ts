@@ -127,6 +127,7 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt).toContain('Use multiSelect: true when the user may choose more than one option');
     expect(prompt).toContain('For non-blocking surveys or lightweight coordination, use send_poll');
     expect(prompt).toContain('Do not ask the user to type "I voted"');
+    expect(prompt).toContain('In group chats, use send_poll. AskUserQuestion auto-polling is DM-only until group voter policy exists.');
   });
 
   it('keeps the no-extra-instructions prompt within the recorded byte budget', () => {

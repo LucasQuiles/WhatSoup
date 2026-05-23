@@ -527,6 +527,7 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.debug.mockClear();
     // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
     mockQueue.flush.mockResolvedValue(undefined);
+    mockQueue.targetChatJid = 'test@s.whatsapp.net';
   });
 
   it('start() calls ensureAgentSchema', async () => {
@@ -5201,10 +5202,112 @@ describe('AgentRuntime', () => {
       expect(pollSends[0].values).toEqual([
         'Python — Dynamic typing',
         'Go — Compiled, fast',
+        'Other — propose a different option',
       ]);
 
       // No follow-up description text enqueued (all descriptions fit)
       expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    });
+
+    it('does not append default Other when an escape hatch option is already present', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_ESCAPE', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-escape-1',
+        toolInput: {
+          questions: [{
+            question: 'Continue?',
+            header: 'Continue',
+            options: [
+              { label: 'Proceed', description: 'Continue with the plan' },
+              { label: 'Need more context', description: 'Pause and ask follow-up questions' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].values).toEqual([
+        'Proceed — Continue with the plan',
+        'Need more context — Pause and ask follow-up questions',
+      ]);
+    });
+
+    it('keeps default Other when labels only contain false-positive words', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_FALSE_POSITIVE', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-false-positive-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick an operational action',
+            header: 'Action',
+            options: [
+              { label: 'Other databases', description: 'Evaluate database options' },
+              { label: 'Cancel subscription', description: 'End the vendor plan' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].values).toEqual([
+        'Other databases — Evaluate database options',
+        'Cancel subscription — End the vendor plan',
+        'Other — propose a different option',
+      ]);
+    });
+
+    it('does not append default Other when the option list is already at WhatsApp cap', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_CAP', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const options = Array.from({ length: 12 }, (_, index) => ({
+        label: `Option ${index + 1}`,
+        description: `Description ${index + 1}`,
+      }));
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-cap-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick one capped option',
+            header: 'Cap',
+            options,
+            multiSelect: true,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].values).toHaveLength(12);
+      expect(pollSends[0].values).not.toContain('Other — propose a different option');
+      expect(pollSends[0].selectableCount).toBe(12);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ optionCount: 12 }),
+        'AskUserQuestion options at WhatsApp cap — default Other option not appended',
+      );
     });
 
     it('sends companion details when at least one option needs out-of-band text', async () => {
@@ -5241,7 +5344,7 @@ describe('AgentRuntime', () => {
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
 
       // Detail text is flushed before the poll so users read context before tapping.
-      expect(pollSends[0].values).toEqual(['Short', 'Long option']);
+      expect(pollSends[0].values).toEqual(['Short', 'Long option', 'Other — propose a different option']);
       expect(mockQueue.enqueueText).toHaveBeenCalledTimes(1);
       const followUp = mockQueue.enqueueText.mock.calls[0][0] as string;
       expect(followUp).toContain('Details for poll: Pick one');
@@ -5284,7 +5387,7 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
-      expect(pollSends[0].values).toEqual(['Short', 'Long option']);
+      expect(pollSends[0].values).toEqual(['Short', 'Long option', 'Other — propose a different option']);
       expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ chatJid: pollSends[0].chatJid }),
         'failed to flush poll details before poll send',
@@ -5333,6 +5436,50 @@ describe('AgentRuntime', () => {
     });
 
 
+    it('does not duplicate long option details in immediate text fallback after poll send fails', async () => {
+      const { messenger } = makePollMessenger({ waMessageId: 'POLL_FAIL_LONG_DETAILS', hasSecret: false });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueText.mockClear();
+      mockQueue.flush.mockClear();
+
+      const longDesc = 'A'.repeat(140);
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-fail-long-detail',
+        toolInput: {
+          questions: [{
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              { label: 'Short', description: 'Fits fine' },
+              { label: 'Long option', description: longDesc },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledTimes(2));
+
+      const detailText = mockQueue.enqueueText.mock.calls[0][0] as string;
+      const fallbackText = mockQueue.enqueueText.mock.calls[1][0] as string;
+      expect(detailText).toContain(longDesc);
+      expect(fallbackText).toContain('Pick one');
+      expect(fallbackText).toContain('_Full option details were sent above._');
+      expect(fallbackText).toContain('1. *Short*');
+      expect(fallbackText).toContain('2. *Long option*');
+      expect(fallbackText).toContain('3. *Other — propose a different option*');
+      expect(fallbackText).not.toContain(longDesc);
+      expect(fallbackText).not.toContain('Fits fine');
+      expect(fallbackText).toContain('Reply with option number or text');
+    });
+
     it('sets selectableCount to option count for multiSelect polls', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_MULTI', hasSecret: true });
       const db = makeDb();
@@ -5360,7 +5507,7 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
-      expect(pollSends[0].selectableCount).toBe(3);
+      expect(pollSends[0].selectableCount).toBe(4);
     });
 
     it('injects a pollVoteReceived answer back into the active per-chat session', async () => {
@@ -5603,11 +5750,275 @@ describe('AgentRuntime', () => {
       }));
 
       await vi.waitFor(() => {
-        expect(sendTurnTexts().some((arg) => arg.includes('A: submitted (free-text response)'))).toBe(true);
+        expect(sendTurnTexts().some((arg) => arg.includes('A: Submitted'))).toBe(true);
       });
       expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('waiting for the poll vote itself'));
     });
 
+
+    it('injects an Other poll vote as a structured interview directive', async () => {
+      const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_OTHER_DIRECTIVE', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-other-directive-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick a database',
+            header: 'Database',
+            options: [
+              { label: 'PostgreSQL', description: 'Server database' },
+              { label: 'SQLite', description: 'Embedded database' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      mockSession.sendTurn.mockClear();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_OTHER_DIRECTIVE',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Other — propose a different option'],
+      });
+
+      await vi.waitFor(() => {
+        expect(sendTurnTexts().some((arg) => arg.includes('[User selected Other'))).toBe(true);
+      });
+      const injected = sendTurnTexts().find((arg) => arg.includes('[User selected Other'))!;
+      expect(injected).toContain("A:\n[User selected Other");
+      expect(injected).toContain('Question requiring follow-up: Pick a database');
+      expect(injected).toContain('Original options:');
+      expect(injected).toContain('1. *PostgreSQL*');
+      expect(injected).toContain('2. *SQLite*');
+      expect(injected).toContain('Directive:');
+    });
+
+    it('falls through in group chats without registering AskUser poll suppression', () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_GROUP', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const groupQueue = makeQueueMock('111111100000000099@g.us');
+      const handleEventWithContext = (
+        runtime as unknown as {
+          handleEventWithContext: (
+            event: AgentEvent,
+            queue: IOutboundQueue,
+            session: typeof mockSession,
+            conversationKey?: string,
+            inboundSeq?: number,
+            mapKey?: string,
+            toolScopeKey?: string,
+          ) => void;
+        }
+      ).handleEventWithContext.bind(runtime);
+
+      handleEventWithContext(
+        {
+          type: 'tool_use',
+          toolName: 'AskUserQuestion',
+          toolId: 'tool-group-1',
+          toolInput: {
+            questions: [{
+              question: 'Pick one',
+              header: 'Group',
+              options: [
+                { label: 'A', description: 'First' },
+                { label: 'B', description: 'Second' },
+              ],
+              multiSelect: false,
+            }],
+          },
+        },
+        groupQueue,
+        mockSession,
+        undefined,
+        undefined,
+        'group-map-key',
+        'group-map-key',
+      );
+
+      expect(pollSends).toHaveLength(0);
+      expect(groupQueue.enqueueToolUpdate).toHaveBeenCalledTimes(1);
+
+      handleEventWithContext(
+        {
+          type: 'tool_result',
+          toolId: 'tool-group-1',
+          isError: true,
+          content: 'Answer questions?',
+        },
+        groupQueue,
+        mockSession,
+        undefined,
+        undefined,
+        'group-map-key',
+        'group-map-key',
+      );
+
+      expect((groupQueue.enqueueToolUpdate as ReturnType<typeof vi.fn>).mock.calls.some(
+        ([update]) => (update as { category?: string }).category === 'error',
+      )).toBe(true);
+    });
+
+    it('soft-expiry switches all unanswered poll questions to text fallback', async () => {
+      vi.useFakeTimers();
+      try {
+        const { messenger, pollSends, sentMessages } = makePollMessenger([
+          { waMessageId: 'POLL_EXPIRY_1', hasSecret: true },
+          { waMessageId: 'POLL_EXPIRY_2', hasSecret: true },
+        ]);
+        const db = makeDb();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+        await runtime.start();
+        await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+        capturedOnEventRef.current!({
+          type: 'tool_use',
+          toolName: 'AskUserQuestion',
+          toolId: 'tool-soft-expiry-1',
+          toolInput: {
+            questions: [
+              {
+                question: 'First question?',
+                header: 'First',
+                options: [
+                  { label: 'First A', description: 'First option' },
+                  { label: 'First B', description: 'Second option' },
+                ],
+                multiSelect: false,
+              },
+              {
+                question: 'Second question?',
+                header: 'Second',
+                options: [
+                  { label: 'Second A', description: 'First option' },
+                  { label: 'Second B', description: 'Second option' },
+                ],
+                multiSelect: false,
+              },
+            ],
+          },
+        });
+
+        await vi.waitFor(() => expect(pollSends.length).toBe(2));
+        sentMessages.length = 0;
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(sentMessages.filter((message) => message.text.includes('option number or text'))).toHaveLength(2);
+        expect(sentMessages.some((message) => message.text.includes('First question?'))).toBe(true);
+        expect(sentMessages.some((message) => message.text.includes('Second question?'))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('hard-expiry clears pending poll state and ignores later replies', async () => {
+      vi.useFakeTimers();
+      try {
+        const { messenger, pollSends, sentMessages } = makePollMessenger({ waMessageId: 'POLL_HARD_EXPIRY', hasSecret: true });
+        const db = makeDb();
+        const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+        await runtime.start();
+        await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+        capturedOnEventRef.current!({
+          type: 'tool_use',
+          toolName: 'AskUserQuestion',
+          toolId: 'tool-hard-expiry-1',
+          toolInput: {
+            questions: [{
+              question: 'Pick a runtime',
+              header: 'Runtime',
+              options: [
+                { label: 'Node', description: 'JavaScript runtime' },
+                { label: 'Go', description: 'Compiled runtime' },
+              ],
+              multiSelect: false,
+            }],
+          },
+        });
+
+        await vi.waitFor(() => expect(pollSends.length).toBe(1));
+        sentMessages.length = 0;
+        mockSession.sendTurn.mockClear();
+
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        expect(sentMessages.some((message) => message.text.includes('This decision has expired'))).toBe(true);
+
+        await sendAndDrain(runtime, makeMsg({
+          content: 'Go',
+          chatJid: '5678@s.whatsapp.net',
+          senderJid: '5678@s.whatsapp.net',
+        }));
+
+        expect(sendTurnTexts().some((arg) => arg.includes('[User answered poll]'))).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('pollVoteFailed switches to idempotent text fallback and accepts typed option', async () => {
+      const { messenger, pollSends, eventHandlers, sentMessages } = makePollMessenger({ waMessageId: 'POLL_DECRYPT_FAIL', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-failed-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick a runtime',
+            header: 'Runtime',
+            options: [
+              { label: 'Node', description: 'JavaScript runtime' },
+              { label: 'Go', description: 'Compiled runtime' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      sentMessages.length = 0;
+
+      const failPayload = {
+        pollMessageId: 'POLL_DECRYPT_FAIL',
+        chatJid: pollSends[0].chatJid,
+        reason: 'decrypt_failed',
+      };
+      eventHandlers.get('pollVoteFailed')!(failPayload);
+      eventHandlers.get('pollVoteFailed')!(failPayload);
+
+      expect(sentMessages.filter((message) => message.text.includes("couldn't read your poll vote"))).toHaveLength(1);
+      expect(sentMessages[0].text).toContain('1. *Node*');
+      expect(sentMessages[0].text).toContain('2. *Go*');
+
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        content: 'Go',
+        chatJid: '5678@s.whatsapp.net',
+        senderJid: '5678@s.whatsapp.net',
+      }));
+
+      await vi.waitFor(() => expect(sendTurnTexts().some((arg) => arg.includes('A: Go'))).toBe(true));
+    });
 
     it('ignores stale poll votes after partial poll send falls back to text', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger([

@@ -52,14 +52,20 @@ describe('AgentRuntime structural policy', () => {
       'this.compactBoundaryScopes.delete(mapKey);',
       'this.autoCompactCooldownUntil.delete(mapKey);',
       'this.operationTrackers.delete(mapKey);',
-      'this.pendingPollQuestions.delete(mapKey);',
+      'this.deletePendingPollQuestions(mapKey);',
     ];
 
     for (const expectedDelete of expectedDeletes) {
       expect(methodBody).toContain(expectedDelete);
     }
 
-    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length);
+    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 1);
+
+    const pendingHelper = source.match(/private deletePendingPollQuestions\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
+    expect(pendingHelper).toBeTruthy();
+    const helperBody = pendingHelper?.[1] ?? '';
+    expect(helperBody).toContain('this.clearPendingPollTimers(pending);');
+    expect(helperBody).toContain('this.pendingPollQuestions.delete(mapKey);');
     expect(methodBody).toContain("this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');");
   });
 

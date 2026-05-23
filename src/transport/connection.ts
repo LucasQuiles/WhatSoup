@@ -171,6 +171,12 @@ export interface TransportEvents {
     voterJid: string;
     selectedOptions: string[];
   }) => void;
+  /** Poll vote decryption failed after all bounded JID candidates were exhausted. */
+  pollVoteFailed: (data: {
+    pollMessageId: string;
+    chatJid: string;
+    reason: string;
+  }) => void;
 }
 
 // Typed event emitter augmentation
@@ -1294,6 +1300,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     // All candidates exhausted
     this.log.error({ pollMessageId: creationKey.id, candidateCount: candidates.length }, 'poll vote decryption failed with all JID candidates');
+    this.emit('pollVoteFailed', {
+      pollMessageId: creationKey.id,
+      chatJid: stored.chatJid,
+      reason: 'decrypt_failed',
+    });
   }
 
   /**
