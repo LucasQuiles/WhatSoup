@@ -325,7 +325,8 @@ const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char li
  *
  * - Question text: up to 900 chars, truncated with "…" suffix if longer.
  * - Option values: `label — description` when it fits within the option budget.
- *   Falls back to bare `label` when combined text exceeds the limit.
+ *   Truncates the description when combined text exceeds the option limit,
+ *   then falls back to bare `label` only when the label leaves no useful description budget.
  * - `needsFollowUp`: true when any description was omitted or truncated,
  *   signaling the caller to send a follow-up text with full descriptions.
  *
