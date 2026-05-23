@@ -227,6 +227,125 @@ describe('chat-management tools', () => {
       // 222 has most recent message (msg6 at 6000)
       expect(data.chats[0].conversationKey).toBe('222');
     });
+
+    it('filters conversations by query across key, jid, and chat name', async () => {
+      db.raw.exec(`
+        INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived)
+        VALUES ('111@s.whatsapp.net', '111', 'Alice Chat', 3, 0)
+      `);
+
+      const byName = await registry.call('list_chats', { query: 'alice' }, globalSession());
+      expect(byName.isError).toBeUndefined();
+      const nameData = JSON.parse(byName.content[0].text) as { chats: Array<{ conversationKey: string }> };
+      expect(nameData.chats.map((c) => c.conversationKey)).toEqual(['111']);
+
+      const byJid = await registry.call('list_chats', { query: '222@s.whatsapp.net' }, globalSession());
+      expect(byJid.isError).toBeUndefined();
+      const jidData = JSON.parse(byJid.content[0].text) as { chats: Array<{ conversationKey: string }> };
+      expect(jidData.chats.map((c) => c.conversationKey)).toEqual(['222']);
+    });
+
+    it('filters LID-addressed conversations by mapped phone JID', async () => {
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('9999@lid', '9999', '9999@lid', 'Lid Contact', 'msg-lid', 'LID-backed DM', 'text', 0, 7000);
+        INSERT INTO lid_mappings (lid, phone_jid)
+        VALUES ('9999', 'fixture-phone@s.whatsapp.net')
+      `);
+
+      const result = await registry.call('list_chats', { query: 'fixture-phone' }, globalSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{ conversationKey: string; chatJid: string }>;
+      };
+      expect(data.chats.map((c) => c.conversationKey)).toEqual(['9999']);
+      expect(data.chats[0].chatJid).toBe('9999@lid');
+    });
+
+    it('paginates after sorting by last activity', async () => {
+      const firstPage = await registry.call('list_chats', { limit: 1, page: 0 }, globalSession());
+      const secondPage = await registry.call('list_chats', { limit: 1, page: 1 }, globalSession());
+      const firstData = JSON.parse(firstPage.content[0].text) as { chats: Array<{ conversationKey: string }>; page: number };
+      const secondData = JSON.parse(secondPage.content[0].text) as { chats: Array<{ conversationKey: string }>; page: number };
+
+      expect(firstData.page).toBe(0);
+      expect(secondData.page).toBe(1);
+      expect(firstData.chats.map((c) => c.conversationKey)).toEqual(['222']);
+      expect(secondData.chats.map((c) => c.conversationKey)).toEqual(['111']);
+    });
+
+    it('sorts by chat name when requested', async () => {
+      db.raw.exec(`
+        INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived)
+        VALUES
+          ('111@s.whatsapp.net', '111', 'Alice Chat', 0, 0),
+          ('222@s.whatsapp.net', '222', 'Bob Chat', 0, 0)
+      `);
+
+      const result = await registry.call('list_chats', { sort_by: 'name' }, globalSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { chats: Array<{ conversationKey: string }> };
+      expect(data.chats.map((c) => c.conversationKey)).toEqual(['111', '222']);
+    });
+
+    it('includes the latest message only when requested', async () => {
+      const withoutPreview = await registry.call('list_chats', { limit: 1 }, globalSession());
+      const withoutData = JSON.parse(withoutPreview.content[0].text) as { chats: Array<{ lastMessage?: unknown }> };
+      expect(withoutData.chats[0].lastMessage).toBeUndefined();
+
+      const withPreview = await registry.call(
+        'list_chats',
+        { limit: 1, include_last_message: true },
+        globalSession(),
+      );
+      expect(withPreview.isError).toBeUndefined();
+      const withData = JSON.parse(withPreview.content[0].text) as {
+        chats: Array<{
+          conversationKey: string;
+          lastMessage: { messageId: string; contentPreview: string; content?: string; contentType: string };
+        }>;
+      };
+      expect(withData.chats[0].conversationKey).toBe('222');
+      expect(withData.chats[0].lastMessage.messageId).toBe('msg6');
+      expect(withData.chats[0].lastMessage.contentPreview).toBe('Bob chat');
+      expect(withData.chats[0].lastMessage.content).toBeUndefined();
+      expect(withData.chats[0].lastMessage.contentType).toBe('text');
+    });
+
+    it('truncates last-message previews to avoid bloating agent context', async () => {
+      const longText = 'x'.repeat(150);
+      db.raw.prepare(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_text, content_type, is_from_me, timestamp)
+        VALUES
+          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        '333@s.whatsapp.net',
+        '333',
+        '333@s.whatsapp.net',
+        'Carol',
+        'msg-long',
+        longText,
+        longText,
+        'text',
+        0,
+        7000,
+      );
+
+      const result = await registry.call(
+        'list_chats',
+        { limit: 1, include_last_message: true },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{ lastMessage: { contentPreview: string } }>;
+      };
+      expect(data.chats[0].lastMessage.contentPreview).toHaveLength(100);
+      expect(data.chats[0].lastMessage.contentPreview.endsWith('...')).toBe(true);
+    });
   });
 
   // --- list_chats — with chat metadata ---

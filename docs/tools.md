@@ -808,7 +808,7 @@ Get messages surrounding a specific message in a conversation. Validates that th
 
 ### list_chats
 
-List all WhatsApp conversations with their last message timestamp and metadata. Returns conversations ordered by most recent activity.
+List WhatsApp conversations with their last message timestamp and metadata. Supports optional query filtering, pagination, sort mode, and last-message previews.
 
 | | |
 |---|---|
@@ -821,6 +821,10 @@ List all WhatsApp conversations with their last message timestamp and metadata. 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | limit | number | optional | Max conversations to return; defaults to 100 |
+| page | number | optional | Zero-based page offset applied after sorting; defaults to 0 |
+| query | string | optional | Case-insensitive substring filter against conversation key, chat JID, chat name, or mapped LID phone JID |
+| sort_by | `"last_active"` or `"name"` | optional | Sort mode; defaults to `"last_active"` |
+| include_last_message | boolean | optional | Include a compact latest-message preview (`messageId`, `senderName`, `contentPreview`, `contentType`, `timestamp`) for each returned conversation; defaults to false |
 
 ---
 

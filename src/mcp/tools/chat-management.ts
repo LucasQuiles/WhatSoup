@@ -160,58 +160,144 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
 
 const ListChatsSchema = z.object({
   limit: SqliteReadLimitSchema.optional(),
+  page: z.number().int().nonnegative().optional(),
+  query: z.string().optional(),
+  sort_by: z.enum(['last_active', 'name']).optional(),
+  include_last_message: z.boolean().optional(),
 });
+
+function contentPreview(contentText: string | null, content: string | null): string | null {
+  const text = contentText ?? content;
+  if (text === null) return null;
+  return text.length > 100 ? `${text.slice(0, 97)}...` : text;
+}
 
 function makeListChats(db: Database): ToolDeclaration {
   return {
     name: 'list_chats',
     description:
-      'List all WhatsApp conversations with their last message timestamp and metadata (global). Returns conversations ordered by most recent activity.',
+      'List WhatsApp conversations with optional query filtering, pagination, sorting, and last-message previews (global).',
     schema: ListChatsSchema,
     scope: 'global',
     targetMode: 'caller-supplied',
     replayPolicy: 'read_only',
     handler: async (params) => {
-      const { limit = 100 } = ListChatsSchema.parse(params);
+      const {
+        limit = 100,
+        page = 0,
+        query,
+        sort_by = 'last_active',
+        include_last_message = false,
+      } = ListChatsSchema.parse(params);
+      const trimmedQuery = query?.trim();
+      const likeQuery = trimmedQuery ? `%${trimmedQuery.toLowerCase()}%` : null;
+      const offset = page * limit;
 
       const rows = db.raw
         .prepare(
-          `SELECT m.conversation_key,
-                  m.chat_jid,
-                  MAX(m.timestamp) AS last_timestamp,
-                  COUNT(*) AS message_count,
-                  c.name,
-                  c.unread_count,
-                  c.is_archived,
-                  c.is_pinned,
-                  c.mute_until,
-                  c.ephemeral_duration
-           FROM messages m
-           LEFT JOIN chats c ON c.conversation_key = m.conversation_key
-           WHERE m.deleted_at IS NULL
-           GROUP BY m.conversation_key
+          `WITH base_conversation_rows AS (
+             SELECT m.conversation_key,
+                    COALESCE(c.jid, (
+                      SELECT m2.chat_jid
+                      FROM messages m2
+                      WHERE m2.conversation_key = m.conversation_key
+                        AND m2.deleted_at IS NULL
+                      ORDER BY m2.timestamp DESC, m2.pk DESC
+                      LIMIT 1
+                    )) AS chat_jid,
+                    MAX(m.timestamp) AS last_timestamp,
+                    COUNT(*) AS message_count,
+                    c.name,
+                    c.unread_count,
+                    c.is_archived,
+                    c.is_pinned,
+                    c.mute_until,
+                    c.ephemeral_duration
+             FROM messages m
+             LEFT JOIN chats c ON c.conversation_key = m.conversation_key
+             WHERE m.deleted_at IS NULL
+             GROUP BY m.conversation_key
 
-           UNION ALL
+             UNION ALL
 
-           SELECT c2.conversation_key,
-                  c2.jid AS chat_jid,
-                  NULL AS last_timestamp,
-                  0 AS message_count,
-                  c2.name,
-                  c2.unread_count,
-                  c2.is_archived,
-                  c2.is_pinned,
-                  c2.mute_until,
-                  c2.ephemeral_duration
-           FROM chats c2
-           WHERE c2.conversation_key NOT IN (
-             SELECT DISTINCT conversation_key FROM messages WHERE deleted_at IS NULL
+             SELECT c2.conversation_key,
+                    c2.jid AS chat_jid,
+                    NULL AS last_timestamp,
+                    0 AS message_count,
+                    c2.name,
+                    c2.unread_count,
+                    c2.is_archived,
+                    c2.is_pinned,
+                    c2.mute_until,
+                    c2.ephemeral_duration
+             FROM chats c2
+             WHERE c2.conversation_key NOT IN (
+               SELECT DISTINCT conversation_key FROM messages WHERE deleted_at IS NULL
+             )
+           ), conversation_rows AS (
+             SELECT b.*, lm.phone_jid
+             FROM base_conversation_rows b
+             LEFT JOIN lid_mappings lm
+               ON b.chat_jid = lm.lid || '@lid'
+               OR b.chat_jid LIKE lm.lid || ':%@lid'
+           ), filtered_rows AS (
+             SELECT *
+             FROM conversation_rows
+             WHERE ? IS NULL
+                OR lower(conversation_key) LIKE ?
+                OR lower(chat_jid) LIKE ?
+                OR lower(COALESCE(name, '')) LIKE ?
+                OR lower(COALESCE(phone_jid, '')) LIKE ?
+           ), paged_rows AS (
+             SELECT *
+             FROM filtered_rows
+             ORDER BY
+               CASE WHEN ? = 'name' THEN lower(COALESCE(name, conversation_key)) END ASC,
+               CASE WHEN ? = 'last_active' THEN last_timestamp END DESC NULLS LAST,
+               conversation_key ASC
+             LIMIT ? OFFSET ?
+           ), latest_messages AS (
+             SELECT *
+             FROM (
+               SELECT m.*,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY m.conversation_key
+                        ORDER BY m.timestamp DESC, m.pk DESC
+                      ) AS rn
+               FROM messages m
+               WHERE m.deleted_at IS NULL
+                 AND m.conversation_key IN (SELECT conversation_key FROM paged_rows)
+             ) latest_ranked
+             WHERE rn = 1
            )
-
-           ORDER BY last_timestamp DESC NULLS LAST
-           LIMIT ?`,
+           SELECT paged_rows.*,
+                  latest.message_id AS last_message_id,
+                  latest.sender_name AS last_sender_name,
+                  latest.content AS last_content,
+                  latest.content_text AS last_content_text,
+                  latest.content_type AS last_content_type,
+                  latest.timestamp AS last_message_timestamp
+           FROM paged_rows
+           LEFT JOIN latest_messages latest
+             ON latest.conversation_key = paged_rows.conversation_key
+           ORDER BY
+             CASE WHEN ? = 'name' THEN lower(COALESCE(name, paged_rows.conversation_key)) END ASC,
+             CASE WHEN ? = 'last_active' THEN last_timestamp END DESC NULLS LAST,
+             paged_rows.conversation_key ASC`,
         )
-        .all(limit) as Array<{
+        .all(
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          sort_by,
+          sort_by,
+          limit,
+          offset,
+          sort_by,
+          sort_by,
+        ) as Array<{
           conversation_key: string;
           chat_jid: string;
           last_timestamp: number | null;
@@ -222,6 +308,12 @@ function makeListChats(db: Database): ToolDeclaration {
           is_pinned: number | null;
           mute_until: string | null;
           ephemeral_duration: number | null;
+          last_message_id: string | null;
+          last_sender_name: string | null;
+          last_content: string | null;
+          last_content_text: string | null;
+          last_content_type: MessageRow['content_type'] | null;
+          last_message_timestamp: number | null;
         }>;
 
       return {
@@ -236,8 +328,18 @@ function makeListChats(db: Database): ToolDeclaration {
           isPinned: r.is_pinned ? true : undefined,
           muteUntil: r.mute_until ?? undefined,
           ephemeralDuration: r.ephemeral_duration ?? undefined,
+          ...(include_last_message ? {
+            lastMessage: r.last_message_id ? {
+              messageId: r.last_message_id,
+              senderName: r.last_sender_name ?? null,
+              contentPreview: contentPreview(r.last_content_text, r.last_content),
+              contentType: r.last_content_type,
+              timestamp: r.last_message_timestamp,
+            } : null,
+          } : {}),
         })),
         count: rows.length,
+        page,
       };
     },
   };
