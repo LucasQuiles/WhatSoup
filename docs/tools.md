@@ -820,11 +820,13 @@ List WhatsApp conversations with their last message timestamp and metadata. Supp
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| limit | number | optional | Max conversations to return; defaults to 100 |
-| page | number | optional | Zero-based page offset applied after sorting; defaults to 0 |
-| query | string | optional | Case-insensitive substring filter against conversation key, chat JID, chat name, or mapped LID phone JID |
+| limit | number | optional | Max conversations to return; defaults to 100 and is capped at 1000 |
+| page | number | optional | Zero-based page offset applied after sorting; defaults to 0 and is capped at 100000 |
+| query | string | optional | Case-insensitive literal substring filter against conversation key, chat JID, chat name, or mapped LID phone JID; `%` and `_` are treated as ordinary characters |
 | sort_by | `"last_active"` or `"name"` | optional | Sort mode; defaults to `"last_active"` |
 | include_last_message | boolean | optional | Include a compact latest-message preview (`messageId`, `senderName`, `contentPreview`, `contentType`, `timestamp`) for each returned conversation; defaults to false |
+
+`count` is the number of conversations returned on the current page, not the total matching conversation count. A page beyond the available result set returns `chats: []` with `count: 0`.
 
 ---
 

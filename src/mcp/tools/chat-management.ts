@@ -15,7 +15,9 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 
 const log = createChildLogger('chat-management');
 const SQLITE_READ_LIMIT_MAX = 1000;
+const LIST_CHATS_PAGE_MAX = 100_000;
 const SqliteReadLimitSchema = z.number().int().positive().max(SQLITE_READ_LIMIT_MAX);
+const ListChatsPageSchema = z.number().int().nonnegative().max(LIST_CHATS_PAGE_MAX);
 
 // ---------------------------------------------------------------------------
 // list_messages — paginated messages in a conversation (scope: chat)
@@ -160,7 +162,7 @@ function makeGetMessageContext(db: Database): ToolDeclaration {
 
 const ListChatsSchema = z.object({
   limit: SqliteReadLimitSchema.optional(),
-  page: z.number().int().nonnegative().optional(),
+  page: ListChatsPageSchema.optional(),
   query: z.string().optional(),
   sort_by: z.enum(['last_active', 'name']).optional(),
   include_last_message: z.boolean().optional(),
@@ -170,6 +172,10 @@ function contentPreview(contentText: string | null, content: string | null): str
   const text = contentText ?? content;
   if (text === null) return null;
   return text.length > 100 ? `${text.slice(0, 97)}...` : text;
+}
+
+function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 function makeListChats(db: Database): ToolDeclaration {
@@ -190,7 +196,7 @@ function makeListChats(db: Database): ToolDeclaration {
         include_last_message = false,
       } = ListChatsSchema.parse(params);
       const trimmedQuery = query?.trim();
-      const likeQuery = trimmedQuery ? `%${trimmedQuery.toLowerCase()}%` : null;
+      const likeQuery = trimmedQuery ? `%${escapeSqlLikePattern(trimmedQuery.toLowerCase())}%` : null;
       const offset = page * limit;
 
       const rows = db.raw
@@ -239,15 +245,20 @@ function makeListChats(db: Database): ToolDeclaration {
              FROM base_conversation_rows b
              LEFT JOIN lid_mappings lm
                ON b.chat_jid = lm.lid || '@lid'
-               OR b.chat_jid LIKE lm.lid || ':%@lid'
+               OR (
+                 instr(b.chat_jid, ':') > 1
+                 AND substr(b.chat_jid, 1, instr(b.chat_jid, ':') - 1) = lm.lid
+                 AND length(b.chat_jid) > instr(b.chat_jid, ':') + 4
+                 AND substr(b.chat_jid, -4) = '@lid'
+               )
            ), filtered_rows AS (
              SELECT *
              FROM conversation_rows
              WHERE ? IS NULL
-                OR lower(conversation_key) LIKE ?
-                OR lower(chat_jid) LIKE ?
-                OR lower(COALESCE(name, '')) LIKE ?
-                OR lower(COALESCE(phone_jid, '')) LIKE ?
+                OR lower(conversation_key) LIKE ? ESCAPE '\\'
+                OR lower(chat_jid) LIKE ? ESCAPE '\\'
+                OR lower(COALESCE(name, '')) LIKE ? ESCAPE '\\'
+                OR lower(COALESCE(phone_jid, '')) LIKE ? ESCAPE '\\'
            ), paged_rows AS (
              SELECT *
              FROM filtered_rows
@@ -315,6 +326,15 @@ function makeListChats(db: Database): ToolDeclaration {
           last_content_type: MessageRow['content_type'] | null;
           last_message_timestamp: number | null;
         }>;
+
+      log.debug({
+        hasQuery: likeQuery !== null,
+        limit,
+        page,
+        sortBy: sort_by,
+        includeLastMessage: include_last_message,
+        resultCount: rows.length,
+      }, 'list_chats completed');
 
       return {
         chats: rows.map((r) => ({

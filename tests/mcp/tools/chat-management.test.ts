@@ -264,6 +264,69 @@ describe('chat-management tools', () => {
       expect(data.chats[0].chatJid).toBe('9999@lid');
     });
 
+    it('filters device-suffixed LID conversations by mapped phone JID', async () => {
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('9999:12@lid', '9999', '9999:12@lid', 'Lid Contact', 'msg-lid-device', 'LID-backed DM', 'text', 0, 7000);
+        INSERT INTO lid_mappings (lid, phone_jid)
+        VALUES ('9999', 'fixture-phone@s.whatsapp.net')
+      `);
+
+      const result = await registry.call('list_chats', { query: 'fixture-phone' }, globalSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as {
+        chats: Array<{ conversationKey: string; chatJid: string }>;
+      };
+      expect(data.chats.map((c) => c.conversationKey)).toEqual(['9999']);
+      expect(data.chats[0].chatJid).toBe('9999:12@lid');
+    });
+
+    it('treats query wildcard characters as literal substring characters', async () => {
+      db.raw.exec(`
+        INSERT INTO chats (jid, conversation_key, name, unread_count, is_archived)
+        VALUES
+          ('333@s.whatsapp.net', '333', '100% Real', 0, 0),
+          ('334@s.whatsapp.net', '334', '1000 Real', 0, 0),
+          ('335@s.whatsapp.net', '335', 'A_B Contact', 0, 0),
+          ('336@s.whatsapp.net', '336', 'ACB Contact', 0, 0)
+      `);
+
+      const percent = await registry.call('list_chats', { query: '100%' }, globalSession());
+      expect(percent.isError).toBeUndefined();
+      const percentData = JSON.parse(percent.content[0].text) as { chats: Array<{ conversationKey: string }> };
+      expect(percentData.chats.map((c) => c.conversationKey)).toEqual(['333']);
+
+      const underscore = await registry.call('list_chats', { query: 'a_' }, globalSession());
+      expect(underscore.isError).toBeUndefined();
+      const underscoreData = JSON.parse(underscore.content[0].text) as { chats: Array<{ conversationKey: string }> };
+      expect(underscoreData.chats.map((c) => c.conversationKey)).toEqual(['335']);
+    });
+
+    it('does not broaden LID mapping joins when stored LID values contain wildcard characters', async () => {
+      db.raw.exec(`
+        INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, content_type, is_from_me, timestamp)
+        VALUES
+          ('abcx:1@lid', 'abcx', 'abcx:1@lid', 'Corrupt Lid Candidate', 'msg-wild-lid', 'Should not match', 'text', 0, 7000);
+        INSERT INTO lid_mappings (lid, phone_jid)
+        VALUES ('abc_', 'wildcard-phone@s.whatsapp.net')
+      `);
+
+      const result = await registry.call('list_chats', { query: 'wildcard-phone' }, globalSession());
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text) as { chats: Array<{ conversationKey: string }> };
+      expect(data.chats).toEqual([]);
+    });
+
+    it('rejects impractically large page offsets', async () => {
+      const result = await registry.call('list_chats', { page: 100_001 }, globalSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Invalid parameters/);
+      expect(result.content[0].text).toMatch(/page/);
+    });
+
     it('paginates after sorting by last activity', async () => {
       const firstPage = await registry.call('list_chats', { limit: 1, page: 0 }, globalSession());
       const secondPage = await registry.call('list_chats', { limit: 1, page: 1 }, globalSession());
