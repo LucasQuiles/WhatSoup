@@ -66,6 +66,9 @@ export interface MessagingDeps {
   auditWriter?: OutboundSendsWriter;
 }
 
+const POLL_QUESTION_MAX_CHARS = 900;
+const POLL_OPTION_MAX_CHARS = 95;
+
 type OwnershipRow = Pick<MessageRow, 'conversation_key' | 'is_from_me' | 'chat_jid' | 'message_id' | 'sender_jid' | 'content'>;
 
 interface OwnershipResult {
@@ -491,21 +494,31 @@ export function registerMessagingTools(
 
   registry.register({
     name: 'send_poll',
-    description: 'Send a poll to the current chat.',
+    description: 'Send a poll to the current chat. Use for lightweight decisions or surveys; for blocking user input, prefer AskUserQuestion when available.',
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'unsafe',
     schema: z.object({
-      chatJid: z.string(),
-      question: z.string(),
-      options: z.array(z.string()),
-      selectableCount: z.number().optional(),
+      chatJid: z.string().describe('Target WhatsApp chat JID. Injected automatically in chat-scoped sessions.'),
+      question: z.string().describe('Poll question text. Keep it concise; send long context in a normal message before the poll.'),
+      options: z.array(
+        z.string().describe('Short poll option label. Keep under the WhatsApp option limit; send paragraph details before the poll.'),
+      ).describe('Poll options. Must contain 2-12 unique, non-empty labels.'),
+      selectableCount: z.number().optional().describe('Whole number of options the voter may select. Defaults to 1; use values above 1 for multi-select polls and never exceed options.length.'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
-      const question = params['question'] as string;
-      const options = params['options'] as string[];
+      const question = (params['question'] as string).trim();
+      const options = (params['options'] as string[]).map((option) => option.trim());
       const selectableCount = params['selectableCount'] as number | undefined;
+
+      if (!question) {
+        return errorResult('Poll question is required');
+      }
+
+      if (question.length > POLL_QUESTION_MAX_CHARS) {
+        return errorResult(`Poll question must be ${POLL_QUESTION_MAX_CHARS} characters or fewer. Send context as a separate message before the poll.`);
+      }
 
       if (options.length < 2) {
         return errorResult('Poll requires at least 2 options');
@@ -515,19 +528,49 @@ export function registerMessagingTools(
         return errorResult('Poll allows at most 12 options');
       }
 
+      const blankOptionIndex = options.findIndex((option) => option.length === 0);
+      if (blankOptionIndex !== -1) {
+        return errorResult(`Poll option ${blankOptionIndex + 1} is blank`);
+      }
+
+      const longOption = options.find((option) => option.length > POLL_OPTION_MAX_CHARS);
+      if (longOption) {
+        return errorResult(`Poll options must be ${POLL_OPTION_MAX_CHARS} characters or fewer. Keep options concise and send longer context before the poll.`);
+      }
+
+      const normalized = new Set<string>();
+      for (const option of options) {
+        const key = option.toLowerCase();
+        if (normalized.has(key)) {
+          return errorResult(`Poll options must be unique: ${option}`);
+        }
+        normalized.add(key);
+      }
+
+      const resolvedSelectableCount = selectableCount ?? 1;
+      if (!Number.isInteger(resolvedSelectableCount)) {
+        return errorResult('selectableCount must be a whole number');
+      }
+      if (resolvedSelectableCount < 1) {
+        return errorResult('selectableCount must be at least 1');
+      }
+      if (resolvedSelectableCount > options.length) {
+        return errorResult('selectableCount cannot exceed the number of poll options');
+      }
+
       try {
         await connection.sendRaw(chatJid, {
           poll: {
             name: question,
             values: options,
-            selectableCount: selectableCount ?? 1,
+            selectableCount: resolvedSelectableCount,
           },
         });
       } catch (err) {
         return errorResult(sanitizeError(err));
       }
 
-      return { sent: true, question, options };
+      return { sent: true, question, options, selectableCount: resolvedSelectableCount };
     },
   });
 

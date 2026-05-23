@@ -8,7 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run --pool=forks --",
+    "test": "node scripts/run-vitest.mjs",
     "test:watch": "vitest --pool=forks",
     "typecheck": "tsc --noEmit"
   },

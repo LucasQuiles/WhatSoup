@@ -23,40 +23,46 @@ const log = createChildLogger('ToolRegistry');
 
 type JsonSchema = Record<string, unknown>;
 
+function withZodDescription(schema: ZodType, jsonSchema: JsonSchema): JsonSchema {
+  return schema.description
+    ? { ...jsonSchema, description: schema.description }
+    : jsonSchema;
+}
+
 function zodToJsonSchema(schema: ZodType): JsonSchema {
   if (schema instanceof ZodString) {
-    return { type: 'string' };
+    return withZodDescription(schema, { type: 'string' });
   }
 
   if (schema instanceof ZodNumber) {
-    return { type: 'number' };
+    return withZodDescription(schema, { type: 'number' });
   }
 
   if (schema instanceof ZodBoolean) {
-    return { type: 'boolean' };
+    return withZodDescription(schema, { type: 'boolean' });
   }
 
   if (schema instanceof ZodOptional) {
-    // Unwrap and mark the inner type
-    return zodToJsonSchema(schema.unwrap());
+    // Unwrap and mark the inner type while preserving descriptions attached after .optional().
+    return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
   }
 
   if (schema instanceof ZodArray) {
-    return {
+    return withZodDescription(schema, {
       type: 'array',
       items: zodToJsonSchema(schema.element),
-    };
+    });
   }
 
   if (schema instanceof ZodEnum) {
-    return {
+    return withZodDescription(schema, {
       type: 'string',
       enum: schema.options as string[],
-    };
+    });
   }
 
   if (schema instanceof ZodRecord) {
-    return { type: 'object' };
+    return withZodDescription(schema, { type: 'object' });
   }
 
   if (schema instanceof ZodObject) {
@@ -75,11 +81,11 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
     if (required.length > 0) {
       result.required = required;
     }
-    return result;
+    return withZodDescription(schema, result);
   }
 
   // Fallback for unrecognised types
-  return {};
+  return withZodDescription(schema, {});
 }
 
 function schemaHasProperty(tool: ToolDeclaration, propertyName: string): boolean {

@@ -53,6 +53,14 @@ export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'openai-api': 'OpenAI API',
 };
 
+const POLL_DECISION_GUIDANCE = [
+  'Decision polling:',
+  '- For bounded user decisions that block progress, use AskUserQuestion when available; WhatSoup renders it as a WhatsApp poll.',
+  '- Use multiSelect: true when the user may choose more than one option; keep labels short and put longer context in option descriptions.',
+  '- For non-blocking surveys or lightweight coordination, use send_poll; set selectableCount above 1 when multiple selections are valid.',
+  '- Do not ask the user to type "I voted". Wait for the poll vote, or accept an exact option label/number if WhatsApp vote delivery fails.',
+].join('\n');
+
 export interface SessionCrashInfo {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -455,6 +463,7 @@ export class SessionManager {
       'Your responses are sent as WhatsApp messages — keep them concise.',
       'You have full access to the local machine via bypassPermissions mode.',
       `Working directory: ${cwd}`,
+      POLL_DECISION_GUIDANCE,
     ].join('\n');
     const sources = [transportPrelude];
 

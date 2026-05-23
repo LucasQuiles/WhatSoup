@@ -104,6 +104,14 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
+  it('verify chains invoke the agent decision polls protocol guard', () => {
+    for (const scriptName of ['verify:push:branch', 'verify:release', 'verify:publish']) {
+      const chain = packageJson.scripts[scriptName];
+      expect(chain, `${scriptName} script must exist`).toBeDefined();
+      expect(chain).toMatch(/\bnpm run guard:agent-decision-polls\b/);
+    }
+  });
+
   it('verify:push:branch invokes the test-integrity baseline gate', () => {
     // Regression guard: PR #677 surfaced that verify:push:branch did NOT run
     // guard:test-integrity, so a weak-assertion violation slipped past the

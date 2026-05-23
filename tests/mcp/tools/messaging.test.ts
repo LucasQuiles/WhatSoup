@@ -767,8 +767,22 @@ describe('registerMessagingTools', () => {
   // ── send_poll ─────────────────────────────────────────────────────────────
 
   describe('send_poll', () => {
+    it('advertises portable usage guidance in the MCP schema', () => {
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
+      const tool = registry.listTools(session).find((candidate) => candidate.name === 'send_poll');
+      const schema = tool?.inputSchema as {
+        properties: Record<string, { description?: string; items?: { description?: string } }>;
+      } | undefined;
+
+      expect(tool?.description).toContain('blocking user input, prefer AskUserQuestion');
+      expect(schema?.properties['question'].description).toContain('send long context in a normal message before the poll');
+      expect(schema?.properties['options'].description).toContain('2-12 unique');
+      expect(schema?.properties['options'].items?.description).toContain('Short poll option label');
+      expect(schema?.properties['selectableCount'].description).toContain('multi-select polls');
+    });
+
     it('sends a poll with question and options', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_poll',
         { question: 'Favourite colour?', options: ['Red', 'Blue', 'Green'] },
@@ -779,10 +793,29 @@ describe('registerMessagingTools', () => {
       const call = JSON.parse(calls[0]);
       expect(call.content.poll.name).toBe('Favourite colour?');
       expect(call.content.poll.values).toEqual(['Red', 'Blue', 'Green']);
+      expect(call.content.poll.selectableCount).toBe(1);
+      expect(JSON.parse(result.content[0].text).selectableCount).toBe(1);
+    });
+
+    it('sends a multi-select poll when selectableCount allows multiple choices', async () => {
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
+      const result = await registry.call(
+        'send_poll',
+        { question: 'Pick supported channels', options: ['WhatsApp', 'Email', 'Slack'], selectableCount: 2 },
+        session,
+      );
+
+      expect(result.isError).toBeUndefined();
+      const call = JSON.parse(calls[0]);
+      expect(call.content.poll.selectableCount).toBe(2);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        sent: true,
+        selectableCount: 2,
+      });
     });
 
     it('rejects poll with fewer than 2 options', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_poll',
         { question: 'One option?', options: ['Only one'] },
@@ -794,7 +827,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('rejects poll with more than 12 options', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
       const tooMany = Array.from({ length: 13 }, (_, i) => `Option ${i + 1}`);
       const result = await registry.call(
         'send_poll',
@@ -804,6 +837,41 @@ describe('registerMessagingTools', () => {
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toMatch(/at most 12 options/);
+    });
+
+    it('rejects invalid selectableCount values before sending', async () => {
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
+
+      for (const [selectableCount, errorPattern] of [
+        [0, /at least 1/],
+        [1.5, /whole number/],
+        [4, /cannot exceed/],
+      ] as const) {
+        const result = await registry.call(
+          'send_poll',
+          { question: 'Pick options', options: ['A', 'B', 'C'], selectableCount },
+          session,
+        );
+
+        const body = JSON.parse(result.content[0].text);
+        expect(body.error).toMatch(errorPattern);
+      }
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects blank, duplicate, and overly long poll text before sending', async () => {
+      const session = chatSession('poll-chat', 'poll-chat@s.whatsapp.net');
+
+      const blank = await registry.call('send_poll', { question: '  ', options: ['A', 'B'] }, session);
+      expect(JSON.parse(blank.content[0].text).error).toMatch(/question is required/);
+
+      const duplicate = await registry.call('send_poll', { question: 'Pick', options: ['A', ' a '] }, session);
+      expect(JSON.parse(duplicate.content[0].text).error).toMatch(/unique/);
+
+      const longOption = await registry.call('send_poll', { question: 'Pick', options: ['A'.repeat(96), 'B'] }, session);
+      expect(JSON.parse(longOption.content[0].text).error).toMatch(/95 characters or fewer/);
+
+      expect(calls).toHaveLength(0);
     });
   });
 

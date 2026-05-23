@@ -73,8 +73,8 @@ describe('voice tools', () => {
           inputSchema: {
             type: 'object',
             properties: {
-              text: { type: 'string' },
-              voice_id: { type: 'string' },
+              text: { type: 'string', description: 'Text to synthesize and send as a voice note' },
+              voice_id: { type: 'string', description: 'ElevenLabs voice ID (defaults to instance config)' },
             },
             required: ['text'],
           },
@@ -95,8 +95,8 @@ describe('voice tools', () => {
             type: 'object',
             properties: {
               chatJid: { type: 'string' },
-              text: { type: 'string' },
-              voice_id: { type: 'string' },
+              text: { type: 'string', description: 'Text to synthesize and send as a voice note' },
+              voice_id: { type: 'string', description: 'ElevenLabs voice ID (defaults to instance config)' },
             },
             required: ['chatJid', 'text'],
           },

@@ -9,7 +9,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 239;
+const BASE_TRANSPORT_PROMPT_BYTES = 800;
 
 const tempRoots: string[] = [];
 
@@ -110,6 +110,23 @@ describe('SessionManager system prompt composition', () => {
 
     expect(prompt).toContain('Working directory:');
     expect(prompt).not.toContain('CLAUDE discovery should stay native.');
+  });
+
+  it('adds WhatsApp poll decision guidance to the transport prelude', () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: '/mock/home',
+    });
+
+    const prompt = sm.buildSystemPrompt();
+
+    expect(prompt).toContain('For bounded user decisions that block progress, use AskUserQuestion when available');
+    expect(prompt).toContain('Use multiSelect: true when the user may choose more than one option');
+    expect(prompt).toContain('For non-blocking surveys or lightweight coordination, use send_poll');
+    expect(prompt).toContain('Do not ask the user to type "I voted"');
   });
 
   it('keeps the no-extra-instructions prompt within the recorded byte budget', () => {

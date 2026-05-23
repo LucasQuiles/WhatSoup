@@ -1640,8 +1640,12 @@ export class AgentRuntime implements Runtime {
           new URL('.', import.meta.url).pathname,
           '../../../deploy/hooks/agent-sandbox.sh',
         );
-        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath);
-        log.info({ cwd, hookPath }, 'wrote sandbox-policy.json and settings.json');
+        const pollLintHookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/poll-interaction-lint.mjs',
+        );
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath);
+        log.info({ cwd, hookPath, pollLintHookPath }, 'wrote sandbox-policy.json and settings.json');
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -3934,6 +3938,7 @@ export class AgentRuntime implements Runtime {
       try {
         // Provision workspace (deterministic rewrite of control files)
         const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
+        const pollLintHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/poll-interaction-lint.mjs');
         const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
         const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
@@ -3942,6 +3947,7 @@ export class AgentRuntime implements Runtime {
           instanceCwd: this.cwd ?? homedir(),
           sandbox: this.sandbox!,
           hookPath,
+          pollLintHookPath,
           mcpServerPath,
           sendMediaServerPath,
           chatScopedToolNames,

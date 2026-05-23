@@ -79,6 +79,7 @@ describe('provisionWorkspace', () => {
         bash: { enabled: true, pathRestricted: true },
       },
       hookPath: '/abs/path/to/agent-sandbox.sh',
+      pollLintHookPath: '/abs/path/to/poll-interaction-lint.mjs',
       mcpServerPath: '/abs/path/to/whatsoup-proxy.ts',
     };
   }
@@ -159,15 +160,15 @@ describe('provisionWorkspace', () => {
     expect(policy.bash).toEqual(opts.sandbox.bash);
   });
 
-  it('settings.json contains the hookPath', () => {
+  it('settings.json contains enforcement and poll diagnostics hooks', () => {
     const workspacePath = makeTmp();
     const instanceCwd = makeTmp();
     const opts = makeOpts(workspacePath, instanceCwd);
     provisionWorkspace(opts);
 
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
-    const command = settings.hooks.PreToolUse[0].hooks[0].command;
-    expect(command).toBe(opts.hookPath);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(opts.hookPath);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(opts.pollLintHookPath);
   });
 
   it('.mcp.json contains the mcpServerPath and socket path under .claude/ (whatsoup.sock)', () => {
@@ -204,12 +205,17 @@ describe('provisionWorkspace', () => {
     const opts = makeOpts(workspacePath, instanceCwd);
     provisionWorkspace(opts);
 
-    // Modify hookPath and re-provision
-    const opts2 = { ...opts, hookPath: '/new/path/to/hook.sh' };
+    // Modify hook paths and re-provision.
+    const opts2 = {
+      ...opts,
+      hookPath: '/new/path/to/hook.sh',
+      pollLintHookPath: '/new/path/to/poll-interaction-lint.mjs',
+    };
     provisionWorkspace(opts2);
 
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/new/path/to/hook.sh');
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe('/new/path/to/poll-interaction-lint.mjs');
   });
 
   it('returns the socket path (ends with .claude/whatsoup.sock)', () => {

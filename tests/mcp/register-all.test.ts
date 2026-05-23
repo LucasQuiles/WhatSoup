@@ -2,6 +2,7 @@
 // TDD test for the standalone registerAllTools function.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { z } from 'zod';
 import { Database } from '../../src/core/database.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
@@ -168,7 +169,7 @@ describe('registerAllTools', () => {
     registry.register({
       name: 'list_messages',
       description: 'stale duplicate to force registry collision',
-      inputSchema: { type: 'object', properties: {} },
+      schema: z.object({}),
       scope: 'global',
       replayPolicy: 'reject',
       handler: async () => ({ ok: true }),
@@ -192,7 +193,7 @@ describe('registerAllTools', () => {
     registry.register({
       name: 'knowledge_search',
       description: 'stale duplicate to force optional collision',
-      inputSchema: { type: 'object', properties: {} },
+      schema: z.object({}),
       scope: 'global',
       replayPolicy: 'reject',
       handler: async () => ({ ok: true }),

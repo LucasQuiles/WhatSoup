@@ -219,7 +219,9 @@ Send one or more contact cards to the current chat.
 
 ### send_poll
 
-Send a poll to the current chat.
+Send a poll to the current chat. Use this for lightweight decisions, surveys, and non-blocking coordination. For a decision that blocks agent progress, prefer `AskUserQuestion` when the provider exposes it; WhatSoup renders that interaction as a WhatsApp poll and routes the vote back into the waiting turn.
+
+For multi-select polls, set `selectableCount` to the maximum number of options the voter may choose. Keep option text concise; send long context in a normal message immediately before the poll.
 
 | | |
 |---|---|
@@ -232,7 +234,7 @@ Send a poll to the current chat.
 |------|------|----------|-------------|
 | question | string | required | Poll question text |
 | options | array of string | required | Poll options (2–12 items) |
-| selectableCount | number | optional | Number of options voters may select; defaults to 1 |
+| selectableCount | number | optional | Whole number from `1` through `options.length`; defaults to `1`. Use values above `1` for multi-select polls. |
 
 ---
 

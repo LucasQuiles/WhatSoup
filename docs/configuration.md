@@ -439,7 +439,7 @@ include `agentOptions` should keep these fields explicit.
 
 #### `agentOptions.sandbox`
 
-Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.sh`).
+Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.sh`). Sandboxed agent workspaces also install `deploy/hooks/poll-interaction-lint.mjs` as a fail-open `PostToolUse` diagnostic hook for poll/AskUser friction; it writes session-local JSONL telemetry and does not block tool calls.
 
 | Field | Type | Description |
 |-------|------|-------------|

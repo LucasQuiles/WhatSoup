@@ -24,6 +24,7 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 - **ToolRegistry** — in-process MCP tool declarations with scope enforcement (chat vs global)
 - **SocketServer** — per-scope Unix sockets speaking MCP JSON-RPC. Chat-scoped sessions auto-inject deliveryJid; global sessions require explicit chatJid.
 - **SessionContext** — per-socket state: tier (global/chat-scoped), conversationKey, deliveryJid
+- **Agent decision polls** — blocking user decisions use `AskUserQuestion` so WhatSoup can render a WhatsApp poll and inject the vote back into the waiting turn; non-blocking surveys use MCP `send_poll`. See `docs/runbooks/agent-decision-polls.md`.
 
 ## Instance Model
 
@@ -73,5 +74,6 @@ If anything turns up, read the matched line in context — if your PR closes the
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
 - `docs/tools.md` — complete MCP tool API reference (162 tools — 161 across 20 modules under `src/mcp/tools/*.ts` plus 1 inline registration in `src/runtimes/agent/runtime.ts`; 160 always-registered + 2 conditionally-registered)
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
+- `docs/runbooks/agent-decision-polls.md` — portable contract for `AskUserQuestion` poll bridging and MCP `send_poll` usage
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms
 - `docs/security-handoffs/` — open security handoffs that belong to the WhatSoup application lifecycle

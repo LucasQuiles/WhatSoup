@@ -542,6 +542,32 @@ describe('ToolRegistry', () => {
     expect(schema.properties['tags'].items).toEqual({ type: 'string' });
   });
 
+  it('preserves Zod descriptions in JSON Schema for portable MCP tool planners', () => {
+    registry.register(
+      makeTool({
+        schema: z.object({
+          question: z.string().describe('Question shown to the user'),
+          options: z.array(
+            z.string().describe('Short option label'),
+          ).describe('Available choices'),
+          selectableCount: z.number().optional().describe('Maximum number of choices'),
+        }).describe('Poll request'),
+      }),
+    );
+
+    const tools = registry.listTools(makeSession());
+    const schema = tools[0].inputSchema as {
+      description?: string;
+      properties: Record<string, { description?: string; items?: { description?: string } }>;
+    };
+
+    expect(schema.description).toBe('Poll request');
+    expect(schema.properties['question'].description).toBe('Question shown to the user');
+    expect(schema.properties['options'].description).toBe('Available choices');
+    expect(schema.properties['options'].items?.description).toBe('Short option label');
+    expect(schema.properties['selectableCount'].description).toBe('Maximum number of choices');
+  });
+
   it('converts ZodRecord to JSON Schema object', () => {
     registry.register(
       makeTool({

@@ -262,6 +262,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
+| `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
 | `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
@@ -310,7 +311,7 @@ are breaking.
 | `deploy:generate-health-tokens` | `generate-health-tokens.sh` | [`deploy/generate-health-tokens.sh`](../deploy/generate-health-tokens.sh) | stable | active | Generates per-instance health tokens |
 | `deploy:tokens.env-template` | `whatsoup-tokens.env.example` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Template for `tokens.env` populated at deploy time |
 | `deploy:mcp` | MCP wrapper templates | [`deploy/mcp/`](../deploy/mcp) | stable | active | MCP integration entrypoints |
-| `deploy:hooks` | Agent sandbox hooks | [`deploy/hooks/`](../deploy/hooks) | beta | active | Sandbox enforcement; behavior contract still settling |
+| `deploy:hooks` | Agent sandbox hooks | [`deploy/hooks/`](../deploy/hooks) | beta | active | Sandbox enforcement plus fail-open diagnostics such as `poll-interaction-lint.mjs`; behavior contract still settling |
 | `deploy:loops` | Background loop runners | [`deploy/loops/`](../deploy/loops) | beta | active | Long-running maintenance loops |
 | `deploy:scripts` | Operator helper scripts | [`deploy/scripts/`](../deploy/scripts) | beta | active | Helpers that operators may reference from docs |
 | `deploy:launchd.generated` | macOS plist generation behavior | [docs/runbooks/macos-launchd-deployment.md](runbooks/macos-launchd-deployment.md), [src/fleet/platform.ts](../src/fleet/platform.ts) | stable | active | Generated launchd plists; per §4, regen non-destructively is non-breaking |

@@ -16,6 +16,7 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Documentation drift | `npm run guard:doc-drift` | docs ↔ code coupling check |
 | Public surface drift | `npm run guard:public-surface-drift` | exported API surface stability check |
 | Work index coverage | `npm run guard:work-index` | docs/work-index.json completeness |
+| AskUser poll protocol guard | `npm run guard:agent-decision-polls` | Verifies the WhatsApp poll decision protocol remains wired across prompt guidance, MCP schema descriptions, sandbox diagnostics, docs, and release gates. |
 | **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. GitHub Actions installs the private `LucasQuiles/test-integrity` plugin over SSH using the `TEST_INTEGRITY_DEPLOY_KEY` secret (read-only deploy key on `LucasQuiles/test-integrity`) before running this gate. |
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
 | Full test suite | `npm test -- --pool=forks` | vitest with --pool=forks for stability |
@@ -27,8 +28,8 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 
 | Push target | Composite script | Required checks |
 |---|---|---|
-| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, `npm run typecheck`, and the targeted guard test list below |
-| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, test-integrity baseline, `tools/whatsoup_guard` install/typecheck/test, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, and console production build |
+| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, `npm run typecheck`, and the targeted guard test list below |
+| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, test-integrity baseline, `tools/whatsoup_guard` install/typecheck/test, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, and console production build |
 
 `verify:push:branch` runs this targeted `tests/scripts/` list:
 - `repo-hygiene-guard.test.ts`

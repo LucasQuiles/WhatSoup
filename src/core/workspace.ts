@@ -138,6 +138,7 @@ export interface ProvisionOptions {
   hookPath: string;              // absolute path to agent-sandbox.sh
   mcpServerPath: string;         // absolute path to whatsoup-proxy.ts
   sendMediaServerPath?: string;  // absolute path to send-media-server.ts (optional — enables media bridge)
+  pollLintHookPath?: string;     // absolute path to poll-interaction-lint.mjs (optional diagnostics hook)
   chatScopedToolNames?: string[];  // chat-scoped tool names from registry (used to auto-generate allowedMcpTools)
 }
 
@@ -161,20 +162,24 @@ export function buildMcpAllowlist(chatScopedToolNames: string[], includeSendMedi
  * @param claudeDir  Absolute path to the .claude/ directory (must already exist).
  * @param policy     The sandbox policy object to serialise as sandbox-policy.json.
  * @param hookPath   Absolute path to agent-sandbox.sh wired as the PreToolUse hook.
+ * @param pollLintHookPath Absolute path to poll-interaction-lint.mjs wired as an optional PostToolUse hook.
  */
 export function writeSandboxArtifacts(
   claudeDir: string,
   policy: Record<string, unknown>,
   hookPath: string,
+  pollLintHookPath?: string,
 ): void {
   try {
     writePrivateFileSync(join(claudeDir, 'sandbox-policy.json'), JSON.stringify(policy, null, 2));
 
-    const settings = {
-      hooks: {
-        PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
-      },
+    const hooks: Record<string, unknown> = {
+      PreToolUse: [{ matcher: '', hooks: [{ type: 'command', command: hookPath }] }],
     };
+    if (pollLintHookPath) {
+      hooks.PostToolUse = [{ matcher: '', hooks: [{ type: 'command', command: pollLintHookPath }] }];
+    }
+    const settings = { hooks };
     writePrivateFileSync(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2));
   } catch (err) {
     log.error({ err, claudeDir }, 'failed to write sandbox artifacts');
@@ -290,7 +295,7 @@ export function ensurePermissionsSettings(
  * Deterministic — always overwrites existing files.
  */
 export function provisionWorkspace(opts: ProvisionOptions): string {
-  const { workspacePath, instanceCwd, sandbox, hookPath, mcpServerPath, sendMediaServerPath } = opts;
+  const { workspacePath, instanceCwd, sandbox, hookPath, pollLintHookPath, mcpServerPath, sendMediaServerPath } = opts;
 
   try {
     // 1. Ensure .claude/ directory exists without following directory symlinks.
@@ -310,7 +315,7 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
         : mcpAllowlist ? { allowedMcpTools: mcpAllowlist } : {}),
       bash: sandbox.bash,
     };
-    writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath);
+    writeSandboxArtifacts(claudeDir, sandboxPolicy, hookPath, pollLintHookPath);
 
     // 3. Compute socket path (whatsoup.sock)
     const socketPath = join(claudeDir, 'whatsoup.sock');
