@@ -5161,6 +5161,10 @@ describe('AgentRuntime', () => {
       return { messenger: messenger as unknown as Messenger, sentMessages, pollSends, eventHandlers };
     }
 
+    function sendTurnTexts(): string[] {
+      return mockSession.sendTurn.mock.calls.map((call) => String((call as unknown as [unknown])[0]));
+    }
+
     it('sends poll with no follow-up when all descriptions fit in poll options', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OK', hasSecret: true });
       const db = makeDb();
@@ -5350,11 +5354,9 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: Go'))).toBe(true);
+        expect(sendTurnTexts().some((arg) => arg.includes('A: Go'))).toBe(true);
       });
-      const injected = mockSession.sendTurn.mock.calls
-        .map(([arg]) => String(arg))
-        .find((arg) => arg.includes('A: Go'))!;
+      const injected = sendTurnTexts().find((arg) => arg.includes('A: Go'))!;
       expect(injected).toContain('[User answered poll]');
       expect(injected).toContain('Q: Pick a runtime');
     });
@@ -5417,11 +5419,9 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: First A'))).toBe(true);
+        expect(sendTurnTexts().some((arg) => arg.includes('A: First A'))).toBe(true);
       });
-      const injected = mockSession.sendTurn.mock.calls
-        .map(([arg]) => String(arg))
-        .find((arg) => arg.includes('A: First A'))!;
+      const injected = sendTurnTexts().find((arg) => arg.includes('A: First A'))!;
       expect(injected).toContain('Q: First question?');
       expect(injected).toContain('Q: Second question?');
       expect(injected).toContain('A: Second B');
@@ -5463,11 +5463,9 @@ describe('AgentRuntime', () => {
       }));
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: Use DuckDB instead (free-text response)'))).toBe(true);
+        expect(sendTurnTexts().some((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))).toBe(true);
       });
-      const injected = mockSession.sendTurn.mock.calls
-        .map(([arg]) => String(arg))
-        .find((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))!;
+      const injected = sendTurnTexts().find((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))!;
       expect(injected).toContain('Q: Pick a database');
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('Use DuckDB instead');
     });
@@ -5537,11 +5535,9 @@ describe('AgentRuntime', () => {
       }));
 
       await vi.waitFor(() => {
-        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: fallback answer two (free-text response)'))).toBe(true);
+        expect(sendTurnTexts().some((arg) => arg.includes('A: fallback answer two (free-text response)'))).toBe(true);
       });
-      const injected = mockSession.sendTurn.mock.calls
-        .map(([arg]) => String(arg))
-        .find((arg) => arg.includes('A: fallback answer two (free-text response)'))!;
+      const injected = sendTurnTexts().find((arg) => arg.includes('A: fallback answer two (free-text response)'))!;
       expect(injected).toContain('Q: First fallback question?');
       expect(injected).toContain('A: fallback answer one (free-text response)');
       expect(injected).toContain('Q: Second fallback question?');
