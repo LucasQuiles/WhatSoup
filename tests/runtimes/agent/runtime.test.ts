@@ -5123,4 +5123,200 @@ describe('AgentRuntime', () => {
       },
     );
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AskUserQuestion → Poll bridge: runtime queue behavior
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  describe('AskUserQuestion poll bridge queue behavior', () => {
+    // Build a messenger with sendPollMessage and event subscription support
+    function makePollMessenger(sendResult: { waMessageId: string | null; hasSecret: boolean }) {
+      const sentMessages: Array<{ jid: string; text: string }> = [];
+      const pollSends: Array<{ chatJid: string; name: string; values: string[]; selectableCount: number }> = [];
+      const eventHandlers = new Map<string, Function>();
+
+      const messenger = {
+        sendMessage: vi.fn(async (jid: string, text: string) => {
+          sentMessages.push({ jid, text });
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+        // ConnectionManager-shaped additions for poll bridge
+        sendPollMessage: vi.fn(async (chatJid: string, name: string, values: string[], selectableCount: number) => {
+          pollSends.push({ chatJid, name, values, selectableCount });
+          return sendResult;
+        }),
+        on: vi.fn((event: string, handler: Function) => {
+          eventHandlers.set(event, handler);
+          return messenger;
+        }),
+      };
+      return { messenger: messenger as unknown as Messenger, sentMessages, pollSends, eventHandlers };
+    }
+
+    it('sends poll with no follow-up when all descriptions fit in poll options', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OK', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueText.mockClear();
+      mockQueue.enqueueToolUpdate.mockClear();
+
+      // Fire AskUserQuestion tool_use with short descriptions that fit
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick a language',
+            header: 'Language',
+            options: [
+              { label: 'Python', description: 'Dynamic typing' },
+              { label: 'Go', description: 'Compiled, fast' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      // Let async poll send complete
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+
+      // Poll was sent with rich option text
+      expect(pollSends[0].values).toEqual([
+        'Python — Dynamic typing',
+        'Go — Compiled, fast',
+      ]);
+
+      // No follow-up description text enqueued (all descriptions fit)
+      expect(mockQueue.enqueueText).not.toHaveBeenCalled();
+    });
+
+    it('sends follow-up descriptions only when at least one option was truncated', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OK', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueText.mockClear();
+
+      // Fire with one description too long to fit (>95 chars combined)
+      const longDesc = 'A very long description that definitely exceeds the ninety-five character budget for WhatsApp poll option text display';
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-2',
+        toolInput: {
+          questions: [{
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              { label: 'Short', description: 'Fits fine' },
+              { label: 'Long option', description: longDesc },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+
+      // Follow-up description text WAS enqueued (one option truncated)
+      expect(mockQueue.enqueueText).toHaveBeenCalledTimes(1);
+      const followUp = mockQueue.enqueueText.mock.calls[0][0] as string;
+      expect(followUp).toContain('*Short*:');
+      expect(followUp).toContain('*Long option*:');
+      expect(followUp).toContain(longDesc);
+    });
+
+    it('sends only text fallback (no separate follow-up) when poll send fails', async () => {
+      // sendPollMessage returns hasSecret=false → text fallback
+      const { messenger } = makePollMessenger({ waMessageId: 'POLL_FAIL', hasSecret: false });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueText.mockClear();
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-3',
+        toolInput: {
+          questions: [{
+            question: 'Which database?',
+            header: 'DB',
+            options: [
+              { label: 'PostgreSQL', description: 'Relational, ACID compliant' },
+              { label: 'SQLite', description: 'Embedded, zero-config' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalled());
+
+      // Exactly ONE enqueueText call: the numbered text fallback
+      expect(mockQueue.enqueueText).toHaveBeenCalledTimes(1);
+      const fallbackText = mockQueue.enqueueText.mock.calls[0][0] as string;
+      // Text fallback includes question + numbered options with descriptions
+      expect(fallbackText).toContain('Which database?');
+      expect(fallbackText).toContain('1. *PostgreSQL*');
+      expect(fallbackText).toContain('2. *SQLite*');
+      expect(fallbackText).toContain('Reply with option number or text');
+      // No separate follow-up description message
+    });
+
+    it('suppresses auto-resolved tool_result for intercepted AskUserQuestion', async () => {
+      const { messenger } = makePollMessenger({ waMessageId: 'POLL_OK', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueToolUpdate.mockClear();
+
+      // tool_use
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-suppress-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick',
+            header: 'Test',
+            options: [
+              { label: 'A', description: 'a' },
+              { label: 'B', description: 'b' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      // Auto-resolved tool_result arrives immediately
+      capturedOnEventRef.current!({
+        type: 'tool_result',
+        toolId: 'tool-suppress-1',
+        isError: true,
+        content: 'Answer questions?',
+      });
+
+      // tool_result error should NOT be forwarded to queue
+      const errorCalls = mockQueue.enqueueToolUpdate.mock.calls.filter(
+        ([update]: [{ category: string }]) => update.category === 'error',
+      );
+      expect(errorCalls).toHaveLength(0);
+    });
+  });
 });
