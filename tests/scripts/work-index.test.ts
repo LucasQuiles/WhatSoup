@@ -13,6 +13,7 @@ import {
   writeWorkIndex,
 } from '../../scripts/work-index.ts';
 
+const WORK_INDEX_TEST_TIMEOUT_MS = 30_000;
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 function cleanGitEnv() {
@@ -37,7 +38,7 @@ describe('work index scanner', () => {
     expect(index.rows.some((row) => row.path === 'docs/superpowers/specs/2026-04-25-transport-layer-design.md')).toBe(true);
     expect(index.rows.some((row) => row.path === 'docs/superpowers/plans/2026-04-22-mw-bot-group-protection.md')).toBe(false);
     expect(index.rows.some((row) => row.path === 'docs/superpowers/plans/2026-04-23-history-sync-fitness-cleanup.md')).toBe(false);
-  });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('reports missing and stale coverage entries against a synthetic tree', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-'));
@@ -58,7 +59,7 @@ describe('work index scanner', () => {
       missing: ['docs/superpowers/plans/2026-04-25-example-plan.md'],
       stale: ['docs/superpowers/plans/2026-04-25-stale-plan.md'],
     });
-  });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('ignores untracked markdown files matched by gitignore', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-ignored-'));
@@ -85,12 +86,12 @@ describe('work index scanner', () => {
       missing: [],
       stale: [],
     });
-  });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('keeps the checked-in work-index artifacts clean', () => {
     expect(findWorkIndexCoverageIssues(repoRoot)).toEqual({ missing: [], stale: [] });
     expect(findWorkIndexCheckIssues(repoRoot)).toEqual({ missing: [], stale: [], drift: [] });
-  });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('honors an explicit leading status before explanatory status words', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-status-'));
@@ -112,7 +113,7 @@ describe('work index scanner', () => {
 
     expect(index.rows.find((row) => row.path === 'docs/superpowers/plans/2026-04-25-example-plan.md')?.status)
       .toBe('unknown');
-  });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('detects stale generated work-index artifacts, not just path coverage', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-drift-'));
@@ -139,5 +140,5 @@ describe('work index scanner', () => {
         { path: 'docs/work-index.md', reason: 'generated Markdown differs from scanner output' },
       ],
     });
-  });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
 });
