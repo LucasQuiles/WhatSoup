@@ -466,7 +466,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.log.info({
         chatJid, waMessageId, optionCount: values.length,
         secretLen: messageSecret.length,
-        secretHex: Buffer.from(messageSecret).toString('hex').slice(0, 16) + '...',
         secretPath: r?.messageSecret ? 'top' : r?.messageContextInfo?.messageSecret ? 'contextInfo' : 'message.contextInfo',
       }, 'poll sent and tracked for vote decryption');
       return { waMessageId, hasSecret: true };
