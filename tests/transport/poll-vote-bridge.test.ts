@@ -17,7 +17,7 @@ vi.mock('@whiskeysockets/baileys/lib/Utils/process-message.js', () => ({
 
 vi.mock('../../src/config.ts', () => ({
   config: {
-    adminPhones: new Set(['15550100001']),
+    adminPhones: new Set(['1111']),
     authDir: '/tmp/wa-test-auth',
     dbPath: ':memory:',
     mediaDir: '/tmp',
