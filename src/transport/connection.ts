@@ -531,7 +531,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         createdAt: Date.now(),
       });
 
-      this.log.info({ chatJid, waMessageId, optionCount: values.length }, 'poll sent and tracked for vote decryption');
+      this.log.info({
+        chatJid, waMessageId, optionCount: values.length,
+        secretLen: messageSecret.length,
+        secretHex: Buffer.from(messageSecret).toString('hex').slice(0, 16) + '...',
+        secretPath: r?.messageSecret ? 'top' : r?.messageContextInfo?.messageSecret ? 'contextInfo' : 'message.contextInfo',
+      }, 'poll sent and tracked for vote decryption');
       return { waMessageId, hasSecret: true };
     }
 
@@ -1276,6 +1281,23 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const pollCreatorJid = creationKey.fromMe
         ? meId
         : (creationKey.participantAlt || creationKey.remoteJidAlt || creationKey.participant || creationKey.remoteJid || '');
+
+      this.log.info({
+        pollMessageId: creationKey.id,
+        voterJid,
+        pollCreatorJid,
+        meId,
+        secretLen: stored.messageSecret?.length,
+        secretHex: Buffer.from(stored.messageSecret).toString('hex').slice(0, 16) + '...',
+        encPayloadLen: vote.encPayload?.length,
+        encIvLen: vote.encIv?.length,
+        creationKeyFromMe: creationKey.fromMe,
+        msgKeyFromMe: msgKey.fromMe,
+        msgKeyParticipant: msgKey.participant,
+        msgKeyParticipantAlt: msgKey.participantAlt,
+        msgKeyRemoteJid: msgKey.remoteJid,
+        msgKeyRemoteJidAlt: msgKey.remoteJidAlt,
+      }, 'poll vote decryption attempt — diagnostic');
 
       const decrypted = decryptPollVote(
         { encPayload: vote.encPayload, encIv: vote.encIv },
