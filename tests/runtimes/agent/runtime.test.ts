@@ -5130,10 +5130,14 @@ describe('AgentRuntime', () => {
 
   describe('AskUserQuestion poll bridge queue behavior', () => {
     // Build a messenger with sendPollMessage and event subscription support
-    function makePollMessenger(sendResult: { waMessageId: string | null; hasSecret: boolean }) {
+    function makePollMessenger(
+      sendResult: { waMessageId: string | null; hasSecret: boolean }
+        | Array<{ waMessageId: string | null; hasSecret: boolean }>,
+    ) {
       const sentMessages: Array<{ jid: string; text: string }> = [];
       const pollSends: Array<{ chatJid: string; name: string; values: string[]; selectableCount: number }> = [];
       const eventHandlers = new Map<string, Function>();
+      let sendIndex = 0;
 
       const messenger = {
         sendMessage: vi.fn(async (jid: string, text: string) => {
@@ -5144,6 +5148,9 @@ describe('AgentRuntime', () => {
         // ConnectionManager-shaped additions for poll bridge
         sendPollMessage: vi.fn(async (chatJid: string, name: string, values: string[], selectableCount: number) => {
           pollSends.push({ chatJid, name, values, selectableCount });
+          if (Array.isArray(sendResult)) {
+            return sendResult[Math.min(sendIndex++, sendResult.length - 1)];
+          }
           return sendResult;
         }),
         on: vi.fn((event: string, handler: Function) => {
@@ -5274,6 +5281,271 @@ describe('AgentRuntime', () => {
       expect(fallbackText).toContain('2. *SQLite*');
       expect(fallbackText).toContain('Reply with option number or text');
       // No separate follow-up description message
+    });
+
+
+    it('sets selectableCount to option count for multiSelect polls', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_MULTI', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-multiselect-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick runtimes',
+            header: 'Runtime',
+            options: [
+              { label: 'Node', description: 'JavaScript runtime' },
+              { label: 'Python', description: 'Scripting runtime' },
+              { label: 'Go', description: 'Compiled runtime' },
+            ],
+            multiSelect: true,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].selectableCount).toBe(3);
+    });
+
+    it('injects a pollVoteReceived answer back into the active per-chat session', async () => {
+      const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_ANSWER', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-answer-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick a runtime',
+            header: 'Runtime',
+            options: [
+              { label: 'Node', description: 'JavaScript runtime' },
+              { label: 'Go', description: 'Compiled runtime' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      mockSession.sendTurn.mockClear();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_ANSWER',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Go'],
+      });
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: Go'))).toBe(true);
+      });
+      const injected = mockSession.sendTurn.mock.calls
+        .map(([arg]) => String(arg))
+        .find((arg) => arg.includes('A: Go'))!;
+      expect(injected).toContain('[User answered poll]');
+      expect(injected).toContain('Q: Pick a runtime');
+    });
+
+    it('collects multi-question poll votes by poll message id before injecting answers', async () => {
+      const { messenger, pollSends, eventHandlers } = makePollMessenger([
+        { waMessageId: 'POLL_Q1', hasSecret: true },
+        { waMessageId: 'POLL_Q2', hasSecret: true },
+      ]);
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-two-question-1',
+        toolInput: {
+          questions: [
+            {
+              question: 'First question?',
+              header: 'First',
+              options: [
+                { label: 'First A', description: 'First option' },
+                { label: 'First B', description: 'Second option' },
+              ],
+              multiSelect: false,
+            },
+            {
+              question: 'Second question?',
+              header: 'Second',
+              options: [
+                { label: 'Second A', description: 'First option' },
+                { label: 'Second B', description: 'Second option' },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(2));
+      mockSession.sendTurn.mockClear();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_Q2',
+        chatJid: pollSends[1].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['Second B'],
+      });
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_Q1',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['First A'],
+      });
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: First A'))).toBe(true);
+      });
+      const injected = mockSession.sendTurn.mock.calls
+        .map(([arg]) => String(arg))
+        .find((arg) => arg.includes('A: First A'))!;
+      expect(injected).toContain('Q: First question?');
+      expect(injected).toContain('Q: Second question?');
+      expect(injected).toContain('A: Second B');
+      expect(injected).not.toContain('(no answer)');
+    });
+
+    it('treats text while a poll is pending as a free-text Other answer', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OTHER', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-other-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick a database',
+            header: 'Database',
+            options: [
+              { label: 'PostgreSQL', description: 'Server database' },
+              { label: 'SQLite', description: 'Embedded database' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      mockSession.sendTurn.mockClear();
+
+      await sendAndDrain(runtime, makeMsg({
+        content: 'Use DuckDB instead',
+        chatJid: '5678@s.whatsapp.net',
+        senderJid: '5678@s.whatsapp.net',
+      }));
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: Use DuckDB instead (free-text response)'))).toBe(true);
+      });
+      const injected = mockSession.sendTurn.mock.calls
+        .map(([arg]) => String(arg))
+        .find((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))!;
+      expect(injected).toContain('Q: Pick a database');
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('Use DuckDB instead');
+    });
+
+
+    it('ignores stale poll votes after partial poll send falls back to text', async () => {
+      const { messenger, pollSends, eventHandlers } = makePollMessenger([
+        { waMessageId: 'POLL_PARTIAL_1', hasSecret: true },
+        { waMessageId: 'POLL_PARTIAL_2', hasSecret: false },
+      ]);
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-partial-fallback-1',
+        toolInput: {
+          questions: [
+            {
+              question: 'First fallback question?',
+              header: 'First',
+              options: [
+                { label: 'A', description: 'First A' },
+                { label: 'B', description: 'First B' },
+              ],
+              multiSelect: false,
+            },
+            {
+              question: 'Second fallback question?',
+              header: 'Second',
+              options: [
+                { label: 'C', description: 'Second C' },
+                { label: 'D', description: 'Second D' },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(2));
+      mockSession.sendTurn.mockClear();
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_PARTIAL_1',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['B'],
+      });
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+
+      await sendAndDrain(runtime, makeMsg({
+        content: 'fallback answer one',
+        chatJid: '5678@s.whatsapp.net',
+        senderJid: '5678@s.whatsapp.net',
+      }));
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('fallback answer one'));
+
+      await sendAndDrain(runtime, makeMsg({
+        content: 'fallback answer two',
+        chatJid: '5678@s.whatsapp.net',
+        senderJid: '5678@s.whatsapp.net',
+      }));
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn.mock.calls.some(([arg]) => String(arg).includes('A: fallback answer two (free-text response)'))).toBe(true);
+      });
+      const injected = mockSession.sendTurn.mock.calls
+        .map(([arg]) => String(arg))
+        .find((arg) => arg.includes('A: fallback answer two (free-text response)'))!;
+      expect(injected).toContain('Q: First fallback question?');
+      expect(injected).toContain('A: fallback answer one (free-text response)');
+      expect(injected).toContain('Q: Second fallback question?');
+      expect(injected).not.toContain('A: B');
     });
 
     it('suppresses auto-resolved tool_result for intercepted AskUserQuestion', async () => {

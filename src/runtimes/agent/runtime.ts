@@ -742,8 +742,10 @@ export class AgentRuntime implements Runtime {
     }>;
     toolId: string;
     chatJid: string;
+    mode: 'poll' | 'textFallback';
+    pollMessageIdToQuestionIndex: Map<string, number>;
     currentQuestionIndex: number;
-    answersCollected: Record<string, string>;  // questionText → selectedLabel(s)
+    answersCollected: Record<number, string>;  // question index -> selectedLabel(s)
     createdAt: number;
   }>();
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
@@ -2602,14 +2604,32 @@ export class AgentRuntime implements Runtime {
     // answer and inject it back to the session.
     const pendingPoll = this.pendingPollQuestions.get(mapKey);
     if (pendingPoll) {
+      while (
+        pendingPoll.currentQuestionIndex < pendingPoll.questions.length
+        && pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] !== undefined
+      ) {
+        pendingPoll.currentQuestionIndex++;
+      }
+
       const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
       if (currentQ) {
-        pendingPoll.answersCollected[currentQ.question] = `${text} (free-text response)`;
+        pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] = `${text} (free-text response)`;
         pendingPoll.currentQuestionIndex++;
-        if (pendingPoll.currentQuestionIndex >= pendingPoll.questions.length) {
+        while (
+          pendingPoll.currentQuestionIndex < pendingPoll.questions.length
+          && pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] !== undefined
+        ) {
+          pendingPoll.currentQuestionIndex++;
+        }
+
+        if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
           this.injectPollAnswers(mapKey, pendingPoll);
         } else {
-          log.info({ mapKey, answered: pendingPoll.currentQuestionIndex, total: pendingPoll.questions.length }, 'free-text answer collected — waiting for more');
+          log.info({
+            mapKey,
+            answered: Object.keys(pendingPoll.answersCollected).length,
+            total: pendingPoll.questions.length,
+          }, 'free-text answer collected — waiting for more');
         }
         return; // consume the message — don't send as a new turn
       }
@@ -2707,29 +2727,34 @@ export class AgentRuntime implements Runtime {
     // Register ALL synchronous state BEFORE any async work — tool_result and
     // result events may arrive while we're awaiting poll send.
     this.suppressedAskUserToolIds.add(toolId);
-    this.pendingPollQuestions.set(mapKey, {
+    const pending = {
       questions,
       toolId,
       chatJid,
+      mode: 'poll' as 'poll' | 'textFallback',
+      pollMessageIdToQuestionIndex: new Map<string, number>(),
       currentQuestionIndex: 0,
-      answersCollected: {},
+      answersCollected: {} as Record<number, string>,
       createdAt: Date.now(),
-    });
+    };
+    this.pendingPollQuestions.set(mapKey, pending);
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
-    const formattedQuestions = questions.map(q => ({
+    const formattedQuestions = questions.map((q, index) => ({
+      index,
       question: q,
       formatted: formatPollQuestion(q),
     }));
 
-    for (const { question: q, formatted } of formattedQuestions) {
+    for (const { index, question: q, formatted } of formattedQuestions) {
       const selectableCount = q.multiSelect ? q.options.length : 1;
 
       try {
         const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
         if (result.waMessageId) {
           pollMessageIds.push(result.waMessageId);
+          pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
         }
         if (!result.hasSecret) {
           allHaveSecret = false;
@@ -2741,6 +2766,8 @@ export class AgentRuntime implements Runtime {
     }
 
     if (pollMessageIds.length === 0 || !allHaveSecret) {
+      pending.mode = 'textFallback';
+      pending.pollMessageIdToQuestionIndex.clear();
       // Fall back: send as text with numbered options.
       // Text fallback already includes full descriptions — no follow-up needed.
       log.warn({ chatJid, toolId }, 'poll send failed or missing secret — falling back to text question');
@@ -2773,38 +2800,52 @@ export class AgentRuntime implements Runtime {
     voterJid: string;
     selectedOptions: string[];
   }): void {
-    // Find the pending question whose chatJid matches
     let matchedMapKey: string | null = null;
+    let matchedQuestionIndex: number | undefined;
     for (const [mapKey, pending] of this.pendingPollQuestions) {
-      if (pending.chatJid === data.chatJid) {
+      if (pending.chatJid !== data.chatJid || pending.mode !== 'poll') continue;
+      const index = pending.pollMessageIdToQuestionIndex.get(data.pollMessageId);
+      if (index !== undefined) {
         matchedMapKey = mapKey;
+        matchedQuestionIndex = index;
         break;
       }
     }
 
-    if (!matchedMapKey) {
-      log.debug({ chatJid: data.chatJid, pollMessageId: data.pollMessageId }, 'poll vote received but no pending question for this chat');
+    if (matchedMapKey === null || matchedQuestionIndex === undefined) {
+      log.debug({ chatJid: data.chatJid, pollMessageId: data.pollMessageId }, 'poll vote received but no matching pending poll');
       return;
     }
 
     const pending = this.pendingPollQuestions.get(matchedMapKey)!;
-    const currentQ = pending.questions[pending.currentQuestionIndex];
+    const currentQ = pending.questions[matchedQuestionIndex];
     if (!currentQ) {
-      log.warn({ mapKey: matchedMapKey, index: pending.currentQuestionIndex }, 'poll vote for out-of-range question index');
-      this.pendingPollQuestions.delete(matchedMapKey);
+      log.warn({ mapKey: matchedMapKey, index: matchedQuestionIndex }, 'poll vote for out-of-range question index');
+      pending.pollMessageIdToQuestionIndex.delete(data.pollMessageId);
       return;
     }
 
-    // Record the answer
-    const answer = data.selectedOptions.join(', ');
-    pending.answersCollected[currentQ.question] = answer;
-    pending.currentQuestionIndex++;
+    if (pending.answersCollected[matchedQuestionIndex] !== undefined) {
+      log.debug({ mapKey: matchedMapKey, pollMessageId: data.pollMessageId, index: matchedQuestionIndex }, 'duplicate poll vote ignored');
+      return;
+    }
 
-    // Check if all questions answered
-    if (pending.currentQuestionIndex >= pending.questions.length) {
+    // Record the answer against the poll message that produced it; users can
+    // vote on multiple AskUser polls in any order.
+    pending.answersCollected[matchedQuestionIndex] = data.selectedOptions.join(', ');
+    pending.pollMessageIdToQuestionIndex.delete(data.pollMessageId);
+    while (
+      pending.currentQuestionIndex < pending.questions.length
+      && pending.answersCollected[pending.currentQuestionIndex] !== undefined
+    ) {
+      pending.currentQuestionIndex++;
+    }
+
+    const answered = Object.keys(pending.answersCollected).length;
+    if (answered >= pending.questions.length) {
       this.injectPollAnswers(matchedMapKey, pending);
     } else {
-      log.info({ mapKey: matchedMapKey, answered: pending.currentQuestionIndex, total: pending.questions.length }, 'poll vote collected — waiting for more');
+      log.info({ mapKey: matchedMapKey, answered, total: pending.questions.length }, 'poll vote collected — waiting for more');
     }
   }
 
@@ -2818,18 +2859,18 @@ export class AgentRuntime implements Runtime {
     mapKey: string,
     pending: {
       questions: Array<{ question: string }>;
-      answersCollected: Record<string, string>;
+      answersCollected: Record<number, string>;
       chatJid: string;
     },
   ): void {
     // Format the answer as structured context for Claude
     const lines = ['[User answered poll]'];
-    for (const q of pending.questions) {
-      const a = pending.answersCollected[q.question] ?? '(no answer)';
+    pending.questions.forEach((q, index) => {
+      const a = pending.answersCollected[index] ?? '(no answer)';
       lines.push(`Q: ${q.question}`);
       lines.push(`A: ${a}`);
       lines.push('');
-    }
+    });
     const answerText = lines.join('\n').trim();
 
     // Clear pending state BEFORE sending the turn — sendTurnPerChat checks
