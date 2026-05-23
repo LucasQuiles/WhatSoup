@@ -499,8 +499,16 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     );
 
     const waMessageId = result?.key?.id ?? null;
-    const messageSecret = (result as any)?.messageContextInfo?.messageSecret as Uint8Array | undefined
-      ?? (result as any)?.message?.messageContextInfo?.messageSecret as Uint8Array | undefined;
+    // messageSecret location varies by Baileys version / proto shape:
+    //   WebMessageInfo.messageSecret (direct field on proto)
+    //   WebMessageInfo.messageContextInfo.messageSecret (nested in context)
+    //   WebMessageInfo.message.messageContextInfo.messageSecret (inside Message)
+    const r = result as any;
+    const messageSecret = (
+      r?.messageSecret ??
+      r?.messageContextInfo?.messageSecret ??
+      r?.message?.messageContextInfo?.messageSecret
+    ) as Uint8Array | undefined;
 
     if (waMessageId && messageSecret) {
       // Evict stale entries before adding
@@ -527,7 +535,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       return { waMessageId, hasSecret: true };
     }
 
-    this.log.warn({ chatJid, waMessageId, hasResult: !!result }, 'poll sent but messageSecret unavailable — vote decryption disabled');
+    // Diagnostic: log which paths were checked so we can fix in future versions
+    this.log.warn({
+      chatJid, waMessageId, hasResult: !!result,
+      hasTopLevel: !!r?.messageSecret,
+      hasContextInfo: !!r?.messageContextInfo?.messageSecret,
+      hasMessageContext: !!r?.message?.messageContextInfo?.messageSecret,
+    }, 'poll sent but messageSecret unavailable — vote decryption disabled');
     return { waMessageId, hasSecret: false };
   }
 
@@ -1249,8 +1263,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     try {
-      const voterJid = jidNormalizedUser(msg.key.participant ?? msg.key.remoteJid ?? '');
-      const pollCreatorJid = jidNormalizedUser(this.botJid ?? '');
+      // Mirror Baileys' getKeyAuthor(key, meId) semantics exactly:
+      //   fromMe ? meId : participantAlt || remoteJidAlt || participant || remoteJid
+      // In LID-addressed messages, participantAlt/remoteJidAlt carry the phone
+      // JID which is what the sender used for HMAC derivation during encryption.
+      // See: @whiskeysockets/baileys/lib/Utils/generics.js:getKeyAuthor
+      const meId = jidNormalizedUser(this.botJid ?? '');
+      const msgKey = msg.key as any;
+      const voterJid = msgKey.fromMe
+        ? meId
+        : (msgKey.participantAlt || msgKey.remoteJidAlt || msgKey.participant || msgKey.remoteJid || '');
+      const pollCreatorJid = creationKey.fromMe
+        ? meId
+        : (creationKey.participantAlt || creationKey.remoteJidAlt || creationKey.participant || creationKey.remoteJid || '');
 
       const decrypted = decryptPollVote(
         { encPayload: vote.encPayload, encIv: vote.encIv },
