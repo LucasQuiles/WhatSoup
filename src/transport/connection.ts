@@ -16,6 +16,7 @@ import {
   isJidGroup,
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
+import { createHash, createHmac, createDecipheriv } from 'node:crypto';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -91,6 +92,89 @@ function canReplayMediaSend(media: OutboundMedia): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Poll vote decryption — inlined from Baileys process-message.js because the
+// module is not re-exported from the package's public surface and TS cannot
+// resolve the deep import path.
+// Algorithm: HMAC-SHA256 key derivation + AES-256-GCM decryption.
+// Source: @whiskeysockets/baileys/lib/Utils/process-message.js:87-100
+// ---------------------------------------------------------------------------
+
+function toBinary(str: string): Buffer {
+  return Buffer.from(str, 'utf-8');
+}
+
+function hmacSign(data: Buffer | Uint8Array, key: Buffer | Uint8Array): Buffer {
+  return createHmac('sha256', key).update(data).digest();
+}
+
+interface PollVoteDecryptResult {
+  selectedOptions: Uint8Array[];
+}
+
+/**
+ * Decrypt a poll vote. Returns the list of selected option SHA256 hashes.
+ */
+function decryptPollVote(
+  vote: { encPayload: Uint8Array; encIv: Uint8Array },
+  ctx: { pollCreatorJid: string; pollMsgId: string; pollEncKey: Uint8Array; voterJid: string },
+): PollVoteDecryptResult {
+  const sign = Buffer.concat([
+    toBinary(ctx.pollMsgId),
+    toBinary(ctx.pollCreatorJid),
+    toBinary(ctx.voterJid),
+    toBinary('Poll Vote'),
+    new Uint8Array([1]),
+  ]);
+  // Baileys: hmacSign(buffer=data, key=key) → HMAC(key).update(data)
+  // key0 = HMAC(key=zero32).update(data=pollEncKey)
+  const key0 = hmacSign(ctx.pollEncKey, new Uint8Array(32));
+  // decKey = HMAC(key=key0).update(data=sign)
+  const decKey = hmacSign(sign, key0);
+  const aad = toBinary(`${ctx.pollMsgId}\0${ctx.voterJid}`);
+
+  // AES-256-GCM: last 16 bytes of encPayload are the auth tag
+  const enc = Buffer.from(vote.encPayload);
+  const tagStart = enc.length - 16;
+  const ciphertext = enc.subarray(0, tagStart);
+  const authTag = enc.subarray(tagStart);
+
+  const decipher = createDecipheriv('aes-256-gcm', decKey, vote.encIv);
+  decipher.setAAD(aad);
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+
+  // Decode as protobuf PollVoteMessage — selectedOptions is a repeated bytes field (tag 1).
+  // Minimal protobuf decode: each field is varint(tag<<3|wireType) + length-delimited bytes.
+  const selectedOptions: Uint8Array[] = [];
+  let offset = 0;
+  while (offset < decrypted.length) {
+    const fieldTag = decrypted[offset++];
+    if (fieldTag === undefined) break;
+    const fieldNumber = fieldTag >> 3;
+    const wireType = fieldTag & 0x07;
+    if (wireType === 2) { // length-delimited
+      let len = 0;
+      let shift = 0;
+      let byte: number;
+      do {
+        byte = decrypted[offset++]!;
+        len |= (byte & 0x7f) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+      const data = decrypted.subarray(offset, offset + len);
+      offset += len;
+      if (fieldNumber === 1) {
+        selectedOptions.push(data);
+      }
+    } else if (wireType === 0) { // varint — skip
+      while (offset < decrypted.length && decrypted[offset++]! & 0x80) { /* skip */ }
+    }
+  }
+
+  return { selectedOptions };
+}
+
+// ---------------------------------------------------------------------------
 // Typed transport events
 // ---------------------------------------------------------------------------
 
@@ -147,6 +231,13 @@ export interface TransportEvents {
     errorMessage: string;
     rawKey: { remoteJid: string; id: string; fromMe: boolean };
     timestamp: number;
+  }) => void;
+  /** Poll vote received — decoded option names from a poll we sent. */
+  pollVoteReceived: (data: {
+    pollMessageId: string;
+    chatJid: string;
+    voterJid: string;
+    selectedOptions: string[];
   }) => void;
 }
 
@@ -208,6 +299,18 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   /** When true, incoming calls are automatically rejected via sock.rejectCall(). */
   autoRejectCalls = false;
+
+  // ---------------------------------------------------------------------------
+  // Poll vote tracking — stores data needed to decrypt votes for polls we sent.
+  // ---------------------------------------------------------------------------
+  private pendingPolls = new Map<string, {
+    messageSecret: Uint8Array;
+    optionNames: string[];
+    optionHashes: Map<string, string>;  // hex(sha256(name)) → name
+    chatJid: string;
+    createdAt: number;
+  }>();
+  private static readonly PENDING_POLL_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
   getSocket(): WhatsAppSocket | null {
@@ -373,6 +476,69 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
     }
     return { waMessageId: result?.key?.id ?? null };
+  }
+
+  /**
+   * Send a WhatsApp poll and store the message secret for later vote decryption.
+   * Returns `hasSecret: false` if the poll was sent but messageSecret is unavailable
+   * (vote decryption will not work — caller should fall back to text question).
+   */
+  async sendPollMessage(
+    chatJid: string,
+    name: string,
+    values: string[],
+    selectableCount: number,
+  ): Promise<{ waMessageId: string | null; hasSecret: boolean }> {
+    if (!this.sock) throw new WhatSoupError('WhatsApp is not connected', 'CONNECTION_UNAVAILABLE');
+
+    const result = await withSendTimeout(
+      this.sock.sendMessage(chatJid, {
+        poll: { name, values, selectableCount },
+      } as any),
+      'sendPollMessage',
+    );
+
+    const waMessageId = result?.key?.id ?? null;
+    const messageSecret = (result as any)?.messageContextInfo?.messageSecret as Uint8Array | undefined
+      ?? (result as any)?.message?.messageContextInfo?.messageSecret as Uint8Array | undefined;
+
+    if (waMessageId && messageSecret) {
+      // Evict stale entries before adding
+      this.evictStalePolls();
+
+      // Build option hash map: sha256(optionName) → optionName
+      const optionHashes = new Map<string, string>();
+      for (const v of values) {
+        // Match Baileys' sha256().toString() — raw buffer toString (NOT hex)
+        // See: @whiskeysockets/baileys/lib/Utils/messages.js:718
+        const hash = createHash('sha256').update(Buffer.from(v)).digest().toString();
+        optionHashes.set(hash, v);
+      }
+
+      this.pendingPolls.set(waMessageId, {
+        messageSecret,
+        optionNames: values,
+        optionHashes,
+        chatJid,
+        createdAt: Date.now(),
+      });
+
+      this.log.info({ chatJid, waMessageId, optionCount: values.length }, 'poll sent and tracked for vote decryption');
+      return { waMessageId, hasSecret: true };
+    }
+
+    this.log.warn({ chatJid, waMessageId, hasResult: !!result }, 'poll sent but messageSecret unavailable — vote decryption disabled');
+    return { waMessageId, hasSecret: false };
+  }
+
+  /** Evict pending polls older than TTL to prevent memory leaks. */
+  private evictStalePolls(): void {
+    const cutoff = Date.now() - ConnectionManager.PENDING_POLL_TTL_MS;
+    for (const [id, poll] of this.pendingPolls) {
+      if (poll.createdAt < cutoff) {
+        this.pendingPolls.delete(id);
+      }
+    }
   }
 
   async setTyping(chatJid: string, typing: TypingState): Promise<void> {
@@ -1033,6 +1199,19 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.emit('lidPairDiscovered', participant, participantAlt);
       }
 
+      // Poll vote detection — decrypt and emit before general parsing.
+      // pollUpdateMessage arrives in messages.upsert (Baileys' process-message
+      // poll branch is commented out in this version, so messages.update does NOT
+      // carry decoded pollUpdates). We decrypt manually using stored messageSecret.
+      const innerMsg = (msg.message as any);
+      const pollUpdate = innerMsg?.pollUpdateMessage
+        ?? innerMsg?.ephemeralMessage?.message?.pollUpdateMessage;
+      if (pollUpdate) {
+        this.handlePollVoteMessage(msg, pollUpdate);
+        // Fall through to parseIncomingMessage — it sets isResponseWorthy=false,
+        // so the vote gets stored in DB but doesn't trigger an agent session.
+      }
+
       const parsed = parseIncomingMessage(msg);
       if (parsed) {
         // Build contacts directory from every incoming sender for @mention resolution
@@ -1046,6 +1225,69 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Decrypt a poll vote message and emit `pollVoteReceived` if it matches a poll we sent.
+   * Uses `decryptPollVote` from Baileys with the stored messageSecret.
+   */
+  private handlePollVoteMessage(msg: WAMessage, pollUpdate: any): void {
+    const creationKey = pollUpdate.pollCreationMessageKey;
+    if (!creationKey?.id) return;
+
+    const stored = this.pendingPolls.get(creationKey.id);
+    if (!stored) {
+      // Not a poll we're tracking — ignore silently
+      return;
+    }
+
+    const vote = pollUpdate.vote;
+    if (!vote?.encPayload || !vote?.encIv) {
+      this.log.warn({ pollMessageId: creationKey.id }, 'poll vote missing encrypted payload');
+      return;
+    }
+
+    try {
+      const voterJid = jidNormalizedUser(msg.key.participant ?? msg.key.remoteJid ?? '');
+      const pollCreatorJid = jidNormalizedUser(this.botJid ?? '');
+
+      const decrypted = decryptPollVote(
+        { encPayload: vote.encPayload, encIv: vote.encIv },
+        {
+          pollCreatorJid,
+          pollMsgId: creationKey.id,
+          pollEncKey: stored.messageSecret,
+          voterJid,
+        },
+      );
+
+      // decrypted.selectedOptions is an array of SHA256 hashes (as Buffers)
+      const selectedOptions: string[] = [];
+      for (const optHash of decrypted.selectedOptions ?? []) {
+        // Match Baileys' vote hash comparison — raw buffer toString
+        const hashStr = Buffer.from(optHash).toString();
+        const optName = stored.optionHashes.get(hashStr);
+        if (optName) {
+          selectedOptions.push(optName);
+        } else {
+          this.log.warn({ pollMessageId: creationKey.id, hash: hashStr }, 'poll vote hash did not match any known option');
+          selectedOptions.push('Unknown');
+        }
+      }
+
+      if (selectedOptions.length > 0) {
+        this.emit('pollVoteReceived', {
+          pollMessageId: creationKey.id,
+          chatJid: stored.chatJid,
+          voterJid,
+          selectedOptions,
+        });
+        this.pendingPolls.delete(creationKey.id);
+        this.log.info({ pollMessageId: creationKey.id, chatJid: stored.chatJid, selectedOptions }, 'poll vote decrypted and emitted');
+      }
+    } catch (err) {
+      this.log.error({ err, pollMessageId: creationKey.id }, 'failed to decrypt poll vote');
     }
   }
 

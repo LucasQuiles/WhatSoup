@@ -649,6 +649,25 @@ export class AgentRuntime implements Runtime {
    */
   private postTurnGate = new Set<string>();
 
+  // ---------------------------------------------------------------------------
+  // AskUserQuestion → Poll bridge state
+  // ---------------------------------------------------------------------------
+  private pendingPollQuestions = new Map<string, {
+    questions: Array<{
+      question: string;
+      header: string;
+      options: Array<{ label: string; description: string }>;
+      multiSelect: boolean;
+    }>;
+    toolId: string;
+    chatJid: string;
+    currentQuestionIndex: number;
+    answersCollected: Record<string, string>;  // questionText → selectedLabel(s)
+    createdAt: number;
+  }>();
+  /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
+  private suppressedAskUserToolIds = new Set<string>();
+
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
   // so health reporting can surface recent failures until a successful respawn decays them.
@@ -1068,6 +1087,8 @@ export class AgentRuntime implements Runtime {
     this.autoCompactCooldownUntil.delete(mapKey);
     this.finishAutoCompact(mapKey);
     this.clearSilentCompact(mapKey);
+    // Clean up pending poll question state
+    this.pendingPollQuestions.delete(mapKey);
     // Cancel any pending image coalesce buffer
     this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
     // Clean up operation tracker for this chat
@@ -1265,6 +1286,14 @@ export class AgentRuntime implements Runtime {
       },
     });
     this.turnQueue.setProcessor((turn) => this.processTurn(turn));
+
+    // Subscribe to poll vote events for AskUserQuestion → Poll bridge
+    const connection = this.messenger as ConnectionManager;
+    if (typeof connection.on === 'function') {
+      connection.on('pollVoteReceived', (data) => {
+        this.handlePollVoteReceived(data);
+      });
+    }
   }
 
   private registerAllTools(): void {
@@ -2487,6 +2516,24 @@ export class AgentRuntime implements Runtime {
     mapKey: string = this.resolvePerChatMapKey(chatJid),
     actorJid?: string,
   ): Promise<void> {
+    // AskUserQuestion → Poll bridge: if a poll question is pending for this
+    // chat and the user sends a text reply, treat it as a free-text "Other"
+    // answer and inject it back to the session.
+    const pendingPoll = this.pendingPollQuestions.get(mapKey);
+    if (pendingPoll) {
+      const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
+      if (currentQ) {
+        pendingPoll.answersCollected[currentQ.question] = `${text} (free-text response)`;
+        pendingPoll.currentQuestionIndex++;
+        if (pendingPoll.currentQuestionIndex >= pendingPoll.questions.length) {
+          this.injectPollAnswers(mapKey, pendingPoll);
+        } else {
+          log.info({ mapKey, answered: pendingPoll.currentQuestionIndex, total: pendingPoll.questions.length }, 'free-text answer collected — waiting for more');
+        }
+        return; // consume the message — don't send as a new turn
+      }
+    }
+
     // Clear post-turn gate — legitimate new user turn begins
     this.postTurnGate.delete(mapKey);
 
@@ -2553,6 +2600,172 @@ export class AgentRuntime implements Runtime {
     this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey);
   }
 
+  // ---------------------------------------------------------------------------
+  // AskUserQuestion → WhatsApp Poll bridge
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Intercept an AskUserQuestion tool_use: send WhatsApp polls for each
+   * question, store pending state, and register the toolId for tool_result
+   * suppression.
+   */
+  private async handleAskUserQuestionAsPoll(
+    questions: Array<{
+      question: string;
+      header: string;
+      options: Array<{ label: string; description: string }>;
+      multiSelect: boolean;
+    }>,
+    toolId: string,
+    mapKey: string,
+    queue: IOutboundQueue,
+  ): Promise<void> {
+    const chatJid = queue.targetChatJid;
+    const connection = this.messenger as import('../../transport/connection.ts').ConnectionManager;
+
+    // Register ALL synchronous state BEFORE any async work — tool_result and
+    // result events may arrive while we're awaiting poll send.
+    this.suppressedAskUserToolIds.add(toolId);
+    this.pendingPollQuestions.set(mapKey, {
+      questions,
+      toolId,
+      chatJid,
+      currentQuestionIndex: 0,
+      answersCollected: {},
+      createdAt: Date.now(),
+    });
+
+    const pollMessageIds: string[] = [];
+    let allHaveSecret = true;
+
+    for (const q of questions) {
+      const labels = q.options.map(o => o.label);
+      const pollName = q.question.length > 255
+        ? q.question.slice(0, 252) + '...'
+        : q.question;
+      const selectableCount = q.multiSelect ? q.options.length : 1;
+
+      try {
+        const result = await connection.sendPollMessage(chatJid, pollName, labels, selectableCount);
+        if (result.waMessageId) {
+          pollMessageIds.push(result.waMessageId);
+        }
+        if (!result.hasSecret) {
+          allHaveSecret = false;
+        }
+      } catch (err) {
+        log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
+        allHaveSecret = false;
+      }
+    }
+
+    if (pollMessageIds.length === 0 || !allHaveSecret) {
+      // Fall back: send as text with numbered options
+      log.warn({ chatJid, toolId }, 'poll send failed or missing secret — falling back to text question');
+      for (const q of questions) {
+        const optionLines = q.options.map((o, i) => `${i + 1}. *${o.label}* — ${o.description}`).join('\n');
+        queue.enqueueText(`${q.question}\n\n${optionLines}\n\n_Reply with option number or text._`);
+      }
+    }
+
+    // State already registered synchronously at method entry.
+
+    // Also send option descriptions as context (poll values are short labels;
+    // descriptions help the user understand each option)
+    for (const q of questions) {
+      if (q.options.some(o => o.description && o.description.length > 10)) {
+        const descLines = q.options.map(o => `• *${o.label}*: ${o.description}`).join('\n');
+        queue.enqueueText(descLines);
+      }
+    }
+
+    log.info({ chatJid, mapKey, toolId, questionCount: questions.length, pollCount: pollMessageIds.length }, 'AskUserQuestion intercepted → polls sent');
+  }
+
+  /**
+   * Handle a poll vote received from the transport layer.
+   * Matches the vote to a pending AskUserQuestion and injects the answer
+   * as a sendTurn text message.
+   */
+  private handlePollVoteReceived(data: {
+    pollMessageId: string;
+    chatJid: string;
+    voterJid: string;
+    selectedOptions: string[];
+  }): void {
+    // Find the pending question whose chatJid matches
+    let matchedMapKey: string | null = null;
+    for (const [mapKey, pending] of this.pendingPollQuestions) {
+      if (pending.chatJid === data.chatJid) {
+        matchedMapKey = mapKey;
+        break;
+      }
+    }
+
+    if (!matchedMapKey) {
+      log.debug({ chatJid: data.chatJid, pollMessageId: data.pollMessageId }, 'poll vote received but no pending question for this chat');
+      return;
+    }
+
+    const pending = this.pendingPollQuestions.get(matchedMapKey)!;
+    const currentQ = pending.questions[pending.currentQuestionIndex];
+    if (!currentQ) {
+      log.warn({ mapKey: matchedMapKey, index: pending.currentQuestionIndex }, 'poll vote for out-of-range question index');
+      this.pendingPollQuestions.delete(matchedMapKey);
+      return;
+    }
+
+    // Record the answer
+    const answer = data.selectedOptions.join(', ');
+    pending.answersCollected[currentQ.question] = answer;
+    pending.currentQuestionIndex++;
+
+    // Check if all questions answered
+    if (pending.currentQuestionIndex >= pending.questions.length) {
+      this.injectPollAnswers(matchedMapKey, pending);
+    } else {
+      log.info({ mapKey: matchedMapKey, answered: pending.currentQuestionIndex, total: pending.questions.length }, 'poll vote collected — waiting for more');
+    }
+  }
+
+  /**
+   * Inject collected poll answers back into the session as a user turn.
+   * Routes through the runtime's normal turn path (sendTurnPerChat / shared
+   * sendTurn) so pendingTurnText, post-turn-gate, and durability state stay
+   * consistent.
+   */
+  private injectPollAnswers(
+    mapKey: string,
+    pending: {
+      questions: Array<{ question: string }>;
+      answersCollected: Record<string, string>;
+      chatJid: string;
+    },
+  ): void {
+    // Format the answer as structured context for Claude
+    const lines = ['[User answered poll]'];
+    for (const q of pending.questions) {
+      const a = pending.answersCollected[q.question] ?? '(no answer)';
+      lines.push(`Q: ${q.question}`);
+      lines.push(`A: ${a}`);
+      lines.push('');
+    }
+    const answerText = lines.join('\n').trim();
+
+    // Clear pending state BEFORE sending the turn — sendTurnPerChat checks
+    // pendingPollQuestions and would re-intercept as another "Other" answer.
+    this.pendingPollQuestions.delete(mapKey);
+
+    // Route through sendTurnPerChat for proper lifecycle handling.
+    // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
+    // pendingPollQuestions from being populated in shared mode.
+    void this.sendTurnPerChat(pending.chatJid, answerText, mapKey).catch((err) => {
+      log.error({ err, mapKey, chatJid: pending.chatJid }, 'failed to inject poll answer via sendTurnPerChat');
+    });
+
+    log.info({ mapKey, chatJid: pending.chatJid, questionCount: pending.questions.length }, 'poll answers injected');
+  }
+
   /**
    * Core event handler that operates on explicitly-passed queue and session
    * references rather than shared instance fields. Used by handleEventPerChat
@@ -2601,6 +2814,20 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
+
+        // AskUserQuestion → WhatsApp poll bridge (per_chat mode only).
+        // Shared mode is excluded — see handleEvent tool_use case for rationale.
+        if (event.toolName === 'AskUserQuestion' && mapKey !== undefined) {
+          const questions = (event.toolInput as any)?.questions;
+          if (Array.isArray(questions) && questions.length > 0) {
+            // Suppression state (suppressedAskUserToolIds) is registered synchronously
+            // inside handleAskUserQuestionAsPoll before any async work, so tool_result
+            // suppression is guaranteed even though we fire-and-forget the async poll send.
+            void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue);
+            break; // skip normal tool_use handling — poll sent instead
+          }
+        }
+
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
@@ -2627,6 +2854,14 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+
+        // Suppress the auto-resolved "Answer questions?" error for AskUserQuestion
+        if (this.suppressedAskUserToolIds.has(event.toolId)) {
+          this.suppressedAskUserToolIds.delete(event.toolId);
+          log.info({ toolId: event.toolId }, 'suppressed AskUserQuestion auto-resolved tool_result');
+          break;
+        }
+
         // Note: tool_result is NOT gated. Phantom tool_use is already blocked,
         // so phantom tool_result cannot arrive. Gating tool_result would break
         // legitimate session-replacement scenarios where two sessions share a mapKey.
@@ -2652,10 +2887,18 @@ export class AgentRuntime implements Runtime {
         tracker?.onTurnComplete();
         this.clearToolNames(toolScopeKey);
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
+        const hasPendingPoll = mapKey !== undefined && this.pendingPollQuestions.has(mapKey);
         if (mapKey !== undefined) {
-          this.postTurnGate.add(mapKey);
+          if (hasPendingPoll) {
+            // Do NOT gate — the turn is logically still open (waiting for poll vote).
+            // Allow the poll vote handler to send the next turn.
+            this.postTurnGate.delete(mapKey);
+          } else {
+            this.postTurnGate.add(mapKey);
+          }
         }
-        if (event.text) {
+
+        if (event.text && !hasPendingPoll) {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
@@ -4105,6 +4348,18 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
+
+        // AskUserQuestion → Poll bridge is NOT supported in shared mode.
+        // Shared mode's turn lifecycle (currentTurnChatJid, turnQueue) makes
+        // safe answer injection non-trivial — currentTurnChatJid is cleared
+        // after the result event, so the injected answer turn would have no
+        // queue context and events would be dropped. Future enhancement.
+        // In shared mode, AskUserQuestion falls through to normal tool_use
+        // handling — Claude's auto-resolved error is shown to the user.
+        if (event.toolName === 'AskUserQuestion') {
+          log.info({ toolName: event.toolName }, 'AskUserQuestion poll bridge not supported in shared mode — falling through to normal handling');
+        }
+
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
@@ -4137,6 +4392,12 @@ export class AgentRuntime implements Runtime {
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+
+        // Note: AskUserQuestion poll bridge is per_chat only. In shared mode,
+        // tool_result flows normally (no suppression needed — interception is
+        // not active). suppressedAskUserToolIds is only populated by per_chat
+        // handleEventWithContext.
+
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
         const toolNames = this.activeToolNames.get(GLOBAL_TOOL_SCOPE_KEY);
         if (event.isError) {
@@ -4162,8 +4423,12 @@ export class AgentRuntime implements Runtime {
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
+
+        // AskUserQuestion poll bridge is per_chat only — no pending-poll
+        // suppression in shared mode. Normal result lifecycle applies.
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
         this.postTurnGate.add(GLOBAL_TOOL_SCOPE_KEY);
+
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
           // Suppress usage-limit messages — log and kill session instead of forwarding

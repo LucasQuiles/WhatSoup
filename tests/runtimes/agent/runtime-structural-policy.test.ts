@@ -52,6 +52,7 @@ describe('AgentRuntime structural policy', () => {
       'this.compactBoundaryScopes.delete(mapKey);',
       'this.autoCompactCooldownUntil.delete(mapKey);',
       'this.operationTrackers.delete(mapKey);',
+      'this.pendingPollQuestions.delete(mapKey);',
     ];
 
     for (const expectedDelete of expectedDeletes) {
