@@ -431,38 +431,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     );
 
     const waMessageId = result?.key?.id ?? null;
-    // messageSecret location varies by Baileys version / proto shape:
-    //   WebMessageInfo.messageSecret (direct field on proto)
-    //   WebMessageInfo.messageContextInfo.messageSecret (nested in context)
-    //   WebMessageInfo.message.messageContextInfo.messageSecret (inside Message)
+    // messageSecret is set by Baileys' generateWAMessageContent at
+    // m.messageContextInfo.messageSecret (inside the Message proto).
+    // The return value of sendMessage is a WebMessageInfo where the
+    // Message lives at result.message.
     const r = result as any;
-
-    // Diagnostic: dump available paths to find the correct messageSecret
-    const pathTop = r?.messageSecret;
-    const pathCtx = r?.messageContextInfo?.messageSecret;
-    const pathMsgCtx = r?.message?.messageContextInfo?.messageSecret;
-    const pathEncKey = r?.message?.pollCreationMessage?.encKey
-      ?? r?.message?.pollCreationMessageV3?.encKey
-      ?? r?.message?.pollCreationMessageV2?.encKey;
-
-    this.log.info({
-      waMessageId,
-      pathTopLen: pathTop?.length,
-      pathCtxLen: pathCtx?.length,
-      pathMsgCtxLen: pathMsgCtx?.length,
-      pathEncKeyLen: pathEncKey?.length,
-      pathTopIsBuffer: pathTop instanceof Uint8Array,
-      pathEncKeyIsBuffer: pathEncKey instanceof Uint8Array,
-      sameCtxAndEncKey: pathMsgCtx && pathEncKey ? Buffer.from(pathMsgCtx).equals(Buffer.from(pathEncKey)) : 'n/a',
-    }, 'sendPollMessage: messageSecret path diagnostic');
-
-    // Prefer encKey from PollCreationMessage if available — this is what
-    // recipients see and use for vote encryption. Fall back to messageContextInfo.
     const messageSecret = (
-      pathEncKey ??
-      pathTop ??
-      pathCtx ??
-      pathMsgCtx
+      r?.message?.messageContextInfo?.messageSecret ??
+      r?.messageContextInfo?.messageSecret ??
+      r?.messageSecret
     ) as Uint8Array | undefined;
 
     if (waMessageId && messageSecret) {
@@ -486,21 +463,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         createdAt: Date.now(),
       });
 
-      this.log.info({
-        chatJid, waMessageId, optionCount: values.length,
-        secretLen: messageSecret.length,
-        secretPath: r?.messageSecret ? 'top' : r?.messageContextInfo?.messageSecret ? 'contextInfo' : 'message.contextInfo',
-      }, 'poll sent and tracked for vote decryption');
+      this.log.info({ chatJid, waMessageId, optionCount: values.length, secretLen: messageSecret.length }, 'poll sent and tracked for vote decryption');
       return { waMessageId, hasSecret: true };
     }
 
-    // Diagnostic: log which paths were checked so we can fix in future versions
-    this.log.warn({
-      chatJid, waMessageId, hasResult: !!result,
-      hasTopLevel: !!r?.messageSecret,
-      hasContextInfo: !!r?.messageContextInfo?.messageSecret,
-      hasMessageContext: !!r?.message?.messageContextInfo?.messageSecret,
-    }, 'poll sent but messageSecret unavailable — vote decryption disabled');
+    this.log.warn({ chatJid, waMessageId }, 'poll sent but messageSecret unavailable — vote decryption disabled');
     return { waMessageId, hasSecret: false };
   }
 
@@ -1229,59 +1196,85 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   private async decryptAndEmitPollVote(
     msg: WAMessage,
-    pollUpdate: any,
+    _pollUpdate: any,
     creationKey: any,
     vote: any,
     stored: { messageSecret: Uint8Array; optionHashes: Map<string, string>; chatJid: string },
   ): Promise<void> {
-    // Mirror Baileys' getKeyAuthor(key, meId) semantics exactly:
-    //   fromMe ? meId : participantAlt || remoteJidAlt || participant || remoteJid
-    const meId = jidNormalizedUser(this.botJid ?? '');
-    const msgKey = msg.key as any;
-    const voterJid = msgKey.fromMe
-      ? meId
-      : (msgKey.participantAlt || msgKey.remoteJidAlt || msgKey.participant || msgKey.remoteJid || '');
-    const pollCreatorJid = creationKey.fromMe
-      ? meId
-      : (creationKey.participantAlt || creationKey.remoteJidAlt || creationKey.participant || creationKey.remoteJid || '');
-
-    // Use the REAL Baileys decryptPollVote — our inlined version had a subtle
-    // crypto mismatch. Dynamic import bypasses TS resolution issues.
     const baileysDecrypt = await loadBaileysPollDecrypt();
-    const decrypted = baileysDecrypt(
-      vote,
-      {
-        pollCreatorJid,
-        pollMsgId: creationKey.id,
-        pollEncKey: stored.messageSecret,
-        voterJid,
-      },
-    );
+    const msgKey = msg.key as any;
 
-    // decrypted.selectedOptions is an array of SHA256 hashes (as Buffers)
-    const selectedOptions: string[] = [];
-    for (const optHash of decrypted.selectedOptions ?? []) {
-      // Match Baileys' sha256().toString() — raw buffer toString
-      const hashStr = Buffer.from(optHash).toString();
-      const optName = stored.optionHashes.get(hashStr);
-      if (optName) {
-        selectedOptions.push(optName);
-      } else {
-        this.log.warn({ pollMessageId: creationKey.id, hashHex: Buffer.from(optHash).toString('hex') }, 'poll vote hash did not match any known option');
-        selectedOptions.push('Unknown');
+    // Build candidate JID pairs for decryption. In LID-addressed messages
+    // the HMAC context uses LID JIDs; in phone-addressed messages it uses
+    // phone JIDs. We try LID first (current WhatsApp default), then phone.
+    const botLid = this.botLid ? jidNormalizedUser(this.botLid) : null;
+    const botPhone = this.botJid ? jidNormalizedUser(this.botJid) : null;
+
+    // Voter JID: LID is at participant/remoteJid, phone is at participantAlt/remoteJidAlt
+    const voterLid = jidNormalizedUser(msgKey.participant || msgKey.remoteJid || '');
+    const voterPhone = msgKey.participantAlt || msgKey.remoteJidAlt || '';
+
+    // Poll creator JID: fromMe → our JID, else from creationKey
+    const creatorLid = creationKey.fromMe
+      ? botLid
+      : jidNormalizedUser(creationKey.participant || creationKey.remoteJid || '');
+    const creatorPhone = creationKey.fromMe
+      ? botPhone
+      : (creationKey.participantAlt || creationKey.remoteJidAlt || '');
+
+    // Bounded candidate list: LID pair first (LID-addressed default), phone pair second
+    const candidates: Array<{ voterJid: string; pollCreatorJid: string; label: string }> = [];
+    if (voterLid && creatorLid) {
+      candidates.push({ voterJid: voterLid, pollCreatorJid: creatorLid, label: 'LID' });
+    }
+    if (voterPhone && creatorPhone) {
+      candidates.push({ voterJid: voterPhone, pollCreatorJid: creatorPhone, label: 'phone' });
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const decrypted = baileysDecrypt(
+          vote,
+          {
+            pollCreatorJid: candidate.pollCreatorJid,
+            pollMsgId: creationKey.id,
+            pollEncKey: stored.messageSecret,
+            voterJid: candidate.voterJid,
+          },
+        );
+
+        // Decryption succeeded — map hashes to option names
+        const selectedOptions: string[] = [];
+        for (const optHash of decrypted.selectedOptions ?? []) {
+          const hashStr = Buffer.from(optHash).toString();
+          const optName = stored.optionHashes.get(hashStr);
+          selectedOptions.push(optName ?? 'Unknown');
+        }
+
+        if (selectedOptions.length > 0) {
+          this.emit('pollVoteReceived', {
+            pollMessageId: creationKey.id,
+            chatJid: stored.chatJid,
+            voterJid: candidate.voterJid,
+            selectedOptions,
+          });
+          this.pendingPolls.delete(creationKey.id);
+          this.log.info({
+            pollMessageId: creationKey.id,
+            chatJid: stored.chatJid,
+            selectedOptions,
+            jidType: candidate.label,
+          }, 'poll vote decrypted and emitted');
+        }
+        return; // success — stop trying candidates
+      } catch {
+        // This candidate pair failed — try next
+        this.log.debug({ pollMessageId: creationKey.id, jidType: candidate.label }, 'poll vote decrypt failed with candidate — trying next');
       }
     }
 
-    if (selectedOptions.length > 0) {
-      this.emit('pollVoteReceived', {
-        pollMessageId: creationKey.id,
-        chatJid: stored.chatJid,
-        voterJid,
-        selectedOptions,
-      });
-      this.pendingPolls.delete(creationKey.id);
-      this.log.info({ pollMessageId: creationKey.id, chatJid: stored.chatJid, selectedOptions }, 'poll vote decrypted and emitted');
-    }
+    // All candidates exhausted
+    this.log.error({ pollMessageId: creationKey.id, candidateCount: candidates.length }, 'poll vote decryption failed with all JID candidates');
   }
 
   // -------------------------------------------------------------------------
