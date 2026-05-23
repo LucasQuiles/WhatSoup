@@ -232,8 +232,8 @@ describe('poll vote bridge', () => {
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
 
-      // Wait for async decryption to buffer the vote
-      await vi.advanceTimersByTimeAsync(0);
+      // Wait for async decryption to buffer the vote and schedule the grace timer.
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(1));
       // Vote should NOT be emitted yet (grace window)
       expect(handler).not.toHaveBeenCalled();
 
@@ -272,6 +272,8 @@ describe('poll vote bridge', () => {
       });
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      // Wait for async decryption to try both candidates and schedule the grace timer.
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).toHaveBeenCalledWith({
