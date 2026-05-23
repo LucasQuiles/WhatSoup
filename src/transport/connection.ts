@@ -436,10 +436,33 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     //   WebMessageInfo.messageContextInfo.messageSecret (nested in context)
     //   WebMessageInfo.message.messageContextInfo.messageSecret (inside Message)
     const r = result as any;
+
+    // Diagnostic: dump available paths to find the correct messageSecret
+    const pathTop = r?.messageSecret;
+    const pathCtx = r?.messageContextInfo?.messageSecret;
+    const pathMsgCtx = r?.message?.messageContextInfo?.messageSecret;
+    const pathEncKey = r?.message?.pollCreationMessage?.encKey
+      ?? r?.message?.pollCreationMessageV3?.encKey
+      ?? r?.message?.pollCreationMessageV2?.encKey;
+
+    this.log.info({
+      waMessageId,
+      pathTopLen: pathTop?.length,
+      pathCtxLen: pathCtx?.length,
+      pathMsgCtxLen: pathMsgCtx?.length,
+      pathEncKeyLen: pathEncKey?.length,
+      pathTopIsBuffer: pathTop instanceof Uint8Array,
+      pathEncKeyIsBuffer: pathEncKey instanceof Uint8Array,
+      sameCtxAndEncKey: pathMsgCtx && pathEncKey ? Buffer.from(pathMsgCtx).equals(Buffer.from(pathEncKey)) : 'n/a',
+    }, 'sendPollMessage: messageSecret path diagnostic');
+
+    // Prefer encKey from PollCreationMessage if available — this is what
+    // recipients see and use for vote encryption. Fall back to messageContextInfo.
     const messageSecret = (
-      r?.messageSecret ??
-      r?.messageContextInfo?.messageSecret ??
-      r?.message?.messageContextInfo?.messageSecret
+      pathEncKey ??
+      pathTop ??
+      pathCtx ??
+      pathMsgCtx
     ) as Uint8Array | undefined;
 
     if (waMessageId && messageSecret) {
