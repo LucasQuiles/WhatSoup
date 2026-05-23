@@ -336,6 +336,7 @@ type PendingPollQuestion = {
   questions: AskUserQuestion[];
   toolId: string;
   chatJid: string;
+  chatJidAliases: Set<string>;
   mode: 'poll' | 'textFallback';
   pollMessageIdToQuestionIndex: Map<string, number>;
   currentQuestionIndex: number;
@@ -465,6 +466,10 @@ export function formatPollQuestion(q: {
     needsFollowUp: anyTruncated,
     followUpText: anyTruncated ? buildFollowUpText() : null,
   };
+}
+
+function pendingPollMatchesChatJid(pending: PendingPollQuestion, chatJid: string): boolean {
+  return pending.chatJid === chatJid || pending.chatJidAliases.has(chatJid);
 }
 
 function normalizeDecisionLabel(value: string): string {
@@ -1766,6 +1771,17 @@ export class AgentRuntime implements Runtime {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
           }
+          const pendingPoll = this.pendingPollQuestions.get(lidKey);
+          if (pendingPoll) {
+            this.pendingPollQuestions.delete(lidKey);
+            this.clearPendingPollTimers(pendingPoll);
+            pendingPoll.chatJidAliases.add(lidKey);
+            pendingPoll.chatJidAliases.add(newJid);
+            pendingPoll.chatJidAliases.add(canonical);
+            pendingPoll.chatJid = canonical;
+            this.pendingPollQuestions.set(canonical, pendingPoll);
+            this.startPendingPollExpiry(canonical, pendingPoll);
+          }
           const imageBuffer = this.imageCoalesceBuffers.get(lidKey);
           if (imageBuffer) {
             clearTimeout(imageBuffer.timer);
@@ -2855,10 +2871,21 @@ export class AgentRuntime implements Runtime {
       const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
       if (currentQ) {
         if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
-          this.sendDirect(
-            pendingPoll.chatJid,
-            'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
-          );
+          const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
+          if (queue) {
+            queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
+            try {
+              await queue.flush();
+            } catch (err) {
+              log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
+            }
+          } else {
+            this.sendDirect(
+              pendingPoll.chatJid,
+              'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+            );
+          }
+          this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply');
           return;
         }
 
@@ -2876,6 +2903,7 @@ export class AgentRuntime implements Runtime {
             answered: Object.keys(pendingPoll.answersCollected).length,
             total: pendingPoll.questions.length,
           }, 'free-text answer collected — waiting for more');
+          this.completeConsumedPerChatInbound(mapKey, 'poll_partial_answer_collected');
         }
         return; // consume the message — don't send as a new turn
       }
@@ -2968,15 +2996,42 @@ export class AgentRuntime implements Runtime {
     this.pendingPollQuestions.delete(mapKey);
   }
 
+  private completeConsumedPerChatInbound(mapKey: string, terminalReason: string): void {
+    const seqQueue = this.perChatInboundSeqQueue.get(mapKey);
+    const inboundSeq = seqQueue?.shift();
+    if (seqQueue && seqQueue.length === 0) {
+      this.perChatInboundSeqQueue.delete(mapKey);
+    }
+    this.chatQueues.get(mapKey)?.setInboundSeq(seqQueue?.[0]);
+
+    if (inboundSeq === undefined) return;
+    this.durability?.completeInbound(inboundSeq, terminalReason);
+    this.replyGuarantee?.disarm(inboundSeq);
+  }
+
   private startPendingPollExpiry(mapKey: string, pending: PendingPollQuestion): void {
     if (pending.mode === 'poll' && !pending.softExpiryTimer) {
-      pending.softExpiryTimer = setTimeout(() => this.handlePendingPollSoftExpiry(mapKey), ASKUSER_POLL_SOFT_EXPIRY_MS);
+      pending.softExpiryTimer = setTimeout(() => this.handlePendingPollSoftExpiry(mapKey, pending), ASKUSER_POLL_SOFT_EXPIRY_MS);
       pending.softExpiryTimer.unref?.();
     }
     if (!pending.hardExpiryTimer) {
-      pending.hardExpiryTimer = setTimeout(() => this.handlePendingPollHardExpiry(mapKey), ASKUSER_POLL_HARD_EXPIRY_MS);
+      pending.hardExpiryTimer = setTimeout(() => this.handlePendingPollHardExpiry(mapKey, pending), ASKUSER_POLL_HARD_EXPIRY_MS);
       pending.hardExpiryTimer.unref?.();
     }
+  }
+
+  private isPendingPollActive(pending: PendingPollQuestion): boolean {
+    for (const active of this.pendingPollQuestions.values()) {
+      if (active === pending) return true;
+    }
+    return false;
+  }
+
+  private shouldContinuePendingPollSend(mapKey: string, pending: PendingPollQuestion): boolean {
+    if (this.isPendingPollActive(pending)) return true;
+    this.clearPendingPollTimers(pending);
+    log.debug({ mapKey, chatJid: pending.chatJid, toolId: pending.toolId }, 'AskUserQuestion poll send abandoned after pending poll was replaced');
+    return false;
   }
 
   private removePollIdsForQuestion(pending: PendingPollQuestion, questionIndex: number): void {
@@ -3013,9 +3068,9 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private handlePendingPollSoftExpiry(mapKey: string): void {
+  private handlePendingPollSoftExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
     const pending = this.pendingPollQuestions.get(mapKey);
-    if (!pending || pending.mode !== 'poll') return;
+    if (!pending || pending !== expectedPending || pending.mode !== 'poll') return;
 
     const unanswered = this.unansweredPollQuestions(pending);
     if (unanswered.length === 0) return;
@@ -3031,9 +3086,9 @@ export class AgentRuntime implements Runtime {
     log.warn({ mapKey, chatJid: pending.chatJid, unanswered: unanswered.length }, 'AskUserQuestion poll soft-expired to text fallback');
   }
 
-  private handlePendingPollHardExpiry(mapKey: string): void {
+  private handlePendingPollHardExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
     const pending = this.pendingPollQuestions.get(mapKey);
-    if (!pending) return;
+    if (!pending || pending !== expectedPending) return;
 
     if (this.unansweredPollQuestions(pending).length > 0) {
       this.sendDirect(pending.chatJid, 'This decision has expired — please re-trigger when ready.');
@@ -3078,11 +3133,13 @@ export class AgentRuntime implements Runtime {
 
     // Register ALL synchronous state BEFORE any async work — tool_result and
     // result events may arrive while we're awaiting poll send.
+    this.deletePendingPollQuestions(mapKey);
     this.suppressedAskUserToolIds.add(toolId);
     const pending: PendingPollQuestion = {
       questions: normalizedQuestions,
       toolId,
       chatJid,
+      chatJidAliases: new Set([chatJid]),
       mode: 'poll',
       pollMessageIdToQuestionIndex: new Map<string, number>(),
       currentQuestionIndex: 0,
@@ -3113,10 +3170,12 @@ export class AgentRuntime implements Runtime {
         } catch (err) {
           log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
         }
+        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
       }
 
       try {
         const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
+        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
         if (result.waMessageId) {
           pollMessageIds.push(result.waMessageId);
           pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
@@ -3125,10 +3184,13 @@ export class AgentRuntime implements Runtime {
           allHaveSecret = false;
         }
       } catch (err) {
+        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
         log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
         allHaveSecret = false;
       }
     }
+
+    if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
 
     if (pollMessageIds.length === 0 || !allHaveSecret) {
       pending.mode = 'textFallback';
@@ -3161,7 +3223,7 @@ export class AgentRuntime implements Runtime {
     let matchedMapKey: string | null = null;
     let matchedQuestionIndex: number | undefined;
     for (const [mapKey, pending] of this.pendingPollQuestions) {
-      if (pending.chatJid !== data.chatJid || pending.mode !== 'poll') continue;
+      if (!pendingPollMatchesChatJid(pending, data.chatJid) || pending.mode !== 'poll') continue;
       const index = pending.pollMessageIdToQuestionIndex.get(data.pollMessageId);
       if (index !== undefined) {
         matchedMapKey = mapKey;
@@ -3209,7 +3271,7 @@ export class AgentRuntime implements Runtime {
   }): void {
     let matchedMapKey: string | null = null;
     for (const [mapKey, pending] of this.pendingPollQuestions) {
-      if (pending.chatJid !== data.chatJid || pending.mode !== 'poll') continue;
+      if (!pendingPollMatchesChatJid(pending, data.chatJid) || pending.mode !== 'poll') continue;
       if (pending.pollMessageIdToQuestionIndex.has(data.pollMessageId)) {
         matchedMapKey = mapKey;
         break;
