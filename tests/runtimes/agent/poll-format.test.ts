@@ -89,7 +89,7 @@ describe('formatPollQuestion', () => {
       expect(result.pollValues).toEqual(['Plan A', 'Plan B']);
       expect(result.needsFollowUp).toBe(true);
       expect(result.followUpText).toContain('1. *Plan A*\nFirst line\nSecond line with more context');
-      expect(result.followUpText).toContain('Use the poll above to choose. Full option details:');
+      expect(result.followUpText).toContain('Use the poll below to choose. Full option details:');
     });
 
     it('uses bare label when description is empty', () => {

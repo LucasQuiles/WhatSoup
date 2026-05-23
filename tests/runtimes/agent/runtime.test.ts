@@ -5216,6 +5216,8 @@ describe('AgentRuntime', () => {
       await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
 
       mockQueue.enqueueText.mockClear();
+      mockQueue.flush.mockClear();
+      (messenger as unknown as { sendPollMessage: ReturnType<typeof vi.fn> }).sendPollMessage.mockClear();
 
       // Fire with one description too long to fit (>95 chars combined)
       const longDesc = 'A very long description that definitely exceeds the ninety-five character budget for WhatsApp poll option text display';
@@ -5238,13 +5240,55 @@ describe('AgentRuntime', () => {
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
 
-      // Follow-up detail text WAS enqueued and the poll labels stayed concise.
+      // Detail text is flushed before the poll so users read context before tapping.
       expect(pollSends[0].values).toEqual(['Short', 'Long option']);
       expect(mockQueue.enqueueText).toHaveBeenCalledTimes(1);
       const followUp = mockQueue.enqueueText.mock.calls[0][0] as string;
       expect(followUp).toContain('Details for poll: Pick one');
+      expect(followUp).toContain('Use the poll below to choose. Full option details:');
       expect(followUp).toContain('1. *Short*\nFits fine');
       expect(followUp).toContain(`2. *Long option*\n${longDesc}`);
+      expect(mockQueue.enqueueText.mock.invocationCallOrder[0]).toBeLessThan(mockQueue.flush.mock.invocationCallOrder[0]);
+      expect(mockQueue.flush.mock.invocationCallOrder[0]).toBeLessThan(
+        (messenger as unknown as { sendPollMessage: ReturnType<typeof vi.fn> }).sendPollMessage.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('still sends the poll if pre-poll detail flushing fails', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_AFTER_FLUSH_FAIL', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      mockQueue.enqueueText.mockClear();
+      mockQueue.flush.mockReset();
+      mockQueue.flush.mockRejectedValueOnce(new Error('flush failed'));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-poll-flush-fail-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              { label: 'Short', description: 'Fits fine' },
+              { label: 'Long option', description: 'A'.repeat(120) },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].values).toEqual(['Short', 'Long option']);
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ chatJid: pollSends[0].chatJid }),
+        'failed to flush poll details before poll send',
+      );
     });
 
     it('sends only text fallback (no separate follow-up) when poll send fails', async () => {
@@ -5469,6 +5513,99 @@ describe('AgentRuntime', () => {
       const injected = sendTurnTexts().find((arg) => arg.includes('A: Use DuckDB instead (free-text response)'))!;
       expect(injected).toContain('Q: Pick a database');
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('Use DuckDB instead');
+    });
+
+    it('does not resolve a pending poll from a generic vote-status text reply', async () => {
+      const { messenger, sentMessages, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_STATUS_TEXT', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-status-text-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick a database',
+            header: 'Database',
+            options: [
+              { label: 'PostgreSQL', description: 'Server database' },
+              { label: 'SQLite', description: 'Embedded database' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      mockQueue.enqueueText.mockClear();
+      mockSession.sendTurn.mockClear();
+
+      await sendAndDrain(runtime, makeMsg({
+        content: 'I voted',
+        chatJid: '5678@s.whatsapp.net',
+        senderJid: '5678@s.whatsapp.net',
+      }));
+
+      expect(sendTurnTexts().some((arg) => arg.includes('[User answered poll]'))).toBe(false);
+      const clarificationTexts = [
+        ...mockQueue.enqueueText.mock.calls.map((call) => String(call[0])),
+        ...sentMessages.map((message) => message.text),
+      ];
+      expect(clarificationTexts.some((text) => text.includes('waiting for the poll vote itself'))).toBe(true);
+
+      eventHandlers.get('pollVoteReceived')!({
+        pollMessageId: 'POLL_STATUS_TEXT',
+        chatJid: pollSends[0].chatJid,
+        voterJid: '5678@s.whatsapp.net',
+        selectedOptions: ['SQLite'],
+      });
+
+      await vi.waitFor(() => expect(sendTurnTexts().some((arg) => arg.includes('A: SQLite'))).toBe(true));
+    });
+
+    it('accepts a typed option label even when the label looks like generic vote status', async () => {
+      const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_SUBMITTED_OPTION', hasSecret: true });
+      const db = makeDb();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'test', chatJid: '5678@s.whatsapp.net', senderJid: '5678@s.whatsapp.net' }));
+
+      capturedOnEventRef.current!({
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolId: 'tool-submitted-option-1',
+        toolInput: {
+          questions: [{
+            question: 'Pick the ticket state',
+            header: 'State',
+            options: [
+              { label: 'Submitted', description: 'The request was filed' },
+              { label: 'Draft', description: 'The request is still being edited' },
+            ],
+            multiSelect: false,
+          }],
+        },
+      });
+
+      await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      mockQueue.enqueueText.mockClear();
+      mockSession.sendTurn.mockClear();
+
+      await sendAndDrain(runtime, makeMsg({
+        content: 'submitted',
+        chatJid: '5678@s.whatsapp.net',
+        senderJid: '5678@s.whatsapp.net',
+      }));
+
+      await vi.waitFor(() => {
+        expect(sendTurnTexts().some((arg) => arg.includes('A: submitted (free-text response)'))).toBe(true);
+      });
+      expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('waiting for the poll vote itself'));
     });
 
 

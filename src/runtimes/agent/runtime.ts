@@ -368,7 +368,7 @@ export function formatPollQuestion(q: {
   const buildFollowUpText = (): string => [
     `Details for poll: ${q.question}`,
     '',
-    'Use the poll above to choose. Full option details:',
+    'Use the poll below to choose. Full option details:',
     ...optionDetailLines,
   ].join('\n');
 
@@ -421,6 +421,52 @@ export function formatPollQuestion(q: {
     needsFollowUp: anyTruncated,
     followUpText: anyTruncated ? buildFollowUpText() : null,
   };
+}
+
+function normalizedPollReplyText(text: string): string {
+  return text.trim().toLowerCase().replace(/[.!?]+$/g, '').replace(/\s+/g, ' ');
+}
+
+function textMatchesPollOption(text: string, options: Array<{ label: string; description: string }>): boolean {
+  const normalized = normalizedPollReplyText(text);
+  if (!normalized) return false;
+
+  if (/^\d+$/.test(normalized)) {
+    const index = Number(normalized);
+    return Number.isInteger(index) && index >= 1 && index <= options.length;
+  }
+
+  if (/^[a-z]$/.test(normalized)) {
+    const index = normalized.charCodeAt(0) - 'a'.charCodeAt(0);
+    return index >= 0 && index < options.length;
+  }
+
+  return options.some((option) => {
+    return normalizedPollReplyText(option.label) === normalized
+      || normalizedPollReplyText(option.description) === normalized;
+  });
+}
+
+const LOW_SIGNAL_POLL_STATUS_REPLIES = new Set([
+  'i voted',
+  'voted',
+  'i vote',
+  'vote sent',
+  'sent my vote',
+  'i sent my vote',
+  'i selected one',
+  'i selected an option',
+  'i picked one',
+  'i chose one',
+  'submitted',
+]);
+
+function isLowSignalPollStatusReply(
+  text: string,
+  options: Array<{ label: string; description: string }>,
+): boolean {
+  if (textMatchesPollOption(text, options)) return false;
+  return LOW_SIGNAL_POLL_STATUS_REPLIES.has(normalizedPollReplyText(text));
 }
 
 /**
@@ -2643,6 +2689,14 @@ export class AgentRuntime implements Runtime {
 
       const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
       if (currentQ) {
+        if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
+          this.sendDirect(
+            pendingPoll.chatJid,
+            'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+          );
+          return;
+        }
+
         pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] = `${text} (free-text response)`;
         pendingPoll.currentQuestionIndex++;
         while (
@@ -2780,6 +2834,17 @@ export class AgentRuntime implements Runtime {
     for (const { index, question: q, formatted } of formattedQuestions) {
       const selectableCount = q.multiSelect ? q.options.length : 1;
 
+      if (formatted.followUpText) {
+        queue.enqueueText(formatted.followUpText);
+        // Long option details should arrive before the poll so the user can read
+        // context first instead of scrolling back after the tap target appears.
+        try {
+          await queue.flush();
+        } catch (err) {
+          log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
+        }
+      }
+
       try {
         const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
         if (result.waMessageId) {
@@ -2805,16 +2870,8 @@ export class AgentRuntime implements Runtime {
         const optionLines = q.options.map((o, i) => `${i + 1}. *${o.label}* — ${o.description}`).join('\n');
         queue.enqueueText(`${q.question}\n\n${optionLines}\n\n_Reply with option number or text._`);
       }
-    } else {
-      // Poll send succeeded - send companion details only when poll labels had
-      // to omit or truncate option descriptions.
-      for (const { formatted } of formattedQuestions) {
-        if (formatted.followUpText) {
-          queue.enqueueText(formatted.followUpText);
-        }
-      }
-    }
 
+    }
     log.info({ chatJid, mapKey, toolId, questionCount: questions.length, pollCount: pollMessageIds.length }, 'AskUserQuestion intercepted → polls sent');
   }
 
