@@ -5314,7 +5314,7 @@ describe('AgentRuntime', () => {
 
       // tool_result error should NOT be forwarded to queue
       const errorCalls = mockQueue.enqueueToolUpdate.mock.calls.filter(
-        ([update]: [{ category: string }]) => update.category === 'error',
+        ([update]) => (update as { category?: string }).category === 'error',
       );
       expect(errorCalls).toHaveLength(0);
     });
