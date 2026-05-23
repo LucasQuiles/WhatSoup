@@ -4,6 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { escapeRegExp } from '../src/lib/regex-utils.ts';
+import { normalizeRepoPath } from './lib/guard-core.ts';
 
 interface ParsedArgs {
   help: boolean;
@@ -76,10 +78,6 @@ const privatePineconeProjectIds = [
   ['nf', '9h', 'zvy'],
 ].map((parts) => parts.join(''));
 
-function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/').replace(/^\.\//, '');
-}
-
 function gitList(args: string[], cwd: string): string[] {
   const output = execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
   return output ? output.split(/\r?\n/).map(normalizeRepoPath).filter(Boolean) : [];
@@ -90,10 +88,6 @@ function isTextCandidate(filePath: string): boolean {
   const baseName = path.basename(normalized);
   if (baseName === 'Dockerfile' || baseName.startsWith('.env')) return true;
   return textExtensions.has(path.extname(normalized));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function fingerprint(value: string): string {

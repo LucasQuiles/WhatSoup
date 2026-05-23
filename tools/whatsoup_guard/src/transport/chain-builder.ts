@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { errorMessage } from '../lib/error-utils.ts';
 import type { Policy } from '../policy/schema.ts';
 import { LocalLogSink, LocalNotifySink } from './local-notify.ts';
 import { NtfySink } from './meta-alert/ntfy.ts';
@@ -115,10 +116,6 @@ function readOptionalSecret(path: string | undefined, setting: string): SecretRe
   } catch (error) {
     return { ok: false, error: `${setting} cannot be read at ${path}: ${errorMessage(error)}` };
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function stateDir(options: BuildChainOptions): string {

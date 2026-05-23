@@ -1,4 +1,5 @@
 import { canonicalize, fingerprint, structuralDiff } from '../canonical.ts';
+import { isRecord } from '../../../../src/lib/type-guards.ts';
 import type { DeploymentRole } from '../policy/schema.ts';
 import type { Domain, ProbeDoc, Severity } from '../types.ts';
 import type { EvaluatorEventInput } from './types.ts';
@@ -194,8 +195,4 @@ function readAccessMode(value: unknown): Record<string, boolean | string> {
     if (typeof raw === 'boolean' || typeof raw === 'string') out[key] = raw;
   }
   return out;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

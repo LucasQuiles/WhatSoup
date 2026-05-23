@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/error-utils.ts';
 import type { AlertPayload, DeliveryResult, Sink } from '../types.ts';
 
 export interface PushoverSinkOptions {
@@ -61,10 +62,6 @@ function missingConfiguredSecret(label: string, value: string): string | undefin
     return `missing ${label}`;
   }
   return undefined;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function redact(value: string, secrets: string[]): string {

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { safeErrorMessage } from '../lib/error-utils.ts';
 import { SIMULATOR_SCENARIOS, runSimulator, type SimulatorInput, type SimulatorScenario } from '../simulator.ts';
 
 export interface SimulateCommandDeps {
@@ -122,8 +123,4 @@ function isRecord(value: unknown): value is Record<string, Record<string, unknow
 
 function currentIso(deps: SimulateCommandDeps): string {
   return (deps.now ? deps.now() : new Date()).toISOString();
-}
-
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'operation failed';
 }

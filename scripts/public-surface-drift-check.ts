@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { normalizeRepoPath } from './lib/guard-core.ts';
 
 export type PublicSurfaceDriftKind =
   | 'missing-source'
@@ -69,10 +70,6 @@ interface RegistryMcpModule {
   tools: number | null;
   line: number;
   text: string;
-}
-
-function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/').replace(/^\.\//, '');
 }
 
 function splitTableRow(line: string): string[] {

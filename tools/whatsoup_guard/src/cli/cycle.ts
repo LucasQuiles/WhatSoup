@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RunCycleResult } from '../runner.ts';
+import { safeErrorMessage } from '../lib/error-utils.ts';
 import { loadPolicy } from '../policy/loader.ts';
 import { buildRuntimeConfig, type RuntimePolicyConfig } from '../policy/runtime.ts';
 import type { Policy } from '../policy/schema.ts';
@@ -89,10 +90,6 @@ function appendCycleFailed(stateDir: string, message: string, logger: StoreLogge
   } finally {
     db?.close();
   }
-}
-
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'operation failed';
 }
 
 function formatCycleJsonResult(result: RunCycleResult): Record<string, number> {

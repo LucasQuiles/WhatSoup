@@ -4,6 +4,7 @@ import { runCycleRuntime } from './cycle-runtime.ts';
 import { muteCommand, statusCommand, type MuteCommandDeps } from './mute.ts';
 import { simulateCommand, type SimulateCommandDeps } from './simulate.ts';
 import { watchdogCommand, type WatchdogCommandDeps } from './watchdog.ts';
+import { safeErrorMessage } from '../lib/error-utils.ts';
 import { createGuardLogger } from '../logging.ts';
 
 export type CycleCommand = (args: string[], deps: CycleDeps) => Promise<number>;
@@ -59,10 +60,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.stderr.write(`whatsoup-guard: ${safeErrorMessage(error)}\n`);
     process.exitCode = 1;
   });
-}
-
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'operation failed';
 }
 
 function defaultRunCycle(logger: CycleDeps['logger']): NonNullable<CycleDeps['runCycle']> {

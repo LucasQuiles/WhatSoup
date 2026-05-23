@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { normalizeRepoPath } from './lib/guard-core.ts';
 
 export type WorkIndexStatus =
   | 'active'
@@ -76,10 +77,6 @@ interface StateEpicInfo {
   statusSource: WorkIndexStatusSource | null;
   phaseLogStatus: WorkIndexStatus | null;
   beadStatusByName: Map<string, WorkIndexStatus>;
-}
-
-function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/').replace(/^\.\//, '');
 }
 
 function repoRelative(cwd: string, absolutePath: string): string {
