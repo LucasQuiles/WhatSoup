@@ -319,16 +319,17 @@ export interface AgentRuntimeOptions {
 /** Conservative WhatsApp poll limits. */
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
+const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
 
 /**
  * Format an AskUserQuestion question for WhatsApp poll rendering.
  *
  * - Question text: up to 900 chars, truncated with "…" suffix if longer.
- * - Option values: `label — description` when it fits within the option budget.
- *   Truncates the description when combined text exceeds the option limit,
- *   then falls back to bare `label` only when the label leaves no useful description budget.
- * - `needsFollowUp`: true when any description was omitted or truncated,
- *   signaling the caller to send a follow-up text with full descriptions.
+ * - Option values: concise labels for paragraph/multiline descriptions;
+ *   otherwise `label — description` when it fits within the option budget.
+ * - `followUpText`: contextual full details when poll labels omit or truncate descriptions.
+ * - `needsFollowUp`: compatibility flag for callers that only need to know whether
+ *   `followUpText` should be sent.
  *
  * Exported for unit testing.
  */
@@ -339,18 +340,37 @@ export function formatPollQuestion(q: {
   pollName: string;
   pollValues: string[];
   needsFollowUp: boolean;
+  followUpText: string | null;
 } {
   // Question text: truncate to budget
   const pollName = q.question.length > POLL_QUESTION_MAX_CHARS
     ? q.question.slice(0, POLL_QUESTION_MAX_CHARS - 1) + '…'
     : q.question;
 
-  // Option values: combine label + description, truncating description
-  // to fit within budget. Only drop to bare label when the label itself
-  // consumes the budget.
+  // Option values stay compact when any option carries paragraph-scale detail;
+  // otherwise short descriptions are included inline while staying under budget.
   let anyTruncated = false;
   const SEPARATOR = ' — ';
   const ELLIPSIS = '…';
+
+  const hasDetailDescription = q.options.some(o => {
+    const description = o.description ?? '';
+    return description.trim().length > POLL_DETAIL_DESCRIPTION_MIN_CHARS || /\r|\n/.test(description);
+  });
+
+  const optionDetailLines = q.options.map((o, i) => {
+    const description = o.description.trim();
+    return description.length > 0
+      ? `${i + 1}. *${o.label}*\n${description}`
+      : `${i + 1}. *${o.label}*`;
+  });
+
+  const buildFollowUpText = (): string => [
+    `Details for poll: ${q.question}`,
+    '',
+    'Use the poll above to choose. Full option details:',
+    ...optionDetailLines,
+  ].join('\n');
 
   const pollValues = q.options.map(o => {
     if (!o.description || o.description.trim().length === 0) {
@@ -362,7 +382,16 @@ export function formatPollQuestion(q: {
       return o.label;
     }
 
-    const rich = `${o.label}${SEPARATOR}${o.description}`;
+    if (hasDetailDescription) {
+      anyTruncated = true;
+      if (o.label.length > POLL_OPTION_MAX_CHARS) {
+        return o.label.slice(0, POLL_OPTION_MAX_CHARS - 1) + ELLIPSIS;
+      }
+      return o.label;
+    }
+
+    const description = o.description.replace(/\s+/g, ' ').trim();
+    const rich = `${o.label}${SEPARATOR}${description}`;
     if (rich.length <= POLL_OPTION_MAX_CHARS) {
       // Full rich text fits
       return rich;
@@ -375,7 +404,7 @@ export function formatPollQuestion(q: {
     if (descBudget >= 10) {
       // Enough room for a meaningful description prefix
       anyTruncated = true;
-      return `${o.label}${SEPARATOR}${o.description.slice(0, descBudget)}${ELLIPSIS}`;
+      return `${o.label}${SEPARATOR}${description.slice(0, descBudget)}${ELLIPSIS}`;
     }
 
     // Label itself nearly fills the budget — bare label only
@@ -390,6 +419,7 @@ export function formatPollQuestion(q: {
     pollName,
     pollValues,
     needsFollowUp: anyTruncated,
+    followUpText: anyTruncated ? buildFollowUpText() : null,
   };
 }
 
@@ -2776,12 +2806,11 @@ export class AgentRuntime implements Runtime {
         queue.enqueueText(`${q.question}\n\n${optionLines}\n\n_Reply with option number or text._`);
       }
     } else {
-      // Poll send succeeded — send follow-up only for questions where
-      // at least one description was truncated in the poll option text.
-      for (const { question: q, formatted } of formattedQuestions) {
-        if (formatted.needsFollowUp) {
-          const descLines = q.options.map(o => `• *${o.label}*: ${o.description}`).join('\n');
-          queue.enqueueText(descLines);
+      // Poll send succeeded - send companion details only when poll labels had
+      // to omit or truncate option descriptions.
+      for (const { formatted } of formattedQuestions) {
+        if (formatted.followUpText) {
+          queue.enqueueText(formatted.followUpText);
         }
       }
     }

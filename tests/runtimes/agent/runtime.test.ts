@@ -5207,7 +5207,7 @@ describe('AgentRuntime', () => {
       expect(mockQueue.enqueueText).not.toHaveBeenCalled();
     });
 
-    it('sends follow-up descriptions only when at least one option was truncated', async () => {
+    it('sends companion details when at least one option needs out-of-band text', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_OK', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -5238,12 +5238,13 @@ describe('AgentRuntime', () => {
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
 
-      // Follow-up description text WAS enqueued (one option truncated)
+      // Follow-up detail text WAS enqueued and the poll labels stayed concise.
+      expect(pollSends[0].values).toEqual(['Short', 'Long option']);
       expect(mockQueue.enqueueText).toHaveBeenCalledTimes(1);
       const followUp = mockQueue.enqueueText.mock.calls[0][0] as string;
-      expect(followUp).toContain('*Short*:');
-      expect(followUp).toContain('*Long option*:');
-      expect(followUp).toContain(longDesc);
+      expect(followUp).toContain('Details for poll: Pick one');
+      expect(followUp).toContain('1. *Short*\nFits fine');
+      expect(followUp).toContain(`2. *Long option*\n${longDesc}`);
     });
 
     it('sends only text fallback (no separate follow-up) when poll send fails', async () => {

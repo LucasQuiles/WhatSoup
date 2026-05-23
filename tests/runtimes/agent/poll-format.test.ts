@@ -62,7 +62,7 @@ describe('formatPollQuestion', () => {
       expect(result.needsFollowUp).toBe(false);
     });
 
-    it('truncates long description with prefix and ellipsis within budget', () => {
+    it('uses concise labels plus companion details for paragraph descriptions', () => {
       const longDesc = 'D'.repeat(120);
       const result = formatPollQuestion({
         question: 'Pick one',
@@ -71,12 +71,25 @@ describe('formatPollQuestion', () => {
           { label: 'Go', description: 'Short desc' },
         ],
       });
-      // Python: label(6) + " — "(3) = 9 prefix, budget for desc = 95 - 9 - 1(ellipsis) = 85
-      expect(result.pollValues[0]).toMatch(/^Python — D+…$/);
-      expect(result.pollValues[0].length).toBe(OPTION_MAX);
-      // Go fits fully
-      expect(result.pollValues[1]).toBe('Go — Short desc');
+      expect(result.pollValues).toEqual(['Python', 'Go']);
       expect(result.needsFollowUp).toBe(true);
+      expect(result.followUpText).toContain('Details for poll: Pick one');
+      expect(result.followUpText).toContain(`1. *Python*\n${longDesc}`);
+      expect(result.followUpText).toContain('2. *Go*\nShort desc');
+    });
+
+    it('normalizes multiline descriptions into companion details instead of poll labels', () => {
+      const result = formatPollQuestion({
+        question: 'Pick one',
+        options: [
+          { label: 'Plan A', description: 'First line\nSecond line with more context' },
+          { label: 'Plan B', description: 'Single line' },
+        ],
+      });
+      expect(result.pollValues).toEqual(['Plan A', 'Plan B']);
+      expect(result.needsFollowUp).toBe(true);
+      expect(result.followUpText).toContain('1. *Plan A*\nFirst line\nSecond line with more context');
+      expect(result.followUpText).toContain('Use the poll above to choose. Full option details:');
     });
 
     it('uses bare label when description is empty', () => {
@@ -142,12 +155,11 @@ describe('formatPollQuestion', () => {
         ],
       });
       expect(result.needsFollowUp).toBe(true);
-      // B truncated with prefix
-      expect(result.pollValues[1]).toMatch(/^B — X+…$/);
-      expect(result.pollValues[1].length).toBe(OPTION_MAX);
-      // A and C kept full rich
-      expect(result.pollValues[0]).toBe('A — Short');
-      expect(result.pollValues[2]).toBe('C — Short');
+      // Paragraph description moves the poll to concise labels
+      expect(result.pollValues).toEqual(['A', 'B', 'C']);
+      expect(result.followUpText).toContain(`2. *B*\n${'X'.repeat(120)}`);
+      expect(result.followUpText).toContain('1. *A*\nShort');
+      expect(result.followUpText).toContain('3. *C*\nShort');
     });
 
     it('is false when all descriptions are empty', () => {
@@ -164,32 +176,33 @@ describe('formatPollQuestion', () => {
 
   describe('boundary conditions', () => {
     it('exactly-at-budget option is not truncated', () => {
-      // "X — " = 4 chars, desc can be 91 to hit exactly 95
-      const desc = 'D'.repeat(91);
+      // label(42) + " — "(3) + desc(50) hits exactly 95 while staying below the detail threshold.
+      const label = 'L'.repeat(42);
+      const desc = 'D'.repeat(50);
       const result = formatPollQuestion({
         question: 'Q',
         options: [
-          { label: 'X', description: desc },
+          { label, description: desc },
           { label: 'Y', description: 'ok' },
         ],
       });
-      expect(result.pollValues[0]).toBe(`X${SEPARATOR}${desc}`);
+      expect(result.pollValues[0]).toBe(`${label}${SEPARATOR}${desc}`);
       expect(result.pollValues[0].length).toBe(OPTION_MAX);
       expect(result.needsFollowUp).toBe(false);
     });
 
     it('one-over-budget option gets description truncated', () => {
-      const desc = 'D'.repeat(92); // "X — " + 92 = 96, 1 over
+      const label = 'L'.repeat(43);
+      const desc = 'D'.repeat(50); // label + " — " + desc = 96, 1 over
       const result = formatPollQuestion({
         question: 'Q',
         options: [
-          { label: 'X', description: desc },
+          { label, description: desc },
           { label: 'Y', description: 'ok' },
         ],
       });
-      // Truncated: "X — DDD...D…" at exactly 95 chars
       expect(result.pollValues[0].length).toBe(OPTION_MAX);
-      expect(result.pollValues[0].startsWith('X — D')).toBe(true);
+      expect(result.pollValues[0].startsWith(`${label}${SEPARATOR}D`)).toBe(true);
       expect(result.pollValues[0].endsWith(ELLIPSIS)).toBe(true);
       expect(result.needsFollowUp).toBe(true);
     });
